@@ -619,7 +619,7 @@ ORBIT's scheduled activation (rounds, plans with concurrent batches, and quanta)
   - possibly a binder hook (M2's design decides);
   - extending the `source` literal changes the log schema and the generated TypeScript types, so it goes through inspect_ai's type-generation pipeline and a ts-mono PR;
   - a new `source` value is additive for new writers, but readers whose literal still has only `input`, `generate` and `operator` would reject logs containing it. M2's detailed design must either state the minimum reader version or keep an existing `source` and carry provenance in message `metadata`. The second avoids version skew and is preferred unless the viewer needs the distinction.
-- **A new event type**, if one is proposed ([open question 1](#open-questions)), is the largest change: the event union, schema, ts-mono types, viewer renderer, dataframes and Scout's event handling. It is deliberately not part of M1 or M2.
+- **A new event type**, if one is proposed ([open question 1](#open-questions)), is the largest change: the event union, schema, ts-mono types, viewer renderer, dataframes and Scout's event handling. M1 uses existing event types; whether and when to add a new event type remains open.
 - **inspect_swe** changes are additive options on the Codex and Claude Code agents.
 - **Vendor traffic visibility.** Evidence for vendor swarms is limited by what the bridge sees.
   - Codex `agent_message` content can be `encrypted_content`, which is opaque except to OpenAI (`src/inspect_ai/agent/_bridge/responses_impl.py:1196-1245`).
