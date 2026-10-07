@@ -1,0 +1,22 @@
+name: Release
+
+# Disabled until the first release: the package is experimental and has nothing
+# to ship yet. With no `push` trigger, Release Please does not open a release PR
+# on every merge to main. Restore the `push` trigger (or dispatch by hand) when
+# ready to cut 0.1.0; Release Please will fold everything since the beginning
+# into that one release.
+on:
+  workflow_dispatch:
+
+jobs:
+  release-please:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: meridianlabs-ai/actions/.github/workflows/release-please-python.yml@v1
+    with:
+      # Publish runs in publish.yaml on the `release` event, behind its own
+      # environment gate, and posts the approval ping from there so the ping
+      # deep-links to the paused run.
+      approval-ping: false
+    secrets: inherit

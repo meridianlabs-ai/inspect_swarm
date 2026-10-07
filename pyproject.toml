@@ -1,0 +1,105 @@
+[project]
+name = "inspect_swarm"
+dynamic = ["version"]
+description = "Evals with multi-agent swarms (experimental)."
+authors = [{ name = "Meridian Labs" }]
+readme = "README.md"
+# Matches inspect-ai's floor.
+requires-python = ">=3.10"
+license = { text = "MIT License" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Development Status :: 1 - Planning",
+]
+dependencies = [
+    # Development tracks inspect_ai's `main`, because swarm and inspect_ai are
+    # expected to co-develop. The git ref never reaches PyPI:
+    # release-pin-deps.yml rewrites it to a `>=<latest>` floor on the Release
+    # Please release PR, and release-dep-guard.yml blocks the release if it is
+    # still a git ref.
+    "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",
+]
+
+[project.urls]
+"Source Code" = "https://github.com/meridianlabs-ai/inspect_swarm"
+"Issue Tracker" = "https://github.com/meridianlabs-ai/inspect_swarm/issues"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "pytest",
+    "pyright",
+    "pytest-xdist",
+    "pytest-timeout>=2.4.0",
+    # tests import anyio directly; inspect-ai depends on it too, but a
+    # transitive dependency is not a promise
+    "anyio>=4.0",
+    # async tests run on both anyio backends (tests/conftest.py)
+    "trio",
+]
+dist = ["twine", "build"]
+
+[tool.hatch.build]
+only-packages = true
+exclude = ["docs/", "tests/", "design/"]
+artifacts = ["src/**/py.typed"]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/inspect_swarm/_version.py"
+
+[tool.hatch.version.raw-options]
+local_scheme = "no-local-version" # Important for PyPI compatibility
+
+# hatchling rejects PEP 508 direct references (the inspect-ai git ref above)
+# without this
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv]
+managed = true
+
+[tool.ruff]
+extend-exclude = ["docs", "design"]
+src = [".", "src"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # flake8
+    "D",      # pydocstyle
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "SIM101", # duplicate isinstance
+]
+ignore = ["E203", "E501", "D10", "D212", "D415"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-n auto"
+timeout = 120
+
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "strict"
+pythonPlatform = "All"
+pythonVersion = "3.10"
+
+# tests may exercise private helpers directly
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportPrivateUsage = false
+extraPaths = ["."]
