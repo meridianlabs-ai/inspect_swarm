@@ -6,7 +6,7 @@ This is the first design document for `inspect_swarm`. It is deliberately high l
 
 It synthesises the team's earlier design notes on swarms. One was a layered runtime RFC: a `swarm()` agent on `deepagent()` with messaging, a task list, a fact log, a board and a monitor hook. The other argued for cheap experiments first, using leaderless swarms that communicate through the filesystem. It also draws on published work, cited inline. Figures quoted from secondary sources, or that could not be checked against a primary source, are marked *unverified*.
 
-Code references are to inspect_ai `main` at `aa20052a` (2026-10-06), inspect_swe at `a54461e7` (2026-10-05) and inspect_sentinel at `0f9b5c71` (2026-10-06). Paths are relative to each repository's root.
+Code references are to inspect_ai `main` at `aa20052a` (2026-10-06), inspect_swe at `a54461e7` (2026-10-05), inspect_sentinel at `0f9b5c71` (2026-10-06), inspect_evals at `cef701f5` and ORBIT at `588b3035`. Paths are relative to each repository's root.
 
 ## Why
 
@@ -84,7 +84,7 @@ The library is worth building to the extent that it makes these questions cheap 
 
 | Question | Experimental design | What the harness must provide |
 |---|---|---|
-| Does a swarm beat more attempts or a bigger budget at the same cost? | Four arms at matched total cost: single agent with budget B; k epochs at B/k each (pass@k, best@k); a deepagent with k background subagents and budget B; a swarm of k members with total budget B (team@k). | A swarm-wide budget equal to the other arms' per-sample budget; per-member submissions as well as the swarm's answer, so team@k and best@k come from the same scoring; cost recorded per member and in total. |
+| Does a swarm beat more attempts or a bigger budget at the same cost? | Four arms with the same cap: single agent with budget B; k epochs at B/k each (pass@k, best@k); a deepagent with k background subagents and budget B; a swarm of k members with total budget B (team@k). Compared on realized cost, not on the cap. | A swarm-wide cap at the same level as the other arms' caps. Realized cost recorded per member and in total, including the final-answer step and calls in flight when the cap was hit. A task-owned result contract, so team@k, best@k and per-member correctness are claimed only where the task can score them ([Results and scoring](#results-and-scoring-a-task-owned-contract)). |
 | How does capability scale with agent count (λ)? | A grid over agent count × per-agent budget; fit iso-performance curves (Ord's method). | Agent count and budget as task parameters, so `eval_set` or inspect_flow can sweep them; total tokens and cost per sample. |
 | What does a swarm buy in latency? | The same arms, measuring wall clock and critical path. | Per-member timestamps; critical-path steps (Kimi's CriticalSteps); idle time; a way to separate waiting on model connections from waiting on peers. |
 | Which topology and channels matter? | Ablations: leaderless against coordinator, filesystem only against messages, task list or board, one mechanism removed at a time. | Topology and channels as configuration, not code; identical members across arms. |
@@ -93,19 +93,23 @@ The library is worth building to the extent that it makes these questions cheap 
 | Can monitors catch distributed attacks? | Per-member against joint monitors, calibrated on honest runs (Multi-Agent AI Control's design). | Every communication and every shared-state write as an attributable event; a monitor hook that can see the whole swarm. |
 | Do agents build channels we did not give them? | Containment probes: shared caches, shared directories, network, with channel use detected from tool calls. | Tool-call evidence per member, monitored with the same machinery; a sandbox layout that makes sanctioned and unsanctioned sharing explicit. |
 
-Two design consequences follow from the first two rows.
+Three design consequences follow from the first two rows.
 
-- **The swarm's budget must be expressible as one sample-level number.** Then a swarm arm and a single-agent arm differ only in the solver, never in how cost is counted.
-- **A swarm must record every member's own answer as well as its final one.** Otherwise team@k (any member right) cannot be compared with best@k from epochs, and the effect of the final-answer step cannot be separated from the effect of the swarm.
+- **The swarm's cap must be expressible as one sample-level number.** Then a swarm arm and a single-agent arm differ only in the solver, never in how the cap is set.
+- **Caps are stopping rules; comparisons use realized cost.** Inspect's limits are cooperative. They are checked before a call is dispatched and after a completed call is recorded (`src/inspect_ai/model/_model.py:3035-3043`, `:3082-3095`), and nothing reserves budget for calls already in flight.
+  - So k concurrent members can each have a call in flight when the cap is reached, and overshoot by up to k calls. The round-1 review measured three synchronised 600-token generations under a 1,000-token cap recording 1,800 tokens.
+  - A single agent overshoots by at most one call.
+  - Arms are therefore compared on what they actually spent: score against realized total cost, as curves where possible (Ord's method), with cap and realized cost both reported. Equal caps alone are not "matched cost".
+- **Who produced a result is task-defined.** A swarm records every member's own submission as well as the final one. Whether that supports per-member correctness, team@k or voting depends on how the task is scored. A task scored on a final answer string can score each member's answer. A task scored on a shared sandbox (SWE-bench runs tests against the shared repository) has one team result, and individual correctness is unavailable unless each member leaves its own stable artifact. [Results and scoring](#results-and-scoring-a-task-owned-contract) makes this a contract the task supplies.
 
 ## Goals and non-goals
 
 ### Goals
 
 - Make agent count, topology, communication channels and budget split ordinary, sweepable task parameters for Inspect evals.
-- Account for cost and usage per member and per swarm, under a swarm-wide budget that is directly comparable with a single agent's limit.
+- Account for realized cost and usage per member and per swarm, under a swarm-wide cap set the same way as a single agent's limit.
 - Make every sanctioned communication observable, attributable and interceptable at one point, and keep unsanctioned channels (the filesystem, shared caches) observable through the tool calls that use them.
-- Let any Inspect `Agent` be a member: `react()`, `deepagent()`, or a bridged agent (Claude Code, Codex) through inspect_swe.
+- Let any Inspect `Agent` be a member: `react()`, `deepagent()`, or a bridged agent (Claude Code, Codex) through inspect_swe. The swarm must own and drain all of a member's work, including descendants. Until inspect_ai offers a way to do that for `background()` work, M1 accepts only members whose work stays inside their invocation ([Members](#members)).
 - Evaluate vendor swarms (Codex multi-agent, Claude Code agent teams) with the same evidence model and metrics as native ones.
 - Keep inspect_ai changes to small, general extension points. The swarm runtime itself lives here.
 - Start with the cheapest experiment that could show a large effect, built as the first slice of the full architecture rather than as a throwaway.
@@ -138,7 +142,11 @@ This section covers only what the design depends on. All paths are in inspect_ai
 - Lifecycle tools: `agent_status`, `agent_wait`, `agent_cancel` and `agent_list` (`lifecycle_tools.py`).
 - Background dispatch is top level only: nested levels always get `background_enabled=False` (`agent_tool.py:893-915`).
 - Communication is parent to child at dispatch only. A running child cannot be steered, children cannot message each other, and a finished child cannot be given more work.
-- Children are abandoned when the parent returns and run until the sample ends (`design/deepagent-background.md`, "Lifetime semantics").
+- Children are abandoned when the parent returns (`design/deepagent-background.md`, "Lifetime semantics").
+  - They run on the sample's task group, not under their caller (`agent_tool.py:620-631`, `util/_background.py:81`), until the runner cancels that group when the solver ends (`_eval/task/run.py:2930-2934`).
+  - The registry that tracks them exists only while the deepagent runs (`deepagent.py:244-250`).
+  - So code that awaits a background deepagent, for example under `run()` or `collect()`, cannot see or await children still running. In the round-1 review's probe, a member joined at 150 tokens, and its still-running child raised the total to 200 afterwards.
+  - Synchronous subagents (`background=False`) are awaited inside the member (`agent_tool.py:548-569`).
 - Errors: a child's own errors are recorded on its future. Sample-level `LimitExceededError`, `TerminateSampleError` and `ModelRefusalError` propagate and end the sample (`agent_tool.py:716-738`).
 
 ### The agent channel
@@ -156,7 +164,10 @@ This section covers only what the design depends on. All paths are in inspect_ai
 ### `react()` lifecycle
 
 - `react()` ends when the model submits and attempts are used up (`_react.py:302-335`).
-- `on_continue` is called each turn the loop continues. It is async, and it may append a message or replace the state (`_react.py:366-392`). This makes it a usable hook for injecting peer messages, or for blocking while a member waits for its inbox.
+- `on_continue` is called each turn the loop continues. It is async, and it may append a message or replace the state (`_react.py:366-392`).
+  - It is a usable hook for injecting peer messages into a member that is still working.
+  - It is not called after a successful submit, because the loop breaks first (`_react.py:324-335`). So it cannot by itself hold a submitted member idle until a message wakes it.
+  - With `submit=False`, `react()` stops when the model makes no tool calls unless `on_continue` says otherwise (`_react.py:421-555`).
 - There is no idle state after submit. Calling `react()` again on a finished `AgentState` re-inserts the system prompt (`_react.py:213-216`), so re-awakening a member needs care or an inspect_ai change.
 
 ### Limits and cost
@@ -174,6 +185,12 @@ I checked this with a spike: three `react()` members under `collect()`, with moc
   - the member nodes recorded 350, 350 and 300;
   - the swarm limit was raised inside all three members, and `collect()` re-raised them as an `ExceptionGroup` of three `LimitExceededError`s.
 - With the same members under `Task(token_limit=1000)` and no swarm limit, Inspect recorded a normal sample token limit and no error.
+
+Three caveats apply to using limit nodes as a budget:
+
+- **They do not bound spend.** Checks are cooperative and happen before dispatch and after a call completes (`src/inspect_ai/model/_model.py:3035-3043`, `:3082-3095`), so concurrent members overshoot a cap by the calls they have in flight (see [Eval questions](#eval-questions-and-the-experimental-design-they-imply)).
+- **Who raises what depends on the group size.** When only one member raises, `collect()` re-raises that exception bare instead of as a group (`src/inspect_ai/util/_collect.py:44-48`). Ancestor limits are checked first, so an outer sample limit can win over the swarm's own (`_limit.py:1082-1092`).
+- **Token and cost nodes can disagree.** A call that trips a token limit raises before its cost is recorded into the cost nodes (`src/inspect_ai/model/_model.py:3089-3095`), although the call's `ModelUsage` still carries its cost. This was found by the round-1 review.
 
 What the log keeps:
 
@@ -262,10 +279,20 @@ All of these are plain values, so a task can expose them as `-T` parameters and 
 - Members may be native agents or bridged agents.
   - A bridged member reaches the substrate's tools through `bridged_tools`.
   - It reaches the shared filesystem through the sandbox it already has.
-- Persistent members (idle after submitting, woken by a message) are needed by coordinator topologies, not by the first slice. Two ways to build them:
-  - an async `on_continue` that waits on the member's inbox, which needs no inspect_ai change;
-  - a clean way to re-enter `react()` on an existing state, which needs one.
-  The choice is left for the coordinator milestone.
+- **Ownership boundary.** The swarm owns everything a member starts, including its descendants. Draining a member means cancelling and awaiting all of that work before the swarm finalises, records usage or returns. Otherwise:
+  - a descendant could keep editing shared files while the final answer is produced;
+  - it could add usage after the ledger is taken;
+  - or it could raise a limit error through the sample's task group instead of through the controller.
+
+  Members fall into three groups:
+  - **Supported from M1.** Members whose work stays inside their invocation: `react()`, `deepagent()` without background dispatch (synchronous subagents are awaited), and bridged agents whose agent process the member awaits.
+  - **Not supported in M1.** Members that use `background()`, which today attaches work to the sample's task group with no owner the swarm can drain. This includes `deepagent(background=True)` and any custom agent that calls `background()`. The swarm rejects `deepagent(background=True)` members where it can detect them, and the restriction is documented for custom agents.
+  - **Lifting the restriction.** It needs an inspect_ai lifecycle extension, for example a scoped owner that `background()` attaches to when one encloses the caller (defaulting to the sample's task group, as now). The swarm would then own each member's descendants. This is proposed when a swarm of background deepagents is needed, not in M1.
+- **Sandbox processes.** Processes a member starts in the sandbox that outlive its tool calls (for example under `nohup`) are outside any Inspect task group. They are part of the [filesystem observation limit](#security), not something the drain can promise to stop.
+- **The deepagent baseline arm** keeps its existing semantics. Children are abandoned when the parent returns and cancelled when the solver ends, and their spend up to then is part of the arm's realized cost.
+- **Persistent members** (idle after submitting, woken by a message) are needed by coordinator topologies, not by the first slice. A blocking `on_continue` alone cannot provide them, because a successful submit leaves `react()` before `on_continue` runs. Two candidates for the coordinator milestone:
+  - **An altered submission protocol.** Run the member with `submit=False` and give it a swarm `report` tool that records an answer without ending the loop. Its `on_continue` then waits on the inbox when the model stops calling tools, and returns when woken. No inspect_ai change is needed, but the member's prompt and stop condition differ from a standard `react()` agent.
+  - **Clean re-entry.** Re-enter `react()` on an existing state without inserting a second system prompt. This needs an inspect_ai change.
 
 ### Substrate
 
@@ -323,27 +350,57 @@ At first these are written as `InfoEvent`s with `source="inspect_swarm"`, inside
 - it is a schema, ts-mono and viewer change;
 - the bridged-swarm milestone is the point where native and Codex `agent_message` traffic should share one type, and its shape will be clearer then.
 
-**Accounting.** The swarm opens one budget node (a `cost_limit` or `token_limit`) around its members, and each member runs with its own limits below it. The spike above shows this gives exact per-member and swarm totals with no inspect_ai change.
+**Accounting.** Two separate things:
 
-- A reserve can be held back so the final-answer step can run after members exhaust the budget.
-- The controller catches the `ExceptionGroup` that concurrent members raise when the swarm limit is hit, cancels the rest, and moves to the final answer.
-- When the arm's budget is the sample limit itself, Inspect already handles the group correctly. The swarm then simply cannot run a final step, so the default is to set `budget` a little under the sample limit.
-- Per-member usage is written to the sample's store and metadata at the end, and also mapped to model roles where members use different models, so `role_usage` in the log stays meaningful.
+- **A stopping rule.** The swarm opens one cap node (a `cost_limit` or `token_limit`) around its members, and each member runs with its own limits below it. The spike above shows these nodes see every member's usage with no inspect_ai change.
+- **A ledger.** Realized usage and cost per member, summed from the model events in each member's span (each `ModelUsage` carries its cost). The ledger is taken after the drain, so it includes descendants, calls that were in flight when the cap was hit, and the final-answer step. The ledger, not the cap, is what analysis compares across arms. It is not taken from limit nodes, because token and cost nodes can disagree (see [Limits and cost](#limits-and-cost)).
+
+The reserve and exhaustion policy, and its limits:
+
+- **Reserve.** The swarm cap sits below the sample's limit by a reserve meant for the final-answer step. Concurrent overshoot can consume the reserve: up to one call per running member. So a reserve makes finalisation likely, not guaranteed, unless the sample limit leaves headroom of at least the reserve plus one maximum-size call per member.
+- **Exhaustion.** The swarm handles only its own cap. On a `LimitExceededError` whose `source` is the swarm's own node, arriving bare or inside an `ExceptionGroup`, it cancels and drains the remaining members, then finalises. Everything else propagates unchanged:
+  - a sample-level limit;
+  - a member's own limit already caught by `run()`;
+  - `TerminateSampleError`;
+  - any other error.
+  A group that mixes the swarm's own limit error with anything else propagates too.
+- **Provisional answer.** If an outer limit ends the sample first, there is no final step. To still leave the sample with an answer, the controller keeps a provisional answer current as members submit. For answer-scored tasks this is the current vote or the first verified submission. The output is then never empty because finalisation could not run.
+- **Roles.** Per-member usage is also mapped to model roles where members use different models, so `role_usage` in the log stays meaningful.
 
 **Metrics** recorded per sample, for scorers and analysis:
 
 - per-member and total tokens and cost;
 - wall clock;
-- critical-path steps (CriticalSteps: per stage, the coordinator's steps plus the slowest member's steps);
+- critical-path steps. Kimi's CriticalSteps sums, over stages, the coordinator's steps plus the slowest subagent's. That formula assumes a staged coordinator; a leaderless, asynchronous swarm needs its own definition, for example the longest chain of member steps linked by reads of another member's writes. Settling it is part of M1's metrics work, and latency curves are not interpreted before then;
 - idle time per member;
 - time each member spends waiting for a model connection, so that a 16-member swarm throttled by `max_connections` is not mistaken for a slow one. Inspect accounts waiting time per sample, counting overlapping waits once (`src/inspect_ai/_util/working.py:95-115`), so per-member waiting needs its own timing;
 - messages, notes, claims and posts per member, and blocked or rewritten communications.
 
-**Scorers and analysis.**
+**Analysis.**
 
-- Scorers for the swarm's answer and for each member's answer: team@k ("any member correct") and per-member correctness.
-- Thin helpers that turn a set of logs from the four arms into matched-cost comparisons and λ fits.
+- Thin helpers that turn a set of logs from the four arms into comparisons on realized cost, and λ fits.
 - Inspect Scout scanners that label coordination failures (MAST categories, duplicated work, message storms) over swarm transcripts.
+
+### Results and scoring: a task-owned contract
+
+Inspect scorers take a `TaskState` and a target, and many inspect or modify the sandbox (`src/inspect_ai/scorer/_scorer.py:35-39`). What counts as "a member's result" therefore belongs to the task, not to the swarm. The task declares one of two kinds.
+
+**Answer-scored tasks.** The scorer reads a final answer, for example a FrontierMath-style value or a BrowseComp answer.
+
+- Each member's submission is a stable artifact, so the task's own scorer can score it on a copy of the state carrying that answer.
+- This gives per-member correctness and team@k, which compare directly with best@k and pass@k from epochs.
+- Voting additionally needs a task-defined comparable form: a normaliser or equivalence rule, such as the match rules a scorer already applies (`src/inspect_ai/scorer/_match.py:9-45`).
+- Free-form proofs or code have no such form, so `vote` is unavailable for them.
+
+**Shared-artifact tasks.** The scorer examines the environment.
+
+- Examples: SWE-bench runs tests against the shared repository (`inspect_evals: src/inspect_evals/swe_bench/scorers.py:32-78`). Frontier-CS recovers a solution from the sandbox when the output text is empty (`inspect_evals: src/inspect_evals/frontier_cs/scorer.py:631-676`).
+- A swarm on such a task has one team result: the state of the shared environment when the swarm ends.
+- Re-scoring each member's text against that one environment would credit the team's artifact to every member, so individual correctness is reported as unavailable.
+- Per-member correctness can be claimed only if the task gives each member a stable artifact of its own (its own worktree, branch or output directory) and a way to score it.
+- The comparison with epochs is then team result against best@k or pass@k at equal realized cost. Test-Time Communication draws the same distinction: it compares best-of-member results with a single shared container's result on Terminal-Bench ([Appendix A.6](https://arxiv.org/html/2609.21032v1)).
+
+**What M1 does.** M1's per-member, team@k and voting helpers support answer-scored tasks only. For shared-artifact tasks, M1 reports the team environment score with realized cost. It does not claim that recording member strings makes every coding benchmark comparable to epochs.
 
 ### Controller: topology, termination, final answer
 
@@ -360,17 +417,22 @@ A deepagent with `background=True` is not reimplemented. It stays a member type 
 **Termination.** Always bounded by the swarm budget and the sample's limits.
 
 - Leaderless swarms have no single submitter. With explicit channels they end by quiescence: every member idle, no open or claimed task, and empty inboxes.
-- On termination the controller cancels and awaits the remaining members (drain). It does not abandon them, so their usage is counted before the sample is scored.
+- On termination the controller cancels and awaits the remaining members and their descendants (drain, within the [ownership boundary](#members)). It does not abandon them, so nothing edits the shared environment during finalisation and their usage is in the ledger before the sample is scored.
 
-**Final answer.** `final=` selects one of:
+**Final answer.** For shared-artifact tasks, the final result is the environment as the drained swarm leaves it. A later topology could add an integration member that runs last. For answer-scored tasks, `final=` selects one of:
 
 - `reporter`: the coordinator's or a designated member's submission.
-- `vote`: plurality over member submissions.
+- `vote`: plurality over member submissions, using the task's comparable answer form. Unavailable when the task has none.
 - `first`: the first submission.
 - `verify`: the first or best submission that a task-supplied verifier tool accepts. The verifier must be the task's in-loop checker, never the scorer's target.
 - `synthesize`: one extra model call over the member submissions and shared notes.
 
-The default is `reporter` for coordinator topologies and `vote` for leaderless ones. Every member's own submission is recorded regardless, so the effect of the final step can be measured separately.
+The defaults:
+
+- coordinator topologies: `reporter`;
+- leaderless swarms: `verify` when the task supplies a verifier, otherwise `vote` when the task defines a comparable answer form, otherwise `first`.
+
+Every member's own submission is recorded regardless, so the effect of the final step can be measured separately.
 
 ### Where each part lives
 
@@ -378,7 +440,8 @@ The default is `reporter` for coordinator topologies and `vote` for leaderless o
 |---|---|---|
 | `swarm()`, controller, members, budget, bus, channels, evidence, metrics, scorers, prompts, Scout scanners | inspect_swarm | Fast iteration; the runtime is opinionated and experimental. |
 | A public way for a producer to obtain a member's `AgentRef`, an agent-message channel item (or `source="agent"`) rendered with provenance, and exported channel types | inspect_ai (M2) | Push and notify delivery need the channel; today only ACP can bind it and the item union is closed. The channel brief already anticipates a subagent supervisor. |
-| Clean re-entry of `react()` on an existing state (no second system prompt), or an idle state | inspect_ai (M4), optional | Persistent members for coordinator topologies; a blocking `on_continue` may be enough. |
+| Clean re-entry of `react()` on an existing state (no second system prompt), or an idle state | inspect_ai (M4), optional | Persistent members for coordinator topologies; the alternative is a `submit=False` member protocol inside inspect_swarm. |
+| A scoped owner for `background()` work, so a swarm can own and drain a member's descendants | inspect_ai, when background deepagent members are needed | Today `background()` attaches to the sample's task group; without an owner the swarm cannot drain `deepagent(background=True)` members. |
 | `span(..., metadata=)` and per-span usage in the log | inspect_ai, nice to have | Member identity and per-member cost without side records. |
 | Correct `StoreEvent` attribution under concurrent spans | inspect_ai, bug-class | Affects any concurrent agents, not only swarms. |
 | A first-class inter-agent message event | inspect_ai (M5), deferred | Shared by native swarms and bridged Codex `agent_message` traffic; a schema change. |
@@ -404,11 +467,20 @@ ORBIT is a mature, Inspect-based security framework (v1.0.3, Apache-2.0, [code](
 - a roster (`AgentSpec`, with a role label, model, tools and a compromised flag);
 - invocation edges kept separate from channels with reader and writer lists;
 - delivery modes `poll`, `notify` and `auto`;
-- a scheduler with round-robin, superstep and interleaved modes, explicit plans and quanta;
+- a scheduler with round-robin, superstep and interleaved modes and explicit plans:
+  - plan steps can run agents concurrently as an activation batch;
+  - a `completion` quantum lets each activation run to completion;
+  - a failing activation cancels and joins its siblings ([`agent_scheduler.py:348-377`](https://github.com/wlanderson0/orbit/blob/588b3035f92450ec4f0496bb8b629daa205e84c7/orbit/execution/agent_scheduler.py#L348));
 - attack and defense registries, with defenses enforced by wrapping the `Model`;
 - evidence events (`sent`, `read`, `notified`, `delivered`, `model_exposure`) written as `InfoEvent`s.
 
-To get turn-level control, it forks `react()` and imports private inspect_ai modules, and it pins one inspect_ai version.
+Other points that bear on reuse:
+
+- To get turn-level control, it forks `react()` and imports private inspect_ai modules.
+- It accepts `inspect-ai>=0.3.263,<0.4`, with a lockfile baseline it is tested against.
+- Its concurrency uses raw asyncio rather than anyio.
+
+Its concurrency is scheduled activation: the scheduler decides which agents run in each step, and messages do not activate agents (its docs: "Messages do not activate agents"). inspect_swarm's members are continuously active, wake on messages, and are joined only at termination.
 
 The recommendation is to **align with ORBIT and aim to be a substrate it could run on, not to absorb it**:
 
@@ -420,7 +492,7 @@ The recommendation is to **align with ORBIT and aim to be a substrate it could r
   - a communication hook that does not wrap `Model` (which breaks response caching).
 - **Leave scenarios, attack and defense registries and security scorers to ORBIT.**
 
-ORBIT's turn-based scheduler (synchronous rounds and quanta) is a useful second execution mode for reproducible security experiments. inspect_swarm's default is asynchronous concurrency, which is what vendor swarms do. Supporting a scheduled mode is in scope for M6, not before.
+ORBIT's scheduled activation (rounds, plans with concurrent batches, and quanta) is a useful second execution mode for reproducible security experiments. inspect_swarm's default is continuously active members woken by messages, which is what vendor swarms do. Supporting a scheduled mode is in scope for M6, not before.
 
 ## Alternatives considered
 
@@ -452,9 +524,12 @@ ORBIT's turn-based scheduler (synchronous rounds and quanta) is a useful second 
 
 **Make ORBIT the substrate.**
 
-- It already has topologies, channels, scheduling and evidence.
-- It is security-first and turn-scheduled. It forks `react()` and pins one inspect_ai version. Its Python floor (3.11) is above Inspect's.
-- Capability-scaling experiments need asynchronous concurrency and matched-cost accounting it does not focus on.
+- It already has topologies, channels, scheduling (including concurrent activation batches) and evidence.
+- It is built around scheduled activation, where the scheduler decides who runs and messages do not wake agents. The swarms this design targets have continuously active members that wake each other.
+- It forks `react()` and imports private inspect_ai modules, which is an upgrade hazard for a library that tracks inspect_ai `main`.
+- It schedules with raw asyncio, where this repository runs on both anyio backends.
+- Its Python floor (3.11) is above Inspect's 3.10.
+- It is security-first, while the first users here are capability-scaling experiments that need realized-cost accounting and the result contract above.
 - Rejected as the substrate; aligned with instead.
 
 **Monitor through model wrapping** (ORBIT's approach: subclass the `Model` to filter inputs and outputs).
@@ -475,9 +550,14 @@ ORBIT's turn-based scheduler (synchronous rounds and quanta) is a useful second 
 - **Eval logs.** M1 writes only existing event types (spans, tool and model events, `InfoEvent`s) plus store and metadata entries. Old viewers and readers see a swarm log as an ordinary log with concurrent agent spans. The `InfoEvent` payload carries a `version` field so later readers can tell formats apart.
 - **inspect_ai extension points** (M2 and later) are additive:
   - a binder API, a new channel item and a message `source` value;
-  - extending the `source` literal changes the log schema and the generated TypeScript types, so it goes through inspect_ai's type-generation pipeline and a ts-mono PR.
+  - extending the `source` literal changes the log schema and the generated TypeScript types, so it goes through inspect_ai's type-generation pipeline and a ts-mono PR;
+  - a new `source` value is additive for new writers, but readers whose literal still has only `input`, `generate` and `operator` would reject logs containing it. M2's detailed design must either state the minimum reader version or keep an existing `source` and carry provenance in message `metadata`. The second avoids version skew and is preferred unless the viewer needs the distinction.
 - **A new event type** (M5) is the largest change: the event union, schema, ts-mono types, viewer renderer, dataframes and Scout's event handling. It is deliberately last.
 - **inspect_swe** changes are additive options on the Codex and Claude Code agents.
+- **Vendor traffic visibility.** Evidence for vendor swarms is limited by what the bridge sees.
+  - Codex `agent_message` content can be `encrypted_content`, which is opaque except to OpenAI (`src/inspect_ai/agent/_bridge/responses_impl.py:1196-1245`).
+  - inspect_swe's completion detection reads plaintext `input_text` (`inspect_swe: src/inspect_swe/_codex_cli/_events/detection.py:65-86`).
+  - M5 measures which evidence fields (`sent`, `read`, `exposed`, payload) are actually observable per vendor, and records unknowns as unknown rather than implying the same coverage as the native bus.
 
 ## Security
 
@@ -491,6 +571,7 @@ Untrusted input reaches this code from several directions.
   - The sandbox layout for swarm tasks should make sharing explicit: one shared directory, per-member scratch space, no shared caches unless intended.
   - Containment probes are an eval in their own right, not a property the library can promise.
   - Samples must not share sandboxes. Isolation between samples is Inspect's sandbox's job, and nothing here weakens it.
+  - **Observation limit.** Tool calls are evidence of possible filesystem communication, not a complete audit. Processes a member starts in the sandbox can read, write or exchange files between logged tool calls, and after the member has ended. Experiments that attribute communication to the filesystem must state this limit, or add independent instrumentation such as filesystem snapshots or audit logs in the sandbox.
 - **Red-team features** (forged senders, injected records, secret channels) exist to create adversarial content deliberately. They are configured by the eval author, recorded in the evidence events with their true origin, and never reachable from member tools.
 - **Log contents.** Evidence payloads are model text. They are written as JSON data in `InfoEvent`s, not as Markdown, so the viewer does not render them as formatted content.
 - **Bridged members** run in the sandbox. The swarm's tools reach them through `bridged_tools`, which execute host-side only for calls the model proposed (`bridge.py:141-146`). Today sentinels do not see bridged agents' tool calls, so a swarm of bridged members gets bus-level interception but not tool-level monitoring until that gap is closed.
@@ -499,9 +580,14 @@ Untrusted input reaches this code from several directions.
 
 - **Runtime tests** use mockllm with scripted outputs and usage. They need no network and no Docker, and they run on asyncio and trio:
   - members start and run concurrently;
-  - the swarm budget and member limits record and stop correctly (the spike above becomes a test);
-  - the `ExceptionGroup` from concurrent limit errors is handled;
+  - the swarm cap and member limits record and stop correctly (the spike above becomes a test);
+  - the ledger records realized usage including overshoot from concurrent in-flight calls, finalisation and drained members, and differs from the cap when it should;
+  - the controller recovers its own cap's exhaustion both as an `ExceptionGroup` and as a lone `LimitExceededError` (which `collect()` unwraps);
+  - sample-level limits, `TerminateSampleError`, other errors and mixed groups propagate unchanged;
+  - an outer limit that trips before the reserve is used leaves the provisional answer as the output;
   - drain cancels and awaits members;
+  - `deepagent(background=True)` members are rejected while background ownership is unsupported;
+  - answer-scored tasks get per-member and team@k scores, voting refuses tasks without a comparable answer form, and shared-artifact tasks report a team score with per-member correctness marked unavailable;
   - each final-answer mode selects as specified;
   - every member's submission is recorded;
   - evidence events are written with the right ids;
@@ -518,21 +604,25 @@ Milestones, each a small series of PRs. The project convention applies: discuss 
 **M0. This design.** Feedback from Ransom; settle the open questions.
 
 **M1. Leaderless filesystem swarm with full accounting** (inspect_swarm only; no inspect_ai changes).
-- `swarm()` with leaderless topology over any member `Agent`.
-- Swarm budget node, member limits and a final-answer reserve.
+- `swarm()` with leaderless topology over members whose work stays inside their invocation (`react()`, synchronous `deepagent()`, bridged agents). Background deepagent members are rejected.
+- A swarm cap node, member limits, a final-answer reserve, and a provisional answer.
+- Recovery from its own cap only.
+- A realized-cost ledger taken after the drain.
 - Drain on termination.
 - Final-answer modes `vote`, `first`, `verify` and `synthesize`.
 - Per-member submissions recorded.
 - Evidence and metrics written to `InfoEvent`s, store and metadata.
-- Team@k and per-member scorers.
+- A definition of critical path for leaderless swarms.
+- The task result contract: answer-scored tasks get per-member and team@k scorers; shared-artifact tasks get a team score only.
 - The filesystem prompt convention (shared directory, append-only notes file).
 - Files: `src/inspect_swarm/_swarm.py`, `_member.py`, `_budget.py`, `_final.py`, `_metrics.py`, `_evidence.py`, `scorer/`, `tests/`.
 
-**M1x. The cheap experiments.** A small set of FrontierMath-style and coding tasks with a verifier.
+**M1x. The cheap experiments.**
 
-- Four arms at matched total cost: single agent, epochs, deepagent with background subagents, leaderless swarm. Two or three swarm sizes.
-- Analysis helpers for matched-cost comparison and λ.
-- **Decision gate:** a large effect on capability (team@k beating best@k or the larger budget at equal cost) justifies M3's structured channels for the capability track. A null result keeps the capability track at M1 plus the deepagent arm.
+- Tasks: a small set of answer-scored, FrontierMath-style tasks with a verifier, plus coding tasks scored as team results.
+- Four arms with equal caps: single agent, epochs, deepagent with background subagents, leaderless swarm. Two or three swarm sizes. Results are compared on realized cost.
+- Analysis helpers for realized-cost comparison and λ.
+- **Decision gate:** a large effect on capability justifies M3's structured channels for the capability track. A large effect means team@k beating best@k, or beating the larger budget, at equal realized cost. A null result keeps the capability track at M1 plus the deepagent arm.
 
 **M2. The bus and direct messages.**
 - `deliver()` with the monitor hook (sentinel action vocabulary), storm controls and evidence kinds `sent`, `delivered`, `read` and `exposed`.
@@ -547,11 +637,12 @@ Milestones, each a small series of PRs. The project convention applies: discuss 
 - Lead and teammates.
 - Idle and wake.
 - `followup_task`-style waking.
-- inspect_ai PR for clean `react()` re-entry if the `on_continue` approach proves inadequate.
+- Either the `submit=False` member protocol, or an inspect_ai PR for clean `react()` re-entry ([Members](#members)).
+- If background deepagents are wanted as members, an inspect_ai PR giving `background()` a scoped owner.
 
 **M5. Bridged swarms.**
 - inspect_swe options to enable Codex multi-agent v2 and Claude Code agent teams.
-- Mapping their traffic into the same evidence records.
+- Mapping their traffic into the same evidence records, after measuring what each vendor's traffic exposes (encrypted Codex messages, Claude Code mailbox files), with unknown fields kept unknown.
 - Bridged agents as native members via `bridged_tools`.
 - Proposal for a first-class inter-agent message event in inspect_ai, shared with the bridge.
 
@@ -582,12 +673,12 @@ Milestones, each a small series of PRs. The project convention applies: discuss 
    - (b) Propose the event type in M2.
 
    Recommendation: (a). The shape should be settled with bridged traffic in view, and the schema change is costly.
-4. **Default final answer for leaderless swarms.**
+4. **Default final answer for leaderless swarms on answer-scored tasks.** Shared-artifact tasks have no choice: the result is the drained environment.
    - (a) `vote`.
-   - (b) `verify` when the task supplies a verifier, else `vote`.
+   - (b) `verify` when the task supplies a verifier, else `vote` when the task defines a comparable answer form, else `first`.
    - (c) `synthesize`.
 
-   Recommendation: (b). It matches how leaderless swarms succeed in practice (the C compiler's oracle, Test-Time Communication's dense verifier). Always record member submissions, so the choice can be compared after the fact.
+   Recommendation: (b). It matches how leaderless swarms succeed in practice (the C compiler's oracle, Test-Time Communication's dense verifier), and voting is meaningless without a comparable answer form. Always record member submissions, so the choice can be compared after the fact.
 5. **ORBIT.** Should we contact its authors now, sharing this design and aligning vocabulary, or after M2 when there is a substrate to show? Recommendation: after M2, aligning vocabulary in the meantime.
 
 ## Not this design
@@ -601,4 +692,5 @@ Adjacent problems noticed and left out, for Ransom to file if wanted:
 - **Claude Code agent teams in inspect_swe.** No representation of teammates, mailboxes or the shared task list today.
 - **Checkpoint and resume for long swarms.** Multi-day swarm samples will want inspect_ai's sample checkpointing to cover several members.
 - **A swarm view in the log viewer** (member graph, message timeline).
+- **Cost limits miss calls that trip a token limit** (inspect_ai). A call that raises at the token-limit check never records its cost into active cost-limit nodes (`src/inspect_ai/model/_model.py:3089-3095`), although its `ModelUsage` keeps the cost. Found by the round-1 review; the ledger above sidesteps it.
 - **`max_connections` and swarm size.** A swarm's members share a model's connection pool with every other sample; an eval-level policy (e.g. reserve connections per swarm) may be needed for latency experiments.
