@@ -49,10 +49,12 @@ General-purpose multi-agent frameworks mostly hand a peer's turns to the recipie
 - or in the **user** role: AutoGen, AG2, Google ADK, Strands, and task-prompt injection in CrewAI, CAMEL and MetaGPT.
 
 Their limits are mostly turn caps. Two features matter here:
-- Coding-agent mail layers deliver peer messages through a tool with a metadata-only reminder: [mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail)'s `fetch_inbox`, and [Gas Town](https://github.com/gastownhall/gastown)'s `gt mail`.
+- Coding-agent mail layers deliver peer message bodies through a tool:
+  - [mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail)'s `fetch_inbox`, prompted by a reminder that carries only counts and fixed text;
+  - [Gas Town](https://github.com/gastownhall/gastown)'s `gt mail`, whose injected reminder does include each message's sender-written subject.
 - A few frameworks add structure worth borrowing: ADK's fencing of quoted agent content, AG2's inline arbiter, Magentic-One's stall counter.
 
-Eval harnesses for multi-agent systems besides ORBIT exist, but none builds a peer swarm on Inspect. [Related projects](#related-projects-and-what-they-teach) surveys them and what each teaches this design.
+Eval harnesses for multi-agent systems besides ORBIT exist, including another Inspect-based peer mesh. None of those surveyed is a reusable runtime of continuously active members. [Related projects](#related-projects-and-what-they-teach) surveys them and what each teaches this design.
 
 ### Swarms are a third inference-scaling axis, and its value is contested
 
@@ -437,7 +439,7 @@ Monitoring aligns with inspect_sentinel; there is no separate `SwarmMonitor` typ
 - Monitor state is per sample, so a protocol can keep a joint, swarm-wide view. This is what the fragmentation result asks for.
 - Unsanctioned channels are tool calls too (a `bash` that writes into a shared cache). The same monitors see them.
 - Monitors need actions as well as messages.
-  - [SCHEME](https://arxiv.org/abs/2605.29178) found that monitors with code access flagged 68–99% of coordinated sabotage (by monitor model) at a 2% false-positive rate.
+  - [SCHEME](https://arxiv.org/abs/2605.29178) found that monitors with code access flagged 68–99% of coordinated sabotage (depending on the attacker model, with one monitor model) at a 2% false-positive rate.
   - [NARCBench](https://arxiv.org/abs/2604.01151)'s message-only collusion monitors scored below chance in the inspect_evals registry's report (AUROC 0.10–0.17), reading honest convergence as suspicious.
   - A bus-only monitor would be the weak design. Sentinel's tool stages, plus the bus's records, give monitors both views.
 - Post-hoc replay of new monitors over existing logs, as ControlArena's `evaluate_monitors_post_hoc` does, comes from sentinel's Scout replay. A sentinel monitor is the same monitor live and replayed.
@@ -490,7 +492,11 @@ The reserve and exhaustion policy, and its limits:
   A group that mixes the swarm's own limit error with anything else propagates too.
 - **Provisional answer.** If an outer limit ends the sample first, there is no final step. The controller therefore keeps a provisional answer current as members submit; for answer-scored tasks it is the current vote or the first verified submission. `as_solver()` copies the agent's output to the task state even when an exception ends the agent (`src/inspect_ai/agent/_as_solver.py:65-80`), so it survives, provided the controller sets it on the `AgentState` object it was passed. A provisional answer exists only once something has been submitted, or verified when the mode requires it. If the sample ends before that, the output is empty and the sample's metadata records that the swarm produced no answer and why. Nothing is invented.
 - **Roles.** Per-member usage is also mapped to model roles where members use different models, so `role_usage` in the log stays meaningful.
-- **Communication against execution.** The ledger also splits each member's usage into tokens spent reading swarm-tool output (messages, notes, board) and everything else. In SCHEME, reading and sending messages took 56–60% of all tokens, and topology alone changed cost by 50–60%. Cost spent reading a message is charged to the reader, but recorded with the sender, so a member that floods others is visible.
+- **Communication volume, as a diagnostic.** Realized totals stay whole-call usage. Inspect reports usage for a whole generation (`src/inspect_ai/core/_model_output.py:13-40`), and one generation's input mixes task instructions, several peers' earlier tool results and cached prefixes, so no measured charge belongs to any one message. Communication is therefore reported separately, and never as a partition of the bill:
+  - **Measured:** counts and sizes of messages, notes and posts sent and read, per member and per sender, plus the usage of generations whose tool calls were swarm communication tools.
+  - **Estimated:** any per-message or per-sender share of tokens or cost (for example, a message's tokenised length times the price of each generation it stayed in context). It is labelled an estimate, and its attribution convention is left to the milestone that builds it.
+
+  This matters because in SCHEME, reading and sending messages took 56–60% of all tokens, and topology alone changed cost by 50–60%. A member that floods others is visible in the measured volumes.
 
 **Metrics** recorded per sample, for scorers and analysis:
 
@@ -626,7 +632,7 @@ ORBIT's scheduled activation (rounds, plans with concurrent batches, and quanta)
 ### Related projects and what they teach
 
 *Are there other eval-oriented swarm substrates besides ORBIT?*
-- **On Inspect, none.** No other project builds a peer swarm on Inspect; inspect_swarm would be the first. Two Inspect projects set conventions to align with: inspect_petri for concurrent agents in one sample, ControlArena for monitors.
+- **On Inspect, one study harness.** [Architecture Matters for Multi-Agent Security](https://github.com/benhagag10/Architecture-Matters-for-Multi-Agent-Security) (code for the ICML 2026 paper of that name) runs four-peer meshes on Inspect. Among the projects surveyed here, it is the only other Inspect peer swarm, and it is a scheduled study harness, not a reusable runtime of continuously active members. Two more Inspect projects set conventions to align with: inspect_petri for concurrent agents in one sample, and ControlArena for monitors.
 - **Outside Inspect, several harnesses** are worth learning from, but not aligning with: SCHEME, Terrarium, Concordia.
 - **Production frameworks** teach delivery, storm-control and termination details, but none is an eval substrate.
 
@@ -638,6 +644,7 @@ All sources below were opened on 2026-10-07 unless marked *unverified*.
 |---|---|---|
 | [inspect_petri](https://github.com/meridianlabs-ai/inspect_petri) (Meridian) | Auditor, target and judge. A Solver runs two Agents concurrently in an anyio task group, each in its own span, connected by a channel, with models assigned by role. | The conventions for concurrent agents in one sample: model roles, per-role named timelines ([Member views](#observer-evidence-accounting-and-metrics)), and harness-validity scores kept separate from the task score. It is two-party, not a swarm. |
 | [ControlArena](https://github.com/UKGovernmentBEIS/control-arena) (UK AISI, Redwood) | Policies, monitors and micro-protocols as serialisable Inspect Agents. Monitor verdicts go in message metadata, and `evaluate_monitors_post_hoc` replays monitors over logs. Its settings are all single-agent. | Monitors that attach per step and can be replayed post hoc. inspect_swarm gets both through inspect_sentinel, and should accept monitors of that shape. |
+| [Architecture Matters for Multi-Agent Security](https://github.com/benhagag10/Architecture-Matters-for-Multi-Agent-Security) (ICML 2026 paper code; also built on Inspect) | Thirteen architectural conditions, including `mesh_round_robin` and `mesh_delegation` with four peers (`conditions.py`, `_mesh_solver`). One solver loop activates one peer at a time: round-robin up to 60 turns, or, in delegation mode, a lead peer that delegates to the others through `as_tool`. Shared history is spliced into each peer's `AgentState`, and peer output is tagged in message metadata. Memory visibility is private, own-reasoning or shared. | Scheduled, one-at-a-time activation, like ORBIT. Peer output reaches the next peer as conversation messages, and delegation results arrive as tool results. It confirms ORBIT's vocabulary (topologies, memory visibility) and that architecture changes attack success. It is not reusable as a substrate for continuously active members. |
 | inspect_evals: NARCBench, tau2 | NARCBench: a message-only collusion monitor over committee deliberations ([arXiv 2604.01151](https://arxiv.org/abs/2604.01151)). tau2: a user simulator that turns each side's output into the other's user message. | NARCBench: monitors need actions, not only messages. tau2: the role-flipping that inspect_swarm's delivery rule avoids. |
 
 **Eval harnesses outside Inspect.**
@@ -658,12 +665,13 @@ All sources below were opened on 2026-10-07 unless marked *unverified*.
 | AutoGen / Magentic-One | User role with `source=sender`. The orchestrator keeps task and progress ledgers, with a stall counter that triggers replanning. Termination conditions compose with `&` and `|`. | Stall-based loop detection and composable termination as later options; record stop reasons. |
 | LangGraph, OpenAI Agents SDK, Microsoft Agent Framework | The peer's turns arrive as assistant messages (with a name or author), or as a tool result for agents used as tools. Agent Framework filters tool-control content before relaying. | Relay text, not transcripts; tool results for solicited answers are universal. |
 | Strands Swarm, CrewAI, CAMEL, MetaGPT | Templated user input or task prompts. Strands has handoff and iteration caps plus optional repetitive-handoff detection; MetaGPT has a budget (`NoMoneyException`) and an all-idle stop. | Turn caps are the norm and are coarse; the swarm's budget is the primary stop. |
-| [mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail), [Gas Town](https://github.com/gastownhall/gastown) | Tool output (`fetch_inbox`; `gt mail`), with a rate-limited, metadata-only reminder. Advisory file reservations with TTLs that report conflicts. Gas Town sets per-role mail budgets. | Direct precedent for tool-output delivery with metadata notices, and for leases that report conflicts. |
+| [mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail) | Tool output (`fetch_inbox`), prompted by a rate-limited reminder hook that carries only counts and fixed text (`scripts/hooks/check_inbox.sh`). Advisory file reservations with TTLs that report conflicts. | Direct precedent for tool-output delivery with metadata-only notices, and for leases that report conflicts. |
+| [Gas Town](https://github.com/gastownhall/gastown) | Mail bodies are read through `gt mail` (tool output). Its injected reminder lists each message's id, sender and **subject** (`internal/cmd/mail_check.go`, `formatInjectOutput`). Per-role mail budgets. | Bodies through tools, but its notice puts a sender-written subject in context, which inspect_swarm's notice contract excludes. Mail budgets as a norm. |
 | Letta | Shared memory blocks: insert is concurrency-safe, replace fails if the text changed, rethink is last-writer-wins. Peer messages arrive as a system-role notice (rendering *unverified*). | Explicit concurrency rules for shared state ([Substrate](#substrate)). |
 
 Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 multi-agent mode (4 or 16 agents with a leader that synthesises; internal agent communication undocumented) are orchestrator-and-workers systems, like the vendor swarms above; their internals are *unverified*.
 
-**Delivering unsolicited peer messages as tool output is rare.** Only the coding-agent mail layers do it, besides Codex and Claude Code's own tools. No general-purpose framework enforces it at runtime with distinct provenance in logs. So that part of inspect_swarm is new, and the fencing above is what makes it defensible.
+**Delivering unsolicited peer messages as tool output is rare.** Among the projects surveyed, only the coding-agent mail layers and SCHEME do it, besides Codex and Claude Code's own tools; and only mcp_agent_mail also keeps its notices free of peer-written text. No general-purpose framework enforces it at runtime with distinct provenance in logs. So that part of inspect_swarm is new, and the fencing above is what makes it defensible.
 
 ## Alternatives considered
 
@@ -789,7 +797,8 @@ Untrusted input reaches this code from several directions.
     - with markers inside the payload removed;
     - with no tool calls or results relayed;
     - notices contain no peer-chosen strings (bodies, subjects, thread titles, member-created channel names);
-  - every run records its stop reason.
+  - every run records its stop reason;
+  - communication diagnostics keep measured volumes apart from estimated per-message token or cost shares, and never change realized totals.
 - **Filesystem-channel tests** need a sandbox. They use the local sandbox where possible and Docker otherwise, marked slow and skipped in CI without Docker, following inspect_ai's conventions.
 - **Bridged tests** (Codex and Claude Code members, vendor swarms) need Docker, inspect_swe and provider keys. They are marked and run by hand or in a scheduled job, never in PR CI.
 - **Analysis helpers** (realized-cost comparison, λ fit) are tested on synthetic logs with known answers.

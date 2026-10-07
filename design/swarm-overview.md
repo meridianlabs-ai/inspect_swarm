@@ -76,7 +76,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 **Align with ORBIT; do not adopt it as the substrate.**
 - Reuse its vocabulary: rosters and roles, channels with readers and writers, delivery modes, evidence kinds.
 - Its scheduled-activation model and its forked `react()` do not fit continuously active members that wake each other.
-- No other project builds a peer swarm on Inspect.
+- The only other Inspect peer swarm found, the code for the paper *Architecture Matters for Multi-Agent Security*, is a scheduled study harness, not a reusable runtime.
 - Within Inspect, follow inspect_petri's conventions for concurrent agents in one sample: model roles, a named timeline per member, and harness-validity scores. Accept ControlArena-shaped monitors through inspect_sentinel.
 - Outside Inspect, SCHEME is the closest published design: a shared sandbox, peer messages as tool output, and monitors that see actions.
 ([Relationship to ORBIT](swarm.md#relationship-to-orbit), [Related projects](swarm.md#related-projects-and-what-they-teach), [Alternatives](swarm.md#alternatives-considered))
