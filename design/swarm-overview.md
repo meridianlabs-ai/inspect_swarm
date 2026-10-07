@@ -33,14 +33,12 @@ A swarm of one member with no channels is a single agent with the same accountin
 
 ## Main decisions
 
-Decisions marked *Ransom* were taken by Ransom on 2026-10-07; the others are the design's recommendation.
-
 **The swarm owns its members' work, including descendants.** On termination it cancels and awaits everything a member started before it finalises, so nothing edits shared files during the final answer and all usage is counted.
 - `background()` attaches work to the sample, not the caller, so M1 rejects background deepagent members.
 - Supporting them needs a scoped owner for `background()` in inspect_ai: later, if wanted.
 - ([Members](swarm.md#members))
 
-**Limits are soft stopping rules; arms are compared on realized cost.** *Ransom.* Inspect checks limits before and after calls and reserves nothing for calls in flight, so any cap is overshot by the calls in flight. The design does not plan on making limits hard. Instead:
+**Limits are soft stopping rules; arms are compared on realized cost.** Inspect checks limits before and after calls and reserves nothing for calls in flight, so any cap is overshot by the calls in flight. The design does not plan on making limits hard. Instead:
 - a ledger records what was actually spent, including descendants, finalisation and overshoot;
 - calls it cannot see (cancelled in flight, unpriced, native compaction) are marked unknown or unattributed, not zero;
 - the final-answer reserve is best-effort.
@@ -51,30 +49,30 @@ Decisions marked *Ransom* were taken by Ransom on 2026-10-07; the others are the
 - *Shared-artifact tasks* (scored on the sandbox, like SWE-bench) get one team score. Individual correctness is unavailable unless each member leaves its own artifact.
 ([Results and scoring](swarm.md#results-and-scoring-a-task-owned-contract))
 
-**Default final answer for leaderless swarms: `verify`, else `vote`, else `first`.** *Ransom.* Use the task's in-loop verifier when it has one, otherwise vote when answers are comparable, otherwise take the first submission. Every member's submission is recorded regardless. For shared-artifact tasks the result is the drained environment. ([Final answer](swarm.md#controller-topology-termination-final-answer))
+**Default final answer for leaderless swarms: `verify`, else `vote`, else `first`.** Use the task's in-loop verifier when it has one, otherwise vote when answers are comparable, otherwise take the first submission. Every member's submission is recorded regardless. For shared-artifact tasks the result is the drained environment. ([Final answer](swarm.md#controller-topology-termination-final-answer))
 
-**Members share the sample's sandbox by default.** *Ransom.* The filesystem is M1's only channel, and bridged members already run there.
+**Members share the sample's sandbox by default.** The filesystem is M1's only channel, and bridged members already run there.
 - A sandbox per member, or partial isolation, is optional later work. Possible reasons: isolation matching the epochs arm, or containment baselines.
 - Concurrent edits, git index locks and resource contention in a shared sandbox are handled by the task's layout: per-member worktrees or scratch directories, and a sandbox sized for the members.
 ([Sandbox topology](swarm.md#sandbox-topology))
 
 **One bus for all sanctioned communication.** Every message, note, claim or post goes through `deliver()`: monitor, then storm controls, then evidence, then delivery. Nothing else writes to a member's inbox. The filesystem stays an *observed* channel, seen only through tool calls, with the limits that implies. ([The bus](swarm.md#the-bus-one-interception-point), [Security](swarm.md#security))
 
-**Monitoring aligns with inspect_sentinel.** *Ransom.* There is no separate swarm monitor type.
+**Monitoring aligns with inspect_sentinel.** There is no separate swarm monitor type.
 - A send is a tool call, so sentinel's tool stages see it with the sender's identity, and sentinel's per-sample state gives monitors a joint view of the swarm.
 - M2 uses sentinel directly if its dispatcher has reached inspect_ai `main`, otherwise a minimal hook in sentinel's action vocabulary.
 ([The bus](swarm.md#the-bus-one-interception-point))
 
 **Messages reach a member through its agent channel, using inspect_ai internals.** Peer messages are delivered as `UserMessage` items with provenance, which `react()` already handles. The open part is the binder: how the bus obtains each member's channel ref, given ACP's first-binder-wins rule. M2's design settles it, and a public inspect_ai API is a later clean-up. ([The agent channel](swarm.md#the-agent-channel))
 
-**Red-team features are optional and unscheduled.** *Ransom.* Forged senders, secret channels and targeted injection may never be built. The single interception point keeps them possible. ([The bus](swarm.md#the-bus-one-interception-point))
+**Red-team features are optional and unscheduled.** Forged senders, secret channels and targeted injection may never be built. The single interception point keeps them possible. ([The bus](swarm.md#the-bus-one-interception-point))
 
 **Align with ORBIT; do not adopt it as the substrate.**
 - Reuse its vocabulary: rosters and roles, channels with readers and writers, delivery modes, evidence kinds.
 - Its scheduled-activation model and its forked `react()` do not fit continuously active members that wake each other.
 ([Relationship to ORBIT](swarm.md#relationship-to-orbit), [Alternatives](swarm.md#alternatives-considered))
 
-**Python 3.11+.** *Ransom.* Above inspect_ai's 3.10 floor. The scaffold moves to 3.11 in a separate PR before M1. ([Compatibility](swarm.md#compatibility-and-migration))
+**Python 3.11+.** Above inspect_ai's 3.10 floor. The scaffold moves to 3.11 in a separate PR before M1. ([Compatibility](swarm.md#compatibility-and-migration))
 
 ## Where each part lives
 
@@ -90,7 +88,7 @@ Detail: [where each part lives](swarm.md#where-each-part-lives).
 
 ## Plan
 
-M1, then M2; after that, a menu in any order or in part, driven by user feedback with no internal evidence gate. *Ransom.* ([Implementation plan](swarm.md#implementation-plan))
+M1, then M2; after that, a menu in any order or in part, driven by user feedback with no internal evidence gate. ([Implementation plan](swarm.md#implementation-plan))
 
 - **M1: leaderless filesystem swarm with full accounting.** Shared sandbox, cap and ledger, drain, final-answer modes, the result contract, `InfoEvent` evidence and metrics. No inspect_ai changes.
 - **M2: the bus and direct messages.** `deliver()`, `send_message`, delivery modes, monitoring through sentinel, and the binder.
