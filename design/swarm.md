@@ -10,6 +10,7 @@ Decisions Ransom took on the first draft (2026-10-07) are marked inline as "(dec
 - limits stay soft;
 - Python 3.11+;
 - inspect_ai internals may be used;
+- peer messages are model output, delivered as tool output with distinct provenance;
 - no internal experiment gate;
 - M1 then M2, the rest in any order;
 - a shared sandbox by default;
@@ -40,6 +41,18 @@ Parallel agents that run at the same time and coordinate are no longer a lab cur
 - **Others.**
   - Kimi K2.5's [Agent Swarm](https://arxiv.org/abs/2602.02276) trains an orchestrator to spawn parallel subagents. It defines **CriticalSteps**, the critical-path analogue of step count.
   - Cursor's [long-running coding agents](https://cursor.com/blog/scaling-agents) found that flat peers with locks slowed to the throughput of two or three agents. Planners plus non-coordinating workers plus a judge worked better.
+
+### How swarms are built elsewhere
+
+General-purpose multi-agent frameworks mostly hand a peer's turns to the recipient as conversation:
+- in the **assistant** role: LangGraph swarms, OpenAI Agents SDK handoffs, Microsoft Agent Framework broadcasts;
+- or in the **user** role: AutoGen, AG2, Google ADK, Strands, and task-prompt injection in CrewAI, CAMEL and MetaGPT.
+
+Their limits are mostly turn caps. Two features matter here:
+- Coding-agent mail layers deliver peer messages through a tool with a metadata-only reminder: [mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail)'s `fetch_inbox`, and [Gas Town](https://github.com/gastownhall/gastown)'s `gt mail`.
+- A few frameworks add structure worth borrowing: ADK's fencing of quoted agent content, AG2's inline arbiter, Magentic-One's stall counter.
+
+Eval harnesses for multi-agent systems besides ORBIT exist, but none builds a peer swarm on Inspect. [Related projects](#related-projects-and-what-they-teach) surveys them and what each teaches this design.
 
 ### Swarms are a third inference-scaling axis, and its value is contested
 
@@ -172,11 +185,12 @@ This section covers only what the design depends on. All paths are in inspect_ai
 - `AgentChannel` is a per-execution queue with a bound cancel scope (`src/inspect_ai/agent/_channel/channel.py`).
   - `react()` opens one (`src/inspect_ai/agent/_react.py:234-237`).
   - It drains the channel at the top of every turn (`_react.py:256-258`).
-- `ChannelItem` is `Union[UserMessage, Cancel]` (`_channel/items.py:62`). The docstrings describe it as an open union with `Announce` and `Steer` reserved for later (`items.py:3-8`). In practice a new item type means editing inspect_ai, because `react()` ignores items it does not recognise; the swarm does not need one (below).
+- `ChannelItem` is `Union[UserMessage, Cancel]` (`_channel/items.py:62`). The docstrings describe it as an open union with `Announce` and `Steer` reserved for later (`items.py:3-8`). In practice a new item type means editing inspect_ai, because `react()` ignores items it does not recognise.
 - `coalesce()` merges only operator-sourced messages (`items.py:96-100`).
 - `ChatMessage.source` is the closed `Literal["input", "generate", "operator"]` (`src/inspect_ai/core/_chat_message.py:29`).
 - `AgentRef`, `UserMessage` and `current_agent_channel` are not exported from `inspect_ai.agent` (`src/inspect_ai/agent/__init__.py:10-14`). inspect_swarm may import them from the private modules, so this is a visibility detail, not a blocker.
-- `before_turn()` delivers any `UserMessage` item. It coalesces only operator-sourced ones and passes others through unchanged (`channel.py:432-453`, `items.py:96-100`). So a peer message can already be delivered as a `UserMessage` carrying a provenance header and sender metadata, with no new item type.
+- `before_turn()` appends every `UserMessage` item to the conversation as a `ChatMessageUser` (`channel.py:432-453`). A `UserMessage` is by definition an operator-injected turn (`items.py:37-46`), so it puts its text in the user role, the most trusted input a model has. The swarm therefore never delivers peer text this way ([Delivery](#delivery-peer-messages-are-model-output)).
+- deepagent already follows the pattern the swarm adopts. Its background-completion notice is harness-authored and metadata-only ("Background agent(s) finished — collect the result"), injected at a turn boundary, and the child's result is fetched with the `agent_status` tool, so it arrives as tool output (`src/inspect_ai/agent/_deepagent/lifecycle_tools.py:510-530`, `:597-634`).
 - **The binder.** A *binder* is how a producer obtains an execution's `AgentRef` so that it can post into that execution's channel. Today `agent_channel()` offers each new channel's ref to the sample's ACP session, first binder wins, so ACP is the only producer (`_channel/__init__.py:125-133`).
   - The swarm's bus is a second producer: it needs each member's ref to deliver messages into it.
   - The member's channel is opened inside that member's `react()`, so code running in the member (a tool, a model wrapper, `on_continue`) can reach it through the private `current_agent_channel()`. The swarm's controller, outside the member, cannot.
@@ -233,7 +247,7 @@ What the log keeps:
 
 - `sandbox_agent_bridge` routes a sandboxed agent's model calls to Inspect models. Each call becomes a `ModelEvent`.
 - `bridged_tools` exposes host-side Inspect tools to the sandboxed agent over MCP (`src/inspect_ai/agent/_bridge/sandbox/bridge.py:141-146`). inspect_swe's Claude Code agent accepts `bridged_tools` (`inspect_swe: src/inspect_swe/_claude_code/claude_code.py:125`). So an inspect_swarm messaging tool can be offered to a bridged member.
-- Codex Multi-Agent V2 `agent_message` items become author-attributed user messages, with the raw item kept on the content (`src/inspect_ai/agent/_bridge/responses_impl.py:1196-1245`). They appear only inside `ModelEvent` inputs; no event represents an inter-agent message.
+- Codex Multi-Agent V2 `agent_message` items become author-attributed user messages, with the raw item kept on the content (`src/inspect_ai/agent/_bridge/responses_impl.py:1196-1245`). They appear only inside `ModelEvent` inputs; no event represents an inter-agent message. This is how Codex's own swarm delivers peer text (in the user role, with an author line). inspect_swarm's native members do not, and this design does not change the bridge ([Delivery](#delivery-peer-messages-are-model-output)).
 - inspect_swe uses the bridge's `ModelEventSink` (`src/inspect_ai/model/_model.py:2933`) to rebuild Codex subagent spans from `spawn_agent`/`close_agent` calls and `agent_message` items (`inspect_swe: src/inspect_swe/_codex_cli/_events/consumer.py:1-33`, `detection.py:50-86`).
 - Claude Code subagents are rebuilt from session files. Agent teams are not represented *(inferred from a search for team, teammate and SendMessage that found nothing)*.
 
@@ -321,20 +335,54 @@ All of these are plain values, so a task can expose them as `-T` parameters and 
 | Channel | What it is | When | What it adds over the filesystem convention |
 |---|---|---|---|
 | Filesystem | The shared sandbox ([Sandbox topology](#sandbox-topology)). Members read and write files; a convention (a shared directory, an append-only `notes.md`, per-member scratch directories) is given in the prompt. | M1 | (Baseline.) Free; the channel Test-Time Communication, the C compiler and the Hugging Face incident all used. Observable only through tool calls. |
-| Messages | `send_message(to, text)`, with wake or no-wake, and `list_members()`. Delivered at the recipient's next turn boundary. | M2 | Addressed, attributable delivery into a member's context, waking it; every message monitored and evidenced. The Codex v2 and Claude Code teams surface. |
-| Notes / fact log | Append-only typed entries (`fact`, `fail`, `done`), shown to members at turn start or on demand. | Later, on request | Typed entries the swarm can inject and summarise, instead of a file members must remember to read; each entry monitored and evidenced. DeLM-style shared context. |
+| Messages | `send_message(to, text)`, with wake or no-wake, `read_messages()` and `list_members()`. The recipient is notified at its next turn boundary and reads the content with `read_messages()`. | M2 | Addressed, attributable messages that wake the recipient; every message monitored and evidenced. The Codex v2 and Claude Code teams surface. |
+| Notes / fact log | Append-only typed entries (`fact`, `fail`, `done`), read with a tool; members are notified of new entries. | Later, on request | Typed entries with a notice when they change, instead of a file members must remember to read; each entry monitored and evidenced. DeLM-style shared context. Unlike DeLM, entries are not injected into the prompt. |
 | Task list | Create, claim (first claim wins, optional lease), update, list, with dependencies. | Later, on request | Atomic claims and leases that cannot race the way lock files do; dependencies; a state the controller can read for quiescence. Claude Code teams and DeLM. |
-| Board | Channels, threads, posts, subscriptions with short notifications. | Later, on request | Many-to-many discussion with subscriptions and notifications instead of polling files; posts monitored and evidenced. Codex's message board. |
+| Board | Channels, threads, posts, and subscriptions with metadata-only notifications. | Later, on request | Many-to-many discussion with subscriptions and notifications instead of polling files; posts monitored and evidenced. Codex's message board. |
 
 Every explicit channel is a set of `@tool`s plus state. The tools do not deliver anything themselves; they hand a typed communication record (sender, recipients, kind, payload) to the bus.
 
-Delivery into a member's context has three modes, borrowing ORBIT's names:
+Shared state gets explicit concurrency rules, because agents hold claims and edits for minutes:
+- notes are append-only;
+- anything mutable is updated with compare-and-swap, failing if the content changed, as Letta's shared memory blocks distinguish;
+- claims are TTL leases that report conflicts rather than block, like mcp_agent_mail's file reservations.
 
-- `poll`: tools only.
-- `notify`: a short "you have N unread from X" notice at the next turn boundary.
-- `push`: the full message is injected, with a provenance header and a statement that peer messages are not user instructions.
+The [CoAgent paper](https://arxiv.org/abs/2606.15376) argues that blocking locks stall long inferences and plain optimistic concurrency throws away minutes of work.
 
-The default is `notify`, which is cheapest in context and closest to Codex's board. The modes are a configuration axis because they change behaviour.
+### Delivery: peer messages are model output
+
+A peer's text is another model's output, so it reaches a member's model only as **tool output**: the result of a swarm tool the member calls (`read_messages()`, a notes read, a thread read). It is never a `ChatMessageUser` or `UserMessage` turn, and never carries `source` `input` or `operator` (decision: Ransom, 2026-10-07). A header saying "this is not a user instruction" would be a prompt-level mitigation; tool output is structural, and it matches the trust models in [Security](#security).
+
+Delivery has two modes, an axis because they change behaviour:
+
+- `poll`: no notice. The member learns of messages only by calling the read tools.
+- `notify` (default): at the member's next turn boundary, the swarm injects a **notice** that carries only metadata. The member then reads the content with a tool.
+
+ORBIT's third mode, which injects full bodies (`auto`), is deliberately not offered.
+
+The notice is the one swarm-authored text that enters a member's context outside a tool result.
+- It is a fixed template, in the manner of deepagent's background-completion notice: "3 unread messages from `worker-2`, `worker-4`; call `read_messages()`".
+- Its only variables are counts, channel kinds, and names the eval author or controller assigned: member names from the roster, and board channels the task defined.
+- It never includes a message body, a subject line, a thread title, or a name a member chose. A board channel or thread a member created is referred to by a swarm-assigned id.
+
+So the notice does not let peer text into the user role. How it is rendered, and how wake works for bridged members (which have no `react()` channel; they may get `poll` only), is part of M2's design.
+
+Tool output is a better place than the user role, but it is not a trust boundary by itself. ADK's own fencing module calls peers' turns and tool results "attacker-reachable" ([`_fencing.py`](https://github.com/google/adk-python/blob/main/src/google/adk/flows/llm_flows/context/_fencing.py)). So the read tools also follow three rules taken from the frameworks surveyed:
+- **Fence each message as data.** Each message sits between begin and end markers under a sender line the bus stamps. Copies of the markers inside the payload are removed, so a payload cannot close its own block. A fixed note says the content is another agent's message to read, not instructions to follow.
+- **Relay text, not mechanics.** A message is what the sender wrote, never the sender's tool calls, tool results or transcript. Microsoft Agent Framework and the OpenAI Agents SDK's `remove_all_tools` filter make the same choice.
+- **Bind sender identity at the bus.** Members never assert who they are. METR's investigation of the Hugging Face incident found agents impersonating one another. Terrarium's attacks inject system messages through its communication proxy.
+
+Provenance is distinct in logs and evidence as well as in the prompt:
+- Peer content appears as the result of a named swarm tool, linked to its `sent`, `delivered` and `read` evidence records.
+- The notice is a distinct swarm item, either a dedicated channel item or a message carrying a swarm metadata marker, never an operator message.
+
+The two ways to mark the notice:
+- **A new `source` value**, which has the reader-compatibility cost described in [Compatibility](#compatibility-and-migration).
+- **Message `metadata`**, which does not.
+
+M2's design should lean towards metadata and a dedicated item, and add a `source` value only if the viewer must distinguish swarm notices without reading metadata. Whether either needs an inspect_ai change, given that private internals are allowed, is for M2's design.
+
+Vendor swarms differ. Codex's multi-agent v2 delivers peer text as author-attributed user messages, and the bridge reproduces that ([Bridged agents](#bridged-agents)). That is the vendor's design, evaluated as shipped; native members never receive peer text that way.
 
 ### Sandbox topology
 
@@ -347,7 +395,9 @@ Which sandbox each member runs in is a decision, not an accident of the scaffold
 
 **Other topologies are optional and deferred to later work, if users need them.**
 - **A sandbox per member**, through Inspect's multiple named sandbox environments per sample (`sandbox(name)`, `src/inspect_ai/util/_sandbox/context.py:48`).
-- **Partial isolation**: private sandboxes plus one shared volume or service.
+- **Partial isolation**:
+  - private sandboxes plus one shared volume or service;
+  - or one shared sandbox with a Linux user and write scope per member, as SCHEME does ("All agents in a given sample share a single Docker sandbox", with per-agent file scopes).
 
 Cases that might need them, none committed:
 - isolation comparable to the k-epochs arm, so that a "no communication" swarm matches independent attempts in its environment as well as its prompts;
@@ -370,7 +420,11 @@ All sanctioned communication goes through one function, `deliver(record)`, which
 
 1. **Policy and monitor.** Attached protocols decide `continue`, `modify` (rewrite the payload, e.g. paraphrase), `reject` (the sender gets a tool error it can react to) or `terminate`.
 2. **Storm controls.** Per-sender rate, deduplication, inbox cap and size cap. Claude Code ships these for cross-session messaging so that a message loop "stops on its own".
-3. **Evidence.** One event per record, with the verdict and, when the payload was rewritten, the original.
+   - A full inbox is returned to the sender as a tool error, which is back-pressure it can react to, as AG2's arbiter does with `InboxFull` ([AG2 Network](https://github.com/ag2ai/ag2)).
+   - Loop detection beyond rate limits is a later option, from two candidates:
+     - a progress-aware stall counter like Magentic-One's, which rises on no progress or a detected loop, decays on progress, and acts at a threshold ([AutoGen](https://github.com/microsoft/autogen));
+     - a unique-senders-in-window rule like Strands' repetitive-handoff detection.
+3. **Evidence.** One event per record, with the verdict and, when the payload was rewritten, the original. Each record also carries a causation id (the record it replies to), as AG2's hub envelopes do, so message → reply → effect chains can be followed.
 4. **Delivery** to the recipients' inboxes, waking them if requested.
 
 Nothing else writes to a member's inbox, so no sanctioned path between members bypasses the monitor or the transcript.
@@ -382,6 +436,11 @@ Monitoring aligns with inspect_sentinel; there is no separate `SwarmMonitor` typ
 - A send is a tool call, so once sentinel's dispatcher lands, every send is already a `BeforeToolCall` step with the sender's `conversation` id. A sentinel protocol can then reject or modify it with no swarm-specific code.
 - Monitor state is per sample, so a protocol can keep a joint, swarm-wide view. This is what the fragmentation result asks for.
 - Unsanctioned channels are tool calls too (a `bash` that writes into a shared cache). The same monitors see them.
+- Monitors need actions as well as messages.
+  - [SCHEME](https://arxiv.org/abs/2605.29178) found that monitors with code access flagged 68–99% of coordinated sabotage (by monitor model) at a 2% false-positive rate.
+  - [NARCBench](https://arxiv.org/abs/2604.01151)'s message-only collusion monitors scored below chance in the inspect_evals registry's report (AUROC 0.10–0.17), reading honest convergence as suspicious.
+  - A bus-only monitor would be the weak design. Sentinel's tool stages, plus the bus's records, give monitors both views.
+- Post-hoc replay of new monitors over existing logs, as ControlArena's `evaluate_monitors_post_hoc` does, comes from sentinel's Scout replay. A sentinel monitor is the same monitor live and replayed.
 
 What sentinel does not cover is the delivery side: what each recipient was shown, after rewriting, notification and coalescing. The bus records that itself. If monitors turn out to need to act on deliveries rather than sends, it can become a sentinel stage later.
 
@@ -431,6 +490,7 @@ The reserve and exhaustion policy, and its limits:
   A group that mixes the swarm's own limit error with anything else propagates too.
 - **Provisional answer.** If an outer limit ends the sample first, there is no final step. The controller therefore keeps a provisional answer current as members submit; for answer-scored tasks it is the current vote or the first verified submission. `as_solver()` copies the agent's output to the task state even when an exception ends the agent (`src/inspect_ai/agent/_as_solver.py:65-80`), so it survives, provided the controller sets it on the `AgentState` object it was passed. A provisional answer exists only once something has been submitted, or verified when the mode requires it. If the sample ends before that, the output is empty and the sample's metadata records that the swarm produced no answer and why. Nothing is invented.
 - **Roles.** Per-member usage is also mapped to model roles where members use different models, so `role_usage` in the log stays meaningful.
+- **Communication against execution.** The ledger also splits each member's usage into tokens spent reading swarm-tool output (messages, notes, board) and everything else. In SCHEME, reading and sending messages took 56–60% of all tokens, and topology alone changed cost by 50–60%. Cost spent reading a message is charged to the reader, but recorded with the sender, so a member that floods others is visible.
 
 **Metrics** recorded per sample, for scorers and analysis:
 
@@ -441,9 +501,12 @@ The reserve and exhaustion policy, and its limits:
 - time each member spends waiting for a model connection, so that a 16-member swarm throttled by `max_connections` is not mistaken for a slow one. Inspect accounts waiting time per sample, counting overlapping waits once (`src/inspect_ai/_util/working.py:95-115`), so per-member waiting needs its own timing;
 - messages, notes, claims and posts per member, and blocked or rewritten communications.
 
+**Member views.** inspect_petri runs its auditor and target concurrently in one sample, and gives each role its own named timeline with `transcript().add_timeline()` (`src/inspect_ai/log/_transcript.py:605`; [inspect_petri](https://github.com/meridianlabs-ai/inspect_petri) `_auditor/auditor.py`). The swarm does the same per member, so the viewer can show one member's trajectory without a new event type.
+
 **Analysis.**
 
 - Thin helpers that turn a set of logs from the four arms into comparisons on realized cost, and λ fits.
+- Harness-validity checks scored separately from the task, following Petri, which scores `auditor_failure` and `stuck_in_loops` and tells users to check them "before trusting the target-behavior scores". For a swarm: a member that never acted, members stuck in loops, deadlock or quiescence never reached, and message storms.
 - Inspect Scout scanners that label coordination failures (MAST categories, duplicated work, message storms) over swarm transcripts.
 
 ### Results and scoring: a task-owned contract
@@ -482,6 +545,8 @@ A deepagent with `background=True` is not reimplemented. It stays a member type 
 **Termination.** Always bounded by the swarm budget and the sample's limits.
 
 - Leaderless swarms have no single submitter. In M1 they end when every member has submitted, or on budget, time or a verified answer. With explicit channels they would end by quiescence: every member idle, no open or claimed task, and empty inboxes. Quiescence needs members that can be idle and woken, so it depends on the persistent-members work ([Members](#members)).
+- Every run records why it stopped, as one of a fixed set of reasons: all submitted, verified answer, swarm cap, sample limit, time, quiescence. Strands and AutoGen report stop reasons the same way, and AutoGen's termination conditions compose with `&` and `|`. Later topologies may compose conditions the same way.
+- Quiescence, when explicit channels exist, can follow SCHEME's pattern: a shared status registry with `wait` and `done`, where a `wait` returns immediately once every other member is done. AG2's passive `max_silence` expectations are a related signal.
 - On termination the controller cancels and awaits the remaining members and their descendants (drain, within the [ownership boundary](#members)). It does not abandon them, so nothing edits the shared environment during finalisation and their usage is in the ledger before the sample is scored.
 
 **Final answer.** For shared-artifact tasks, the final result is the environment as the drained swarm leaves it. A later topology could add an integration member that runs last. For answer-scored tasks, `final=` selects one of:
@@ -504,7 +569,7 @@ The leaderless default matches how leaderless swarms succeed in practice: the C 
 | Part | Lives in | Why |
 |---|---|---|
 | `swarm()`, controller, members, budget, bus, channels, evidence, metrics, scorers, prompts, Scout scanners | inspect_swarm | Fast iteration; the runtime is opinionated and experimental. |
-| Delivering peer messages into a member's channel | inspect_swarm, on inspect_ai's private channel internals (M2) | Peer messages can be posted as `UserMessage` items with provenance metadata, which `react()` already delivers. The open part is the [binder](#the-agent-channel): how the bus obtains each member's ref. M2's design decides whether that needs a small inspect_ai hook for behaviour (registering a member's channel when it opens, alongside ACP's first-binder-wins rule) or can be done from inside the member. Public exports are a later clean-up, not a prerequisite. |
+| Notifying members and delivering peer messages | inspect_swarm, on inspect_ai's private channel internals where needed (M2) | Content is tool output from swarm tools, which needs nothing from inspect_ai. The metadata-only notice reaches a member at a turn boundary through its channel, or an `on_continue`-style injection as deepagent does. The open parts are: the [binder](#the-agent-channel), how the bus obtains each member's ref; and whether the notice is a dedicated channel item, which `react()` would need to render (an inspect_ai behaviour change), or a marked message. M2's design decides both, alongside ACP's first-binder-wins rule. Public exports are a later clean-up, not a prerequisite. |
 | Clean re-entry of `react()` on an existing state (no second system prompt), or an idle state | inspect_ai (coordinator topologies), optional | Persistent members; the alternative is a `submit=False` member protocol inside inspect_swarm. |
 | A scoped owner for `background()` work, so a swarm can own and drain a member's descendants | inspect_ai, when background deepagent members are needed | Today `background()` attaches to the sample's task group; without an owner the swarm cannot drain `deepagent(background=True)` members. |
 | `span(..., metadata=)` and per-span usage in the log, including native compaction usage (for example on `CompactionEvent`) | inspect_ai, nice to have | Member identity and complete per-member cost without side records or an unattributed remainder. |
@@ -558,6 +623,48 @@ The recommendation is to **align with ORBIT and aim to be a substrate it could r
 
 ORBIT's scheduled activation (rounds, plans with concurrent batches, and quanta) is a useful second execution mode for reproducible security experiments. inspect_swarm's default is continuously active members woken by messages, which is what vendor swarms do. Supporting a scheduled mode is later, optional work, not part of M1 or M2.
 
+### Related projects and what they teach
+
+*Are there other eval-oriented swarm substrates besides ORBIT?*
+- **On Inspect, none.** No other project builds a peer swarm on Inspect; inspect_swarm would be the first. Two Inspect projects set conventions to align with: inspect_petri for concurrent agents in one sample, ControlArena for monitors.
+- **Outside Inspect, several harnesses** are worth learning from, but not aligning with: SCHEME, Terrarium, Concordia.
+- **Production frameworks** teach delivery, storm-control and termination details, but none is an eval substrate.
+
+All sources below were opened on 2026-10-07 unless marked *unverified*.
+
+**Inspect-based.**
+
+| Project | What it is | What it teaches inspect_swarm |
+|---|---|---|
+| [inspect_petri](https://github.com/meridianlabs-ai/inspect_petri) (Meridian) | Auditor, target and judge. A Solver runs two Agents concurrently in an anyio task group, each in its own span, connected by a channel, with models assigned by role. | The conventions for concurrent agents in one sample: model roles, per-role named timelines ([Member views](#observer-evidence-accounting-and-metrics)), and harness-validity scores kept separate from the task score. It is two-party, not a swarm. |
+| [ControlArena](https://github.com/UKGovernmentBEIS/control-arena) (UK AISI, Redwood) | Policies, monitors and micro-protocols as serialisable Inspect Agents. Monitor verdicts go in message metadata, and `evaluate_monitors_post_hoc` replays monitors over logs. Its settings are all single-agent. | Monitors that attach per step and can be replayed post hoc. inspect_swarm gets both through inspect_sentinel, and should accept monitors of that shape. |
+| inspect_evals: NARCBench, tau2 | NARCBench: a message-only collusion monitor over committee deliberations ([arXiv 2604.01151](https://arxiv.org/abs/2604.01151)). tau2: a user simulator that turns each side's output into the other's user message. | NARCBench: monitors need actions, not only messages. tau2: the role-flipping that inspect_swarm's delivery rule avoids. |
+
+**Eval harnesses outside Inspect.**
+
+| Project | What it is | What it teaches inspect_swarm |
+|---|---|---|
+| [SCHEME](https://arxiv.org/abs/2605.29178) (coordinated sabotage and monitoring, 2026-05) | 2–4 agents in one shared Docker sandbox, each a separate Linux user with its own file scopes. Messages go through `read_comms`/`send_comm` tools on harness-stamped append-only channels, with `wait`/`done` against a status registry. Main and side tasks are scored jointly in the sandbox. Monitor views are ablated (code, comms, per agent). No public code found. | The closest published design to M1 and M2: shared sandbox by default, peer messages as tool output, quiescence by status registry, monitors with code access, and the communication share of cost. |
+| [Terrarium](https://github.com/umass-aisec/Terrarium) (UMass, [arXiv 2510.14312](https://arxiv.org/abs/2510.14312)) | Append-only blackboards behind one communication proxy (the Megaboard), with a factor graph for topology. Turn-based planning and execution phases. Attacks include agent poisoning, context overflow and proxy-injected system messages. | The proxy is both the observation point and the attack point. This confirms one bus, and that sender identity must be bound there. |
+| [Concordia](https://github.com/google-deepmind/concordia) (Google DeepMind) | A game master resolves actions. Engines are swappable (sequential, simultaneous, asynchronous) and chainable into scenes. Logs are evaluated by LLM autoraters. | Scheduling as a policy over one runtime. inspect_swarm's continuously active default is Concordia's asynchronous engine, and a scheduled mode can be another policy later. |
+| AgentsNet ([arXiv 2507.08616](https://arxiv.org/abs/2507.08616)), Sotopia, MASEval ([arXiv 2603.08835](https://arxiv.org/abs/2603.08835)) | Synchronous rounds over graphs up to 100 agents, with every agent asked for an answer; simultaneous, round-robin or random action order; framework-agnostic "system as the unit of evaluation". | Answer-scored results per agent, and comparisons across papers that need scheduled modes. |
+
+**Production frameworks**, judged by how a peer's message reaches the recipient.
+
+| Framework | How a peer's message arrives | What it teaches inspect_swarm |
+|---|---|---|
+| Google ADK | User role, fenced between quoted-content markers with a data-not-instructions preamble; markers inside the payload are removed. | The fencing inside inspect_swarm's read tools ([Delivery](#delivery-peer-messages-are-model-output)). |
+| AG2 Network | A user turn prefixed `[sender]:`. A hub with a write-ahead log stamps envelopes with a causation id. An inline arbiter applies per-agent token buckets, inbox caps with a high-water mark (`InboxFull`) and delegation depth. | Back-pressure as a tool error, and causation ids in evidence ([The bus](#the-bus-one-interception-point)). |
+| AutoGen / Magentic-One | User role with `source=sender`. The orchestrator keeps task and progress ledgers, with a stall counter that triggers replanning. Termination conditions compose with `&` and `|`. | Stall-based loop detection and composable termination as later options; record stop reasons. |
+| LangGraph, OpenAI Agents SDK, Microsoft Agent Framework | The peer's turns arrive as assistant messages (with a name or author), or as a tool result for agents used as tools. Agent Framework filters tool-control content before relaying. | Relay text, not transcripts; tool results for solicited answers are universal. |
+| Strands Swarm, CrewAI, CAMEL, MetaGPT | Templated user input or task prompts. Strands has handoff and iteration caps plus optional repetitive-handoff detection; MetaGPT has a budget (`NoMoneyException`) and an all-idle stop. | Turn caps are the norm and are coarse; the swarm's budget is the primary stop. |
+| [mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail), [Gas Town](https://github.com/gastownhall/gastown) | Tool output (`fetch_inbox`; `gt mail`), with a rate-limited, metadata-only reminder. Advisory file reservations with TTLs that report conflicts. Gas Town sets per-role mail budgets. | Direct precedent for tool-output delivery with metadata notices, and for leases that report conflicts. |
+| Letta | Shared memory blocks: insert is concurrency-safe, replace fails if the text changed, rethink is last-writer-wins. Peer messages arrive as a system-role notice (rendering *unverified*). | Explicit concurrency rules for shared state ([Substrate](#substrate)). |
+
+Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 multi-agent mode (4 or 16 agents with a leader that synthesises; internal agent communication undocumented) are orchestrator-and-workers systems, like the vendor swarms above; their internals are *unverified*.
+
+**Delivering unsolicited peer messages as tool output is rare.** Only the coding-agent mail layers do it, besides Codex and Claude Code's own tools. No general-purpose framework enforces it at runtime with distinct provenance in logs. So that part of inspect_swarm is new, and the fencing above is what makes it defensible.
+
 ## Alternatives considered
 
 **Build `swarm()` inside inspect_ai.** This is the earlier RFC's placement.
@@ -596,6 +703,18 @@ ORBIT's scheduled activation (rounds, plans with concurrent batches, and quanta)
 - It is security-first, while the first users here are capability-scaling experiments that need realized-cost accounting and the result contract above.
 - Rejected as the substrate; aligned with instead.
 
+**Deliver peer messages as conversation turns** (user or assistant role), as most frameworks do (AutoGen, AG2, ADK, Strands, LangGraph, the OpenAI Agents SDK).
+
+- Simplest to build. Every provider renders it, and it is what Codex's own swarm does.
+- It puts another model's output in the most trusted role (user), or makes it look like the recipient's own words (assistant). LangGraph's documentation warns that relaying full histories confuses the receiving agent.
+- Rejected (decision: Ransom, 2026-10-07) in favour of tool output with fencing and metadata-only notices ([Delivery](#delivery-peer-messages-are-model-output)).
+
+**A scheduler that activates agents in turns, as the default** (ORBIT, Concordia's sequential engine, Terrarium, AgentsNet's synchronous rounds).
+
+- Reproducible, and easier to analyse.
+- The vendor swarms being evaluated run their members continuously and wake them by message.
+- Kept as an optional later scheduling policy, not the default.
+
 **Monitor through model wrapping** (ORBIT's approach: subclass the `Model` to filter inputs and outputs).
 
 - Sees everything a member reads.
@@ -618,7 +737,7 @@ ORBIT's scheduled activation (rounds, plans with concurrent batches, and quanta)
 - **inspect_ai extension points**, where behaviour needs them, are additive:
   - possibly a binder hook (M2's design decides);
   - extending the `source` literal changes the log schema and the generated TypeScript types, so it goes through inspect_ai's type-generation pipeline and a ts-mono PR;
-  - a new `source` value is additive for new writers, but readers whose literal still has only `input`, `generate` and `operator` would reject logs containing it. M2's detailed design must either state the minimum reader version or keep an existing `source` and carry provenance in message `metadata`. The second avoids version skew and is preferred unless the viewer needs the distinction.
+  - a new `source` value is additive for new writers, but readers whose literal still has only `input`, `generate` and `operator` would reject logs containing it. M2's detailed design must either state the minimum reader version or carry the swarm notice's provenance in message `metadata`. The second avoids version skew and is preferred unless the viewer needs the distinction. Peer content itself needs neither, because it is tool output ([Delivery](#delivery-peer-messages-are-model-output)).
 - **A new event type**, if one is proposed ([open question 1](#open-questions)), is the largest change: the event union, schema, ts-mono types, viewer renderer, dataframes and Scout's event handling. M1 uses existing event types; whether and when to add a new event type remains open.
 - **inspect_swe** changes are additive options on the Codex and Claude Code agents.
 - **Vendor traffic visibility.** Evidence for vendor swarms is limited by what the bridge sees.
@@ -631,8 +750,9 @@ ORBIT's scheduled activation (rounds, plans with concurrent batches, and quanta)
 Untrusted input reaches this code from several directions.
 
 - **Peer messages are model output** and may be adversarial: a compromised member, or ordinary prompt injection relayed from a web page.
-  - Pushed messages carry a provenance header naming the sender and a statement that peer messages are not user instructions or approvals. Claude Code teams take the same stance: an agent message is never user consent.
+  - They reach a member only as tool output, never in the user role (decision: Ransom, 2026-10-07). Notices carry metadata only, with no peer-chosen strings ([Delivery](#delivery-peer-messages-are-model-output)). Claude Code teams take the same stance: an agent message is never user consent.
   - Approval and sentinel decisions are never taken from message content.
+  - The `synthesize` final-answer mode is the one place peer text enters a prompt the harness composes. It quotes member submissions as delimited data in a separate model call, not in any member's context. That is a weaker boundary, so `synthesize` is never the default.
 - **Message volume.** Storm controls (rate, deduplication, inbox and size caps) bound how much one member can push into others' contexts and into the log.
 - **The shared filesystem** is an unsanctioned, unmonitored channel by construction. The design treats it as an observed channel, not a trusted one. The Hugging Face incident shows that agents will also find channels the eval designer did not intend, such as package caches, shared mounts and network services.
   - The sandbox layout for swarm tasks should make sharing explicit: one shared directory, per-member scratch space, no shared caches unless intended.
@@ -662,8 +782,14 @@ Untrusted input reaches this code from several directions.
   - answer-scored tasks get per-member and team@k scores, voting refuses tasks without a comparable answer form, and shared-artifact tasks report a team score with per-member correctness marked unavailable;
   - each final-answer mode selects as specified;
   - every member's submission is recorded;
-  - evidence events are written with the right ids;
-  - storm controls and monitor verdicts (`continue`, `modify`, `reject`) behave as specified.
+  - evidence events are written with the right ids, including causation ids;
+  - storm controls and monitor verdicts (`continue`, `modify`, `reject`) behave as specified, and a full inbox reaches the sender as a tool error;
+  - peer content reaches a recipient only in a read tool's result:
+    - fenced, with the bus-stamped sender;
+    - with markers inside the payload removed;
+    - with no tool calls or results relayed;
+    - notices contain no peer-chosen strings (bodies, subjects, thread titles, member-created channel names);
+  - every run records its stop reason.
 - **Filesystem-channel tests** need a sandbox. They use the local sandbox where possible and Docker otherwise, marked slow and skipped in CI without Docker, following inspect_ai's conventions.
 - **Bridged tests** (Codex and Claude Code members, vendor swarms) need Docker, inspect_swe and provider keys. They are marked and run by hand or in a scheduled job, never in PR CI.
 - **Analysis helpers** (realized-cost comparison, λ fit) are tested on synthetic logs with known answers.
@@ -691,17 +817,19 @@ Each milestone is a small series of PRs, and the project convention applies: dis
 - Drain on termination.
 - Final-answer modes `vote`, `first`, `verify` and `synthesize`, with the decided leaderless default.
 - Per-member submissions recorded.
-- Evidence and metrics written to `InfoEvent`s, store and metadata.
+- Evidence and metrics written to `InfoEvent`s, store and metadata; a named timeline per member; a recorded stop reason.
+- Harness-validity checks (a member that never acted, loops, deadlock) reported separately from the task score.
 - A definition of critical path for leaderless swarms.
 - The task result contract: answer-scored tasks get per-member and team@k scorers; shared-artifact tasks get a team score only.
 - Thin analysis helpers for realized-cost comparison and λ fits, for users running scaling experiments.
 - Files: `src/inspect_swarm/_swarm.py`, `_member.py`, `_budget.py`, `_final.py`, `_metrics.py`, `_evidence.py`, `scorer/`, `tests/`.
 
 **M2. The bus and direct messages.**
-- `deliver()` with storm controls and evidence kinds `sent`, `delivered`, `read` and `exposed`.
+- `deliver()` with storm controls (including back-pressure to the sender) and evidence kinds `sent`, `delivered`, `read` and `exposed`, with causation ids.
+- Fenced, text-only read tools, with sender identity bound at the bus ([Delivery](#delivery-peer-messages-are-model-output)).
 - Monitoring through inspect_sentinel: its protocols directly if its dispatcher is on inspect_ai `main` by then; otherwise the minimal hook in its action vocabulary ([The bus](#the-bus-one-interception-point)).
-- `send_message` and `list_members`, with delivery modes `poll`, `notify` and `push`.
-- Delivery as `UserMessage` items with provenance metadata, through inspect_ai's private channel internals.
+- `send_message`, `read_messages` and `list_members`, with delivery modes `poll` and `notify`. Content is delivered as tool output, and notices are metadata-only ([Delivery](#delivery-peer-messages-are-model-output)).
+- Notices through inspect_ai's private channel internals, or an `on_continue`-style injection; M2's design picks one.
 - M2's design settles the binder: how the bus obtains each member's ref, and whether that needs a small inspect_ai hook for behaviour. Public exports are a later clean-up.
 
 **Later work, in any order or in part.** The real dependencies between items are noted so that whichever is picked first is not blocked unexpectedly.

@@ -63,14 +63,23 @@ A swarm of one member with no channels is a single agent with the same accountin
 - M2 uses sentinel directly if its dispatcher has reached inspect_ai `main`, otherwise a minimal hook in sentinel's action vocabulary.
 ([The bus](swarm.md#the-bus-one-interception-point))
 
-**Messages reach a member through its agent channel, using inspect_ai internals.** Peer messages are delivered as `UserMessage` items with provenance, which `react()` already handles. The open part is the binder: how the bus obtains each member's channel ref, given ACP's first-binder-wins rule. M2's design settles it, and a public inspect_ai API is a later clean-up. ([The agent channel](swarm.md#the-agent-channel))
+**Peer messages are model output, delivered as tool output with distinct provenance.** A peer's text reaches a member only as the result of a swarm tool (`read_messages()` and the like), never as a user-role message.
+- Inside the tool result each message is fenced as data under a sender line the bus stamps, and carries only what the sender wrote, never its tool calls or transcript. Tool output alone is not a trust boundary.
+- At a turn boundary the swarm injects at most a metadata-only notice, such as "3 unread from `worker-2`", as deepagent does for background completions.
+- Logs and evidence mark peer content and notices distinctly, preferring metadata to a new `source` value.
+- How the bus obtains each member's channel ref (the binder) and how the notice is rendered are settled in M2's design, possibly on inspect_ai internals.
+- Vendor swarms such as Codex deliver peer text in the user role; native members never do.
+([Delivery](swarm.md#delivery-peer-messages-are-model-output))
 
 **Red-team features are optional and unscheduled.** Forged senders, secret channels and targeted injection may never be built. The single interception point keeps them possible. ([The bus](swarm.md#the-bus-one-interception-point))
 
 **Align with ORBIT; do not adopt it as the substrate.**
 - Reuse its vocabulary: rosters and roles, channels with readers and writers, delivery modes, evidence kinds.
 - Its scheduled-activation model and its forked `react()` do not fit continuously active members that wake each other.
-([Relationship to ORBIT](swarm.md#relationship-to-orbit), [Alternatives](swarm.md#alternatives-considered))
+- No other project builds a peer swarm on Inspect.
+- Within Inspect, follow inspect_petri's conventions for concurrent agents in one sample: model roles, a named timeline per member, and harness-validity scores. Accept ControlArena-shaped monitors through inspect_sentinel.
+- Outside Inspect, SCHEME is the closest published design: a shared sandbox, peer messages as tool output, and monitors that see actions.
+([Relationship to ORBIT](swarm.md#relationship-to-orbit), [Related projects](swarm.md#related-projects-and-what-they-teach), [Alternatives](swarm.md#alternatives-considered))
 
 **Python 3.11+.** Above inspect_ai's 3.10 floor. The scaffold moves to 3.11 in a separate PR before M1. ([Compatibility](swarm.md#compatibility-and-migration))
 
