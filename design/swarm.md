@@ -97,8 +97,9 @@ Three design consequences follow from the first two rows.
 
 - **The swarm's cap must be expressible as one sample-level number.** Then a swarm arm and a single-agent arm differ only in the solver, never in how the cap is set.
 - **Caps are stopping rules; comparisons use realized cost.** Inspect's limits are cooperative. They are checked before a call is dispatched and after a completed call is recorded (`src/inspect_ai/model/_model.py:3035-3043`, `:3082-3095`), and nothing reserves budget for calls already in flight.
-  - So k concurrent members can each have a call in flight when the cap is reached, and overshoot by up to k calls. The round-1 review measured three synchronised 600-token generations under a 1,000-token cap recording 1,800 tokens.
-  - A single agent overshoots by at most one call.
+  - So a cap is overshot by whatever calls are in flight when it is reached. The round-1 review measured three synchronised 600-token generations under a 1,000-token cap recording 1,800 tokens.
+  - The number of calls in flight is set by the agents, not by the member count. A single synchronous `deepagent()` dispatches its parallel-safe subagent calls concurrently (`src/inspect_ai/agent/_deepagent/agent_tool.py:919-942`, `src/inspect_ai/model/_call_tools.py:442-466`). In the round-2 review, one such member had three 600-token subagent calls and its own 50-token call in flight, and recorded 1,850 tokens under a 1,000-token cap.
+  - The same holds for a single-agent arm: its overshoot depends on its agent and tools, not on being one agent.
   - Arms are therefore compared on what they actually spent: score against realized total cost, as curves where possible (Ord's method), with cap and realized cost both reported. Equal caps alone are not "matched cost".
 - **Who produced a result is task-defined.** A swarm records every member's own submission as well as the final one. Whether that supports per-member correctness, team@k or voting depends on how the task is scored. A task scored on a final answer string can score each member's answer. A task scored on a shared sandbox (SWE-bench runs tests against the shared repository) has one team result, and individual correctness is unavailable unless each member leaves its own stable artifact. [Results and scoring](#results-and-scoring-a-task-owned-contract) makes this a contract the task supplies.
 
@@ -188,7 +189,7 @@ I checked this with a spike: three `react()` members under `collect()`, with moc
 
 Three caveats apply to using limit nodes as a budget:
 
-- **They do not bound spend.** Checks are cooperative and happen before dispatch and after a call completes (`src/inspect_ai/model/_model.py:3035-3043`, `:3082-3095`), so concurrent members overshoot a cap by the calls they have in flight (see [Eval questions](#eval-questions-and-the-experimental-design-they-imply)).
+- **They do not bound spend.** Checks are cooperative and happen before dispatch and after a call completes (`src/inspect_ai/model/_model.py:3035-3043`, `:3082-3095`), so a cap is overshot by every call in flight across all members and their descendants when it is reached (see [Eval questions](#eval-questions-and-the-experimental-design-they-imply)).
 - **Who raises what depends on the group size.** When only one member raises, `collect()` re-raises that exception bare instead of as a group (`src/inspect_ai/util/_collect.py:44-48`). Ancestor limits are checked first, so an outer sample limit can win over the swarm's own (`_limit.py:1082-1092`).
 - **Token and cost nodes can disagree.** A call that trips a token limit raises before its cost is recorded into the cost nodes (`src/inspect_ai/model/_model.py:3089-3095`), although the call's `ModelUsage` still carries its cost. This was found by the round-1 review.
 
@@ -353,18 +354,31 @@ At first these are written as `InfoEvent`s with `source="inspect_swarm"`, inside
 **Accounting.** Two separate things:
 
 - **A stopping rule.** The swarm opens one cap node (a `cost_limit` or `token_limit`) around its members, and each member runs with its own limits below it. The spike above shows these nodes see every member's usage with no inspect_ai change.
-- **A ledger.** Realized usage and cost per member, summed from the model events in each member's span (each `ModelUsage` carries its cost). The ledger is taken after the drain, so it includes descendants, calls that were in flight when the cap was hit, and the final-answer step. The ledger, not the cap, is what analysis compares across arms. It is not taken from limit nodes, because token and cost nodes can disagree (see [Limits and cost](#limits-and-cost)).
+- **A ledger.** Realized usage and cost, taken after the drain so it includes descendants, calls that completed after the cap was hit, and the final-answer step. The ledger, not the cap, is what analysis compares across arms. It is not taken from limit nodes, because token and cost nodes can disagree (see [Limits and cost](#limits-and-cost)).
+
+The ledger states its coverage and how each kind of call is charged, because no single Inspect record covers everything.
+
+- **Totals per arm come from Inspect's sample usage** (`model_usage` and `role_usage`, with cost on each `ModelUsage`). This is what Inspect's limits are charged from (`record_and_check_model_usage`, `src/inspect_ai/model/_model.py:3045-3095`). It counts newly incurred usage, excludes response-cache replays, and includes native provider compaction. Every arm gets it the same way, so arm-to-arm comparisons use it.
+- **Attribution per member comes from the model events in each member's span**, with these rules:
+  - **Cache replays.** An event with `cache="read"` (`src/inspect_ai/event/_model.py:135`) replays the original call's output and usage, but costs nothing new (`_model.py:1537-1564`). It is counted as a replay and charged zero, not summed. A naive sum would double-count it (the round-2 review: 50 tokens incurred, 100 summed).
+  - **Native compaction.** `Model.compact()` records usage with no model event (`_model.py:1349-1361`), and a `CompactionEvent` carries no billable usage. `deepagent()` defaults to automatic compaction, which tries native compaction first. In M1 this usage appears as the difference between the sample total and the member-attributed sum, reported as *unattributed*, not hidden. Attributing it needs an inspect_ai change, for example usage on the compaction event.
+  - **Cancelled calls.** A generation cancelled in flight (by the drain, or by a sibling's limit error) leaves an error event with no usage (`_model.py:1658-1674`), and the provider may still have charged for it. The ledger counts such calls as *unknown*, not zero. This applies to Inspect's sample totals too.
+  - **Unpriced models.** Usage with no cost is reported as cost *unknown*.
+- **Claims.** A total is reported as complete realized expenditure only when there are no unknown entries and the unattributed remainder is zero or explained. Otherwise it is reported as a lower bound, with the number of unknown calls. This corrects the measurement contract only; reconciling against provider billing is out of scope.
 
 The reserve and exhaustion policy, and its limits:
 
-- **Reserve.** The swarm cap sits below the sample's limit by a reserve meant for the final-answer step. Concurrent overshoot can consume the reserve: up to one call per running member. So a reserve makes finalisation likely, not guaranteed, unless the sample limit leaves headroom of at least the reserve plus one maximum-size call per member.
+- **Reserve.** The swarm cap sits below the sample's limit by a reserve meant for the final-answer step. Overshoot from calls in flight can consume it, and the number of those calls depends on how much each member and its descendants run concurrently, not on the member count. So the reserve is best-effort.
+  - It becomes a guarantee only when the eval bounds both the number of concurrent calls across every member's tree and the size of each call. For example: plain `react()` members whose tools make no model calls, with output limits set, need headroom of at least the reserve plus one maximum-size call per member.
+  - A member that fans out raises that bound by its own fan-out; a synchronous deepagent is an example.
+  - Without such bounds, nothing about the member count makes finalisation certain.
 - **Exhaustion.** The swarm handles only its own cap. On a `LimitExceededError` whose `source` is the swarm's own node, arriving bare or inside an `ExceptionGroup`, it cancels and drains the remaining members, then finalises. Everything else propagates unchanged:
   - a sample-level limit;
   - a member's own limit already caught by `run()`;
   - `TerminateSampleError`;
   - any other error.
   A group that mixes the swarm's own limit error with anything else propagates too.
-- **Provisional answer.** If an outer limit ends the sample first, there is no final step. To still leave the sample with an answer, the controller keeps a provisional answer current as members submit. For answer-scored tasks this is the current vote or the first verified submission. The output is then never empty because finalisation could not run.
+- **Provisional answer.** If an outer limit ends the sample first, there is no final step. The controller therefore keeps a provisional answer current as members submit; for answer-scored tasks it is the current vote or the first verified submission. `as_solver()` copies the agent's output to the task state even when an exception ends the agent (`src/inspect_ai/agent/_as_solver.py:65-80`), so it survives, provided the controller sets it on the `AgentState` object it was passed. A provisional answer exists only once something has been submitted, or verified when the mode requires it. If the sample ends before that, the output is empty and the sample's metadata records that the swarm produced no answer and why. Nothing is invented.
 - **Roles.** Per-member usage is also mapped to model roles where members use different models, so `role_usage` in the log stays meaningful.
 
 **Metrics** recorded per sample, for scorers and analysis:
@@ -442,7 +456,7 @@ Every member's own submission is recorded regardless, so the effect of the final
 | A public way for a producer to obtain a member's `AgentRef`, an agent-message channel item (or `source="agent"`) rendered with provenance, and exported channel types | inspect_ai (M2) | Push and notify delivery need the channel; today only ACP can bind it and the item union is closed. The channel brief already anticipates a subagent supervisor. |
 | Clean re-entry of `react()` on an existing state (no second system prompt), or an idle state | inspect_ai (M4), optional | Persistent members for coordinator topologies; the alternative is a `submit=False` member protocol inside inspect_swarm. |
 | A scoped owner for `background()` work, so a swarm can own and drain a member's descendants | inspect_ai, when background deepagent members are needed | Today `background()` attaches to the sample's task group; without an owner the swarm cannot drain `deepagent(background=True)` members. |
-| `span(..., metadata=)` and per-span usage in the log | inspect_ai, nice to have | Member identity and per-member cost without side records. |
+| `span(..., metadata=)` and per-span usage in the log, including native compaction usage (for example on `CompactionEvent`) | inspect_ai, nice to have | Member identity and complete per-member cost without side records or an unattributed remainder. |
 | Correct `StoreEvent` attribution under concurrent spans | inspect_ai, bug-class | Affects any concurrent agents, not only swarms. |
 | A first-class inter-agent message event | inspect_ai (M5), deferred | Shared by native swarms and bridged Codex `agent_message` traffic; a schema change. |
 | Turning on and mapping Codex multi-agent v2 and Claude Code agent teams | inspect_swe | Agent-specific configuration and event reconstruction already live there. |
@@ -582,6 +596,11 @@ Untrusted input reaches this code from several directions.
   - members start and run concurrently;
   - the swarm cap and member limits record and stop correctly (the spike above becomes a test);
   - the ledger records realized usage including overshoot from concurrent in-flight calls, finalisation and drained members, and differs from the cap when it should;
+  - a synchronous deepagent member fanning out to parallel subagent calls overshoots the cap by its fan-out, and the reserve is reported as best-effort;
+  - response-cache replays are counted as replays and charged zero;
+  - native compaction usage appears as unattributed and agrees with the sample totals;
+  - calls cancelled in flight are counted as unknown, and the total is then reported as a lower bound;
+  - zero submissions, and zero verified submissions, leave an empty output with the reason recorded;
   - the controller recovers its own cap's exhaustion both as an `ExceptionGroup` and as a lone `LimitExceededError` (which `collect()` unwraps);
   - sample-level limits, `TerminateSampleError`, other errors and mixed groups propagate unchanged;
   - an outer limit that trips before the reserve is used leaves the provisional answer as the output;
@@ -607,7 +626,7 @@ Milestones, each a small series of PRs. The project convention applies: discuss 
 - `swarm()` with leaderless topology over members whose work stays inside their invocation (`react()`, synchronous `deepagent()`, bridged agents). Background deepagent members are rejected.
 - A swarm cap node, member limits, a final-answer reserve, and a provisional answer.
 - Recovery from its own cap only.
-- A realized-cost ledger taken after the drain.
+- A realized-cost ledger taken after the drain, with its coverage rules: arm totals from sample usage; member attribution from events, with cache replays charged zero; unattributed native compaction; cancelled and unpriced calls reported as unknown.
 - Drain on termination.
 - Final-answer modes `vote`, `first`, `verify` and `synthesize`.
 - Per-member submissions recorded.
