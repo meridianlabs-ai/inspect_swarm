@@ -450,7 +450,7 @@ The bus uses sentinel's action vocabulary from the start and adopts sentinel pro
 
 ### Observer: evidence, accounting and metrics
 
-**Evidence.** Each communication produces records of kinds adapted from ORBIT's: `sent`, `delivered` (enqueued for a recipient), `read`, `notified` (a notice named it) and `exposed` (it entered a model's input). ORBIT's own `delivered` means content inserted into a conversation, which the bus never does; [swarm-orbit.md](swarm-orbit.md#p3-evidence-and-exposure-without-a-model-wrapper-m2) maps the two. Each record carries:
+**Evidence.** Each communication produces records of kinds adapted from ORBIT's: `sent`, `delivered` (enqueued for a recipient), `read`, `notified` (a notice named it) and `exposed` (it entered a model's input). ORBIT's own `delivered` means content inserted into a conversation, which the bus never does; [swarm-orbit.md](swarm-orbit.md#p3-evidence-and-exposure-m2) maps the two. Each record carries:
 
 - sender and recipients (member names);
 - channel and kind;
