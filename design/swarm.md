@@ -450,7 +450,7 @@ The bus uses sentinel's action vocabulary from the start and adopts sentinel pro
 
 ### Observer: evidence, accounting and metrics
 
-**Evidence.** Each communication produces records of the kinds ORBIT uses: `sent`, `delivered`, `read` and `exposed`, the last meaning it entered a model's input. Each record carries:
+**Evidence.** Each communication produces records of kinds adapted from ORBIT's: `sent`, `delivered` (enqueued for a recipient), `read`, `notified` (a notice named it) and `exposed` (it entered a model's input). ORBIT's own `delivered` means content inserted into a conversation, which the bus never does; [swarm-orbit.md](swarm-orbit.md#p3-evidence-and-exposure-m2) maps the two. Each record carries:
 
 - sender and recipients (member names);
 - channel and kind;
@@ -621,13 +621,17 @@ Its concurrency is scheduled activation: the scheduler decides which agents run 
 The recommendation is to **align with ORBIT and aim to be a substrate it could run on, not to absorb it**:
 
 - **Reuse its vocabulary** where it fits: roster and roles as data, channels with reader and writer lists, delivery modes, evidence kinds, output member.
-- **Provide what it had to build itself**, without forking `react()`:
-  - turn boundaries and a scheduler;
-  - per-member tool and model wrapping;
-  - a communication hook that does not wrap `Model` (which breaks response caching).
+- **Provide what it had to build itself**, without forking `react()` or wrapping `Model`:
+  - turn boundaries and an activation-policy interface, through a composed `on_continue` on `react()` members;
+  - notices at turn boundaries and exposure evidence from the transcript, in place of ORBIT's `Model` wrappers (its defense-filter wrapper also has to refuse response caching);
+  - a public extension point on the bus for channel kinds such as ORBIT's reader and writer channels.
+
+  Tool gates come from approval policies and inspect_sentinel, not from the swarm.
 - **Leave scenarios, attack and defense registries and security scorers to ORBIT.**
 
 ORBIT's scheduled activation (rounds, plans with concurrent batches, and quanta) is a useful second execution mode for reproducible security experiments. inspect_swarm's default is continuously active members woken by messages, which is what vendor swarms do. Supporting a scheduled mode is later, optional work, not part of M1 or M2.
+
+[swarm-orbit.md](swarm-orbit.md) is the deep dive on this relationship: the concept map, what inspect_swarm provides at each milestone, what a port of ORBIT changes, the migration path, and what stays ORBIT-specific.
 
 ### Related projects and what they teach
 
@@ -726,7 +730,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 **Monitor through model wrapping** (ORBIT's approach: subclass the `Model` to filter inputs and outputs).
 
 - Sees everything a member reads.
-- Breaks response caching, couples to model internals, and cannot tell a peer message from any other input.
+- Filters below Inspect's cache lookup force response caching off (ORBIT's defense wrapper refuses it), every wrapper couples to model internals, and it cannot tell a peer message from any other input.
 - Rejected in favour of a bus chokepoint plus sentinel's tool stages.
 
 **A new event type from day one.**
@@ -834,7 +838,7 @@ Each milestone is a small series of PRs, and the project convention applies: dis
 - Files: `src/inspect_swarm/_swarm.py`, `_member.py`, `_budget.py`, `_final.py`, `_metrics.py`, `_evidence.py`, `scorer/`, `tests/`.
 
 **M2. The bus and direct messages.**
-- `deliver()` with storm controls (including back-pressure to the sender) and evidence kinds `sent`, `delivered`, `read` and `exposed`, with causation ids.
+- `deliver()` with storm controls (including back-pressure to the sender) and evidence kinds `sent`, `delivered`, `read`, `notified` and `exposed`, with causation ids.
 - Fenced, text-only read tools, with sender identity bound at the bus ([Delivery](#delivery-peer-messages-are-model-output)).
 - Monitoring through inspect_sentinel: its protocols directly if its dispatcher is on inspect_ai `main` by then; otherwise the minimal hook in its action vocabulary ([The bus](#the-bus-one-interception-point)).
 - `send_message`, `read_messages` and `list_members`, with delivery modes `poll` and `notify`. Content is delivered as tool output, and notices are metadata-only ([Delivery](#delivery-peer-messages-are-model-output)).
@@ -858,7 +862,7 @@ Each milestone is a small series of PRs, and the project convention applies: dis
 - **Safety and security hooks.**
   - Roles as data; per-member prompt, model and tool overrides for compromised members.
   - Joint-monitor helpers on sentinel.
-  - An optional scheduled (turn-based) execution mode.
+  - An optional scheduled (turn-based) execution mode: a turn seam and an activation-policy interface ([swarm-orbit.md](swarm-orbit.md#p4-the-turn-seam-and-activation-policies-scheduled-mode-item)).
 - **Optional, unscheduled: red-team features.** Injection with forged or hidden senders, secret channels, and injection into a specific member. They may never be built; they need M2's bus.
 - **Optional, if needed: other sandbox topologies.** A sandbox per member, or partial isolation ([Sandbox topology](#sandbox-topology)).
 
