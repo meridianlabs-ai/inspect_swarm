@@ -220,12 +220,13 @@ class SwarmResultRecord(BaseModel):
     members: list[MemberResult]
     final: FinalRecord | None
     final_verdict: Verdict | None     # artifact kind: verifier on the drained environment
-    solve_usage: dict[str, ModelUsage] | None       # sample usage when the swarm finished
-    solve_role_usage: dict[str, ModelUsage] | None  # sample role usage when the swarm finished
+    solve_usage: dict[str, ModelUsage] | None       # sample usage when the swarm exited, however it exited
+    solve_role_usage: dict[str, ModelUsage] | None  # sample role usage at the same moment
+    solve_exit: Literal["returned", "limit", "terminated", "error", "cancelled"] | None
 ```
 
-- The controller writes the record when the swarm starts, updates it when a member stops (adding its output, key and verdict) and when the provisional answer changes, and finalises it after the drain. An outer limit that ends the sample early therefore leaves an accurate record with `provisional: true` and no `solve_usage`.
-- `solve_usage` is the sample's cumulative usage (`sample_model_usage()`, and `sample_role_usage()` for roles), taken as the swarm's last act after finalisation, `synthesize` included. Sample usage already counts native compaction and excludes response-cache replays, so it is complete where model events are not ([Cost comparisons](#cost-comparisons-exclude-scoring)). It covers everything up to the swarm's return, so the swarm must be the task's last solver step; `swarm()` documents this, and a later solver step's usage would be counted as scoring.
+- The controller writes the record when the swarm starts, updates it when a member stops (adding its output, key and verdict) and when the provisional answer changes, and finalises it after the drain. An outer limit that ends the sample early therefore leaves an accurate record with `provisional: true`.
+- `solve_usage` is the sample's cumulative usage (`sample_model_usage()`, and `sample_role_usage()` for roles), taken in the swarm's outermost `finally`, however the swarm exits: after finalisation (`synthesize` included) when it returns, and after its task group has cancelled and awaited the members when a sample limit, `TerminateSampleError`, an error or a cancellation propagates out of it. Both reads and the store write are synchronous, so they run under cancellation too, and `solve_exit` records the path. Inspect scores only after the solver has returned or raised (`run.py:2960-3059`), so the snapshot always falls before grading. Sample usage already counts native compaction and excludes response-cache replays, so it is complete where model events are not ([Cost comparisons](#cost-comparisons-exclude-scoring)). It covers everything up to the swarm's exit, so the swarm must be the task's last solver step; `swarm()` documents this, and a later solver step's usage would land after the boundary.
 - It is in the store, not only in events, because re-scoring rebuilds `TaskState.store` and nothing else from the run.
 - Each stop, verdict and the final selection also produce an evidence `InfoEvent` (`source="inspect_swarm"`, versioned payload, kinds `member_result`, `verdict`, `final`), inside the member's span or the swarm's span. They put the result in the transcript at the time it happened; the store record is what scorers read. The InfoEvent payload format is the Observer's ([Observer](swarm.md#observer-evidence-accounting-and-metrics)); this design adds these three kinds.
 - Outputs can be long (code). They are stored once, in the record; evidence events carry the member name and the answer key, not the text.
@@ -254,7 +255,7 @@ The swarm's returned `AgentState` has the sample's input messages followed by on
 
 **No submissions.** When no member submitted, the final answer is empty with `reason="no_submissions"`, even though members have outputs. An output from a member stopped mid-work is usually a working message, not an answer. The per-member scores still score those outputs, so `best_member` reflects them.
 
-**Finalisation.** After the drain (the limits deep dive owns its ordering against the reserve), the controller verifies any submission not yet verified, runs the chain once more including `synthesize`, and, for an artifact task with a verifier, takes `final_verdict` ([Shared-artifact tasks](#shared-artifact-tasks-and-per-member-artifacts)). It then writes the final record with `provisional: false` and `solve_usage`, writes the `final` evidence event and returns.
+**Finalisation.** After the drain (the limits deep dive owns its ordering against the reserve), the controller verifies any submission not yet verified, runs the chain once more including `synthesize`, and, for an artifact task with a verifier, takes `final_verdict` ([Shared-artifact tasks](#shared-artifact-tasks-and-per-member-artifacts)). It then writes the final record with `provisional: false`, writes the `final` evidence event and returns; `solve_usage` is taken on the way out.
 
 ### `synthesize`
 
@@ -269,8 +270,9 @@ def synthesize(model: str | Model | None = None, prompt: str | None = None) -> F
 - **Shared notes.** In M1 there is no notes channel; the filesystem notes file is not read, because its contents are unfenced and member-written in any layout. If the notes channel is built later, its entries are fenced the same way.
 - **Accounting.** The call runs in the swarm's span after the drain, inside the final-answer reserve, so `solve_usage` and the ledger count it as finalisation.
 - **Failures.** Before the call, the provisional answer (computed without `synthesize`) is already on the `AgentState`. Then:
-  - **Recoverable:** an `Exception` from the call other than `LimitExceededError` and `TerminateSampleError` (a provider error after Inspect's retries, a `ModelRefusalError`), and a returned output with an empty completion or `stop_reason="content_filter"`. The chain moves to its next mode and `synthesize_error` records why. A chain of `["synthesize"]` alone keeps the provisional answer.
-  - **Not recoverable:** `LimitExceededError` from any limit node, `TerminateSampleError`, and cancellation propagate unchanged. A limit error reaches the controller's [exhaustion policy](swarm.md#observer-evidence-accounting-and-metrics), which recovers only the swarm's own cap and lets every other limit reach the runner, so Inspect records `EvalSample.limit`. Either way the provisional answer is the sample's output.
+  - **Classification is group-aware.** Inspect re-raises a provider's exception without unwrapping it (`src/inspect_ai/model/_model.py:1651-1656`), so a model API that uses a task group can raise an `ExceptionGroup` holding a `LimitExceededError`. An exception is *stopping* if it is, or is a `BaseExceptionGroup` that contains at any depth, a `LimitExceededError`, a `TerminateSampleError` or the backend's cancellation exception (`anyio.get_cancelled_exc_class()`). The check uses `BaseExceptionGroup.subgroup()` (Python 3.11).
+  - **Recoverable:** an `Exception` from the call that is not stopping (a provider error after Inspect's retries, a `ModelRefusalError`, a group of such errors), and a returned output with an empty completion or `stop_reason="content_filter"`. The chain moves to its next mode and `synthesize_error` records why. A chain of `["synthesize"]` alone keeps the provisional answer.
+  - **Not recoverable:** a stopping exception propagates unchanged, as raised. A group is never split: a group that mixes a limit with an ordinary error propagates whole, which is what swarm.md's exhaustion policy expects of mixed groups. A limit error reaches the controller's [exhaustion policy](swarm.md#observer-evidence-accounting-and-metrics), which recovers only the swarm's own cap and lets every other limit reach the runner, so Inspect records `EvalSample.limit`. Either way the provisional answer is the sample's output.
 - **Scoring.** The synthesized answer is no member's output. The task's scorer scores it; per-member scores are unaffected.
 
 ### Answer-scored tasks: per-member scores
@@ -307,7 +309,7 @@ For `kind="artifact"`:
 - **`final_verdict`** is therefore taken in M1's finalisation, after the drain, on the environment that will be scored: the controller calls the verifier once more with the final answer's completion, or `""` when there is no final answer. Analysis compares it with the run-time verdicts and with the team score.
 - **Per-member scores** are unavailable unless the task supplies `member_artifacts`.
 
-With `member_artifacts`, `member_scores` grades each member's artifact instead of its output text, with the same outcomes and aggregation as answer tasks:
+With `member_artifacts`, `member_scores` grades each member's artifact instead of its output text. Every member is graded, whatever its completion: the empty-output outcome is for answer tasks only, because a member can leave a passing artifact and stop without submitting any text. Unavailable grades and aggregation follow answer tasks:
 
 ```python
 for m in members:                                   # roster order
@@ -328,7 +330,7 @@ Each quantity is defined once and paired with the one it is fairly compared with
 
 | Quantity | Arm | Definition | Uses the target to select? | Computed by |
 |---|---|---|---|---|
-| **final@k** | swarm of k | The task's scorer on the swarm's final answer; `empty_value` when there is none | No | the task's scorer; the helper applies the empty rule |
+| **final@k** | swarm of k | Answer tasks: the task's scorer on the swarm's final answer, `empty_value` when there is none. Artifact tasks: the task's scorer on the drained environment, whatever the final text | No | the task's scorer; the helper applies the empty rule to answer tasks only |
 | **team@k** | swarm of k | Answer tasks: `best_member`. Artifact tasks: the shared environment's score, equal to final@k | Answer: yes. Artifact: no | `member_scores`; the task's scorer |
 | **mean member** | swarm of k | `mean_member` | No | `member_scores` |
 | **pass@k** | n ≥ k epochs of `baseline()` | P(at least one of k attempts correct), binary values, without replacement | Yes | Inspect `pass_at(k)` on `best_member` |
@@ -373,11 +375,19 @@ class Attempt:
     answer_key: str | None
     verdict: Verdict | None
     final_value: float | None         # task scorer's value for this epoch's sample (NaN -> None)
+    final_verdict: Verdict | None     # artifact tasks: verifier on the drained environment
 ```
 
 **The pool** for a sample is its epochs with a final record and a non-NaN `final_value`; others are excluded and counted. With fewer than k attempts in the pool, the sample's select@k is NaN (unscored), as `pass_at` does.
 
-**One subset.** Apply the chain to the *submitted* attempts of the subset, with the same rules and tie-breaks as the swarm (verdict value, then time, then epoch in place of roster order). Unsubmitted attempts are never selected, as the swarm never selects an unsubmitted member. The subset's value is the chosen attempt's `final_value`. Because a `baseline()` attempt's final answer is its own submission, that is the task's scorer on the chosen output. When the chain produces nothing (no submissions; strict modes with nothing passing or no keys), the value is `empty_value`, the rule final@k uses.
+**One subset (answer tasks).** Apply the chain to the *submitted* attempts of the subset, with the same rules and tie-breaks as the swarm (verdict value, then time, then epoch in place of roster order). Unsubmitted attempts are never selected, as the swarm never selects an unsubmitted member. The subset's value is the chosen attempt's `final_value`. Because a `baseline()` attempt's final answer is its own submission, that is the task's scorer on the chosen output. When the chain produces nothing (no submissions; strict modes with nothing passing or no keys), the value is `empty_value`, the rule final@k uses.
+
+**Artifact tasks** differ, because every attempt leaves an environment and the swarm arm's team environment is scored whether or not anyone submitted text:
+
+- every attempt in the pool is eligible, submitted or not, and its value is its environment score (`final_value`, the task's scorer on its drained environment);
+- `verify` uses each attempt's `final_verdict`, the verifier on its drained environment, which is what the swarm arm's own environment check corresponds to; `vote` uses the answer keys of submitted attempts, when the task defines a key; `first` takes the attempt with the earliest stop time;
+- the helper appends `first` to the chain if it is not already last, so every subset selects an environment, as the swarm arm always has one. A strict chain therefore has no artifact analogue, and the helper says so in its output when the swarm arm used one;
+- `empty_value` is never used for artifact tasks.
 
 **The sample's select@k** is the mean over all C(n′, k) subsets of its pool when that is at most 10,000, otherwise over 10,000 subsets sampled with a fixed seed recorded in the output. The helper also reports, per sample, the fraction of subsets that produced no answer.
 
@@ -389,9 +399,10 @@ class Attempt:
 
 Swarm.md takes each arm's total from Inspect's sample usage ([Accounting](swarm.md#observer-evidence-accounting-and-metrics)). Sample usage includes scorer model calls (verified above), and `member_scores` makes k + 1 times as many scorer calls in the swarm arm as in a baseline arm. Model events cannot separate the two phases, because native compaction records usage without one.
 
-- An arm's realized solve usage is the record's `solve_usage`: the sample's cumulative usage when the swarm returned, after finalisation. It has the coverage of Inspect's sample usage, native compaction included and cache replays excluded, and the ledger's unknown-cost rules still apply to it (calls cancelled in flight, unpriced models).
+- An arm's realized solve usage is the record's `solve_usage`: the sample's cumulative usage when the swarm exited ([What the swarm records](#what-the-swarm-records)), after finalisation when it returned, after the drain when a limit, termination, error or cancellation ended it. It has the coverage of Inspect's sample usage, native compaction included and cache replays excluded, and the ledger's unknown-cost rules still apply to it (calls cancelled in flight, unpriced models).
 - Scoring usage is the sample total minus `solve_usage`, reported separately per arm, so the cost of per-member scoring is visible.
-- A sample without `solve_usage` (an outer limit or error ended it before finalisation, or a plain agent without `baseline()`) has no solve/scoring split. The helper reports its total as solve usage, flagged as possibly including scoring, and counts such samples. The limits deep dive, which owns the ledger, takes arm totals from `solve_usage`.
+- A sample without `solve_usage` has no solve/scoring boundary: a plain agent without `baseline()`, or a sample that failed before the swarm started. The helper keeps its total under a separate name, `sample_total_usage`, never as solve usage, excludes the sample from every solve-cost comparison, and reports the number excluded per arm. Its scores are still reported.
+- The limits deep dive, which owns the ledger, takes arm totals from `solve_usage` and follows the same exclusion when it joins on (log, sample id, epoch).
 
 ### Re-scoring
 
@@ -429,10 +440,10 @@ Because Inspect applies every epoch reducer to every scorer and key, an epochs a
 def attempt_rows(logs: Sequence[str | EvalLog], *, scorer: str, member_scorer: str) -> list[AttemptRow]: ...
 def compare_arms(rows: Sequence[AttemptRow], *, k: int, chain: Sequence[str] | None = None, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> list[ArmScores]: ...
 def best_at_k(values: Sequence[float], k: int) -> float: ...
-def select_at_k(attempts: Sequence[Attempt], k: int, chain: Sequence[str], *, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> float: ...
+def select_at_k(attempts: Sequence[Attempt], k: int, chain: Sequence[str], *, kind: ResultKind, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> float: ...
 ```
 
-- **`AttemptRow`**, one per (log, sample id, epoch): the log path, the arm labels (`eval.task_args`), member count, the task scorer's value, `final` (mode, member, reason), `best_member`, `mean_member`, `complete`, the per-member keys, verdicts, times and submission flags, `solve_usage`, scoring usage, and flags (`no_solve_usage`, `target_assisted`). The ledger and the limits deep dive's curves join on (log, sample id, epoch).
+- **`AttemptRow`**, one per (log, sample id, epoch): the log path, the arm labels (`eval.task_args`), member count, the task scorer's value, `final` (mode, member, reason), `best_member`, `mean_member`, `complete`, the per-member keys, verdicts, times and submission flags, `solve_usage` and `solve_exit`, scoring usage, `sample_total_usage`, and flags (`no_solve_usage`, `target_assisted`). Rows flagged `no_solve_usage` have no solve or scoring usage and are left out of cost comparisons. The ledger and the limits deep dive's curves join on (log, sample id, epoch).
 - **`ArmScores`**, one per arm: the arm's labels, kind (swarm or baseline), k or n, and each quantity of [Comparison quantities](#comparison-quantities) that applies to it, as a mean over samples with its count of scored samples and of excluded samples. `chain` defaults to the chain recorded in the swarm arm's records.
 - **Target-assisted samples.** `target_assisted` is set when the solve phase contains `ScoreEvent(intermediate=True)`: an agent consulted the task's scorer with the target in the loop (for example `react(attempts=...)`). In a swarm that feedback can be shared with peers, so the helper reports those samples separately.
 
@@ -452,7 +463,9 @@ def select_at_k(attempts: Sequence[Attempt], k: int, chain: Sequence[str], *, em
 
 **Voting with Inspect's `mode`/`majority` reducers.** They vote on correctness values, not on answers. Rejected.
 
-**Solve cost by subtracting scoring model events.** Native compaction during scoring records usage with no event, so it would be counted as solve cost. A usage snapshot at the swarm's return is complete. Chosen.
+**Solve cost by subtracting scoring model events.** Native compaction during scoring records usage with no event, so it would be counted as solve cost. A usage snapshot at the swarm's exit is complete. Chosen.
+
+**Snapshot only on a normal return, falling back to the sample total.** The second draft's rule. Budget exhaustion is a normal way for an arm to end, and Inspect still grades those samples, so the fallback total would include grading, which differs between arms. Taking the snapshot in the swarm's `finally` gives limit-ended samples a boundary too, and samples with none are excluded from cost comparisons rather than estimated.
 
 **Strict modes only** (verify yields nothing when nothing verifies). Simpler, and measures the verifier alone. But it makes the default swarm return nothing where an attempt would otherwise be scored on its answer. Strict behaviour stays available as `final="verify"`. [Open question 1](#open-questions).
 
@@ -491,13 +504,13 @@ Untrusted input reaching the new code:
 All runtime tests use mockllm with scripted outputs, need no network or Docker, and run on asyncio and trio unless marked:
 
 - **Chain selection** (table-driven, over lists of member results): `verify` (best verdict value, `None` values, ties by time then roster, none passed); `vote` (plurality, `None` keys abstain, ties by earliest, one vote per member); `first`; fall-through in the default chain; the strict single mode leaving an empty answer with its reason; construction errors for each missing need.
-- **Provisional answer** follows the chain without `synthesize` after each submission and verdict, and an outer limit leaves it as the sample's output with `provisional: true` and no `solve_usage`.
+- **Provisional answer** follows the chain without `synthesize` after each submission and verdict, and an outer limit leaves it as the sample's output with `provisional: true`.
 - **Verifier** is called once per submission, one at a time, never with the target; its exception fails the sample; neither scoring nor re-scoring calls it.
-- **`synthesize`**: the prompt fences each submission under the harness's sender line with markers stripped and no tool calls; its usage falls inside `solve_usage`; a provider error, a refusal and an empty output fall through the chain with `synthesize_error` set; a sample-level `LimitExceededError`, `TerminateSampleError` and cancellation propagate, the sample records its limit, and the provisional answer is the output.
+- **`synthesize`**: the prompt fences each submission under the harness's sender line with markers stripped and no tool calls; its usage falls inside `solve_usage`; a provider error, a refusal and an empty output fall through the chain with `synthesize_error` set; a sample-level `LimitExceededError`, `TerminateSampleError` and cancellation propagate, the sample records its limit, and the provisional answer is the output; an `ExceptionGroup` holding a sample limit (from a model API that uses a task group) and a mixed group of a limit and an ordinary error propagate whole, on both backends.
 - **The record**: written at start, updated on each stop, finalised after the drain; member output kept after the member's own limit and after the drain for an agent that updates its state in place.
 - **Artifact `final_verdict`**: taken after the drain on the final environment, with the final completion or `""` when there is no final answer, and differing from a run-time verdict when a member edits after a passing check.
 - **`member_scores`** with `match()`:
-  - per-member values, `best_member` and `mean_member`; empty outputs get `empty_value` and never reach the scorer;
+  - per-member values, `best_member` and `mean_member`; empty outputs get `empty_value` and never reach the scorer in answer tasks;
   - an inner scorer returning `None`, `Score.unscored()` and a dict value gives unavailable members with their reasons; mixed and all-unavailable cases; every roster permutation gives the same aggregates;
   - artifact kind without artifacts, kind mismatch and missing contract give NaN with the right reason;
   - a plain agent is scored as one member with its key and no verdict;
@@ -506,8 +519,9 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
 - **Answer attribution**: a Frontier-CS-shaped scorer with a sandbox fallback, given a member completion holding an empty fenced block, is not credited with the team's files when `member_scores` uses the answer-only adapter.
 - **Re-scoring**: in a fresh process, default scorer resolution (`resolve_scorers()` then `score()`, as `inspect score` does) rebuilds the task's member-scorer factory and reproduces its scores for a sandbox-free answer scorer; programmatic re-scoring with freshly built scorers does the same; a sandbox-dependent scorer raises `ProcessLookupError`.
 - **`best_at(k)`** against brute-force enumeration (table of small cases), equality with `pass_at(k)` on binary values, NaN with fewer than k scored epochs, dict values per key.
-- **`select_at_k`** against a reference built from the runtime selector: exact enumeration on small pools; the seeded sample above 10,000 subsets; unsubmitted attempts never selected; subsets with no answer valued at `empty_value`; pools smaller than k giving NaN; `first` by record time, unchanged when the grader's duration is varied.
-- **Solve usage**: `solve_usage` excludes a model-graded scorer's usage and a scorer's native compaction (mockllm compaction usage), includes the swarm's own compaction and `synthesize`, and counts cache replays as Inspect does.
+- **`select_at_k`** for answer tasks against a reference built from the runtime selector: exact enumeration on small pools; the seeded sample above 10,000 subsets; unsubmitted attempts never selected; subsets with no answer valued at `empty_value`; pools smaller than k giving NaN; `first` by record time, unchanged when the grader's duration is varied.
+- **Solve usage**: `solve_usage` excludes a model-graded scorer's usage and a scorer's native compaction (mockllm compaction usage), includes the swarm's own compaction and `synthesize`, and counts cache replays as Inspect does. A sample ended by an outer limit, with a grader that makes model calls and compacts, still has `solve_usage` (with `solve_exit="limit"`) equal to the solve's usage alone; the same holds for termination and cancellation. A plain-agent sample has no `solve_usage`, is excluded from cost comparisons and counted.
+- **Artifact results ignore answer text**: with an artifact-shaped scorer (scores the environment, ignores the completion), a passing environment and an empty final output give final@k and team@k 1, not `empty_value`; a member with an empty completion and a passing materialized artifact is graded 1; artifact select@k selects unsubmitted attempts, uses `final_verdict`, and always selects an environment.
 - **`member_artifacts`** (later item): with the local sandbox and files standing in for branches, the team score runs before any `materialize`, each member is graded with its artifact in place, and the team state is restored on exit and on a scorer error. A git-worktree layout test needs Docker and is marked slow, following inspect_ai's conventions.
 
 ## Implementation plan
