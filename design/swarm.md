@@ -112,6 +112,8 @@ Most of the feedback that shapes the plan is expected to come from these users, 
 
 The library is worth building to the extent that it makes these questions cheap to ask and hard to get wrong. The table says what users' experiments need from the harness. It is not a list of experiments this project commits to running (decision: Ransom, 2026-10-07).
 
+An **arm** is one condition of an experiment. In Inspect terms it is one task in an eval set: a `Task` instantiated with its arguments and run with a given solver (a single agent, a deepagent, a swarm), model and limits. Inspect tells arms apart by `task_identifier()` (`src/inspect_ai/_eval/evalset.py:2111-2282`), which hashes the task's name and arguments, the model, the solver plan with its parameters, and the sample limits, but not scorers or epochs; [swarm-api.md](swarm-api.md#task-identity-what-makes-two-arms-distinct) lists what does and does not distinguish swarm arms.
+
 | Question | Experimental design | What the harness must provide |
 |---|---|---|
 | Does a swarm beat more attempts or a bigger budget at the same cost? | Four arms with the same cap: single agent with budget B; k epochs at B/k each (pass@k, best@k); a deepagent with k background subagents and budget B; a swarm of k members with total budget B (team@k). Compared on realized cost, not on the cap. | A swarm-wide cap at the same level as the other arms' caps. Realized cost recorded per member and in total, including the final-answer step and calls in flight when the cap was hit. A task-owned result contract, so team@k, best@k and per-member correctness are claimed only where the task can score them ([Results and scoring](#results-and-scoring-a-task-owned-contract)). |
@@ -268,7 +270,7 @@ What the log keeps:
 A swarm is four things, and the library keeps them separate. ORBIT reached the same factoring, separating invocation, message routes, activation and conversation ownership.
 
 1. **Members**: who the agents are. Each has a name, a role (data), an `Agent`, its own model, tools and limits, and its own conversation.
-2. **Channels** (called the substrate before [swarm-api.md](swarm-api.md)): how members share information. The shared sandbox filesystem, and optional explicit channels: direct messages, a shared notes/fact log, a task list with claims, a board. Each is a `@channel` registry object.
+2. **Channels**: how members share information. The shared sandbox filesystem, and optional explicit channels: direct messages, a shared notes/fact log, a task list with claims, a board. Each is a `@channel` registry object.
 3. **Controller**: how the swarm runs. Topology (leaderless, coordinator tree, lead plus teammates), how members are started and woken, termination, and how the final answer is produced. Each topology is a `@controller` registry object.
 4. **Observer**: what is recorded and who may intervene. Evidence events for every communication, per-member accounting, swarm metrics, and the interception point that monitors attach to (and optional red-team features could, if they are ever built).
 
@@ -584,7 +586,7 @@ The leaderless default matches how leaderless swarms succeed in practice: the C 
 | Part | Lives in | Why |
 |---|---|---|
 | `swarm()`, controller, members, budget, bus, channels, evidence, metrics, scorers, prompts, Scout scanners | inspect_swarm | Fast iteration; the runtime is opinionated and experimental. |
-| Registry types `controller` and `channel` | inspect_ai, before M1 | `RegistryType` is a closed literal; scout and sentinel added their types the same way ([swarm-api.md](swarm-api.md#resolving-names)). |
+| Registry types `controller` and `channel` | inspect_ai, before M1 (decision: Ransom, 2026-10-08) | `RegistryType` is a closed literal; scout and sentinel added their types the same way ([swarm-api.md](swarm-api.md#resolving-names)). |
 | Notifying members and delivering peer messages | inspect_swarm, on inspect_ai's private channel internals where needed (M2) | Content is tool output from swarm tools, which needs nothing from inspect_ai. The metadata-only notice reaches a member at a turn boundary through its channel, or an `on_continue`-style injection as deepagent does. The open parts are: the [binder](#the-agent-channel), how the bus obtains each member's ref; and whether the notice is a dedicated channel item, which `react()` would need to render (an inspect_ai behaviour change), or a marked message. M2's design decides both, alongside ACP's first-binder-wins rule. Public exports are a later clean-up, not a prerequisite. |
 | Clean re-entry of `react()` on an existing state (no second system prompt), or an idle state | inspect_ai (coordinator topologies), optional | Persistent members; the alternative is a `submit=False` member protocol inside inspect_swarm. |
 | A scoped owner for `background()` work, so a swarm can own and drain a member's descendants | inspect_ai, when background deepagent members are needed | Today `background()` attaches to the sample's task group; without an owner the swarm cannot drain `deepagent(background=True)` members. |
@@ -828,7 +830,7 @@ Each milestone is a small series of PRs, and the project convention applies: dis
 
 **Before M1: scaffold to Python 3.11.** A separate `chore:` PR moves `AGENTS.md`, `pyproject.toml`, `CONTRIBUTING.md` and the CI matrix from 3.10 to 3.11 ([Compatibility](#compatibility-and-migration)).
 
-**M1. Leaderless filesystem swarm with full accounting** (inspect_swarm, after a one-line inspect_ai PR adding the `controller` and `channel` registry types; [swarm-api.md](swarm-api.md#implementation-plan)).
+**M1. Leaderless filesystem swarm with full accounting** (inspect_swarm, after a one-line inspect_ai PR adding the `controller` and `channel` registry types, decision: Ransom, 2026-10-08; [swarm-api.md](swarm-api.md#implementation-plan)).
 - The API skeleton of [swarm-api.md](swarm-api.md): `@controller` and `@channel`, `member()` records, name resolution, faithful logging, and the built-ins `leaderless` and `filesystem`.
 - `swarm()` with leaderless topology over members whose work stays inside their invocation (`react()`, synchronous `deepagent()`, bridged agents). Background deepagent members are rejected.
 - The shared-sandbox default and its filesystem prompt convention: shared directory, append-only notes file, per-member scratch directories or worktrees ([Sandbox topology](#sandbox-topology)).

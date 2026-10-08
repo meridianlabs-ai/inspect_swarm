@@ -15,7 +15,7 @@ It is an eval library, not a production orchestration framework. The runtime liv
 | Component | What it is |
 |---|---|
 | **Members** | The agents: each a name, role, `Agent`, model, tools, limits and conversation. Any `Agent` that keeps its work inside its invocation: `react()`, synchronous `deepagent()`, or a bridged Claude Code or Codex. ([Members](swarm.md#members)) |
-| **Channels** | How members share information: the shared sandbox filesystem from M1; direct messages from M2; later, optionally, a notes/fact log, a task list with claims, and a board. Each is a `@channel` registry object. Called the substrate in earlier drafts. ([Channels](swarm.md#channels)) |
+| **Channels** | How members share information: the shared sandbox filesystem from M1; direct messages from M2; later, optionally, a notes/fact log, a task list with claims, and a board. Each is a `@channel` registry object. ([Channels](swarm.md#channels)) |
 | **Controller** | How the swarm runs: topology (leaderless first; coordinator tree and lead-with-teammates later), start and wake, termination, and the final-answer chain. Each topology is a `@controller` registry object; the swarm's fixed runtime does the drain and finalisation. ([Controller](swarm.md#controller-topology-termination-final-answer)) |
 | **Observer** | What is recorded and where monitors attach: one bus for every sanctioned message, evidence events, a realized-cost ledger, and swarm metrics. ([Observer](swarm.md#observer-evidence-accounting-and-metrics)) |
 
@@ -32,7 +32,7 @@ swarm(
 
 A strict, verifier-only answer is a controller parameter and needs the task's verifier: `controller=leaderless(final="verify")` with `result=answer_result(verifier=...)`.
 
-The observer is not an argument: it must be the same in every arm. The API's own arguments are logged faithfully, so names, task parameters and Python sweeps all work; members configured with hooks and the task's result contract are rebuilt through registered builders or the task ([API](swarm-api.md#logging-and-replay)).
+The observer has no argument: what it records is a fixed, versioned contract that scorers and analysis read, the same in a swarm and in its baselines. Monitors are configured through inspect_sentinel, scores through the task's own scorers, and labels through Scout ([API](swarm-api.md#observer)). The API's own arguments are logged faithfully, so names, task parameters and Python sweeps all work; members configured with hooks and the task's result contract are rebuilt through registered builders or the task ([API](swarm-api.md#logging-and-replay)). A swarm is the task's solver, so its arguments are part of Inspect's task identity, and two *arms* (two tasks in an eval set, each a `Task` with its arguments, solver, model and limits) that differ in any of them are distinct ([API](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
 
 A swarm of one member with no channels is a single agent with the same accounting, so it is the natural baseline.
 
@@ -104,7 +104,7 @@ Detail: [where each part lives](swarm.md#where-each-part-lives).
 
 M1, then M2; after that, a menu in any order or in part, driven by user feedback with no internal evidence gate. ([Implementation plan](swarm.md#implementation-plan))
 
-- **M1: leaderless filesystem swarm with full accounting.** The `swarm()` API with `@controller` and `@channel`, shared sandbox, cap and ledger, drain, final-answer modes, the result contract, `InfoEvent` evidence and metrics. Its only inspect_ai change is a one-line PR adding two registry types.
+- **M1: leaderless filesystem swarm with full accounting.** The `swarm()` API with `@controller` and `@channel`, shared sandbox, cap and ledger, drain, final-answer modes, the result contract, `InfoEvent` evidence and metrics. Its only inspect_ai change is a one-line PR adding two registry types, landed first (decision: Ransom, 2026-10-08).
 - **M2: the bus and direct messages.** `deliver()`, `send_message`, delivery modes, monitoring through sentinel, and the binder.
 - **Later, any order:**
   - structured channels (each needs M2; quiescence needs persistent members);
