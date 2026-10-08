@@ -198,7 +198,7 @@ This section covers only what the design depends on. All paths are in inspect_ai
 - **The binder.** A *binder* is how a producer obtains an execution's `AgentRef` so that it can post into that execution's channel. Today `agent_channel()` offers each new channel's ref to the sample's ACP session, first binder wins, so ACP is the only producer (`_channel/__init__.py:125-133`).
   - The swarm's bus would be a second producer if it posted notices into members' channels.
   - The member's channel is opened inside that member's `react()`, so code running in the member (a tool, a model wrapper, `on_continue`) can reach it through the private `current_agent_channel()`. The swarm's controller, outside the member, cannot.
-  - Settled in [swarm-communication.md](swarm-communication.md): M2 posts nothing into member channels, so it needs no ref and no inspect_ai hook. A swarm `UserMessage` would satisfy ACP's post-interrupt redirect wait, and any other item is dropped by `react()`. The swarm binds each member's channel for identity only and leaves ACP's binding alone.
+  - Settled in [swarm-communication.md](swarm-communication.md): M2 posts nothing into members' agent channels, so it needs no ref and no inspect_ai hook. A swarm `UserMessage` would satisfy ACP's post-interrupt redirect wait, and any other item is dropped by `react()`. The swarm binds each member's channel for identity only and leaves ACP's binding alone.
 - The channel brief names a "subagent supervisor" and "detached child channels" as intended future producers (`design/acp/agent_channel_brief.md:32`, `:178`).
 
 ### `react()` lifecycle

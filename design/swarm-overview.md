@@ -72,7 +72,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 - Inside the tool result each message is fenced as data under a sender line the bus stamps, and carries only what the sender wrote, never its tool calls or transcript. Tool output alone is not a trust boundary.
 - At a turn boundary the swarm injects at most a metadata-only notice, such as "3 unread from `worker-2`", as deepagent does for background completions.
 - Logs and evidence mark peer content and notices distinctly, preferring metadata to a new `source` value.
-- The notice is a marked message appended by a swarm `on_continue` hook; the swarm never posts into member channels, so M2 needs no inspect_ai change ([swarm-communication.md](swarm-communication.md)).
+- The notice is a marked message appended by a swarm `on_continue` hook; the swarm never posts into members' agent channels, so M2 needs no inspect_ai change beyond the registry types ([swarm-communication.md](swarm-communication.md)).
 - Vendor swarms such as Codex deliver peer text in the user role; native members never do.
 ([Delivery](swarm.md#delivery-peer-messages-are-model-output))
 
