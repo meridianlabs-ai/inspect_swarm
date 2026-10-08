@@ -313,7 +313,7 @@ agent = swarm(
 )
 ```
 
-The final-answer chain is the controller's `final=` parameter. Names resolve to registry objects with their defaults, and every argument is logged faithfully, so a task can expose them as `-T` parameters and an eval set can sweep them ([swarm-api.md](swarm-api.md#every-argument-serialises)). A swarm of one member with no channels is a single agent with the same accounting, which makes it the natural baseline arm.
+The final-answer chain is the controller's `final=` parameter. Names resolve to registry objects with their defaults, and the API's own arguments are logged faithfully, so a task can expose them as `-T` parameters and an eval set can sweep them; members configured with hooks and the task's result contract are rebuilt through registered builders or the task ([swarm-api.md](swarm-api.md#logging-and-replay)). A swarm of one member with no channels is a single agent with the same accounting, which makes it the natural baseline arm.
 
 ### Members
 

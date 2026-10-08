@@ -39,7 +39,7 @@ The sibling deep dives are each adding parameters to `swarm()`: `budget=Budget(.
 
 - `swarm()`'s arguments mirror the components: `members=`, `channels=`, `controller=`. The observer is not an argument ([why](#observer-no-argument)).
 - The components users extend are Inspect registry objects, with Inspect's conventions: decorated factories, package-qualified registry names, creation parameters captured into the log, lookup by name, and an `inspect_ai` entry point. Those are controllers (`@controller`) and channels (`@channel`).
-- The common case stays one line, and every argument works as a task parameter (`-T`), in a Python `eval_set` sweep and in the log: names resolve to registry objects, and every argument serialises faithfully and can be rebuilt from the log.
+- The common case stays one line, and the arguments work as task parameters (`-T`), in a Python `eval_set` sweep and in the log. Names resolve to registry objects. Everything this API defines (member records, controllers, channels, the budget) is logged faithfully and can be rebuilt from the log. What it cannot rebuild alone (a member agent configured with callables, a sample-scoped agent, the task's result contract) has a stated route: a registered builder or the task ([Logging and replay](#logging-and-replay)).
 - One place for each sibling design's parameters.
 - A better name than "substrate", applied in swarm.md and the overview.
 
@@ -49,7 +49,8 @@ The sibling deep dives are each adding parameters to `swarm()`: `budget=Budget(.
 - The coordinator topologies and persistent members (later work in swarm.md's plan). This document shows how a coordinator plugs in, not how idle and wake work.
 - An observer registry type. The observer is fixed so that arms stay comparable ([Observer](#observer-no-argument)).
 - CLI conveniences beyond what Inspect already parses: grid sweeps, or a dict form for controller parameters on the command line ([Not this design](#not-this-design)).
-- Changing how inspect_ai serialises arguments in general ([Not this design](#not-this-design)).
+- Changing how inspect_ai serialises arguments in general, or making arbitrary agents' callbacks serialisable ([Not this design](#not-this-design)).
+- Supporting inspect_swe's ACP agents as members in M1 ([Members](#members)).
 
 ## Current behaviour
 
@@ -77,6 +78,7 @@ The sibling deep dives are each adding parameters to `swarm()`: `budget=Budget(.
 | An object with `_repr_params_()`, at top level only | what that method returns. Inspect's compaction strategies use this (`src/inspect_ai/model/_compaction/types.py:37`) |
 | Any other object at top level | its `name` attribute, else its type's name: `cost_limit(40.0)` → `"_CostLimit"`; a frozen dataclass `Budget(10.0)` → `"Budget"`; deepagent's `Subagent` → its `name` |
 | A dataclass inside a list | a dict, but its callables become their `__name__`: a member record holding a `react()` agent → `{"agent": "execute", ...}` |
+| A plain callable (an `on_continue` hook, a filter) | its `__name__` (`registry.py:233-234`). On replay that string is passed back where the callable was: a submitting `react()` then uses it as continuation text, and `react(submit=False)` rejects it (`src/inspect_ai/agent/_react.py:132`, `:394`). Two hooks with the same `__name__`, such as two closures from one helper, log identically |
 | A non-serialisable object inside a list | `null`: `[cost_limit(40.0)]` → `[null]` |
 
 Where that log goes:
@@ -88,7 +90,7 @@ Where that log goes:
 
 ### Registry objects are shared by concurrent samples
 
-A task's plan is built once, and every sample runs the same objects (`src/inspect_ai/_eval/task/run.py:2831`, `await plan(state, generate)`). So an agent, solver, controller or channel object is shared by all concurrently running samples, and anything per-sample must live in the call, not on the object. Inspect's agents already meet this, which is also why `member(agent, count=4)` may run one agent object four times at once.
+A task's plan is built once, and every sample runs the same objects (`src/inspect_ai/_eval/task/run.py:2831`, `await plan(state, generate)`). So an agent, solver, controller or channel object is shared by all concurrently running samples, and anything per-sample must live in the call, not on the object. Most agents meet this: `react()`, `deepagent()` and inspect_swe's bridged CLI agents keep their state in the invocation. Not all do. inspect_swe's ACP agents (`interactive_claude_code`, `interactive_codex_cli`, `interactive_gemini_cli`) refuse to be constructed outside an active sample and keep the live connection, session and readiness event on the instance (`inspect_swe@a54461e7: src/inspect_swe/acp/agent.py:97-110`, `:190-196`), so they cannot be built at task construction or shared.
 
 ### Precedent for member-like records
 
@@ -146,6 +148,7 @@ swarm(
 - member names, after `count` expansion, are unique;
 - each channel name appears at most once;
 - names resolve ([Resolution](#resolving-names));
+- `result` is a `ResultSpec` or `None`; the string a raw-solver replay passes raises `TypeError` ([Logging and replay](#logging-and-replay));
 - the controller's `check` accepts the roster, and the controller's `final` is valid for `result` (the scoring deep dive's validation rules, applied to the controller's chain).
 
 ### Controller and runtime
@@ -155,7 +158,7 @@ swarm.md uses "the controller" both for the policy that decides how the swarm ru
 - **The controller** is a registry object chosen per arm. It decides which members start, when, with what input; when the swarm is done; and which final-answer chain applies.
 - **The runtime** is inspect_swarm's fixed code in `swarm()`. It owns member tasks, member spans and limits, the budget nodes, recovery from the swarm's own cap, drain, verification of submissions and the provisional answer, finalisation, the ledger, evidence and metrics.
 
-A controller cannot break an invariant because it never holds what the runtime owns: it starts members through a handle, never runs them itself; it returns a stop reason, and the runtime then drains; it names a final chain, and the runtime runs it after the drain. Where the sibling deep dives write "the controller" for drain, exhaustion, verification or finalisation, they mean the runtime.
+A controller cannot break an invariant because it never holds what the runtime owns: it starts members through a handle, never runs them itself; it returns a stop reason, and the runtime then runs the limits deep dive's stop procedure; it names a final chain, and the runtime runs it after the drain. Where the sibling deep dives write "the controller" for drain, exhaustion, verification or finalisation, they mean the runtime.
 
 ### Members
 
@@ -188,6 +191,27 @@ def member(
 - **Replay.** Rebuilding the swarm from the log hands `swarm()` a dict whose `agent` is already an `Agent` again (`registry_kwargs()` rebuilt it; the same spike confirmed this). `swarm()` therefore accepts a mapping wherever it accepts a `Member` and validates it with `Member.model_validate()`. A limit dict is rebuilt by a validator that calls the matching Inspect limit factory.
 - **Names.** With `count=1` the member is called `name`. With `count=k>1` the members are `name-1` to `name-k`. A name is an identifier the eval author chose; members never choose names (swarm.md, [Delivery](swarm.md#delivery-peer-messages-are-model-output)).
 - **Background deepagents** are rejected by `member()` while background ownership is unsupported, as swarm.md's [Members](swarm.md#members) says.
+- **The member contract.** A member's agent is built once, when the task is built, and the swarm invokes that one object for every member the record stands for and in every sample, concurrently. So the agent must be safe to invoke concurrently, with its state local to each invocation, as `react()`, synchronous `deepagent()` and the bridged CLI agents are ([Current behaviour](#registry-objects-are-shared-by-concurrent-samples)). An agent that must be created inside a sample, such as inspect_swe's ACP agents, is not a valid prebuilt member. It can be wrapped in a registered agent that creates it per invocation:
+
+  ```python
+  @agent
+  def per_invocation_claude_code(model: str | None = None) -> Agent:
+      async def execute(state: AgentState) -> AgentState:
+          inner = interactive_claude_code(model=model)   # built inside the sample, per member
+          return await inner(state)
+      return execute
+  ```
+
+  M1 does not test or support ACP members; the wrapper is the route when someone needs one. `swarm()` cannot detect an unsafe agent in general, so the contract is documented on `member()`.
+- **Faithful only as far as the agent's own params.** `registry_value(agent)` writes what Inspect captured when the agent was built. Ordinary values (`react(prompt=..., tools=[bash()])`) round-trip. A callable argument (an `on_continue` hook, a model filter, a `ToolSource` such as the communication deep dive's `swarm_tools()`) is logged as its name and cannot be rebuilt ([table](#how-arguments-reach-the-log)); two members that differ only in such a callback even collide in `eval_set`. The route is a **member builder**: a registered `@agent` factory with ordinary parameters that builds the configured agent inside, so the log records the builder and its parameters and replay calls it again:
+
+  ```python
+  @agent
+  def worker(prompt: str = WORKER_PROMPT) -> Agent:
+      return react(prompt=prompt, tools=[bash(), python(), swarm_tools()], on_continue=swarm_on_continue())
+  ```
+
+  `member(worker(), count=3)` logs `{"type": "agent", "name": "worker", "params": {"prompt": "..."}}`; a spike confirmed that the outer factory's identity and parameters replace `react()`'s and that `create_registry_object()` rebuilds it. The examples below use builders wherever a member has hooks.
 
 ### Controllers
 
@@ -219,7 +243,7 @@ def controller(
 ) -> ...: ...   # same overloads as @agent: @controller and @controller(name=...)
 ```
 
-- **`run`** is called once per sample with a `SwarmControl` and returns the stop reason. Returning is the stop: the runtime cancels members still running, drains, and finalises. Its local variables are per sample; the `Controller` object is shared, so it holds no per-sample state ([Current behaviour](#registry-objects-are-shared-by-concurrent-samples)).
+- **`run`** is called once per sample with a `SwarmControl` and returns the stop reason. Returning requests the stop: the runtime stops members still running through the limits deep dive's soft-stop procedure ([Stopping](#controllers), below), then finalises. Its local variables are per sample; the `Controller` object is shared, so it holds no per-sample state ([Current behaviour](#registry-objects-are-shared-by-concurrent-samples)).
 - **`final`** is the final-answer chain the runtime applies after the drain, and for the provisional answer as members end. `None` means the scoring deep dive's default chain for the task's `result` (verify, then vote, then first, from what the task supplies). It is on the controller, not on `swarm()`, because the default and the valid modes depend on the topology: a coordinator defaults to the lead's report, and `reporter` is invalid for a leaderless swarm.
 - **`check`** runs at `swarm()` construction with the roster, for errors a factory cannot see alone (a named member that is not in the roster).
 - **The decorator** follows `@agent` and sentinel ([The registry](#the-registry)): registry name `registry_name(func, name or func.__name__)`; the wrapper calls the factory, raises `TypeError` unless it returned a `Controller`, and tags it with `registry_tag(func, instance, RegistryInfo(type="controller", name=...), *args, **kwargs)`; `registry_add()` registers the wrapper. `Controller` is a plain class, not a frozen dataclass, because tagging sets attributes on it. The factory is annotated `-> Controller` so `registry_create("controller", ...)` instantiates it.
@@ -227,7 +251,12 @@ def controller(
 The handle a controller works through:
 
 ```python
-MemberStatus = Literal["pending", "running", "done", "limit", "errored", "cancelled"]
+MemberState = Literal["pending", "running", "ended"]
+
+@dataclass(frozen=True)
+class VerdictSummary:
+    passed: bool
+    value: float | None          # scoring's optional graded value; never the explanation
 
 class MemberHandle(Protocol):
     @property
@@ -235,11 +264,13 @@ class MemberHandle(Protocol):
     @property
     def role(self) -> str | None: ...
     @property
-    def status(self) -> MemberStatus: ...
+    def state(self) -> MemberState: ...
+    @property
+    def status(self) -> str | None: ...              # the limits deep dive's status once ended, else None
     @property
     def submitted(self) -> bool: ...
     @property
-    def verdict(self) -> Verdict | None: ...    # scoring's Verdict; None without a verifier or before it ran
+    def verdict(self) -> VerdictSummary | None: ...  # None without a verifier or before it ran
 
 class SwarmControl(Protocol):
     @property
@@ -248,32 +279,27 @@ class SwarmControl(Protocol):
     def start(
         self,
         member: str | MemberHandle,
-        input: str | list[ChatMessage] | None = None,           # None: the swarm's own input
+        input: str | list[ChatMessage] | None = None,           # None: the member's input, else the swarm's
     ) -> None: ...
     def events(self) -> AsyncIterator[SwarmEvent]: ...
 
 @dataclass(frozen=True)
 class MemberEnded:
     member: str
-    status: MemberStatus
+    status: str                  # the limits deep dive's member status
     submitted: bool
-    verdict: Verdict | None
+    verdict: VerdictSummary | None
 
-@dataclass(frozen=True)
-class MessageDelivered:          # M2: metadata only, never the payload
-    record: str                  # the bus record id
-    channel: str
-    sender: str
-    recipients: tuple[str, ...]
-
-SwarmEvent = MemberEnded | MessageDelivered
+SwarmEvent = MemberEnded         # later work adds kinds (idle and woken members, quiescence)
 ```
 
-- **`start()`** schedules the member in the runtime's member task group, under `run()` in its own span with its limits, and returns at once. Its input is the given input, or the swarm's input, followed by the member's preamble: its name, role and roster size, and each channel's instructions ([Channels](#channels)). The preamble's wording is M1's prompt work. In M1 a member runs once: `start()` on a member that is not `pending` raises `RuntimeError`. Persistent members, later, add a wake operation.
-- **`events()`** yields events in order from swarm start, so none is lost between `start()` and iteration. It ends when no member is running and nothing is queued; a member started later is reported by a new `events()` call. One iterator at a time; a second concurrent call raises `RuntimeError`. M1 has `MemberEnded` only; M2 adds `MessageDelivered` after the bus's delivery step. In M1 a member's submission is what it returns when its agent ends (the scoring deep dive defines what counts as one), so `MemberEnded` carries whether it submitted and the verdict, which the runtime takes as the member ends (scoring deep dive, "When verdicts are taken").
-- **No member text.** Handles and events carry statuses, verdicts and names, never a member's output or a message body. A controller therefore cannot pass one member's words into another's input, which would put model output in the user role (swarm.md, [Delivery](swarm.md#delivery-peer-messages-are-model-output)). Members read each other through channels' tools. ORBIT's scheduled mode adds conversation snapshots and trusted interventions to these handles for trusted policies; that is its deep dive's extension, argued there.
-- **Errors and stops the runtime owns.** The controller's `run` runs inside the swarm's task group. When the swarm's own cap or time runs out, the runtime cancels `run` and the members, records the runtime's reason (for example `swarm_cap` or `time`), drains and finalises; the limits deep dive defines which reasons exist. An exception from `run`, or a member error that is not the member's own limit, drains and propagates under swarm.md's [exhaustion rules](swarm.md#observer-evidence-accounting-and-metrics). A member's own limit ends that member with status `limit` and an event; the swarm continues.
-- **Stop reasons.** The reason `run` returns is recorded as the swarm's stop reason. The built-ins return `all_ended`, `verified` and `lead_ended`, swarm.md's "all submitted" (made exact: a member stopped by its own limit has ended without submitting), "verified answer" and "the root submits". A custom controller's string is recorded as given.
+- **`start()`** schedules the member in the runtime's member task group, under `run()` in its own span with its limits, and returns at once. Its input is the given input, else the member record's `input` (the ORBIT deep dive's field), else the swarm's input, followed by the member's preamble: its name, role and roster size, and each channel's instructions ([Channels](#channels)). The preamble's wording is M1's prompt work. In M1 a member runs once: `start()` on a member whose state is not `pending` raises `RuntimeError`. Persistent members, later, add a wake operation.
+- **`events()`** yields events in order from swarm start, so none is lost between `start()` and iteration. A member counts as running until the runtime has taken its submission's verdict and queued its `MemberEnded`, so an asynchronous verifier still running when the last agent returns cannot be missed. The iterator ends when no member is running and nothing is queued; a member started later is reported by a new `events()` call. One iterator at a time; a second concurrent call raises `RuntimeError`.
+- **Statuses.** `state` is the coarse lifecycle a controller schedules on. `status` and `MemberEnded.status` are the limits deep dive's closed set, unchanged: `submitted`, `stopped` (soft stop), `share`, `member_limit:<type>`, `swarm_cap`, `cancelled`, `errored` (PR #5, "Member wrapper and statuses"). `submitted` is the scoring deep dive's notion of a submission, which a member stopped mid-work does not have.
+- **No member text.** Handles and events carry states, statuses, names chosen by the eval author and a verdict's pass flag and value, never a member's output, a message body or a verifier's explanation (scoring's `Verdict.explanation` is free text that may quote the answer or a judge model's words; it stays in the observer's result record). A controller therefore cannot pass one member's words into another's input, which would put model output in the user role (swarm.md, [Delivery](swarm.md#delivery-peer-messages-are-model-output)). Members read each other through channels' tools. ORBIT's scheduled mode adds conversation snapshots and trusted interventions to these handles for trusted policies; that is its deep dive's extension, argued there.
+- **Stopping.** Returning from `run` is a request to stop, not a cancellation. The runtime passes the returned reason to the limits deep dive's single stop procedure, `stop(reason)`: a soft stop through each running member's stop lever, a grace period of `Budget.grace` for in-flight calls to finish and be recorded, and a hard stop (cancellation) only for members still running after the grace (PR #5, "Stopping"). The swarm's own cap and time cap go through the same procedure (`swarm_cap`, `swarm_time`); the runtime then also cancels `run`, which holds no member work. Members ending during the stop still get statuses and evidence. After the procedure, the runtime finalises with the controller's `final`.
+- **Errors and outer stops.** These are not stops the controller requested, and the limits deep dive's exhaustion rules apply unchanged: a foreign error from a member (a sample limit, `TerminateSampleError`, a crash) or an exception from `run` makes the task group cancel the rest at once and propagates; cancellation from outside (the sample's time limit, an operator interrupt) does no awaiting work. A member's own limit is not an error: that member ends with a status and an event, and the swarm continues.
+- **Stop reasons.** The limits deep dive's closed set is `all_done`, `verified`, `swarm_cap`, `swarm_time` and later `quiescence`. A controller returns one of the topology reasons (`all_done`, `verified`, `quiescence`), or its own string, which is recorded as `controller:<reason>`; the ORBIT deep dive's `policy:<name>` reasons are this form once its policies are controllers. The built-in `leaderless` returns `all_done` or `verified`.
 - **Usage.** A controller normally makes no model calls. If one does, its usage is the swarm's, not a member's; which node meters it is the limits deep dive's call, as for verifier calls.
 
 The built-in controllers are `inspect_swarm/leaderless` (M1) and, later, `inspect_swarm/coordinator`. If the ORBIT deep dive's scheduled mode is adopted, its `ActivationPolicy` becomes a controller's `run`, its `SwarmControl` and `MemberHandle` additions (`activate()`, `snapshot()`, `set_output()`, `append()`, `edit()`) are methods on these same handles, and its `round_robin` is a `@controller`. Its own text already says "M1's leaderless controller is the policy that activates every member once".
@@ -319,11 +345,37 @@ The resolved registry name is recorded in the swarm's evidence for each sample, 
 
 Both registry types need inspect_ai's `RegistryType` to list them ([The registry](#the-registry)): one inspect_ai PR adds `"controller"` and `"channel"`, as inspect_ai#4359 added `validation_predicate`. That is the only inspect_ai change this API needs, and it is needed before M1 ([open question 2](#open-questions)).
 
-### Every argument serialises
+### Logging and replay
 
-The rule for every argument of `swarm()`, `member()`, and every controller and channel factory: it is a plain value, a registry object, a list or dict of those, or a pydantic model whose fields follow the same rule (with field serialisers for registry objects and limits, as `Member` has). Then the plan step logs the argument faithfully, two arms that differ in it get different eval-set identifiers, and `create_registry_object()` can rebuild it. Replay turns registry objects back into objects but leaves pydantic models as dicts, so every factory that takes a pydantic argument also accepts its dict form and validates it, as `swarm()` does for `Member`.
+**The rule for what this API defines.** Every argument of `swarm()`, `member()` and every controller and channel factory is a plain value, a registry object, a list or dict of those, or a pydantic model whose fields follow the same rule (with field serialisers for registry objects, limits and models, as `Member` has). Then the plan step logs the argument faithfully, two arms that differ in it get different eval-set identifiers, and `create_registry_object()` can rebuild it. Replay turns registry objects back into objects but leaves pydantic models as dicts, so every factory that takes a pydantic argument also accepts its dict form and validates it, as `swarm()` does for `Member`.
 
-Under this rule, swarm.md's sketch argument `budget=cost_limit(40.0)` (logged as `"_CostLimit"`) is replaced by the limits deep dive's `Budget`, which must be a frozen pydantic model, not a frozen dataclass (logged as `"Budget"`). The scoring deep dive's `FinalMode` values (for example `synthesize(model=...)`) must be pydantic models too. Its `ResultSpec` holds the task's callables and is logged as its type name, which that deep dive accepts; it is the one exception, and it is safe for eval-set identity because arms of one task share their result contract.
+Under this rule, swarm.md's sketch argument `budget=cost_limit(40.0)` (logged as `"_CostLimit"`) is replaced by the limits deep dive's `Budget`, which must be a frozen pydantic model, not a frozen dataclass (logged as `"Budget"`). The scoring deep dive's `FinalMode` values (`synthesize(model=...)`, and `reporter("<member>")`) must be pydantic models too, with a discriminator field so that a chain of mixed strings and modes validates back from JSON, and a serialiser and validator for a `Model` field (`registry_value()` writes a `Model` as a model dict, `registry.py:678-684`, but only at top level, not inside a pydantic model). Only string chains are spiked so far; the mixed form is verified when the scoring and API types are reconciled in M1.
+
+**What the log records but cannot rebuild.** Three things fall outside the rule, and each has a route that keeps eval sets and retries correct:
+
+| What | Why | Route |
+|---|---|---|
+| A member agent configured with callables (hooks, filters, tool sources) | Inspect logs a callable as its name ([table](#how-arguments-reach-the-log)) | A registered member builder with ordinary parameters ([Members](#members)) |
+| A member agent that must be created inside a sample (inspect_swe's ACP agents) | It cannot be built at task construction at all | A registered wrapper that creates it per invocation ([Members](#members)) |
+| `result=`, the task's `ResultSpec` | It holds the task's callables (answer key, verifier); the scoring deep dive logs it as its type name, `"ResultSpec"` | Rebuild through the task, or through a registered swarm builder (below) |
+
+**Two kinds of reconstruction.** They differ, and the guarantees differ:
+
+- **Through the task.** `eval-retry` and eval-set retries of a task file or registered task re-run the task's code (`src/inspect_ai/_eval/eval.py:1737-1756`), which builds the swarm, its `result=` and its member builders afresh. Everything is rebuilt; this is the supported path for any swarm. (A run that overrode the solver with `--solver` is retried from its solver spec, `:1758-1762`, which is the second path.)
+- **From the solver's logged arguments.** `--solver inspect_swarm/swarm -S ...`, inspect_flow's solver specs, or `create_registry_object()` on a plan step rebuild the raw `swarm()` call from its params. This rebuilds the reconstructible subset: member records, controllers, channels, `Budget`, and member agents whose own params are ordinary. `result` comes back as the string `"ResultSpec"`; `swarm()` raises `TypeError` for a string `result` ("a result contract cannot be rebuilt from a log; rebuild the swarm through its task or a registered builder") rather than treating it as `None`, which would silently change the final-answer chain and per-member claims.
+- **A registered swarm builder** makes the second path complete: an `@agent` factory with ordinary parameters that returns the configured `swarm(...)`, result contract included. It logs as `{"type": "agent", "name": "math_swarm", "params": {"k": 4}}` and replays by calling the builder.
+
+  ```python
+  @agent
+  def math_swarm(k: int = 4, cost: float = 40.0) -> Agent:
+      return swarm(
+          members=member(deepagent(tools=[bash(), python()]), name="solver", count=k),
+          budget=Budget(cost=cost),
+          result=answer_result(answer_key=boxed_number, verifier=check_answer),
+      )
+  ```
+
+For eval-set identity, `result` logged as a type name is harmless: arms of one task share their result contract. Member callbacks are not harmless (two arms differing only in a hook collide), which is why the builder route is the documented way to configure members with hooks.
 
 A spike confirmed the whole path with a simulated `controller` registry type (`RegistryInfo.model_construct()` stands in for the literal entry): `swarm(members=[member(react(prompt="solve"), name="w", count=4)], controller=leaderless(final=["verify", "first"]))` logged the following (the names are unprefixed because the spike ran outside a package; in inspect_swarm they are `inspect_swarm/leaderless`, since `registry_log_name()` strips only `inspect_ai/`, `registry.py:521-535`)
 
@@ -340,23 +392,25 @@ and `create_registry_object("agent", ...)` on those params called `swarm()` agai
 
 - **Task parameters.** A task exposes the axes it wants, and names resolve: `-T controller=escalate`, `-T channels=filesystem,messages`. A single `-T channels=filesystem` arrives as a string, which `channels=` accepts.
 - **Python sweeps.** `eval_set([task(controller=leaderless(final=f)) for f in ...])` and inspect_flow work on solver arguments too, because they are logged faithfully and so give distinct task identifiers.
-- **`--solver inspect_swarm/swarm`.** It works through the `@agent` path, but `members=` needs a dict on the command line (`-S 'members={agent: {type: agent, name: react, params: {}}, count: 4}'`). Tasks are the intended surface.
+- **`--solver inspect_swarm/swarm`.** It works through the `@agent` path, but `members=` needs a dict on the command line (`-S 'members={agent: {type: agent, name: react, params: {}}, count: 4}'`), and it cannot carry a result contract. A registered swarm builder (`--solver math_swarm -S k=8`) has neither problem ([Logging and replay](#logging-and-replay)). Tasks are the intended surface.
 
 ### Where the sibling designs' parameters go
 
 | Deep dive (PR) | Its parameter | In this API |
 |---|---|---|
-| Limits (#5) | `swarm(budget=Budget(...))` | `swarm(budget=)`, unchanged; `Budget` becomes a frozen pydantic model ([Every argument serialises](#every-argument-serialises)) |
+| Limits (#5) | `swarm(budget=Budget(...))` | `swarm(budget=)`, unchanged; `Budget` becomes a frozen pydantic model ([Logging and replay](#logging-and-replay)) |
 | Limits (#5) | `member(limits=[...], bridged=)` | `member()` fields; limits serialised by kind and value |
+| Limits (#5) | `stop(reason)`, soft stop and grace; stop reasons; member statuses | a controller's return value and the own caps go through `stop(reason)`; its reasons and statuses are the public ones ([Controllers](#controllers)) |
 | Scoring (#2) | `swarm(final=...)`, a mode or chain | the controller's `final=`: `leaderless(final=...)`; the chain's semantics and validation are unchanged |
-| Scoring (#2) | `swarm(result=...)` | `swarm(result=)`, unchanged |
+| Scoring (#2) | `swarm(result=...)` | `swarm(result=)`, unchanged; rebuilt through the task or a registered swarm builder, never from a raw solver spec ([Logging and replay](#logging-and-replay)) |
+| Scoring (#2) | `Verdict(passed, value, explanation)` | controllers see `VerdictSummary(passed, value)`; the explanation stays in the result record |
 | Scoring (#2) | `reporter` mode, reserved | valid only on controllers with a reporter; `coordinator(lead=...)` defaults to it |
 | Scoring (#2) | `baseline(agent, result)` | `swarm(members=member(agent), controller=leaderless(final="first"), channels=[], result=result)` |
 | Communication (#3) | `channels=["filesystem", messages(...)]` | the same call; `messages` is a `@channel` factory, `"messages"` resolves to it |
 | Communication (#3) | `member(delivery=)` | a `member()` field |
 | Communication (#3) | `swarm(policy=)` | `swarm(policy=)` from M2, the observer's knob |
 | Communication (#3) | the `Channel` protocol | M2's operations on `Channel`, with per-sample state moved off the shared object |
-| Communication (#3) | `swarm_tools()`, `swarm_on_continue()`, `swarm_bridged_tools()` | unchanged: member-side helpers, not `swarm()` arguments |
+| Communication (#3) | `swarm_tools()`, `swarm_on_continue()`, `swarm_bridged_tools()` | unchanged: member-side helpers, not `swarm()` arguments; a member using them is built by a registered member builder so the log can rebuild it |
 | ORBIT (#4) | `member(input=, role=, exposure=)` | `member()` fields; `input` is the default for `SwarmControl.start(input=None)` |
 | ORBIT (#4) | `ActivationPolicy`, `SwarmControl`, `MemberHandle` | a controller's `run`, and methods added to these handles |
 | ORBIT (#4) | `round_robin(max_rounds=)` | a `@controller` |
@@ -399,7 +453,7 @@ def research_math(k: int = 4, cost: float = 40.0, controller: str = "leaderless"
             members=member(deepagent(tools=[bash(), python()]), name="solver", count=k),
             controller=controller,
             budget=Budget(cost=cost),
-            result=research_math_result(),   # the scoring deep dive's answer_result(...)
+            result=answer_result(answer_key=boxed_number, verifier=check_answer),   # scoring deep dive
         ),
         scorer=...,
         sandbox="docker",
@@ -414,7 +468,7 @@ swarm(
     controller=leaderless(final="verify", stop_on_verified=True),
     channels=[filesystem(notes="notes.md")],
     budget=Budget(cost=40.0),
-    result=research_math_result(),
+    result=answer_result(answer_key=boxed_number, verifier=check_answer),   # verify needs a verifier
 )
 ```
 
@@ -433,22 +487,31 @@ def leaderless(final: FinalSpec | None = None, stop_on_verified: bool = False) -
         async for event in swarm.events():
             if stop_on_verified and isinstance(event, MemberEnded) and event.verdict and event.verdict.passed:
                 return "verified"
-        return "all_ended"
+        return "all_done"
 
     return Controller(run, final=final)
 ```
 
-**A coordinator swarm (later: coordinator topologies, on M2's messages).** A lead and three workers; workers start when the lead first messages them, and the lead's submission is the answer.
+**A coordinator swarm (later: coordinator topologies, on M2's messages).** A lead and three workers. All start together; workers wait for the lead's instructions with `read_messages(wait_seconds=...)`, and the lead's submission is the answer. Members with hooks and tool sources are registered builders, so the log can rebuild them ([Members](#members)).
 
 ```python
-from inspect_ai.agent import react
+from inspect_ai.agent import Agent, agent, react
+from inspect_ai.tool import bash, python
 from inspect_swarm import coordinator, member, messages, swarm, swarm_on_continue, swarm_tools
 
-lead = react(prompt=LEAD_PROMPT, tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
-worker = react(prompt=WORKER_PROMPT, tools=[bash(), python(), swarm_tools()], on_continue=swarm_on_continue())
+
+@agent
+def lead(prompt: str = LEAD_PROMPT) -> Agent:
+    return react(prompt=prompt, tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
+
+
+@agent
+def worker(prompt: str = WORKER_PROMPT) -> Agent:
+    return react(prompt=prompt, tools=[bash(), python(), swarm_tools()], on_continue=swarm_on_continue())
+
 
 swarm(
-    members=[member(lead, name="lead", role="coordinator"), member(worker, name="worker", count=3)],
+    members=[member(lead(), name="lead", role="coordinator"), member(worker(), name="worker", count=3)],
     controller=coordinator(lead="lead"),
     channels=["filesystem", messages(delivery="notify")],
 )
@@ -459,18 +522,15 @@ The controller, as it would be built in the coordinator-topologies work:
 ```python
 @controller
 def coordinator(lead: str = "lead", final: FinalSpec | None = None) -> Controller:
-    """Start the lead; start each other member when it is first sent a message."""
+    """Start everyone; the swarm is done when the lead ends."""
 
     async def run(swarm: SwarmControl) -> StopReason:
-        swarm.start(lead)
+        for m in swarm.members:
+            swarm.start(m)
         async for event in swarm.events():
-            if isinstance(event, MessageDelivered):
-                for name in event.recipients:
-                    if swarm.member(name).status == "pending":
-                        swarm.start(name)
-            elif isinstance(event, MemberEnded) and event.member == lead:
-                return "lead_ended"
-        return "all_ended"
+            if event.member == lead:
+                return "lead_done"       # soft-stops the workers still running
+        return "all_done"
 
     def check(roster: Sequence[MemberInfo]) -> None:
         if lead not in [m.name for m in roster]:
@@ -479,7 +539,7 @@ def coordinator(lead: str = "lead", final: FinalSpec | None = None) -> Controlle
     return Controller(run, final=reporter(lead) if final is None else final, check=check)
 ```
 
-This assumes the bus accepts a record for a member that has not started and holds it in that member's inbox; the communication deep dive decides whether it does, and the coordinator work confirms it. A worker that has submitted cannot be woken again until persistent members exist (swarm.md, [Members](swarm.md#members)).
+Workers start with the lead because the communication deep dive delivers only to running recipients (PR #3, "Commit checks": liveness). Starting a member on its first message would need delivery to pending members, which that design rejects; a topology that wants it brings that extension in its own design. A worker that has submitted cannot be woken again until persistent members exist (swarm.md, [Members](swarm.md#members)). `lead_done` is a topology reason the coordinator work adds to the limits deep dive's set; until then it would be recorded as `controller:lead_done`.
 
 **A user-defined controller.** Adaptive compute: run one cheap member alone, and start the rest only if its answer does not verify.
 
@@ -498,11 +558,11 @@ def escalate(first: str, final: FinalSpec | None = None) -> Controller:
         async for event in swarm.events():
             if isinstance(event, MemberEnded) and event.member == first:
                 if event.verdict is not None and event.verdict.passed:
-                    return "first_verified"
+                    return "verified"
                 for m in swarm.members:
-                    if m.status == "pending":
+                    if m.state == "pending":
                         swarm.start(m)
-        return "all_ended"
+        return "all_done"
 
     def check(roster: Sequence[MemberInfo]) -> None:
         if first not in [m.name for m in roster]:
@@ -548,6 +608,8 @@ The sibling deep dives link `swarm.md#substrate` (the communication and ORBIT de
 
 **Hook-style controllers** (a class with `on_start`, `on_member_ended`, `should_stop` methods, as Inspect's `Hooks` are). Declarative and harder to misuse. But sequencing (escalate, waves, ORBIT's plans) becomes a state machine spread across callbacks, and Inspect's class registration does not capture constructor parameters into the log the way factory decoration does. Rejected in favour of one `run` coroutine over an event stream.
 
+**A factory field on `member()`** (`member(factory=lambda: react(...))`) instead of registered member builders. It would also rebuild hooks per invocation, but the factory is a callable, so the log records only its name and replay cannot call it. A registered `@agent` builder uses Inspect's own registry and logging, and needs nothing new. Rejected.
+
 **Controllers that run members themselves** (`await member.run()` in an anyio task group). Familiar to anyio users. But the controller would then own member tasks, so drain and cap recovery would depend on every controller cancelling correctly, and a controller bug could leave a member running during finalisation. Rejected: the runtime owns member tasks, and the controller only starts them.
 
 **`final=` stays on `swarm()`** (the scoring deep dive's draft). Keeps scoring's API as drafted. But the valid modes and the default depend on the topology, which is the controller, so `swarm()` would have to cross-validate two arguments that belong together. Rejected; scoring's chain and its semantics are unchanged, only where it is passed.
@@ -560,6 +622,7 @@ The sibling deep dives link `swarm.md#substrate` (the communication and ORBIT de
 
 - **inspect_swarm** has no released API ([swarm.md](swarm.md#compatibility-and-migration)). The sketch's `topology=` and `final=` never shipped. The sibling deep dives' parameters move as [the table](#where-the-sibling-designs-parameters-go) says; each deep dive applies the move when it is next revised or implemented.
 - **inspect_ai.** Two entries in `RegistryType`. They are additive: nothing in inspect_ai uses the type set except `RegistryInfo`'s validation and `is_registry_dict()`, which then recognises two more kinds of logged object, and the literal is not in the log schema or the generated TypeScript types (verified above). inspect_swarm needs the inspect_ai version that has them; it tracks inspect_ai `main`, and the release floor pinned by `release-pin-deps.yml` covers released versions. Imported with an older inspect_ai, inspect_swarm's decorators fail at import with pydantic's `ValidationError` on `RegistryInfo`.
+- **Registry dict shapes.** With the new types, any dict of exactly the shape `{"type": "controller" | "channel", "name": str, "params": dict}` inside replayed arguments is rebuilt as an object instead of staying data (`is_registry_dict()`, `registry_arg()`, `registry.py:647-701`). No existing caller using those shapes was found in inspect_ai, inspect_sentinel, inspect_scout or inspect_flow; the inspect_ai PR states this reservation in its compatibility note.
 - **Eval logs.** The swarm's plan step gains nested `{"type": "controller" | "channel", "name", "params"}` objects and member dicts. These are ordinary JSON inside `params`, which is `dict[str, Any]` (`src/inspect_ai/log/_log.py:705-718`), so every log reader accepts them. An inspect_ai that lacks the types treats them as plain dicts on replay; replaying a swarm log needs inspect_swarm installed anyway.
 - **Documents.** `swarm.md#substrate` becomes `swarm.md#channels`; the sibling deep dives' links follow on merge ([above](#changes-to-swarmmd-and-the-overview)).
 
@@ -567,7 +630,7 @@ The sibling deep dives link `swarm.md#substrate` (the communication and ORBIT de
 
 - **Names from the command line or a log.** `-T`, `-S` and replay hand strings and dicts to name resolution, which only finds registered objects. A `package/name` loads that installed package's declared entry point, which `--solver` already does today (`registry.py:289-297`). Logs replayed with `eval-retry` are trusted input, as they already are for solvers. No new exposure.
 - **Controller and channel code is trusted eval-author code**, like solvers. It is never reachable from member tools, and members cannot select a controller or a channel.
-- **No model text reaches a controller.** Handles and events carry statuses, verdicts, member names chosen by the eval author, record ids and channel names, never a member's output or a message payload ([Controllers](#controllers)). So a controller cannot relay model output into another member's input. `start(input=...)` takes the eval author's text; its documentation says never to put member output there.
+- **No model text reaches a controller.** Handles and events carry states, statuses, member names chosen by the eval author, and a verdict's pass flag and numeric value; never a member's output, a message payload or a verifier's explanation, which may quote the answer or a judge model ([Controllers](#controllers)). So a controller cannot relay model output into another member's input. `start(input=...)` takes the eval author's text; its documentation says never to put member output there.
 - **The preamble** contains the member's name and role, the roster size, and channel instructions, all from the eval author. Nothing a member wrote enters it.
 - **Logged parameters** are the eval author's arguments, written as JSON data in the plan, as Inspect already writes solver parameters.
 
@@ -582,16 +645,22 @@ All in inspect_swarm, with mockllm, on asyncio and trio, no network or Docker:
   - `registry_lookup("controller", "inspect_swarm/leaderless")` succeeds in a fresh interpreter that has not imported inspect_swarm (the entry point).
 - `tests/test_api_log.py`:
   - plan-step `params` and `params_passed` for the common case, the explicit form and a heterogeneous roster match expected JSON, including nested agents and limits;
-  - `create_registry_object()` on those params rebuilds an equivalent swarm whose params are equal;
+  - raw-solver replay: `create_registry_object()` on the params of a swarm without `result=` rebuilds an equivalent swarm whose params are equal; with `result=` it raises the documented `TypeError`, never substituting `None`;
+  - task replay: retrying a task-file swarm with a verifier result rebuilds the result contract and selects the same final answer (a separate case from raw-solver replay);
+  - member builders: two `worker(prompt=...)` builders with different prompts log differently, get different `eval_set` identifiers and rebuild with their `on_continue` hook intact; a registered swarm builder (`math_swarm`) replays through `--solver`-style params with its result contract;
   - `eval_set` accepts two arms that differ only in a controller parameter, a channel parameter, a member's `count` or `limits`, or `Budget`, and assigns them different identifiers;
+  - a final chain mixing strings and pydantic `FinalMode` values (including a `synthesize` with a model) validates back from its logged JSON;
   - `-T channels=filesystem` (a string) and `-T channels=filesystem,messages` (a list) both resolve.
 - `tests/test_controller.py`:
-  - `leaderless` starts every member and stops `all_ended`; with `stop_on_verified` it stops at the first passed verdict and the rest are drained;
+  - `leaderless` starts every member and returns `all_done`; with `stop_on_verified` it returns `verified` at the first passed verdict;
+  - a delayed verifier: the last member's agent returns before its verdict is taken, and `events()` still yields that member's `MemberEnded` with the verdict before it ends, so `stop_on_verified` and `escalate` see it;
   - a custom controller (`escalate`) starts members later and with custom input; `start()` twice raises; `events()` ends when nothing runs and a second concurrent iterator raises;
-  - returning while members run cancels and drains them before finalisation; an exception in `run` drains and propagates; a member's own limit yields `MemberEnded(status="limit")` and the swarm continues; the swarm cap cancels `run`, records the runtime's reason and finalises;
-  - events and handles expose no member output (the dataclasses' fields are the contract; one test asserts a member's distinctive output string never appears in any event);
+  - returning while members run goes through the soft stop: in-flight mockllm calls complete and are recorded, members get status `stopped`, and only a member still running after `Budget.grace` is cancelled; the swarm cap and time cap take the same path with reasons `swarm_cap` and `swarm_time`, and `run` is cancelled;
+  - an exception in `run`, or a foreign member error, cancels the rest at once and propagates; a member's own limit ends that member with a `member_limit:<type>` status and the swarm continues;
+  - a custom reason is recorded as `controller:<reason>`;
+  - no member text: a verifier whose explanation echoes a distinctive submission string, and a member that outputs one, and the string appears in no event or handle field;
   - one swarm object serves two concurrent samples with no shared controller state;
-  - `check` errors and invalid `final` raise at `swarm()` construction.
+  - `check` errors and invalid `final` (including `final="verify"` without a verifier) raise at `swarm()` construction.
 - `tests/test_channel.py`: `filesystem()`'s instructions appear in each member's preamble with that member's scratch directory; `channels=[]` adds none; a duplicate channel raises.
 - `tests/test_member.py`: count expansion and names; duplicate names raise; unregistered agents and `deepagent(background=True)` are rejected; `Member` validates from its own logged dict.
 
@@ -603,8 +672,8 @@ In inspect_ai, the registry PR adds a test to `tests/util/test_registry.py` that
 2. **inspect_swarm: registry plumbing** (M1). The decorators, `Controller`, `Channel`, `MemberInfo`, `resolve()`, and the entry point. Files: `src/inspect_swarm/_controller/_controller.py`, `src/inspect_swarm/_channel/_channel.py`, `src/inspect_swarm/_registry.py`, `src/inspect_swarm/_entrypoint.py`, `pyproject.toml` (`[project.entry-points.inspect_ai]`), `tests/test_registry.py`.
 3. **Members and the `swarm()` signature** (M1). `Member` and `member()` with their serialisers; `swarm()`'s arguments, validation and resolution; exports in `src/inspect_swarm/__init__.py`. Files: `src/inspect_swarm/_member.py`, `src/inspect_swarm/_swarm.py`, `src/inspect_swarm/__init__.py`, `tests/test_member.py`, `tests/test_api_log.py`.
 4. **The controller surface in the runtime** (M1). `SwarmControl`, `MemberHandle`, `MemberEnded`, `events()`, `start()` and the preamble, in the M1 runtime the limits and scoring deep dives describe; the built-ins `leaderless` and `filesystem`. Files: `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_controller/leaderless.py`, `src/inspect_swarm/_channel/filesystem.py`, `src/inspect_swarm/_swarm.py`, `tests/test_controller.py`, `tests/test_channel.py`.
-5. **M2.** `messages` as a `@channel`, the communication deep dive's operations on `Channel` with per-run state, `MessageDelivered`, and `swarm(policy=)`.
-6. **Later.** `coordinator` with the coordinator topologies; the ORBIT deep dive's scheduled mode as controllers.
+5. **M2.** `messages` as a `@channel`, the communication deep dive's operations on `Channel` with per-run state, and `swarm(policy=)`.
+6. **Later.** `coordinator` with the coordinator topologies (and the `lead_done` reason); new event kinds with persistent members; the ORBIT deep dive's scheduled mode as controllers.
 
 Steps 2 to 4 are the skeleton of M1, not a separate milestone: swarm.md's M1 builds its runtime behind this surface.
 

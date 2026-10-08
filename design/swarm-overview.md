@@ -24,13 +24,15 @@ It is an eval library, not a production orchestration framework. The runtime liv
 ```python
 swarm(
     members=member(deepagent(...), count=4),
-    controller=leaderless(final="verify"),   # or the name "leaderless"; a user's own @controller works the same way
-    channels=["filesystem"],                 # names or @channel objects
-    budget=Budget(cost=40.0),
+    controller="leaderless",   # a name or a @controller object, including a user's own
+    channels=["filesystem"],   # names or @channel objects
+    budget=Budget(),           # caps derived from the sample's limits
 )
 ```
 
-The observer is not an argument: it must be the same in every arm. Every argument is logged faithfully, so names, task parameters and Python sweeps all work.
+A strict, verifier-only answer is a controller parameter and needs the task's verifier: `controller=leaderless(final="verify")` with `result=answer_result(verifier=...)`.
+
+The observer is not an argument: it must be the same in every arm. The API's own arguments are logged faithfully, so names, task parameters and Python sweeps all work; members configured with hooks and the task's result contract are rebuilt through registered builders or the task ([API](swarm-api.md#logging-and-replay)).
 
 A swarm of one member with no channels is a single agent with the same accounting, so it is the natural baseline.
 
