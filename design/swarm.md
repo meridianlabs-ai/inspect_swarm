@@ -2,7 +2,7 @@
 
 Status: proposed, 2026-10-07. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
 
-This is the first design document for `inspect_swarm`. It is deliberately high level. It sets out what the library is for, which eval questions it should make answerable, the shape of the architecture and where its parts live, and a first slice small enough to build and learn from. It asks for feedback before any detailed design. API sketches are illustrative; names and signatures are not proposals yet.
+This is the first design document for `inspect_swarm`. It is deliberately high level. It sets out what the library is for, which eval questions it should make answerable, the shape of the architecture and where its parts live, and a first slice small enough to build and learn from. It asks for feedback before any detailed design. API sketches are illustrative; names and signatures are not proposals yet, except where a deeper-dive design settles them: [swarm-api.md](swarm-api.md) proposes the public `swarm()` API.
 
 [swarm-overview.md](swarm-overview.md) is the short form. It covers the components and the main decisions for a reader who knows inspect_ai, and links back here for detail.
 
@@ -268,8 +268,8 @@ What the log keeps:
 A swarm is four things, and the library keeps them separate. ORBIT reached the same factoring, separating invocation, message routes, activation and conversation ownership.
 
 1. **Members**: who the agents are. Each has a name, a role (data), an `Agent`, its own model, tools and limits, and its own conversation.
-2. **Substrate**: how members share information. The shared sandbox filesystem, and optional explicit channels: direct messages, a shared notes/fact log, a task list with claims, a board.
-3. **Controller**: how the swarm runs. Topology (leaderless, coordinator tree, lead plus teammates), how members are started and woken, termination, and how the final answer is produced.
+2. **Channels** (called the substrate before [swarm-api.md](swarm-api.md)): how members share information. The shared sandbox filesystem, and optional explicit channels: direct messages, a shared notes/fact log, a task list with claims, a board. Each is a `@channel` registry object.
+3. **Controller**: how the swarm runs. Topology (leaderless, coordinator tree, lead plus teammates), how members are started and woken, termination, and how the final answer is produced. Each topology is a `@controller` registry object.
 4. **Observer**: what is recorded and who may intervene. Evidence events for every communication, per-member accounting, swarm metrics, and the interception point that monitors attach to (and optional red-team features could, if they are ever built).
 
 ```
@@ -294,28 +294,33 @@ A swarm is four things, and the library keeps them separate. ORBIT reached the s
 
 ### Entry point
 
-`swarm()` returns an `Agent`, so it works anywhere an agent does: as a solver via `as_solver`, under `run()`, or as a member of another swarm (not a goal). Illustratively:
+`swarm()` returns an `Agent`, so it works anywhere an agent does: as a solver via `as_solver`, under `run()`, or as a member of another swarm (not a goal). Its arguments mirror the components; [swarm-api.md](swarm-api.md) designs the API in full. The common case is one line:
 
 ```python
-from inspect_swarm import swarm, member
+from inspect_swarm import member, swarm
 
+agent = swarm(members=member(deepagent(...), count=4))
+```
+
+which means, written out:
+
+```python
 agent = swarm(
     members=member(deepagent(...), count=4),  # or a list of named, heterogeneous members
-    topology="leaderless",                    # later: "coordinator", "lead"
-    channels=["filesystem"],                  # later: "messages", "notes", "tasks", "board"
-    budget=cost_limit(40.0),                  # swarm-wide; reserve kept for the final answer
-    final="verify",                           # or "vote", "first", "synthesize", "reporter"
+    controller="leaderless",                  # a @controller: leaderless(final=..., stop_on_verified=...); later "coordinator"
+    channels=["filesystem"],                  # names or @channel objects: filesystem(...); later messages(...), notes, tasks, board
+    budget=Budget(),                          # swarm-wide cap (limits deep dive)
 )
 ```
 
-All of these are plain values, so a task can expose them as `-T` parameters and an eval set can sweep them. A swarm of one member with no channels is a single agent with the same accounting, which makes it the natural baseline arm.
+The final-answer chain is the controller's `final=` parameter. Names resolve to registry objects with their defaults, and every argument is logged faithfully, so a task can expose them as `-T` parameters and an eval set can sweep them ([swarm-api.md](swarm-api.md#every-argument-serialises)). A swarm of one member with no channels is a single agent with the same accounting, which makes it the natural baseline arm.
 
 ### Members
 
 - A member is a record: name, role, `Agent`, model, tools, limits, status (`running`, `idle`, `done`, `errored`, `cancelled`) and its conversation.
 - Each member runs under `run()` in its own agent span named after it, with its limits as a child of the swarm's budget node.
 - Members may be native agents or bridged agents.
-  - A bridged member reaches the substrate's tools through `bridged_tools`.
+  - A bridged member reaches the channels' tools through `bridged_tools`.
   - It reaches the shared filesystem through the sandbox it already has.
 - **Ownership boundary.** The swarm owns everything a member starts, including its descendants. Draining a member means cancelling and awaiting all of that work before the swarm finalises, records usage or returns. Otherwise:
   - a descendant could keep editing shared files while the final answer is produced;
@@ -332,7 +337,9 @@ All of these are plain values, so a task can expose them as `-T` parameters and 
   - **An altered submission protocol.** Run the member with `submit=False` and give it a swarm `report` tool that records an answer without ending the loop. Its `on_continue` then waits on the inbox when the model stops calling tools, and returns when woken. No inspect_ai change is needed, but the member's prompt and stop condition differ from a standard `react()` agent.
   - **Clean re-entry.** Re-enter `react()` on an existing state without inserting a second system prompt. This needs an inspect_ai change.
 
-### Substrate
+### Channels
+
+Each channel is a `@channel` registry object, named in `swarm(channels=[...])` ([swarm-api.md](swarm-api.md#channels)). inspect_ai's unrelated per-execution queue is always called the *agent channel* ([The agent channel](#the-agent-channel)).
 
 | Channel | What it is | When | What it adds over the filesystem convention |
 |---|---|---|---|
@@ -538,6 +545,8 @@ Inspect scorers take a `TaskState` and a target, and many inspect or modify the 
 
 ### Controller: topology, termination, final answer
 
+Each topology is a controller: a `@controller` registry object chosen per arm, such as `leaderless()` ([swarm-api.md](swarm-api.md#controllers)). The controller decides which members start, when, and with what input, when the swarm is done, and which final-answer chain applies. Drain, recovery from the swarm's own cap, verification, the provisional answer and finalisation belong to the swarm's fixed runtime, not to the controller, wherever this document says "the controller" for them ([swarm-api.md](swarm-api.md#controller-and-runtime)).
+
 **Topologies.** Configuration over one runtime, not separate agents:
 
 | Topology | Started by | Typical channels | Ends when |
@@ -555,7 +564,7 @@ A deepagent with `background=True` is not reimplemented. It stays a member type 
 - Quiescence, when explicit channels exist, can follow SCHEME's pattern: a shared status registry with `wait` and `done`, where a `wait` returns immediately once every other member is done. AG2's passive `max_silence` expectations are a related signal.
 - On termination the controller cancels and awaits the remaining members and their descendants (drain, within the [ownership boundary](#members)). It does not abandon them, so nothing edits the shared environment during finalisation and their usage is in the ledger before the sample is scored.
 
-**Final answer.** For shared-artifact tasks, the final result is the environment as the drained swarm leaves it. A later topology could add an integration member that runs last. For answer-scored tasks, `final=` selects one of:
+**Final answer.** For shared-artifact tasks, the final result is the environment as the drained swarm leaves it. A later topology could add an integration member that runs last. For answer-scored tasks, the controller's `final=` parameter selects one of:
 
 - `reporter`: the coordinator's or a designated member's submission.
 - `vote`: plurality over member submissions, using the task's comparable answer form. Unavailable when the task has none.
@@ -575,6 +584,7 @@ The leaderless default matches how leaderless swarms succeed in practice: the C 
 | Part | Lives in | Why |
 |---|---|---|
 | `swarm()`, controller, members, budget, bus, channels, evidence, metrics, scorers, prompts, Scout scanners | inspect_swarm | Fast iteration; the runtime is opinionated and experimental. |
+| Registry types `controller` and `channel` | inspect_ai, before M1 | `RegistryType` is a closed literal; scout and sentinel added their types the same way ([swarm-api.md](swarm-api.md#resolving-names)). |
 | Notifying members and delivering peer messages | inspect_swarm, on inspect_ai's private channel internals where needed (M2) | Content is tool output from swarm tools, which needs nothing from inspect_ai. The metadata-only notice reaches a member at a turn boundary through its channel, or an `on_continue`-style injection as deepagent does. The open parts are: the [binder](#the-agent-channel), how the bus obtains each member's ref; and whether the notice is a dedicated channel item, which `react()` would need to render (an inspect_ai behaviour change), or a marked message. M2's design decides both, alongside ACP's first-binder-wins rule. Public exports are a later clean-up, not a prerequisite. |
 | Clean re-entry of `react()` on an existing state (no second system prompt), or an idle state | inspect_ai (coordinator topologies), optional | Persistent members; the alternative is a `submit=False` member protocol inside inspect_swarm. |
 | A scoped owner for `background()` work, so a swarm can own and drain a member's descendants | inspect_ai, when background deepagent members are needed | Today `background()` attaches to the sample's task group; without an owner the swarm cannot drain `deepagent(background=True)` members. |
@@ -667,7 +677,7 @@ All sources below were opened on 2026-10-07 unless marked *unverified*.
 | Strands Swarm, CrewAI, CAMEL, MetaGPT | Templated user input or task prompts. Strands has handoff and iteration caps plus optional repetitive-handoff detection; MetaGPT has a budget (`NoMoneyException`) and an all-idle stop. | Turn caps are the norm and are coarse; the swarm's budget is the primary stop. |
 | [mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail) | Tool output (`fetch_inbox`), prompted by a rate-limited reminder hook that carries only counts and fixed text (`scripts/hooks/check_inbox.sh`). Advisory file reservations with TTLs that report conflicts. | Direct precedent for tool-output delivery with metadata-only notices, and for leases that report conflicts. |
 | [Gas Town](https://github.com/gastownhall/gastown) | Mail bodies are read through `gt mail` (tool output). Its injected reminder lists each message's id, sender and **subject** (`internal/cmd/mail_check.go`, `formatInjectOutput`). Per-role mail budgets. | Bodies through tools, but its notice puts a sender-written subject in context, which inspect_swarm's notice contract excludes. Mail budgets as a norm. |
-| Letta | Shared memory blocks: insert is concurrency-safe, replace fails if the text changed, rethink is last-writer-wins. Peer messages arrive as a system-role notice (rendering *unverified*). | Explicit concurrency rules for shared state ([Substrate](#substrate)). |
+| Letta | Shared memory blocks: insert is concurrency-safe, replace fails if the text changed, rethink is last-writer-wins. Peer messages arrive as a system-role notice (rendering *unverified*). | Explicit concurrency rules for shared state ([Channels](#channels)). |
 
 Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 multi-agent mode (4 or 16 agents with a leader that synthesises; internal agent communication undocumented) are orchestrator-and-workers systems, like the vendor swarms above; their internals are *unverified*.
 
@@ -743,6 +753,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
   - It must run on both anyio backends, which rules out raw `asyncio` primitives in the runtime.
 - **Eval logs.** M1 writes only existing event types (spans, tool and model events, `InfoEvent`s) plus store and metadata entries. Old viewers and readers see a swarm log as an ordinary log with concurrent agent spans. The `InfoEvent` payload carries a `version` field so later readers can tell formats apart.
 - **inspect_ai extension points**, where behaviour needs them, are additive:
+  - the `controller` and `channel` registry types, two entries in a literal that is not part of the log schema ([swarm-api.md](swarm-api.md#compatibility-and-migration));
   - possibly a binder hook (M2's design decides);
   - extending the `source` literal changes the log schema and the generated TypeScript types, so it goes through inspect_ai's type-generation pipeline and a ts-mono PR;
   - a new `source` value is additive for new writers, but readers whose literal still has only `input`, `generate` and `operator` would reject logs containing it. M2's detailed design must either state the minimum reader version or carry the swarm notice's provenance in message `metadata`. The second avoids version skew and is preferred unless the viewer needs the distinction. Peer content itself needs neither, because it is tool output ([Delivery](#delivery-peer-messages-are-model-output)).
@@ -817,7 +828,8 @@ Each milestone is a small series of PRs, and the project convention applies: dis
 
 **Before M1: scaffold to Python 3.11.** A separate `chore:` PR moves `AGENTS.md`, `pyproject.toml`, `CONTRIBUTING.md` and the CI matrix from 3.10 to 3.11 ([Compatibility](#compatibility-and-migration)).
 
-**M1. Leaderless filesystem swarm with full accounting** (inspect_swarm only; no inspect_ai changes).
+**M1. Leaderless filesystem swarm with full accounting** (inspect_swarm, after a one-line inspect_ai PR adding the `controller` and `channel` registry types; [swarm-api.md](swarm-api.md#implementation-plan)).
+- The API skeleton of [swarm-api.md](swarm-api.md): `@controller` and `@channel`, `member()` records, name resolution, faithful logging, and the built-ins `leaderless` and `filesystem`.
 - `swarm()` with leaderless topology over members whose work stays inside their invocation (`react()`, synchronous `deepagent()`, bridged agents). Background deepagent members are rejected.
 - The shared-sandbox default and its filesystem prompt convention: shared directory, append-only notes file, per-member scratch directories or worktrees ([Sandbox topology](#sandbox-topology)).
 - A swarm cap node, member limits, a final-answer reserve, and a provisional answer.
@@ -843,7 +855,7 @@ Each milestone is a small series of PRs, and the project convention applies: dis
 
 **Later work, in any order or in part.** The real dependencies between items are noted so that whichever is picked first is not blocked unexpectedly.
 
-- **Structured channels.** Notes/fact log, task list with claims and leases, and board with subscriptions; each can be built alone. [Substrate](#substrate) says what each adds over the filesystem convention.
+- **Structured channels.** Notes/fact log, task list with claims and leases, and board with subscriptions; each can be built alone. [Channels](#channels) says what each adds over the filesystem convention.
   - Each needs M2's bus.
   - Quiescence-based termination needs the persistent members below.
 - **Coordinator topologies and persistent members.**
