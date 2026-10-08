@@ -67,7 +67,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 - Inside the tool result each message is fenced as data under a sender line the bus stamps, and carries only what the sender wrote, never its tool calls or transcript. Tool output alone is not a trust boundary.
 - At a turn boundary the swarm injects at most a metadata-only notice, such as "3 unread from `worker-2`", as deepagent does for background completions.
 - Logs and evidence mark peer content and notices distinctly, preferring metadata to a new `source` value.
-- How the bus obtains each member's channel ref (the binder) and how the notice is rendered are settled in M2's design, possibly on inspect_ai internals.
+- The notice is a marked message appended by a swarm `on_continue` hook; the swarm never posts into member channels, so M2 needs no inspect_ai change ([swarm-communication.md](swarm-communication.md)).
 - Vendor swarms such as Codex deliver peer text in the user role; native members never do.
 ([Delivery](swarm.md#delivery-peer-messages-are-model-output))
 
@@ -88,7 +88,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 | Repository | What |
 |---|---|
 | **inspect_swarm** | `swarm()`, controller, members, budget and ledger, bus and channels, evidence, metrics, scorers, prompts, Scout scanners |
-| **inspect_ai** | Only where behaviour needs it: possibly a binder hook (M2), a scoped owner for `background()`, clean `react()` re-entry, per-span usage |
+| **inspect_ai** | Only where behaviour needs it: a scoped owner for `background()`, clean `react()` re-entry, per-span usage |
 | **inspect_swe** | Enabling and mapping Codex multi-agent v2 and Claude Code agent teams |
 | **inspect_sentinel** | Monitors and protocols |
 | **ORBIT-like packages** | Scenarios, attacks, defenses |
@@ -100,7 +100,7 @@ Detail: [where each part lives](swarm.md#where-each-part-lives).
 M1, then M2; after that, a menu in any order or in part, driven by user feedback with no internal evidence gate. ([Implementation plan](swarm.md#implementation-plan))
 
 - **M1: leaderless filesystem swarm with full accounting.** Shared sandbox, cap and ledger, drain, final-answer modes, the result contract, `InfoEvent` evidence and metrics. No inspect_ai changes.
-- **M2: the bus and direct messages.** `deliver()`, `send_message`, delivery modes, monitoring through sentinel, and the binder.
+- **M2: the bus and direct messages.** `deliver()`, `send_message`, delivery modes, monitoring through sentinel, and metadata-only notices ([swarm-communication.md](swarm-communication.md)).
 - **Later, any order:**
   - structured channels (each needs M2; quiescence needs persistent members);
   - coordinator topologies and persistent members;

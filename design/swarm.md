@@ -194,9 +194,9 @@ This section covers only what the design depends on. All paths are in inspect_ai
 - `before_turn()` appends every `UserMessage` item to the conversation as a `ChatMessageUser` (`channel.py:432-453`). A `UserMessage` is by definition an operator-injected turn (`items.py:37-46`), so it puts its text in the user role, the most trusted input a model has. The swarm therefore never delivers peer text this way ([Delivery](#delivery-peer-messages-are-model-output)).
 - deepagent already follows the pattern the swarm adopts. Its background-completion notice is harness-authored and metadata-only ("Background agent(s) finished — collect the result"), injected at a turn boundary, and the child's result is fetched with the `agent_status` tool, so it arrives as tool output (`src/inspect_ai/agent/_deepagent/lifecycle_tools.py:510-530`, `:597-634`).
 - **The binder.** A *binder* is how a producer obtains an execution's `AgentRef` so that it can post into that execution's channel. Today `agent_channel()` offers each new channel's ref to the sample's ACP session, first binder wins, so ACP is the only producer (`_channel/__init__.py:125-133`).
-  - The swarm's bus is a second producer: it needs each member's ref to deliver messages into it.
+  - The swarm's bus would be a second producer if it posted notices into members' channels.
   - The member's channel is opened inside that member's `react()`, so code running in the member (a tool, a model wrapper, `on_continue`) can reach it through the private `current_agent_channel()`. The swarm's controller, outside the member, cannot.
-  - How the bus obtains refs, and how that coexists with ACP's first-binder-wins rule, is deferred to M2's design.
+  - Settled in [swarm-communication.md](swarm-communication.md): M2 posts nothing into member channels, so it needs no ref and no inspect_ai hook. A swarm `UserMessage` would satisfy ACP's post-interrupt redirect wait, and any other item is dropped by `react()`. The swarm binds each member's channel for identity only and leaves ACP's binding alone.
 - The channel brief names a "subagent supervisor" and "detached child channels" as intended future producers (`design/acp/agent_channel_brief.md:32`, `:178`).
 
 ### `react()` lifecycle
@@ -367,7 +367,7 @@ The notice is the one swarm-authored text that enters a member's context outside
 - Its only variables are counts, channel kinds, and names the eval author or controller assigned: member names from the roster, and board channels the task defined.
 - It never includes a message body, a subject line, a thread title, or a name a member chose. A board channel or thread a member created is referred to by a swarm-assigned id.
 
-So the notice does not let peer text into the user role. How it is rendered, and how wake works for bridged members (which have no `react()` channel; they may get `poll` only), is part of M2's design.
+So the notice does not let peer text into the user role. [swarm-communication.md](swarm-communication.md) settles the rest: the notice is appended at the member's turn boundary by a swarm `on_continue` hook, bridged members get `poll` only, and in M2 wake means ending a member's wait in `read_messages`.
 
 Tool output is a better place than the user role, but it is not a trust boundary by itself. ADK's own fencing module calls peers' turns and tool results "attacker-reachable" ([`_fencing.py`](https://github.com/google/adk-python/blob/main/src/google/adk/flows/llm_flows/context/_fencing.py)). So the read tools also follow three rules taken from the frameworks surveyed:
 - **Fence each message as data.** Each message sits between begin and end markers under a sender line the bus stamps. Copies of the markers inside the payload are removed, so a payload cannot close its own block. A fixed note says the content is another agent's message to read, not instructions to follow.
@@ -382,7 +382,7 @@ The two ways to mark the notice:
 - **A new `source` value**, which has the reader-compatibility cost described in [Compatibility](#compatibility-and-migration).
 - **Message `metadata`**, which does not.
 
-M2's design should lean towards metadata and a dedicated item, and add a `source` value only if the viewer must distinguish swarm notices without reading metadata. Whether either needs an inspect_ai change, given that private internals are allowed, is for M2's design.
+M2 uses a marked message: a `ChatMessageUser` with swarm metadata and no `source`, which needs no inspect_ai change ([swarm-communication.md](swarm-communication.md)).
 
 Vendor swarms differ. Codex's multi-agent v2 delivers peer text as author-attributed user messages, and the bridge reproduces that ([Bridged agents](#bridged-agents)). That is the vendor's design, evaluated as shipped; native members never receive peer text that way.
 
@@ -418,7 +418,7 @@ Cases that might need them, none committed:
 
 ### The bus: one interception point
 
-All sanctioned communication goes through one function, `deliver(record)`, which runs these steps in order:
+[swarm-communication.md](swarm-communication.md) details the bus, its tools, addressing and evidence. All sanctioned communication goes through one function, `deliver(record)`, which runs these steps in order:
 
 1. **Policy and monitor.** Attached protocols decide `continue`, `modify` (rewrite the payload, e.g. paraphrase), `reject` (the sender gets a tool error it can react to) or `terminate`.
 2. **Storm controls.** Per-sender rate, deduplication, inbox cap and size cap. Claude Code ships these for cross-session messaging so that a message loop "stops on its own".
@@ -450,7 +450,7 @@ The bus uses sentinel's action vocabulary from the start and adopts sentinel pro
 
 ### Observer: evidence, accounting and metrics
 
-**Evidence.** Each communication produces records of the kinds ORBIT uses: `sent`, `delivered`, `read` and `exposed`, the last meaning it entered a model's input. Each record carries:
+**Evidence.** Each communication produces records of the kinds ORBIT uses: `sent`, `delivered`, `notified`, `read` and `exposed`, the last meaning it entered a model's input. Each record carries:
 
 - sender and recipients (member names);
 - channel and kind;
@@ -575,7 +575,7 @@ The leaderless default matches how leaderless swarms succeed in practice: the C 
 | Part | Lives in | Why |
 |---|---|---|
 | `swarm()`, controller, members, budget, bus, channels, evidence, metrics, scorers, prompts, Scout scanners | inspect_swarm | Fast iteration; the runtime is opinionated and experimental. |
-| Notifying members and delivering peer messages | inspect_swarm, on inspect_ai's private channel internals where needed (M2) | Content is tool output from swarm tools, which needs nothing from inspect_ai. The metadata-only notice reaches a member at a turn boundary through its channel, or an `on_continue`-style injection as deepagent does. The open parts are: the [binder](#the-agent-channel), how the bus obtains each member's ref; and whether the notice is a dedicated channel item, which `react()` would need to render (an inspect_ai behaviour change), or a marked message. M2's design decides both, alongside ACP's first-binder-wins rule. Public exports are a later clean-up, not a prerequisite. |
+| Notifying members and delivering peer messages | inspect_swarm (M2), no inspect_ai change | Content is tool output from swarm tools. The metadata-only notice is a marked message appended by a swarm `on_continue` hook, as deepagent does; the swarm never posts into member channels ([swarm-communication.md](swarm-communication.md)). A channel item rendered by `react()` is the possible later upgrade. |
 | Clean re-entry of `react()` on an existing state (no second system prompt), or an idle state | inspect_ai (coordinator topologies), optional | Persistent members; the alternative is a `submit=False` member protocol inside inspect_swarm. |
 | A scoped owner for `background()` work, so a swarm can own and drain a member's descendants | inspect_ai, when background deepagent members are needed | Today `background()` attaches to the sample's task group; without an owner the swarm cannot drain `deepagent(background=True)` members. |
 | `span(..., metadata=)` and per-span usage in the log, including native compaction usage (for example on `CompactionEvent`) | inspect_ai, nice to have | Member identity and complete per-member cost without side records or an unattributed remainder. |
@@ -743,7 +743,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
   - It must run on both anyio backends, which rules out raw `asyncio` primitives in the runtime.
 - **Eval logs.** M1 writes only existing event types (spans, tool and model events, `InfoEvent`s) plus store and metadata entries. Old viewers and readers see a swarm log as an ordinary log with concurrent agent spans. The `InfoEvent` payload carries a `version` field so later readers can tell formats apart.
 - **inspect_ai extension points**, where behaviour needs them, are additive:
-  - possibly a binder hook (M2's design decides);
+  - no binder hook: M2 needs no inspect_ai change ([swarm-communication.md](swarm-communication.md));
   - extending the `source` literal changes the log schema and the generated TypeScript types, so it goes through inspect_ai's type-generation pipeline and a ts-mono PR;
   - a new `source` value is additive for new writers, but readers whose literal still has only `input`, `generate` and `operator` would reject logs containing it. M2's detailed design must either state the minimum reader version or carry the swarm notice's provenance in message `metadata`. The second avoids version skew and is preferred unless the viewer needs the distinction. Peer content itself needs neither, because it is tool output ([Delivery](#delivery-peer-messages-are-model-output)).
 - **A new event type**, if one is proposed ([open question 1](#open-questions)), is the largest change: the event union, schema, ts-mono types, viewer renderer, dataframes and Scout's event handling. M1 uses existing event types; whether and when to add a new event type remains open.
@@ -838,8 +838,7 @@ Each milestone is a small series of PRs, and the project convention applies: dis
 - Fenced, text-only read tools, with sender identity bound at the bus ([Delivery](#delivery-peer-messages-are-model-output)).
 - Monitoring through inspect_sentinel: its protocols directly if its dispatcher is on inspect_ai `main` by then; otherwise the minimal hook in its action vocabulary ([The bus](#the-bus-one-interception-point)).
 - `send_message`, `read_messages` and `list_members`, with delivery modes `poll` and `notify`. Content is delivered as tool output, and notices are metadata-only ([Delivery](#delivery-peer-messages-are-model-output)).
-- Notices through inspect_ai's private channel internals, or an `on_continue`-style injection; M2's design picks one.
-- M2's design settles the binder: how the bus obtains each member's ref, and whether that needs a small inspect_ai hook for behaviour. Public exports are a later clean-up.
+- Notices through a swarm `on_continue` hook, and a `read_messages` wait that `wake` ends; no inspect_ai change and no binder hook ([swarm-communication.md](swarm-communication.md)).
 
 **Later work, in any order or in part.** The real dependencies between items are noted so that whichever is picked first is not blocked unexpectedly.
 
