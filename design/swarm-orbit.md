@@ -158,7 +158,7 @@ Records carry the fields ORBIT's evidence carries, renamed: member (ORBIT's agen
 **The transcript observer.** At sample start, before any member starts, the swarm subscribes to the transcript. When a `ModelEvent` inside a member's span completes with no error, the observer:
 
 - for each `read` receipt of that member and conversation, finds the `ChatMessageTool` in the event's `input` with the receipt's tool-call id; skips it unless its function matches the receipt's and its `error` is `None`; and then checks each fragment separately with the newline-delimited substring rule. Each surviving fragment gets one `exposed` record the first time it is seen for that message, member and conversation. A read whose result was truncated or rewritten so that only some fragments survive exposes only those;
-- for each notice of that member, writes `exposed` with subject `notice` the first time the notice's message id is in the input;
+- for each notice of that member, writes `exposed` with subject `notice` the first time a message with the notice's message id is in the input and its text equals the notice's text, as ORBIT requires (`message.text == receipt.content`, `delivery.py:370-380`). An edit or input rewrite that keeps the id but removes or changes the text is not exposure. The swarm keeps each notice's text in the observer's memory and its hash in the `notified` record, and `record_exposure()` applies the same check;
 - marks an event with `cache == "read"` as a replayed generation, as ORBIT marks `source="inspect_cache"`.
 
 **Coverage.** A consumer can only treat a missing `exposed` record as "not exposed" when coverage is complete, so every member carries a coverage value in the swarm's evidence:
@@ -178,10 +178,11 @@ The subscription is a private API: `Transcript._subscribe`. inspect_swarm may us
 
 **The seam.** `swarm_continue(on_continue=None, *, conversational=False) -> AgentContinue` returns an `on_continue` that wraps the caller's own:
 
-1. Call the wrapped `on_continue` if there is one; if it returns `False`, return `False`: the member ends as it would alone. With none, apply `react()`'s default, except that under a policy a conversational member's tool-free reply is a boundary (step 2), not the end that the native default makes it.
-2. Decide whether this is an activation boundary. Under an activation policy it is one after every turn when the activation's quantum is `model_step`; and, for a `conversational=True` member, after a tool-free reply whatever the quantum. With no policy, or quantum `completion` for a member that is not conversational, it is not.
-3. At a boundary, take a [snapshot](#member-handles-snapshots-and-output), signal "yielded" to the policy, and wait until the policy opens the member's next activation. Cancellation (drain) ends the wait. On resume, return the member's committed conversation (with any [P5](#p5-trusted-interventions-later-with-p4) interventions and any M2 notice appended) as an `AgentState`, so `react()` adds no continue prompt.
-4. Not at a boundary, append any pending M2 notice by returning an `AgentState` composed with the wrapped result, as `deepagent()`'s `background_on_continue` composes its notices; with nothing pending, return the wrapped result unchanged.
+1. **Call the caller's hook.** Call the wrapped `on_continue` if there is one; if it returns `False`, return `False`: the member ends as it would alone. With none, the result is `react()`'s default, except that under a policy a conversational member's tool-free reply is a boundary (step 3), not the end that the native default makes it.
+2. **Apply its result as `react()` would.** The seam builds the continued state from the result exactly as `react()` applies it (`_react.py:366-407`, `:536-554`): a string is appended as a user message (with `{submit}` replaced for a submitting member); a returned `AgentState` replaces both the messages and the output; `True` after a tool-free reply appends `react()`'s own continue prompt (`DEFAULT_CONTINUE_PROMPT`, or `DEFAULT_CONTINUE_PROMPT_NO_SUBMIT` for a no-submit member); `True` after tool calls adds nothing. The one exception is the boundary that step 1 creates for a conversational member with no hook of its own: it adds no prompt, because no caller asked for one. These are the caller's and `react()`'s own continuation semantics and are kept; what a port removes is only `turn_react`'s extra resume prompt ("Please continue with your next action."), which the seam never adds.
+3. **Decide whether this is an activation boundary.** Under an activation policy it is one after every turn when the activation's quantum is `model_step`; and, for a `conversational=True` member, after a tool-free reply whatever the quantum. With no policy, or quantum `completion` for a member that is not conversational, it is not.
+4. **At a boundary,** take a [snapshot](#member-handles-snapshots-and-output) of the continued state from step 2; it is also the staged copy that [P5](#p5-trusted-interventions-later-with-p4) interventions work on. Signal "yielded" to the policy and wait until the policy opens the member's next activation. Cancellation (drain) ends the wait. On resume, return the committed conversation, with the continued state's output and then any M2 notice appended, as an `AgentState`. So the order of what the model sees next is: the caller's continuation (step 2), then interventions in the order the policy applied them, then the notice.
+5. **Not at a boundary,** return the continued state from step 2, with any pending M2 notice appended, as an `AgentState`, as `deepagent()`'s `background_on_continue` composes its notices; with no notice pending, return the wrapped result unchanged so `react()` applies it itself.
 
 `conversational=True` is for ORBIT's `submit=False` agents. Without a policy it changes nothing: the wrapped default still ends the member at a tool-free reply (`_react.py:553-554`). Under a policy, a tool-free reply ends the activation and the member stays available, which is what ORBIT's repeatable `completion` activations do; the spike's second case is this path.
 
@@ -373,7 +374,7 @@ Through all four steps `legacy/v1` stays on ORBIT's own executors.
   | `receipts` (per-message `rendered_messages`) | ORBIT's channel kind, which already holds the fragments it passes to `record_read()`; tool-call and event ids from the swarm's `read` record |
   | `events`: `sent`, `read` | the swarm's `sent` and `read` records, with the same message ids and native ids |
   | `events`: `model_exposure` | the swarm's `exposed` records with subject `message` |
-  | `events`: `notified` | the swarm's `exposed` records with subject `notice`, which match ORBIT's meaning (the notice reached a successful input, `delivery.py:373-379`); the swarm's own `notified` records are not projected |
+  | `events`: `notified` | the swarm's `exposed` records with subject `notice`, which match ORBIT's meaning (the notice's original text reached a successful input, `delivery.py:370-380`); the swarm's own `notified` records are not projected |
   | `events`: `delivered` | none: `auto` and dialogue projections do not run on the swarm runtime |
   | `observation_enabled_sessions` | members whose coverage is `complete`, or `external` and declared complete; a `failed` or `none` member is left out, so the scorer reports its reads as uncovered (`collusion_scorer.py:108-111`) instead of counting zero exposures |
   | `successful_input_sessions`, `observed_sessions`, `observed_invocations` | members with at least one observed successful generation; member conversation ids; activation ids |
@@ -403,7 +404,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
   - a `completion` activation of a submitting member runs to submission;
   - a conversational (`submit=False`) member gives two tool-free replies in two activations, with no continue prompt added, under both quanta; without a policy it ends at its first tool-free reply, as alone;
   - parked members are cancelled cleanly by drain;
-  - a wrapped `on_continue` keeps its `True`, string, `AgentState` and `False` semantics;
+  - a wrapped `on_continue` keeps its `True`, string, `AgentState` and `False` semantics without a policy and at a scheduled boundary: a returned string and a returned state's extra message and output are in the next model input after the boundary, ahead of an appended intervention and a notice; `True` after a tool-free reply of a submitting member adds `react()`'s continue prompt, and a conversational member with no hook gets none;
   - a submission ends the member;
   - a nested agent built with `swarm_continue()` does not park;
   - a member without the seam under a `model_step` policy runs one activation, and the harness-validity checks report it.
@@ -430,7 +431,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
   - a failed generation does not count;
   - a read with no later generation has no exposure;
   - concurrent members are attributed by span;
-  - a notice's `exposed` record (subject `notice`) appears only after a successful generation that included it;
+  - a notice's `exposed` record (subject `notice`) appears only after a successful generation that included it, and not when an edit or a filter kept the notice's id but redacted or replaced its text, in both the transcript and `record_exposure()` paths;
   - an observer that raises marks coverage `failed`, and no member is reported as complete;
   - a member declared `exposure="external"` is skipped by the transcript observer; with a test `ModelAPI` wrapper that redacts a peer message and reports through `record_exposure()`, the redacted message is not exposed even though the `ModelEvent` input contains it.
 - **Interventions:**
@@ -440,7 +441,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
   - an injection appended with `append` and tagged untrusted is rewritten by a following `edit` before the member's next generation.
 - **ORBIT-shaped conformance tests** with no ORBIT dependency:
   - a policy with sequential and concurrent steps over members using a reader and writer channel kind checks ORBIT's documented rules: messages do not activate members, submitted members are not activated again, step-start snapshots hide same-step sends, and concurrent failure cancels and joins siblings;
-  - a test helper builds a `CommunicationState`-shaped index from the swarm's evidence by the projection table above, and checks private-channel messages, per-session exposure pairs, notices with ORBIT's meaning, and uncovered receipts when coverage failed.
+  - a test helper builds a `CommunicationState`-shaped index from the swarm's evidence by the projection table above, and checks private-channel messages, per-session exposure pairs, notices with ORBIT's meaning (no `notified` for a same-id redacted notice), and uncovered receipts when coverage failed.
 
 ## Implementation plan
 
