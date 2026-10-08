@@ -500,7 +500,7 @@ The reserve and exhaustion policy, and its limits:
   - `TerminateSampleError`;
   - any other error.
   A group that mixes the swarm's own limit error with anything else propagates too.
-- **Provisional answer.** If an outer limit ends the sample first, there is no final step. The controller therefore keeps a provisional answer current as members submit: the final-answer chain, without `synthesize`, applied to the submissions so far ([swarm-scoring.md](swarm-scoring.md#the-final-answer-chain)). `as_solver()` copies the agent's output to the task state even when an exception ends the agent (`src/inspect_ai/agent/_as_solver.py:65-80`), so it survives, provided the controller sets it on the `AgentState` object it was passed. A provisional answer exists only once something has been submitted, or verified under a strict `final="verify"`. If the sample ends before that, the output is empty and the sample's metadata records that the swarm produced no answer and why. Nothing is invented.
+- **Provisional answer.** If an outer limit ends the sample first, there is no final step. The runtime therefore keeps a provisional answer current as members submit: the controller's final-answer chain, without `synthesize`, applied to the submissions so far ([swarm-scoring.md](swarm-scoring.md#the-final-answer-chain)). `as_solver()` copies the agent's output to the task state even when an exception ends the agent (`src/inspect_ai/agent/_as_solver.py:65-80`), so it survives, provided the runtime sets it on the `AgentState` object it was passed. A provisional answer exists only once something has been submitted, or verified under a strict `leaderless(final="verify")`. If the sample ends before that, the output is empty and the sample's metadata records that the swarm produced no answer and why. Nothing is invented.
 - **Roles.** Per-member usage is also mapped to model roles where members use different models, so `role_usage` in the log stays meaningful.
 - **Communication volume, as a diagnostic.** Realized totals stay whole-call usage. Inspect reports usage for a whole generation (`src/inspect_ai/core/_model_output.py:13-40`), and one generation's input mixes task instructions, several peers' earlier tool results and cached prefixes, so no measured charge belongs to any one message. Communication is therefore reported separately, and never as a partition of the bill:
   - **Measured:** counts and sizes of messages, notes and posts sent and read, per member and per sender, plus the usage of generations whose tool calls were swarm communication tools.
@@ -580,7 +580,7 @@ The defaults:
 - coordinator topologies: `reporter`;
 - leaderless swarms: `verify` when the task supplies a verifier, otherwise `vote` when the task defines a comparable answer form, otherwise `first` (decision: Ransom, 2026-10-07).
 
-The default is a chain that falls through: when nothing verifies the swarm votes, and when nothing can vote it takes the first submission. A single mode, such as `final="verify"`, is strict. [swarm-scoring.md](swarm-scoring.md#the-final-answer-chain) specifies each mode, `synthesize` and the verifier.
+The default is a chain that falls through: when nothing verifies the swarm votes, and when nothing can vote it takes the first submission. A single mode, such as `leaderless(final="verify")`, is strict. [swarm-scoring.md](swarm-scoring.md#the-final-answer-chain) specifies each mode, `synthesize` and the verifier.
 
 The leaderless default matches how leaderless swarms succeed in practice: the C compiler's oracle, Test-Time Communication's dense verifier. Voting means nothing without a comparable answer form. Every member's own submission is recorded regardless, so the effect of the final step can be measured separately.
 
@@ -797,7 +797,7 @@ Untrusted input reaches this code from several directions.
   - response-cache replays are counted as replays and charged zero;
   - native compaction usage appears as unattributed and agrees with the sample totals;
   - calls cancelled in flight are counted as unknown, and the total is then reported as a lower bound;
-  - zero submissions, and zero verified submissions under a strict `final="verify"`, leave an empty output with the reason recorded;
+  - zero submissions, and zero verified submissions under a strict `leaderless(final="verify")`, leave an empty output with the reason recorded;
   - the controller recovers its own cap's exhaustion both as an `ExceptionGroup` and as a lone `LimitExceededError` (which `collect()` unwraps);
   - sample-level limits, `TerminateSampleError`, other errors and mixed groups propagate unchanged;
   - an outer limit that trips before the reserve is used leaves the provisional answer as the output;

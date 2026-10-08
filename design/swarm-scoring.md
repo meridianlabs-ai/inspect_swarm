@@ -6,7 +6,9 @@ A deeper dive on one topic of [swarm.md](swarm.md): how a swarm's results are sc
 
 It respects the decisions recorded in swarm.md (Ransom, 2026-10-07): Python 3.11+, inspect_ai internals may be used, limits stay soft, members share the sample sandbox by default, M1 then M2 then the rest in any order. Sibling deep dives cover limits and the ledger, ORBIT alignment and inter-agent communication. This document refers to them and does not design them.
 
-Code references are to inspect_ai `main` at `215cf087` (2026-10-08) and inspect_evals `main` at `a73e6d99` (2026-10-08). Paths are relative to each repository's root.
+It builds on two designs merged on 2026-10-08 and uses their shapes ([summary](#what-the-merged-designs-fix)): [swarm-api.md](swarm-api.md), the `swarm()` API, where the final-answer chain is the controller's `final=` parameter and the swarm's fixed **runtime**, not the controller, verifies submissions, keeps the provisional answer, finalises and writes the record; and [swarm-communication.md](swarm-communication.md), whose fencing rules `synthesize` follows. Where this document says "the runtime", it means swarm-api.md's runtime.
+
+Code references are to inspect_ai `main` at `215cf087` (2026-10-08) and inspect_evals `main` at `a73e6d99` (2026-10-08). Paths are relative to each repository's root. Spikes ran against the inspect_ai this repository's lockfile installs (`0.3.278.dev1+gfccfb298e`), whose registry and scoring code is unchanged from `215cf087`.
 
 ## Why
 
@@ -95,15 +97,28 @@ What the design depends on, in inspect_ai unless noted.
 - SWE-bench diffs the repository against the start commit and runs the test script in the sandbox; the value depends only on the environment (`inspect_evals: src/inspect_evals/swe_bench/scorers.py:28-88`).
 - Frontier-CS extracts code from `output.completion` and compiles and runs it in the sandbox. When the *extracted code* is empty it recovers code from the sandbox's files (`inspect_evals: src/inspect_evals/frontier_cs/scorer.py:672-676`, `:631-660`). Extraction returns the last fenced block's contents (`scorer.py:38-69`), so a non-empty completion holding an empty fenced block also triggers the recovery. The unchanged scorer therefore reads the answer from the environment in some cases: it is not answer-scored in this design's sense.
 
+### What the merged designs fix
+
+What this design takes from [swarm-api.md](swarm-api.md) and [swarm-communication.md](swarm-communication.md), unchanged:
+
+- **Where the chain is passed.** `final=` is a controller parameter: `leaderless(final=..., stop_on_verified=...)`. `Controller(run, final=...)` holds it, and `final=None` means this design's default chain for the task's `result` ([Controllers](swarm-api.md#controllers)). `swarm(result=)` stays on `swarm()`. `FinalSpec = str | FinalMode | Sequence[str | FinalMode]` (this design narrows `str` to the mode names), and every `FinalMode` must be a pydantic model with a discriminator, so a mixed chain is logged faithfully and validates back from JSON ([Logging and replay](swarm-api.md#logging-and-replay)).
+- **Runtime and controller.** The runtime owns member tasks, verification, the provisional answer, the stop procedure (close scheduling, soft stop, grace, hard stop), finalisation and the record. The controller decides who starts, when, and when the swarm is done; it may start members conditionally, so some members can stay `pending` and never run (swarm-api.md's `escalate` example) ([Controller and runtime](swarm-api.md#controller-and-runtime)).
+- **Member state and status.** `MemberState` is `pending`, `running` or `ended`. Once ended, a member's status is the limits deep dive's closed set as swarm-api.md cites it: `submitted`, `stopped`, `share`, `member_limit:<type>`, `swarm_cap`, `cancelled`, `errored`. `submitted` is this design's submission ([Controllers](swarm-api.md#controllers), "Statuses").
+- **What controllers see of a verdict.** `VerdictSummary(passed, value)`, on `MemberHandle.verdict` and `MemberEnded.verdict`. A member counts as running until the runtime has taken its submission's verdict and queued its `MemberEnded`. The explanation stays in the result record.
+- **Logging.** `swarm(result=)` is logged as the type name `"ResultSpec"`. A raw-solver replay (`--solver inspect_swarm/swarm -S ...`) passes that string back, and `swarm()` raises `TypeError` for it. The supported routes are the task, or a registered swarm builder ([Logging and replay](swarm-api.md#logging-and-replay)).
+- **Task identity.** Scorers are not hashed into `task_identifier()`, and a member's in-loop scoring makes the task's scorer part of the trajectory, so a scorer ablation is an arm of its own, chosen by a task argument ([Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
+- **Evidence and fencing (M2).** Evidence is `InfoEvent`s with `source="inspect_swarm"` and payloads carrying `version`, `type` and `kind`, with common fields `member` and `span_id` ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)). Peer text is fenced in tagged envelopes whose tag markers are removed from payloads, repeating until none remain ([Fencing](swarm-communication.md#fencing)). Communication changes nothing about how a member submits: a member still submits through its own agent.
+
 ## Design
 
 ### Terms
 
-- **Member output.** The member's `AgentState.output` when it stops, however it stops: what Inspect would have scored had that member been the only solver. The member runner keeps a reference to the member's `AgentState`, as `as_solver()` does, so the output survives the member's own limit and the drain. For agents that do not update their state in place, a cancelled member's output is empty.
-- **Submission.** A member output from a member that finished normally (status `done`). For `react()` that is a submit; for a bridged agent it is the agent returning. A member stopped by its own limit, an error or the drain has an output but no submission. Each member submits at most once, because `react()`'s internal attempts are not visible outside it.
+- **Member output.** The member's `AgentState.output` when it stops, however it stops: what Inspect would have scored had that member been the only solver. The runtime's member wrapper keeps a reference to the member's `AgentState`, as `as_solver()` does, so the output survives the member's own limit and the stop procedure. For agents that do not update their state in place, a cancelled member's output is empty.
+- **Submission.** A member output from a member that ended with status `submitted`: it finished normally. For `react()` that is a submit; for a bridged agent it is the agent returning. A member that ended with any other status (stopped, its own or the swarm's limit, cancelled, errored) has an output but no submission. Each member submits at most once in M1, because a member runs once and `react()`'s internal attempts are not visible outside it.
+- **Not started.** A member the controller never started stays `pending`. It has no output and no submission, and scoring leaves it out rather than counting it as a failure ([Answer-scored tasks](#answer-scored-tasks-per-member-scores)).
 - **Final answer.** What the swarm returns as its `AgentState.output`, chosen by the final-answer chain from the submissions.
 - **Answer key.** The task's comparable form of an answer, used for voting.
-- **Swarm time.** Seconds on the controller's clock (`anyio.current_time()`) from the swarm's start. Every ordering by time, in the swarm and in the analysis, uses it.
+- **Swarm time.** Seconds on the runtime's clock (`anyio.current_time()`) from the swarm's start. Every ordering by time, in the swarm and in the analysis, uses it.
 
 ### The result contract
 
@@ -148,11 +163,13 @@ For audit, the record stores a label for the verifier: its `name` attribute if i
 
 **`member_artifacts.materialize(member)`** is an async context manager that puts that member's artifact where the scorer looks for the team artifact, and restores the team artifact on exit, including on error. See [Shared-artifact tasks](#shared-artifact-tasks-and-per-member-artifacts).
 
-A swarm without `result=` still runs. Its chain is `first`, its record says `kind: null`, and `member_scores()` reports per-member values as unavailable. Omitting the contract never produces a per-member claim.
+A swarm without `result=` still runs. Its default chain is `first`, its record says `kind: null`, and `member_scores()` reports per-member values as unavailable. Omitting the contract never produces a per-member claim.
+
+`ResultSpec` stays a frozen dataclass: it holds the task's callables, so no serialisable form would rebuild it, and swarm-api.md already routes it through the task or a registered swarm builder ([What the merged designs fix](#what-the-merged-designs-fix)).
 
 ### Opting in
 
-The spec holds callables, which Inspect cannot log or rebuild as a scorer argument ([Current behaviour](#scorer-arguments-in-the-log-and-re-scoring)). So the task keeps the spec in one function, passes it to `swarm()` directly, and wraps `member_scores()` in a **registered, no-argument scorer factory of its own**, which re-scoring rebuilds by name:
+The spec holds callables, which Inspect cannot log or rebuild as a scorer argument ([Current behaviour](#scorer-arguments-in-the-log-and-re-scoring)) or as a solver argument. So the task keeps the spec in one function, passes it to `swarm()` directly, and wraps `member_scores()` in a **registered, no-argument scorer factory of its own**, which re-scoring rebuilds by name:
 
 ```python
 def frontier_math_result() -> ResultSpec:
@@ -166,7 +183,11 @@ def frontier_math_members() -> Scorer:
 def frontier_math(arm: str = "swarm", k: int = 4, budget: float = 40.0) -> Task:
     agent = react(...)
     solver = (
-        swarm(members=member(agent, count=k), budget=cost_limit(budget), result=frontier_math_result())
+        swarm(
+            members=member(agent, name="solver", count=k),
+            budget=Budget(cost=budget),
+            result=frontier_math_result(),
+        )
         if arm == "swarm"
         else baseline(agent, result=frontier_math_result())
     )
@@ -182,29 +203,33 @@ def frontier_math(arm: str = "swarm", k: int = 4, budget: float = 40.0) -> Task:
 - `member_scores(scorer, result, *, value_to_float=value_to_float(), empty_value=0.0) -> Scorer` is a plain builder, not itself registered. `MEMBER_METRICS` is `{"best_member": [mean(), stderr()], "mean_member": [mean(), stderr()]}`. Both are exported from `inspect_swarm.scorer`.
 - If the factory needs parameters, they must be values Inspect logs and rebuilds (strings, numbers, registered objects), and the factory builds the spec from them.
 - The task's own scorer stays first and unchanged, so the headline score is the same scorer in every arm.
-- **Baselines run as a swarm of one.** `baseline(agent, result)` is `swarm(members=member(agent), channels=[], final="first", result=result)`: swarm.md's natural baseline. Every arm then writes the same record, with the same clock, eligibility rule, run-time verdicts and usage boundary, which select@k and the cost comparison need. A plain agent without `baseline()` still gets `member_scores` values (its output is scored as one member), but no run-time evidence, so the analysis leaves it out of select@k and cost comparisons and says so.
+- The swarm arm uses swarm-api.md's defaults: `controller="leaderless"`, whose `final=None` gives this design's default chain, and `channels=("filesystem",)`. The arms differ in the task argument `arm`, so they are distinct in an eval set even though scorers and epochs are not hashed ([Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
+- A task that wants the swarm replayable from a solver spec (`--solver`, inspect_flow solver specs) wraps it in a registered swarm builder, swarm-api.md's `math_swarm`, which builds the same `result=` inside.
+- **Baselines run as a swarm of one.** `baseline(agent, result)` is `swarm(members=member(agent), controller=leaderless(final="first"), channels=[], result=result)`, as swarm-api.md's [parameter table](swarm-api.md#where-the-sibling-designs-parameters-go) has it: swarm.md's natural baseline. Every arm then writes the same record, with the same clock, eligibility rule, run-time verdicts and usage boundary, which select@k and the cost comparison need. A plain agent without `baseline()` still gets `member_scores` values (its output is scored as one member), but no run-time evidence, so the analysis leaves it out of select@k and cost comparisons and says so.
 - In practice the swarm's cap sits below the sample limit by the final-answer reserve (the limits deep dive); the example leaves that out.
 
 A swarm of one returns an empty output when its member never submits, where a plain agent would be scored on its last output. That is the same conservative rule the swarm arm follows ([No submissions](#the-final-answer-chain)), so the arms stay comparable with each other, if not with a plain agent.
 
 ### What the swarm records
 
-The controller keeps one record in the sample store under the key `inspect_swarm.result`, as `model_dump(mode="json")` of:
+The runtime keeps one record in the sample store under the key `inspect_swarm.result`, as `model_dump(mode="json")` of:
 
 ```python
 class MemberResult(BaseModel):
-    name: str                         # roster name, assigned by the eval author or controller
+    name: str                         # roster name after count expansion, chosen by the eval author
     role: str | None
     model: str | None
-    status: Literal["running", "done", "limit", "errored", "cancelled"]
-    output: ModelOutput | None        # member output (see Terms)
+    state: MemberState                # swarm-api.md: "pending", "running" or "ended"
+    status: str | None                # the limits deep dive's status once ended, else None
+    submitted: bool                   # status == "submitted"
+    output: ModelOutput | None        # member output (see Terms); None while pending
     time: float | None                # swarm time when the member stopped
     answer_key: str | None            # result.answer_key(output.completion), when defined
     verdict: Verdict | None           # verifier result for a submission, when a verifier exists
     verdict_time: float | None        # swarm time when the verdict was taken
 
 class FinalRecord(BaseModel):
-    chain: list[str]                  # e.g. ["verify", "vote", "first"]
+    chain: list[str]                  # mode names, e.g. ["verify", "vote", "first"]; parameters are in the plan
     mode: str | None                  # the mode that produced the answer
     member: str | None                # the member whose output was chosen; None for synthesize
     reason: str | None                # why there is no answer, e.g. "no_submissions", "none_verified"
@@ -225,17 +250,41 @@ class SwarmResultRecord(BaseModel):
     solve_exit: Literal["returned", "limit", "terminated", "error", "cancelled"] | None
 ```
 
-- The controller writes the record when the swarm starts, updates it when a member stops (adding its output, key and verdict) and when the provisional answer changes, and finalises it after the drain. An outer limit that ends the sample early therefore leaves an accurate record with `provisional: true`.
+- The runtime writes the record when the swarm starts, with every roster member `pending`; updates it when a member starts, when one ends (adding its status, output, key and verdict) and when the provisional answer changes; and finalises it after the stop procedure. An outer limit that ends the sample early therefore leaves an accurate record with `provisional: true`. Members the controller never started stay `pending` in the final record, which is how the evidence records them as not started.
 - `solve_usage` is the sample's cumulative usage (`sample_model_usage()`, and `sample_role_usage()` for roles), taken in the swarm's outermost `finally`, however the swarm exits: after finalisation (`synthesize` included) when it returns, and after its task group has cancelled and awaited the members when a sample limit, `TerminateSampleError`, an error or a cancellation propagates out of it. Both reads and the store write are synchronous, so they run under cancellation too, and `solve_exit` records the path. Inspect scores only after the solver has returned or raised (`run.py:2960-3059`), so the snapshot always falls before grading. Sample usage already counts native compaction and excludes response-cache replays, so it is complete where model events are not ([Cost comparisons](#cost-comparisons-exclude-scoring)). It covers everything up to the swarm's exit, so the swarm must be the task's last solver step; `swarm()` documents this, and a later solver step's usage would land after the boundary.
 - It is in the store, not only in events, because re-scoring rebuilds `TaskState.store` and nothing else from the run.
-- Each stop, verdict and the final selection also produce an evidence `InfoEvent` (`source="inspect_swarm"`, versioned payload, kinds `member_result`, `verdict`, `final`), inside the member's span or the swarm's span. They put the result in the transcript at the time it happened; the store record is what scorers read. The InfoEvent payload format is the Observer's ([Observer](swarm.md#observer-evidence-accounting-and-metrics)); this design adds these three kinds.
+- Each member's end, each verdict and the final selection also produce an evidence `InfoEvent` with `source="inspect_swarm"` and the payload shape swarm-communication.md uses for its own evidence: `version: 1`, `type: "result"`, and `kind` one of `member_result`, `verdict`, `final`, with the common fields `member` and `span_id` (the swarm's span for `final`). Each is written inside the member's span or the swarm's span. They put the result in the transcript at the time it happened; the store record is what scorers read. The payload format is the Observer's ([Observer](swarm.md#observer-evidence-accounting-and-metrics)); this design adds the `result` type and its three kinds, as the communication design adds `comm`.
 - Outputs can be long (code). They are stored once, in the record; evidence events carry the member name and the answer key, not the text.
 
 The swarm's returned `AgentState` has the sample's input messages followed by one assistant message: the final answer's `output.message`, with `metadata={"inspect_swarm": {"final": {"mode": ..., "member": ...}}}`. Its `output` is the chosen member's `ModelOutput`, unchanged, so the task's scorer sees exactly the object it would have seen had that member run alone. Members' own conversations stay in their spans and timelines.
 
 ### The final-answer chain
 
-`swarm(final=...)` takes one mode or a sequence of modes. A sequence is a chain: each mode is tried in order on the submissions, and the first that produces an answer wins.
+The controller's `final=` parameter (`leaderless(final=...)`) takes one mode or a sequence of modes. A sequence is a chain: each mode is tried in order on the submissions, and the first that produces an answer wins. The runtime applies the controller's chain; the controller never sees member text ([What the merged designs fix](#what-the-merged-designs-fix)).
+
+```python
+# src/inspect_swarm/_final.py
+FinalName = Literal["verify", "vote", "first", "synthesize"]   # "synthesize" is synthesize() with its defaults
+
+class Synthesize(BaseModel):          # frozen; arbitrary types allowed for Model
+    mode: Literal["synthesize"] = "synthesize"
+    model: str | Model | None = None  # a Model is written as Inspect's model dict and read back from it
+    prompt: str | None = None
+
+class Reporter(BaseModel):            # frozen
+    mode: Literal["reporter"] = "reporter"
+    member: str                       # a roster name
+
+FinalMode = Annotated[Synthesize | Reporter, Field(discriminator="mode")]
+FinalSpec = FinalName | FinalMode | Sequence[FinalName | FinalMode]
+
+def synthesize(model: str | Model | None = None, prompt: str | None = None) -> Synthesize: ...
+def reporter(member: str) -> Reporter: ...
+def final_chain(final: FinalSpec | None, result: ResultSpec | None) -> list[FinalName | FinalMode]: ...
+```
+
+- **Logging and replay.** A controller factory validates its `final` argument with a `TypeAdapter(FinalSpec)`, which also accepts the dict forms replay passes back, as swarm-api.md requires of every pydantic argument. `Synthesize.model` has a serialiser that writes a `Model` with `registry_value()` (Inspect's model dict: name, config, base URL, model args) and a validator that accepts that dict, because `registry_value()` reaches a `Model` only at top level or inside lists and dicts, not inside a pydantic model (`src/inspect_ai/_util/registry.py:660-686`). A spike with an `@agent` factory standing in for `leaderless` confirmed the round trip: `final=["verify", Synthesize(model=get_model("mockllm/model"), prompt="x"), "first"]` was logged as `["verify", {"mode": "synthesize", "model": {"model": "mockllm/model", "config": {}, "base_url": null, "model_args": {}}, "prompt": "x"}, "first"]`, and `create_registry_object()` on those params rebuilt the chain with a `Model` whose name matched. The plain string `"synthesize"` is logged as itself.
+- **`final_chain()`** turns the controller's `final` and the task's `result` into the chain the runtime applies: the default below when `final` is `None`, otherwise `final` as a list.
 
 | Mode | Needs | Produces | Produces nothing when |
 |---|---|---|---|
@@ -245,34 +294,36 @@ The swarm's returned `AgentState` has the sample's input messages followed by on
 | `synthesize` | `kind="answer"` | One extra model call over the submissions ([below](#synthesize)) | there are no submissions, or the call fails recoverably |
 | `reporter` | a coordinator topology | Reserved; rejected in M1 | |
 
-**The default.** With `final=None`, the chain is built from what the task supplies: `verify` if there is a verifier, then `vote` if there is an answer key, then `first`. So a task with both gets `["verify", "vote", "first"]`, one with neither gets `["first"]` (decision: Ransom, 2026-10-07, for the order). This design reads the decision as a chain that falls through: when nothing verifies, the swarm votes, and when nothing can vote, it takes the first submission. A single mode, `final="verify"`, is strict: no verified submission means no answer. [Open question 1](#open-questions) asks Ransom to confirm the fall-through reading.
+**The default.** With the controller's `final=None` (the default of `leaderless()`), the chain is built from what the task supplies: `verify` if there is a verifier, then `vote` if there is an answer key, then `first`. So a task with both gets `["verify", "vote", "first"]`, one with neither gets `["first"]` (decision: Ransom, 2026-10-07, for the order). This design reads the decision as a chain that falls through: when nothing verifies, the swarm votes, and when nothing can vote, it takes the first submission. A single mode, `leaderless(final="verify")`, is strict: no verified submission means no answer. [Open question 1](#open-questions) asks Ransom to confirm the fall-through reading.
 
-**Validation.** `swarm()` raises `ValueError` at construction when a mode's need is missing (`verify` without a verifier, `vote` without an answer key, `synthesize` on an artifact task, `reporter` on a leaderless swarm), naming the missing piece.
+**Validation.** `swarm()` applies these rules to its controller's chain at construction, as swarm-api.md's validation list says, and raises `ValueError` when a mode's need is missing (`verify` without a verifier, `vote` without an answer key, `synthesize` on an artifact task), naming the missing piece. A `reporter` mode is the controller's to accept: `leaderless()` raises `ValueError` for one when it is called, and a controller that accepts one checks its member against the roster in its `check`, as swarm-api.md's `coordinator` does. M1 has no controller with a reporter.
 
-**When verdicts are taken.** When the task supplies a verifier, the controller verifies every submission as it arrives, whether or not `verify` is in the chain, so the analysis always has verdicts. Verifier calls run one at a time in the controller, inside the swarm's span, so their usage, if any, is in `solve_usage` and the ledger, charged to the swarm rather than to a member. Which limit node meters them is the limits deep dive's call.
+**When verdicts are taken.** When the task supplies a verifier, the runtime verifies every submission as it arrives, whether or not `verify` is in the chain, so the analysis always has verdicts. It takes the verdict before it queues the member's `MemberEnded`, so a controller's `stop_on_verified` or escalation sees it, as a `VerdictSummary` without the explanation. Verifier calls run one at a time in the runtime, inside the swarm's span, so their usage, if any, is in `solve_usage` and the ledger, charged to the swarm rather than to a member. Which limit node meters them is the limits deep dive's call.
 
-**Provisional answer.** After each submission or verdict, the controller applies the chain without `synthesize` (which needs a model call) to the submissions so far and sets the result on the `AgentState` it was passed, as swarm.md's [exhaustion policy](swarm.md#observer-evidence-accounting-and-metrics) requires. When nothing qualifies, the output stays empty and `reason` says why. Nothing is invented.
+**Provisional answer.** After each submission or verdict, the runtime applies the chain without `synthesize` (which needs a model call) to the submissions so far and sets the result on the `AgentState` it was passed, as swarm.md's [exhaustion policy](swarm.md#observer-evidence-accounting-and-metrics) requires. When nothing qualifies, the output stays empty and `reason` says why. Nothing is invented.
 
 **No submissions.** When no member submitted, the final answer is empty with `reason="no_submissions"`, even though members have outputs. An output from a member stopped mid-work is usually a working message, not an answer. The per-member scores still score those outputs, so `best_member` reflects them.
 
-**Finalisation.** After the drain (the limits deep dive owns its ordering against the reserve), the controller verifies any submission not yet verified, runs the chain once more including `synthesize`, and, for an artifact task with a verifier, takes `final_verdict` ([Shared-artifact tasks](#shared-artifact-tasks-and-per-member-artifacts)). It then writes the final record with `provisional: false`, writes the `final` evidence event and returns; `solve_usage` is taken on the way out.
+**Finalisation.** After the stop procedure (swarm-api.md's [Stopping](swarm-api.md#controllers): scheduling closed, soft stop, grace, hard stop; the limits deep dive owns its ordering against the reserve), the runtime verifies any submission not yet verified, including those from members that ended during grace, runs the chain once more including `synthesize`, and, for an artifact task with a verifier, takes `final_verdict` ([Shared-artifact tasks](#shared-artifact-tasks-and-per-member-artifacts)). It then writes the final record with `provisional: false`, writes the `final` evidence event and returns; `solve_usage` is taken on the way out.
 
 ### `synthesize`
 
 `synthesize` is explicit only, never a default, because it is the one place peer text enters a prompt the harness composes ([Security](swarm.md#security)).
 
-```python
-def synthesize(model: str | Model | None = None, prompt: str | None = None) -> FinalMode: ...
-```
+`synthesize(model=None, prompt=None)` returns the `Synthesize` mode above; the string `"synthesize"` is the same with its defaults.
 
 - **Model.** `model`, else the model role `synthesizer` if the eval defines it, else the swarm's default model (`get_model()`).
-- **Prompt.** A fixed template: the sample's input, then each submission fenced as data under a sender line the harness writes (the member's roster name), with the fence markers removed from the payload, as in [Delivery](swarm.md#delivery-peer-messages-are-model-output). It ends with an instruction to give one final answer in the format the task asks for. Only submissions are included, never members' tool calls or transcripts. `prompt` replaces the instruction, not the fencing.
+- **Prompt.** A fixed template: the sample's input, then a fixed header, then each submission in the envelope swarm-communication.md uses for peer messages ([Fencing](swarm-communication.md#fencing)), with its own tag: `<member_submission id="1" from="worker-2">...</member_submission>`, in roster order. The header says that each block is another agent's output, to be treated as information, not instructions. It ends with an instruction to give one final answer in the format the task asks for. `prompt` replaces that instruction, not the header or the fencing.
+  - **Marker removal** follows the communication design's rule: every case-insensitive occurrence of `<member_submission` and `</member_submission` is removed from the payload, repeating until none remain, so nested fragments cannot reassemble a tag.
+  - **Attribute values** are roster names and sequence numbers. Roster names come from the eval author, but M1 has no name grammar (the messages channel's grammar is checked only when that channel is enabled), so the fence escapes them as XML attribute values.
+  - **Text only.** The payload is the submission's completion. Members' tool calls, transcripts and messages are never included.
+  - **One helper.** The envelope, marker removal and escaping live in `src/inspect_swarm/_fence.py`, built in M1 for `synthesize`, and M2's read tools use the same helper with their own tags, so the two cannot drift.
 - **Shared notes.** In M1 there is no notes channel; the filesystem notes file is not read, because its contents are unfenced and member-written in any layout. If the notes channel is built later, its entries are fenced the same way.
 - **Accounting.** The call runs in the swarm's span after the drain, inside the final-answer reserve, so `solve_usage` and the ledger count it as finalisation.
 - **Failures.** Before the call, the provisional answer (computed without `synthesize`) is already on the `AgentState`. Then:
   - **Classification is group-aware.** Inspect re-raises a provider's exception without unwrapping it (`src/inspect_ai/model/_model.py:1651-1656`), so a model API that uses a task group can raise an `ExceptionGroup` holding a `LimitExceededError`. An exception is *stopping* if it is, or is a `BaseExceptionGroup` that contains at any depth, a `LimitExceededError`, a `TerminateSampleError` or the backend's cancellation exception (`anyio.get_cancelled_exc_class()`). The check uses `BaseExceptionGroup.subgroup()` (Python 3.11).
   - **Recoverable:** an `Exception` from the call that is not stopping (a provider error after Inspect's retries, a `ModelRefusalError`, a group of such errors), and a returned output with an empty completion or `stop_reason="content_filter"`. The chain moves to its next mode and `synthesize_error` records why. A chain of `["synthesize"]` alone keeps the provisional answer.
-  - **Not recoverable:** a stopping exception propagates unchanged, as raised. A group is never split: a group that mixes a limit with an ordinary error propagates whole, which is what swarm.md's exhaustion policy expects of mixed groups. A limit error reaches the controller's [exhaustion policy](swarm.md#observer-evidence-accounting-and-metrics), which recovers only the swarm's own cap and lets every other limit reach the runner, so Inspect records `EvalSample.limit`. Either way the provisional answer is the sample's output.
+  - **Not recoverable:** a stopping exception propagates unchanged, as raised. A group is never split: a group that mixes a limit with an ordinary error propagates whole, which is what swarm.md's exhaustion policy expects of mixed groups. A limit error reaches the runtime's [exhaustion policy](swarm.md#observer-evidence-accounting-and-metrics), which recovers only the swarm's own cap and lets every other limit reach the runner, so Inspect records `EvalSample.limit`. Either way the provisional answer is the sample's output.
 - **Scoring.** The synthesized answer is no member's output. The task's scorer scores it; per-member scores are unaffected.
 
 ### Answer-scored tasks: per-member scores
@@ -280,14 +331,14 @@ def synthesize(model: str | Model | None = None, prompt: str | None = None) -> F
 The scorer `member_scores(scorer, result, ...)` builds:
 
 1. **Skips in-loop scoring.** If `state.completed` is `False`, it returns `None` at once. `score()` drops `None` results, so `react(attempts=...)`, `basic_agent`, the human agent's `/score` and the inspect_swe attempt loops see exactly the task scorer's feedback and call count they saw before, and the wrapper never runs the inner scorer, touches the sandbox or reads a half-written record during the solve. Final scoring and re-scoring both have `completed=True`.
-2. **Reads the members.** From the `inspect_swarm.result` record when it exists. Otherwise (a plain agent, not `baseline()`) it treats the sample's `output` as one member named `solver` with status unknown, and computes its answer key, which is a pure function. It never runs the verifier.
+2. **Reads the members.** From the `inspect_swarm.result` record when it exists. Otherwise (a plain agent, not `baseline()`) it treats the sample's `output` as one started member named `solver` with status unknown, and computes its answer key, which is a pure function. It never runs the verifier.
 3. **Checks the contract.** If `result.kind` is not `"answer"`, or the record's kind differs from `result.kind`, it returns `best_member` and `mean_member` as NaN with `reason` saying why (`"artifact_without_member_artifacts"`, `"kind_mismatch"`, `"kind_not_declared"`). Shared-artifact tasks with member artifacts are handled [below](#shared-artifact-tasks-and-per-member-artifacts).
-4. **Grades each member, in roster order.** Each member gets one of three outcomes:
+4. **Grades each member, in roster order.** A member that never started (state `pending`) gets the outcome **not started**: no value, reason `"not_started"`, and the scorer is not called. It ran nothing, so it is neither a failure nor unavailable. Every other member gets one of three outcomes:
    - **Empty.** No output, or a completion that is empty after stripping whitespace: value `empty_value` (default 0.0), reason `"empty_output"`, and the scorer is not called. This keeps a scorer's environment fallback from crediting the team's work to a member that produced nothing. It is a backstop, not the contract: a non-empty completion can still extract to nothing (an empty fenced block), which is why `kind="answer"` requires a scorer that never reads the answer from the environment.
    - **Graded.** Otherwise it builds a deep copy of the `TaskState` whose `output` is the member's `ModelOutput` and whose `messages` are the sample's input messages plus the member's `output.message`, awaits the scorer with the sample's target, and converts the value with `value_to_float`.
    - **Unavailable.** The scorer returned `None`, a NaN value (`Score.unscored()`), or a dict or list value (no general best of a dict). The member's value is NaN, with the scorer's own `reason` kept, or `"scorer_returned_none"` or `"non_scalar_value"`.
-5. **Aggregates over the members with a value** (empty and graded), ignoring unavailable ones explicitly rather than through `max`/`mean` on NaN, so the result does not depend on roster order: `best_member` is their maximum and `mean_member` their mean. Metadata records `members_total`, `members_valued` and `complete` (no member unavailable), so analysis can restrict to complete samples. With no member valued, both keys are NaN with reason `"no_member_valued"`.
-6. **Returns** `Score(value={"best_member": ..., "mean_member": ...}, metadata=...)`. The metadata holds, per member: outcome, value, answer, explanation, reason, status, `submitted`, answer key, verdict and time; plus the record's `final` block and `kind`. The analysis reads these.
+5. **Aggregates over the members with a value** (empty and graded), ignoring unavailable and not-started ones explicitly rather than through `max`/`mean` on NaN, so the result does not depend on roster order: `best_member` is their maximum and `mean_member` their mean. Metadata records `members_total` (the roster), `members_started`, `members_valued` and `complete` (no started member unavailable), so analysis can restrict to complete samples and see how many members a conditional controller ran. With no member valued, both keys are NaN with reason `"no_member_valued"`.
+6. **Returns** `Score(value={"best_member": ..., "mean_member": ...}, metadata=...)`. The metadata holds, per member: outcome, value, answer, explanation, reason, state, status, `submitted`, answer key, verdict and time; plus the record's `final` block and `kind`. The analysis reads these.
 
 Scores of the copies are not added to `state.scores`, so they do not appear as extra sample scores. Each inner scoring runs inside a span named after the member, within `member_scores`'s scorer span, so a model-graded scorer's calls are attributable.
 
@@ -305,8 +356,8 @@ For `kind="artifact"`:
 
 - **The team score** is the task's scorer on the drained environment. It is the only result the task defines, and it is computed first.
 - **The final-answer chain** still runs and sets `output`, because some scorers read the output text and fall back to the environment (Frontier-CS). `synthesize` is rejected.
-- **The verifier**, when given, checks the environment, not an answer. It is called with the submitting member's completion and the sample metadata whenever a member submits. The controller can use the verdict as a termination signal ([Controller](swarm.md#controller-topology-termination-final-answer)); members still working when it fires keep editing until the drain cancels them, so the environment that is scored can differ from the one that was verified.
-- **`final_verdict`** is therefore taken in M1's finalisation, after the drain, on the environment that will be scored: the controller calls the verifier once more with the final answer's completion, or `""` when there is no final answer. Analysis compares it with the run-time verdicts and with the team score.
+- **The verifier**, when given, checks the environment, not an answer. It is called with the submitting member's completion and the sample metadata whenever a member submits. A controller can stop on it (`leaderless(stop_on_verified=True)`, [swarm-api.md](swarm-api.md#examples)); members still working when it fires keep editing until the stop procedure ends them, so the environment that is scored can differ from the one that was verified.
+- **`final_verdict`** is therefore taken in M1's finalisation, after the stop procedure, on the environment that will be scored: the runtime calls the verifier once more with the final answer's completion, or `""` when there is no final answer. Analysis compares it with the run-time verdicts and with the team score.
 - **Per-member scores** are unavailable unless the task supplies `member_artifacts`.
 
 With `member_artifacts`, `member_scores` grades each member's artifact instead of its output text. Every member is graded, whatever its completion: the empty-output outcome is for answer tasks only, because a member can leave a passing artifact and stop without submitting any text. Unavailable grades and aggregation follow answer tasks:
@@ -353,6 +404,11 @@ team@k follows Test-Time Communication's usage: "a game counts as solved if any 
 
 All of them are compared at realized cost, with each arm's cap and realized spend reported (swarm.md, [Eval questions](swarm.md#eval-questions-and-the-experimental-design-they-imply)).
 
+Two things the merged designs add to what these quantities mean:
+
+- **Conditional controllers.** A controller may leave members `pending` (swarm-api.md's `escalate` starts its workers only when the first answer does not verify). k stays the roster size, the arm's configuration. team@k and mean member are over the members that started, `members_started` is reported beside them, and the cost comparison, at realized cost, reflects how many ran. With `leaderless`, every member starts, so these coincide.
+- **Communication (M2).** With the messages channel, a member's submission may repeat what a peer sent it. Per-member scores measure what each member submitted, which is team@k's meaning ("any of the k agents"), not what it derived alone; `vote` counts a copied answer as that member's vote. The communication evidence (`read` and `exposed`, [Evidence and provenance](swarm-communication.md#evidence-and-provenance)) lets analysis tell the cases apart. The record and the scorers need no change for it.
+
 ### `best_at(k)`: best of k from n epochs
 
 ```python
@@ -375,7 +431,7 @@ select@k needs each attempt's eligibility, answer key, verdict and time, which a
 @dataclass(frozen=True)
 class Attempt:
     epoch: int
-    submitted: bool                   # the member's status was "done"
+    submitted: bool                   # the member's status was "submitted"
     time: float | None                # swarm time when it stopped
     answer_key: str | None
     verdict: Verdict | None
@@ -411,7 +467,7 @@ Swarm.md takes each arm's total from Inspect's sample usage ([Accounting](swarm.
 
 ### Re-scoring
 
-- **Answer tasks with sandbox-free scorers.** `member_scores` reads only the store record, the sample's input and the target, so `inspect score` reproduces it from the log, and can apply a new scorer to every member's output after the fact, provided the task's registered factory is loadable ([Opting in](#opting-in)).
+- **Answer tasks with sandbox-free scorers.** `member_scores` reads only the store record, the sample's input and the target, so `inspect score` reproduces it from the log, and can apply a new scorer to every member's output after the fact, provided the task's registered factory is loadable ([Opting in](#opting-in)). That substitutes for a scorer arm only when no member consulted the task's scorer in the loop (the analysis flags such samples `target_assisted`): in-loop scoring makes the scorer part of the trajectory, so otherwise a scorer change is an arm of its own ([Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
 - **Scorers that need the sandbox** (an answer evaluator that compiles code, any artifact scorer) cannot be re-scored: `sandbox()` raises `ProcessLookupError` and the error propagates, as it does for the task's own scorer today. `member_scores` neither catches it nor reports a partial result.
 - **Selection evidence is never recomputed.** Verdicts, keys, times and `solve_usage` come from the record written during the run; re-scoring never calls a verifier.
 - **Old records.** `member_scores` checks `version`. A record with an unknown version is reported as unscored with reason `"unknown_record_version"`, never misread.
@@ -425,7 +481,7 @@ Swarm.md takes each arm's total from Inspect's sample usage ([Accounting](swarm.
 | Transcript | `InfoEvent`s of kinds `member_result`, `verdict` and `final` (source `inspect_swarm`) at the time they happened; `member_scores`' per-member spans under the scorer span |
 | Sample scores | The task's scorer (final@k, or team@k for artifact tasks); the task's member scorer with `best_member` and `mean_member`, per-member detail in its metadata |
 | Eval results | One `EvalScore` per task scorer and reducer; the member scorer contributes `best_member` and `mean_member` as separate `EvalScore`s with `scored_samples` and `unscored_samples` counts |
-| Eval spec | `swarm()`'s `result` argument is logged as the type name `ResultSpec`, because it holds callables; the record carries the facts |
+| Eval spec (plan) | `swarm()`'s `result` argument is logged as the type name `"ResultSpec"`, because it holds callables; the record carries the facts. The chain is logged faithfully inside the controller's params, for example `{"type": "controller", "name": "inspect_swarm/leaderless", "params": {"final": ["verify", {"mode": "synthesize", ...}], "stop_on_verified": false}}` |
 
 Nothing here needs a new event type, schema change or viewer change. The viewer shows the store, `InfoEvent`s and dict scores generically.
 
@@ -436,6 +492,7 @@ Because Inspect applies every epoch reducer to every scorer and key, an epochs a
 - **Arms as task arguments.** Each arm is the same task with different arguments (`arm`, `k`, `budget`), as in [Opting in](#opting-in). `eval_set` and inspect_flow sweep them, and each arm's log carries its arguments in `eval.task_args`.
 - **Identifying arms.** A log whose records have one member is a baseline arm (n is its epochs); more than one member, a swarm arm (k is the member count). Arguments the user names (`arm`, `budget`) label the rows.
 - **Same scorers everywhere.** The task's member scorer runs in every arm, so all arms have the same scorer names, and `evals_df` and `samples_df` (`inspect_ai.analysis`) line them up without renaming.
+- **What distinguishes arms.** `task_identifier()` hashes the task's arguments and the solver's parameters, including the controller's `final` and `stop_on_verified`, but not scorers, epochs or `result=` (logged as a type name). Arms that differ only in a scorer, in epochs or in the result contract therefore take the difference from a task argument, as `arm` does above; otherwise `eval_set` refuses them as not distinct ([Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
 
 ### The analysis helper
 
@@ -448,9 +505,9 @@ def best_at_k(values: Sequence[float], k: int) -> float: ...
 def select_at_k(attempts: Sequence[Attempt], k: int, chain: Sequence[str], *, kind: ResultKind, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> float: ...
 ```
 
-- **`AttemptRow`**, one per (log, sample id, epoch): the log path, the arm labels (`eval.task_args`), member count, `result_kind` (the record's `kind`), the task scorer's value, `final_verdict` (the record's verifier result on the drained environment), `final` (mode, member, reason), `best_member`, `mean_member`, `complete`, the per-member keys, verdicts, times and submission flags, `solve_usage` and `solve_exit`, scoring usage, `sample_total_usage`, and flags (`no_solve_usage`, `target_assisted`). Rows flagged `no_solve_usage` have no solve or scoring usage and are left out of cost comparisons. The ledger and the limits deep dive's curves join on (log, sample id, epoch).
+- **`AttemptRow`**, one per (log, sample id, epoch): the log path, the arm labels (`eval.task_args`), member count, `result_kind` (the record's `kind`), the task scorer's value, `final_verdict` (the record's verifier result on the drained environment), `final` (mode, member, reason), `best_member`, `mean_member`, `complete`, the per-member states, statuses, keys, verdicts, times and submission flags, `members_started`, `solve_usage` and `solve_exit`, scoring usage, `sample_total_usage`, and flags (`no_solve_usage`, `target_assisted`). Rows flagged `no_solve_usage` have no solve or scoring usage and are left out of cost comparisons. The ledger and the limits deep dive's curves join on (log, sample id, epoch).
 - **`ArmScores`**, one per arm: the arm's labels, `arm_kind` (swarm or baseline), `result_kind`, k or n, and each quantity of [Comparison quantities](#comparison-quantities) that applies to it, as a mean over samples with its count of scored samples and of excluded samples. `chain` defaults to the chain recorded in the swarm arm's records.
-- **From rows to attempts.** For a baseline arm, `compare_arms` builds one `Attempt` per row: `epoch`; `submitted`, `time`, `answer_key` and `verdict` from the row's single member (its status `done`, its stop time, its key, its run-time verdict); `final_value` from the task scorer's value; `final_verdict` from the row's `final_verdict`. It passes the arm's `result_kind` to `select_at_k` as `kind`. The run-time verdict and `final_verdict` are kept apart because the environment can change between a member's submission check and the drain; artifact `verify` reads only `final_verdict`, and nothing derives a verdict from `final_value`, which would select with the target. An arm whose rows disagree on `result_kind`, or whose `result_kind` differs from the swarm arm it is compared with, is an error naming the logs.
+- **From rows to attempts.** For a baseline arm, `compare_arms` builds one `Attempt` per row: `epoch`; `submitted`, `time`, `answer_key` and `verdict` from the row's single member (its status `submitted`, its end time, its key, its run-time verdict); `final_value` from the task scorer's value; `final_verdict` from the row's `final_verdict`. It passes the arm's `result_kind` to `select_at_k` as `kind`. The run-time verdict and `final_verdict` are kept apart because the environment can change between a member's submission check and the drain; artifact `verify` reads only `final_verdict`, and nothing derives a verdict from `final_value`, which would select with the target. An arm whose rows disagree on `result_kind`, or whose `result_kind` differs from the swarm arm it is compared with, is an error naming the logs.
 - **Target-assisted samples.** `target_assisted` is set when the solve phase contains `ScoreEvent(intermediate=True)`: an agent consulted the task's scorer with the target in the loop (for example `react(attempts=...)`). In a swarm that feedback can be shared with peers, so the helper reports those samples separately.
 
 ## Alternatives considered
@@ -473,7 +530,11 @@ def select_at_k(attempts: Sequence[Attempt], k: int, chain: Sequence[str], *, ki
 
 **Snapshot only on a normal return, falling back to the sample total.** The second draft's rule. Budget exhaustion is a normal way for an arm to end, and Inspect still grades those samples, so the fallback total would include grading, which differs between arms. Taking the snapshot in the swarm's `finally` gives limit-ended samples a boundary too, and samples with none are excluded from cost comparisons rather than estimated.
 
-**Strict modes only** (verify yields nothing when nothing verifies). Simpler, and measures the verifier alone. But it makes the default swarm return nothing where an attempt would otherwise be scored on its answer. Strict behaviour stays available as `final="verify"`. [Open question 1](#open-questions).
+**Strict modes only** (verify yields nothing when nothing verifies). Simpler, and measures the verifier alone. But it makes the default swarm return nothing where an attempt would otherwise be scored on its answer. Strict behaviour stays available as `leaderless(final="verify")`. [Open question 1](#open-questions).
+
+**`final=` on `swarm()`** (this design's drafts before swarm-api.md merged). swarm-api.md moved it to the controller, because the valid modes and the default depend on the topology; the chain's semantics are unchanged. Adopted.
+
+**Count never-started members as empty** (value `empty_value`). Every roster member would then have a value. But a conditional controller's choice not to run a member would read as that member failing, lowering `mean_member` by a scheduling decision, not by any output. Not started is its own outcome, with `members_started` reported.
 
 **Score unsubmitted outputs as the last fallback.** Matches how Inspect scores a plain agent that hits its limit. But it selects working messages as answers, and swarm.md decided that nothing is invented. Per-member scores still score those outputs.
 
@@ -486,9 +547,10 @@ def select_at_k(attempts: Sequence[Attempt], k: int, chain: Sequence[str], *, ki
 - **inspect_swarm** has no released API; everything here is new. Python 3.11+ as decided.
 - **Eval logs.** Only existing structures: a store key, `InfoEvent`s, scores with dict values and metadata, a message metadata key. Old readers and the viewer show them generically. The store record and the `InfoEvent` payloads carry `version: 1`.
 - **Names** (`member_scores`, `MEMBER_METRICS`, `best_member`, `mean_member`, `best_at`, `baseline`) become an interface the analysis and users' notebooks depend on once released; changing them later is a breaking change. The member scorer's own name is the task's.
-- **inspect_ai.** No change needed. The design uses public scorer and reducer APIs, the store, `transcript().info`, `sample_model_usage()` and `sample_role_usage()` (private, which inspect_swarm may use), and the member runner's reference to its `AgentState`.
+- **inspect_ai.** No change beyond swarm-api.md's two registry types, which this design does not use directly. The design uses public scorer and reducer APIs, the store, `transcript().info`, `sample_model_usage()` and `sample_role_usage()` (private, which inspect_swarm may use), `registry_value()` for the `Synthesize` model field, and the member wrapper's reference to its `AgentState`.
 - **Tasks.** Tasks opt in. A task that does not pass `result=` behaves as swarm.md describes, with `first` and no per-member claims. A task whose scorer can read the answer from the environment must declare `kind="artifact"` or supply an answer-only adapter.
-- **Swarm.md.** This PR makes small edits there where this document refines it: team@k's definition and its fair pairs; the chain's fall-through and the strict single mode; the provisional answer's definition and its test bullet; arm totals taken from a usage snapshot at the swarm's return, so they exclude scoring; links to this document; and per-member artifacts as a later menu item. The overview's decisions are unchanged.
+- **Swarm.md.** This PR makes small edits there where this document refines it: team@k's definition and its fair pairs; the chain's fall-through and the strict single mode (`leaderless(final="verify")`); the provisional answer's definition, kept by the runtime, and its test bullet; arm totals taken from a usage snapshot at the swarm's exit, so they exclude scoring; links to this document; and per-member artifacts as a later menu item. The overview's decisions are unchanged; its strict example, `controller=leaderless(final="verify")`, already matches.
+- **The merged API and communication designs** need no change. This revision adopts their shapes: the chain on the controller (`leaderless(final=...)`, `baseline()` through `leaderless(final="first")`), the runtime doing what earlier drafts gave the controller, member states and the limits deep dive's statuses in the record, `Budget` in examples, the communication design's evidence payload shape and fencing rules. It defines what swarm-api.md left to this design: the pydantic `FinalMode` types with their discriminator and model serialiser, and how scoring treats members a controller never started.
 
 ## Security
 
@@ -498,9 +560,10 @@ Untrusted input reaching the new code:
   - `answer_key`, task code that must accept any text and return `None` rather than raise on unparseable input;
   - the verifier, which may execute the answer (code) and must do so only inside the sandbox;
   - the member scorer, as they would from a single agent, and only after the solve (`completed=True`);
-  - `synthesize`'s prompt, fenced as data with harness-written sender lines and markers stripped, in a separate call outside every member's context. That is weaker than tool output, so `synthesize` is never a default.
+  - `synthesize`'s prompt, in the communication design's envelope with harness-written attributes and markers stripped, in a separate call outside every member's context. That is weaker than tool output, so `synthesize` is never a default.
 - **Answer attribution.** A member's output must not be credited with the team's environment. The answer-scored contract forbids scorers that read the answer from the environment, and the empty-output backstop keeps the commonest case from reaching the scorer at all.
 - **The target.** Neither the verifier, nor `answer_key`, nor any member tool is given the target. Agents that consult the task's scorer in the loop are flagged by the analysis.
+- **Controllers.** A controller sees a verdict only as `VerdictSummary(passed, value)`. The verifier's explanation, which may quote the answer or a judge model, stays in the record, as swarm-api.md requires, so a controller cannot relay member text through a verdict.
 - **Shared-sandbox attribution.** In a shared sandbox, any member can alter another's worktree or branch, so per-member artifact scores are attributions by convention. `materialize` receives only roster names, never member-chosen names, so a member cannot steer which path is materialized. Detecting cross-writes relies on tool-call evidence and its stated limit.
 - **Logs.** Outputs and answer keys are stored as JSON data in the store and in score metadata, not as Markdown.
 - **Reward hacking.** Members can read whatever the sandbox holds, scorer test files included, exactly as a single agent can. Nothing here adds or removes that exposure.
@@ -509,19 +572,21 @@ Untrusted input reaching the new code:
 
 All runtime tests use mockllm with scripted outputs, need no network or Docker, and run on asyncio and trio unless marked:
 
-- **Chain selection** (table-driven, over lists of member results): `verify` (best verdict value, `None` values, ties by time then roster, none passed); `vote` (plurality, `None` keys abstain, ties by earliest, one vote per member); `first`; fall-through in the default chain; the strict single mode leaving an empty answer with its reason; construction errors for each missing need.
+- **Chain selection** (table-driven, over lists of member results): `verify` (best verdict value, `None` values, ties by time then roster, none passed); `vote` (plurality, `None` keys abstain, ties by earliest, one vote per member); `first`; fall-through in the default chain; the strict single mode leaving an empty answer with its reason; never-started members never selected; construction errors for each missing need, raised by `swarm()` for the controller's chain, and by `leaderless()` for a `Reporter`.
+- **Chain types** (`tests/test_final.py`, beside swarm-api.md's logging test of the same chain): `final_chain()` builds the default from the result; a chain mixing strings, `synthesize(model=get_model(...), prompt=...)` and `reporter(...)` logged through a controller's params validates back from the logged JSON and from the dicts `create_registry_object()` passes, with the `Model` rebuilt; two arms differing only in a `synthesize` prompt get different `eval_set` identifiers.
 - **Provisional answer** follows the chain without `synthesize` after each submission and verdict, and an outer limit leaves it as the sample's output with `provisional: true`.
-- **Verifier** is called once per submission, one at a time, never with the target; its exception fails the sample; neither scoring nor re-scoring calls it.
-- **`synthesize`**: the prompt fences each submission under the harness's sender line with markers stripped and no tool calls; its usage falls inside `solve_usage`; a provider error, a refusal and an empty output fall through the chain with `synthesize_error` set; a sample-level `LimitExceededError`, `TerminateSampleError` and cancellation propagate, the sample records its limit, and the provisional answer is the output; an `ExceptionGroup` holding a sample limit (from a model API that uses a task group) and a mixed group of a limit and an ordinary error propagate whole, on both backends.
-- **The record**: written at start, updated on each stop, finalised after the drain; member output kept after the member's own limit and after the drain for an agent that updates its state in place.
+- **Verifier** is called once per submission, one at a time, never with the target; its exception fails the sample; neither scoring nor re-scoring calls it. Its verdict is on the member's `MemberEnded` and handle as a `VerdictSummary` before the controller sees the event, and no event or handle field contains the explanation.
+- **`synthesize`**: the prompt holds each submission in a `<member_submission>` envelope, with nested marker fragments removed, a roster name containing `"` and `<` escaped, and no tool calls or messages; the fence helper gives the same results on the communication design's `<peer_message>` cases; its usage falls inside `solve_usage`; a provider error, a refusal and an empty output fall through the chain with `synthesize_error` set; a sample-level `LimitExceededError`, `TerminateSampleError` and cancellation propagate, the sample records its limit, and the provisional answer is the output; an `ExceptionGroup` holding a sample limit (from a model API that uses a task group) and a mixed group of a limit and an ordinary error propagate whole, on both backends.
+- **The record**: written at start with every member `pending`, updated on each start and end, finalised after the stop procedure; member output kept after the member's own limit and after a hard stop for an agent that updates its state in place; statuses are the limits deep dive's, and `submitted` is true only for `submitted`; with a conditional controller (swarm-api.md's `escalate`, whose first member verifies), the never-started members stay `pending`.
 - **Artifact `final_verdict`**: taken after the drain on the final environment, with the final completion or `""` when there is no final answer, and differing from a run-time verdict when a member edits after a passing check.
 - **`member_scores`** with `match()`:
   - per-member values, `best_member` and `mean_member`; empty outputs get `empty_value` and never reach the scorer in answer tasks;
   - an inner scorer returning `None`, `Score.unscored()` and a dict value gives unavailable members with their reasons; mixed and all-unavailable cases; every roster permutation gives the same aggregates;
   - artifact kind without artifacts, kind mismatch and missing contract give NaN with the right reason;
   - a plain agent is scored as one member with its key and no verdict;
+  - never-started members get the outcome `not_started`, no value and no scorer call, and leave `complete` true; `members_started` counts the others;
   - the copies do not appear in `state.scores`.
-- **In-loop guard**: a `react(attempts=3)` agent with `member_scores` listed after the task scorer gets the same feedback and the same number of task-scorer calls as without it, and `member_scores` returns `None` while `completed=False`.
+- **In-loop guard** (swarm-api.md's `tests/test_scoring_loop.py`, which runs it inside a swarm): a `react(attempts=3)` agent with `member_scores` listed after the task scorer gets the same feedback and the same number of task-scorer calls as without it, and `member_scores` returns `None` while `completed=False`.
 - **Answer attribution**: a Frontier-CS-shaped scorer with a sandbox fallback, given a member completion holding an empty fenced block, is not credited with the team's files when `member_scores` uses the answer-only adapter.
 - **Re-scoring**: in a fresh process, default scorer resolution (`resolve_scorers()` then `score()`, as `inspect score` does) rebuilds the task's member-scorer factory and reproduces its scores for a sandbox-free answer scorer; programmatic re-scoring with freshly built scorers does the same; a sandbox-dependent scorer raises `ProcessLookupError`.
 - **`best_at(k)`** against brute-force enumeration (table of small cases), equality with `pass_at(k)` on binary values, NaN with fewer than k scored epochs, dict values per key.
@@ -534,11 +599,11 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
 
 ## Implementation plan
 
-This work is part of M1, after the swarm core (members, controller, drain) exists. One PR per step:
+This work is part of M1, after swarm-api.md's steps 2 to 4 (registry plumbing, `Member` and the `swarm()` signature, the controller surface in the runtime) and the limits deep dive's member wrapper and stop procedure. One PR per step:
 
-1. **Result contract, record and baseline.** `src/inspect_swarm/_result.py` (`ResultSpec`, `answer_result`, `artifact_result`, `Verdict`, `Verifier`, `MemberArtifacts`, the record models); the controller writes and updates the record, `solve_usage` and the `member_result`/`verdict` events (`_swarm.py`, `_member.py`, `_evidence.py`); the member runner keeps its `AgentState` reference; `baseline()` in `_swarm.py`. Exports in `src/inspect_swarm/__init__.py`. Tests in `tests/test_result.py`.
-2. **Final-answer chain.** `src/inspect_swarm/_final.py`: modes, chain construction and validation, provisional answer, finalisation including the artifact `final_verdict`, the `final` event and the returned `AgentState`. Tests in `tests/test_final.py`.
-3. **`synthesize`.** In `_final.py`, with its prompt template in `src/inspect_swarm/_prompts.py`, and its failure classes. Tests extend `tests/test_final.py`.
+1. **Result contract, record and baseline.** `src/inspect_swarm/_result.py` (`ResultSpec`, `answer_result`, `artifact_result`, `Verdict`, `Verifier`, `MemberArtifacts`, the record models); the runtime writes and updates the record, `solve_usage` and the `member_result`/`verdict` events, and puts each verdict's `VerdictSummary` on the handle before queuing `MemberEnded` (`_swarm.py`, `_controller/_control.py`, `_evidence.py`); the member wrapper keeps its `AgentState` reference; `baseline()` in `_swarm.py`. Exports in `src/inspect_swarm/__init__.py`. Tests in `tests/test_result.py`.
+2. **Final-answer chain.** `src/inspect_swarm/_final.py`: `FinalName`, `Synthesize`, `Reporter`, `FinalMode`, `FinalSpec` (which `_controller/_controller.py` imports), `final_chain()`, validation against the result (called from `swarm()`'s construction checks; `leaderless()` validates its `final` with the `TypeAdapter`), provisional answer, finalisation including the artifact `final_verdict`, the `final` event and the returned `AgentState`. Tests in `tests/test_final.py`.
+3. **`synthesize`.** In `_final.py`, with its prompt template in `src/inspect_swarm/_prompts.py`, the fence helper in `src/inspect_swarm/_fence.py` (which M2's read tools reuse), and its failure classes. Tests extend `tests/test_final.py`; `tests/test_fence.py`.
 4. **Scorers.** `src/inspect_swarm/scorer/__init__.py`, `scorer/_member_scores.py` (`member_scores`, `MEMBER_METRICS`; answer kind; artifact kind returns unavailable), `scorer/_best_at.py`. Tests in `tests/scorer/`, including the re-scoring test with a task-file factory.
 5. **Analysis.** `src/inspect_swarm/analysis/__init__.py`, `analysis/_scores.py` (`attempt_rows`, `compare_arms`, `best_at_k`, `select_at_k`, the target-assisted flag, the solve/scoring usage split). Tests on synthetic logs in `tests/analysis/`.
 
@@ -549,10 +614,10 @@ Later, in any order with the rest of swarm.md's menu:
 ## Open questions
 
 1. **Does the default chain fall through?** With a verifier and an answer key the default is `["verify", "vote", "first"]`. This design falls through when a mode yields nothing (nothing verified, so vote; no keys, so first). The alternative reads the decision as choosing one mode by what the task supplies, so nothing verified means no answer.
-   - (a) Fall through (this design). The swarm returns an answer whenever anyone submitted. The strict reading stays available as `final="verify"`.
+   - (a) Fall through (this design). The swarm returns an answer whenever anyone submitted. The strict reading stays available as `leaderless(final="verify")`.
    - (b) Strict. Measures the verifier alone, and returns no answer more often.
 
-   Recommendation: (a). Swarm.md's provisional-answer text and its test bullet are edited in this PR to match (a), applying the strict reading to `final="verify"` only.
+   Recommendation: (a). Swarm.md's provisional-answer text and its test bullet are edited in this PR to match (a), applying the strict reading to `leaderless(final="verify")` only.
 
 ## Not this design
 
