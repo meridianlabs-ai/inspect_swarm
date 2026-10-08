@@ -213,7 +213,11 @@ Swarm nodes differ from Inspect's in three more ways:
 
 The wrapper sets a `_current_member` ContextVar so a node knows which member it is checking for.
 
-The lever is a pair with no limit. It never raises until the controller stops the member by setting `lever.limit = int(lever.usage)` (tokens). Its accumulated `ModelUsage`, cost and call counts are the member's meter for the ledger. The ledger reads the token-tree node's accumulated `ModelUsage` from `_TokenLimit._usage`.
+The lever is a pair with no limit. It never raises until the controller stops the member, which does two things:
+- It sets `lever.limit = int(lever.usage)` on the token-tree half, which refuses ordinary calls.
+- It closes a stop gate on the cost-tree half. A closed gate makes that node's `_check_self` raise on every check. Inspect runs the cost check before every dispatch even while token metering is suspended (`_model.py:3036-3044`; `suspend_token_limit()` suspends only the token tree, `_limit.py:648-673`). So an approval or review callback that is running when the stop arrives can finish its dispatched call, which is recorded first (`_model.py:3091-3095`), but cannot start another. Approval and review calls stay out of token metering, as Inspect intends.
+
+Its accumulated `ModelUsage` and cost are the member's meter for the ledger. The ledger reads the token-tree node's accumulated `ModelUsage` from `_TokenLimit._usage`.
 
 This keeps the sample's own nodes untouched: a sample limit reached inside a bridged member still ends the sample, as it should.
 
@@ -250,7 +254,7 @@ A member that exhausts its share stops (its status is `share`), and its unused s
 
 Every stop goes through one controller method, `stop(reason)`. Reasons are a closed set: `all_done`, `verified`, `swarm_cap`, `swarm_time`, and later `quiescence`.
 
-1. **Soft stop.** For every member still running, set its lever to its current usage. A native member raises at its next pre-dispatch check (or after its in-flight call completes), so calls already in flight finish and are recorded, and no new call starts. A bridged member is cancelled at its next check instead (see [Swarm nodes](#swarm-nodes)).
+1. **Soft stop.** For every member still running, set its lever to its current usage and close its stop gate. A native member raises at its next pre-dispatch check (or after its in-flight call completes), including calls made by an approval or review callback, so calls already in flight finish and are recorded, and no new call starts except at most one native compaction per agent loop, which has no pre-dispatch check. A bridged member is cancelled at its next check instead (see [Swarm nodes](#swarm-nodes)).
 2. **Grace.** Wait until every member has returned, or the effective grace has passed. Effective grace is `Budget.grace`. When the sample has a time limit, it is clipped to half the sample's remaining time at the moment of the stop, so the final step always keeps the other half.
 3. **Hard stop.** Cancel the cancel scope of every member still running. Calls they have in flight are cancelled, and the ledger then reports the totals as incomplete ([The ledger](#the-ledger)).
 
@@ -326,7 +330,7 @@ After the members have stopped, the controller leaves the cap nodes and runs the
 - **Provisional answer.** For every mode except `synthesize`, the provisional answer the controller keeps current ([Accounting](swarm.md#observer-evidence-accounting-and-metrics)) is the same answer the final step would pick. A sample limit that ends the swarm early therefore costs these modes the orderly stop, not the answer.
 - **When the reserve holds.** The reserve covers the stop if it is at least the overshoot plus the final step's cost. The swarm's caps see every recorded call before any descendant check can raise, cost included, so a reached cap admits only calls that already hold a connection slot ([Overshoot](#overshoot-and-connection-slots)), plus one native compaction per running agent loop (member or subagent). Each call is at most the model's context window of input plus its `max_tokens` of output.
   - With prices, that is a dollar bound. It depends on the models' configured maximum connections and call size, not on the member count, which refines swarm.md's per-member bound.
-  - Fan-out inside a member (a synchronous deepagent's parallel subagent calls) is covered too, because those calls also hold connection slots. So are approval calls, which the cost pair meters through the cost tree, but not unpriced calls, which no cost cap meters.
+  - Fan-out inside a member (a synchronous deepagent's parallel subagent calls) is covered too, because those calls also hold connection slots. So are approval and review calls: the cost pair meters them through the cost tree, and pre-dispatch cost checks refuse them once the cap or a stop gate is reached. Unpriced calls are not covered, because no cost cap meters them.
   - The bound is loose: with 10 connections and 200,000-token contexts it is 2 million tokens. For the budgets users can afford, the reserve remains best effort.
 - **Default.** 5% of each sample limit, recorded with its use in the ledger so users can tune it. It is a guess, chosen to be small next to the budgets the scaling experiments use and large enough for a few calls.
 
@@ -338,18 +342,23 @@ The ledger is what analysis compares across arms (swarm.md: "caps are stopping r
 class Meter(BaseModel):
     usage: ModelUsage          # token-tree node: every non-suspended recorded call
     cost: float                # the pair's accumulator: priced calls, suspended ones included
-    recorded_calls: int        # calls recorded into the token-tree node
-    unpriced_calls: int        # recorded calls whose ModelUsage had no cost, counted per call
     suspended_cost: float      # cost recorded while token metering was suspended
+
+class Calls(BaseModel):        # counted from ModelEvents and CompactionEvents
+    calls: int                 # completed, non-cache model calls
+    cache_replays: int         # events with cache="read": charged zero
+    cancelled: int             # cancelled, or abandoned by an attempt or stream-idle timeout: usage unknown
+    failed: int                # rejected with a provider error: informational, not counted as spend
+    no_usage: int              # completed with output but no usage
+    unpriced: int              # completed with usage whose total_cost is None
+    native_capable_compactions: int  # compactions that may have called Model.compact()
 
 class MemberLedger(BaseModel):
     name: str
     status: str                # closed set, see Stopping
     bridged: bool
     meter: Meter               # the member's lever
-    cache_replays: int         # events with cache="read": charged zero
-    cancelled_calls: int       # events cancelled in flight: usage unknown
-    no_usage_calls: int        # events completed with output but no usage
+    calls: Calls               # events in the member's spans
     cancelled: bool            # the member's scope was cancelled (hard stop, time limit, bridged branch)
 
 class SwarmLedger(BaseModel):
@@ -359,15 +368,16 @@ class SwarmLedger(BaseModel):
     sample_limits: dict[str, float | None]  # at swarm start
     members: list[MemberLedger]
     final: Meter               # the final meter
-    final_cancelled_calls: int
-    final_no_usage_calls: int
     swarm: Meter               # the swarm meter: members, final step, anything else the swarm ran
+    calls: Calls               # every event in the swarm's span tree: members, final step, auxiliary calls
+    unpriced_calls_recorded: int  # per-call count from the swarm meter's token-tree record()
     sample_delta: ModelUsage   # the sample's model usage over the swarm's lifetime
     unattributed: ModelUsage   # tokens: sample_delta minus swarm.usage; cost: sample_delta's cost minus swarm.cost
     unpriced_models: list[str] # models in sample_delta with tokens but no cost
     overshoot: dict[str, float]  # per capped kind: usage at the end minus the cap, if positive
     stop_reason: str           # closed set, see Stopping and Exhaustion
     interrupted: bool          # a foreign error or outside cancellation ended the swarm
+    final_cancelled: bool      # the final step was cancelled
     resumed: bool              # the sample resumed from a checkpoint (see Compatibility)
     total_complete: bool
     attribution_complete: bool
@@ -378,24 +388,32 @@ Sources and coverage:
 - **Per-member usage comes from the member's lever**, not from summing model events. The lever's token-tree node records every call made in the member's context:
   - the member's own generations;
   - its synchronous subagents and any tool that calls a model;
-  - summary and native compaction;
+  - summary and native compaction (when the provider reports usage);
   - bridged generations;
   - background children once they are supported, since they inherit the member's context.
 
-  Its cost-tree node adds the cost of approval and review calls, which are suspended from token metering. Pricing is checked per call as it is recorded, before aggregation, because `ModelUsage.__add__` hides a missing cost ([What the nodes record](#what-the-nodes-record)). The lever excludes cache replays (they record nothing) and calls with no usage (nothing to record). This attributes native compaction, which swarm.md had to report as unattributed, and avoids the token-node/cost-node disagreement.
-- **Counts come from model events** in the member's and the final step's spans: cache replays (`cache="read"`, `src/inspect_ai/event/_model.py:135`), calls cancelled in flight, and calls completed with output but no usage. Native compaction has no event. A compaction cancelled in flight is therefore invisible, so completeness does not rely on counting it (below).
-- **The sample delta** is the sample's model usage at the end minus at the start. `unattributed` is what it holds beyond the swarm meter: the tokens of approval and review calls (their cost is in the meter, through the cost-tree node), plus anything that ran in the sample during the swarm outside its contexts. `unpriced_models` lists the models whose delta has tokens but no cost. That catches unpriced calls on paths no node records, such as an unpriced approval model. A model priced for some calls and not others (a served-model fallback) still shows a cost and is caught only by the per-call count.
+  Its cost-tree node adds the cost of approval and review calls, which are suspended from token metering. The lever excludes cache replays (they record nothing) and calls with no usage (nothing to record). This attributes native compaction, which swarm.md had to report as unattributed, and avoids the token-node/cost-node disagreement.
+- **Call counts come from events across the whole interval.** The ledger scans every `ModelEvent` whose span ancestry includes the swarm's agent span: member spans, the final step, and auxiliary calls the controller makes outside both. Per-member counts use the member's spans.
+  - **Pricing is per call.** `record_and_check_model_usage()` sets the cost on the same `ModelUsage` object the call's event holds (`_model.py:3064-3066`), so every completed non-cache event shows whether that call was priced. *Spike:* the live event and the logged event both read \$0.05 for a priced call. This covers calls no token node sees: approval and review calls, and generations on any auxiliary path. It also covers a router or fallback that prices one serving model and not another, which aggregates cannot show because `ModelUsage.__add__` keeps the known cost.
+  - The token-tree node's own per-call count (`unpriced_calls_recorded`, taken in `record()` before aggregation) and `unpriced_models` (models whose sample delta has tokens but no cost) are kept as cross-checks.
+  - **Cancelled and usage-less calls:**
+    - `cancelled` counts events completed with Inspect's cancellation error (`_model.py:1666-1674`) or abandoned by an attempt or stream-idle timeout (`_model.py:1641-1650`). The request may have been sent and billed.
+    - `failed` counts provider error responses (rate limits, server errors). Providers do not bill a request they rejected, and retries are common, so these do not affect completeness.
+    - `no_usage` counts events completed with output but no usage (`_model.py:1733-1736`).
+  - **Cache replays** (`cache="read"`, `src/inspect_ai/event/_model.py:135`) are counted and excluded from the pricing and usage checks.
+- **Native compaction cannot be observed per call.** `Model.compact()` emits no model event, may return no usage (`_model.py:1352-1361`; OpenAI's implementation allows it), and leaves no trace when cancelled. The only record is the `CompactionEvent` that Inspect's compaction driver writes afterwards, whose `metadata["strategy"]` names the strategy class (`src/inspect_ai/model/_compaction/_compaction.py:272-286`). So the ledger counts as *native-capable* every Inspect compaction event (`source="inspect"`) in the interval whose strategy is not one of Inspect's strategies that never call `Model.compact()` (`CompactionSummary`, `CompactionEdit`, `CompactionTrim`). A vendor agent's own compaction (`source` naming the agent) runs as bridged generations, which are ordinary observable events. That includes `CompactionNative`, `CompactionAuto` (deepagent's default, which uses native compaction where the provider supports it) and custom strategies. Each may have spent without recording.
+- **The sample delta** is the sample's model usage at the end minus at the start. `unattributed` is what it holds beyond the swarm meter: the tokens of approval and review calls (their cost is in the meter, through the cost-tree node), plus anything that ran in the sample during the swarm outside its contexts.
 - **Totals per arm** stay as swarm.md set them: Inspect's sample `model_usage`, which every arm has. The ledger reconciles with it: `unattributed` must not be negative in tokens or, beyond a relative tolerance of `1e-9` of the delta's cost, in cost. The tolerance absorbs summation order, since the sample sums per model and the meters sum per call. A negative remainder would mean the swarm counted a call twice, so the implementation logs an error and tests pin it.
 
 Claims. Completeness is judged over the whole interval the ledger covers (members, final step and auxiliary calls), and is conservative where calls cannot be observed:
 
 - `total_complete` requires all of:
-  - no agent loop was cancelled: no member `cancelled`, no `interrupted`, and the final step not cancelled. A cancelled loop may have had a native compaction in flight that left no trace.
-  - no cancelled calls and no no-usage calls among members or the final step;
-  - zero `unpriced_calls` in the swarm meter;
-  - `unpriced_models` empty.
+  - no agent loop was cancelled: no member `cancelled`, no `interrupted`, no `final_cancelled`. A cancelled loop may have had a native compaction in flight that left no trace.
+  - in the swarm-wide `calls`: zero `cancelled`, zero `no_usage`, zero `unpriced`, and zero `native_capable_compactions`;
+  - zero `unpriced_calls_recorded`, and `unpriced_models` empty.
 
   Otherwise the arm's total is a lower bound, reported with the counts that cleared the flag. These calls are missing from the sample's `model_usage` too, so the flag applies to the arm's total, not only to the swarm's figures.
+- **The compaction rule is strict on purpose.** A swarm whose members compact with `CompactionAuto` or `CompactionNative` reports lower-bound totals. A task that needs complete totals sets members' compaction to `CompactionSummary` (or none), whose calls are ordinary, observable generations. Inspect could lift this by giving native compaction an event with its usage ([Not this design](#not-this-design)).
 - `attribution_complete`: `total_complete`, and `unattributed` has zero tokens and its cost is within the tolerance of zero. Otherwise per-member figures are lower bounds, and the arm's total is unaffected. Approval or review model calls always leave their tokens unattributed (their cost is attributed), so runs that use them report per-member token figures as lower bounds.
 
 ### Budget splits as a sweep axis
@@ -440,7 +458,7 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
 - Native compaction is metered by the lever but has no pre-dispatch check, so each agent loop may dispatch one native compaction after a stop. Under `CompactionAuto`, a native compaction that trips a node is caught. Auto logs "Native compaction failed" and falls back to summary compaction, which is refused before dispatch, and the error reaches the member. That costs one misleading warning, not an extra call.
 - Compaction thresholds are about context windows, not budgets. A member near its share still compacts when its context fills.
 
-**Approvals and monitors.** Approval-policy model calls are suspended from token and turn nodes, so they never trip a token cap, a token share or a turn limit. Their cost is metered by the cost-tree half of every pair, so they count against cost caps and cost shares and are attributed to the member in the ledger. Their tokens appear as unattributed. Whether inspect_sentinel's monitors will run under the same suspension is for sentinel to settle; the ledger reports whatever they record.
+**Approvals and monitors.** Approval-policy model calls are suspended from token and turn nodes, so they never trip a token cap, a token share or a turn limit. Their cost is metered by the cost-tree half of every pair, so they count against cost caps and cost shares and are attributed to the member in the ledger. A soft stop's gate refuses their next dispatch. Their tokens appear as unattributed. Whether inspect_sentinel's monitors will run under the same suspension is for sentinel to settle; the ledger reports whatever they record.
 
 **Sample limit overrides.** An operator can retune the sample's time, token and message limits while it runs (`src/inspect_ai/util/_limit_overrides.py`). The swarm's derived caps are fixed at start, so a retune moves the reserve, not the cap. A cut below the swarm's cap means the sample limit ends the swarm first.
 
@@ -545,6 +563,7 @@ All runtime tests use mockllm with scripted outputs, usage and `ModelCost` set t
   - a member's token, cost, turn, message and time limits are re-created per invocation with the same values and metering type. They work for `member(..., count=3)`, across two samples and on a second invocation, and stop the member with the right status.
 - **Stopping:**
   - soft stop records every in-flight call and leaves no unknown calls;
+  - an approval callback that makes several sequential model calls is running at the soft stop: its dispatched call completes and is recorded, and its next call is refused by the lever's stop gate;
   - grace expiry cancels a member stuck in a slow tool, counts its in-flight call as unknown and clears `total_complete`;
   - grace is clipped to half the sample's remaining time;
   - the time cap stops members softly and leaves the final step its time;
@@ -567,7 +586,9 @@ All runtime tests use mockllm with scripted outputs, usage and `ModelCost` set t
   - an approval call's cost is attributed to its member, and its tokens appear as unattributed;
   - cache replays counted and charged zero;
   - native compaction (a test `ModelAPI` implementing `compact()`) is attributed to the member;
-  - each of these clears `total_complete`: an unpriced call mixed with priced ones in one member; an unpriced model used only for native compaction; an unpriced approval model; a cancelled native compaction (no event); a response with no usage; a cancelled `synthesize` call; a member hard-stopped by grace.
+  - each of these clears `total_complete`: an unpriced call mixed with priced ones in one member; an unpriced model used only for native compaction; an unpriced approval model; two suspended approval calls through a mock router (`served_model_usage()`) that prices one serving model and not the other; a cancelled native compaction (no event); a native compaction that succeeds without usage; any `CompactionAuto` compaction; a response with no usage, in a member, in the final step and in an auxiliary controller call outside both; a cancelled `synthesize` call; a member hard-stopped by grace;
+  - a priced call's `ModelEvent` carries its `total_cost` (pins the in-place pricing the per-call check relies on);
+  - a run using only `CompactionSummary`, with every call priced and no cancellation, reports `total_complete`.
 - **deepagent:** a synchronous deepagent member with parallel subagent calls overshoots by its fan-out, within the connection-slot bound computed from the mock's `max_connections`.
 - **Bridged members, end to end** (Claude Code or Codex through inspect_swe, a swarm cap and a soft stop) need Docker and provider keys. They are marked slow and run by hand or on a schedule, never in PR CI.
 
@@ -598,7 +619,7 @@ Adjacent problems noticed and left out, for Ransom to file if wanted:
 - **Sample working time under concurrency** (inspect_ai). Waiting counts whenever any task waits, so concurrent agents queueing for connections drive working time towards zero. This affects deepagent's background subagents as well as swarms.
 - **`turn_limit(N)` pays for N+1 generations** (inspect_ai). There is no pre-dispatch turn check, unlike token and cost.
 - **A limit reached inside a bridged agent ends the sample whatever its source** (inspect_ai). Route it through `bridge.request_fail()` so agent-scoped limits on bridged agents behave as on native ones ([Alternatives](#alternatives-considered), [open question 2](#open-questions)).
-- **Native compaction has no pre-dispatch limit check and no model event** (inspect_ai), so it can dispatch after a limit is reached, and a cancelled one leaves no trace.
+- **Native compaction has no pre-dispatch limit check, no model event, and optional usage** (inspect_ai). It can dispatch after a limit is reached, and neither a cancelled nor a usage-less native compaction leaves a trace. An event carrying its usage would let the ledger stop treating every native-capable compaction as incomplete.
 - **Cost nodes miss every call that trips a token node** (inspect_ai), repeatably with child token limits (`_model.py:3089-3095`). The swarm meters cost in the token tree instead; a general fix would record cost before the token check.
 - **`run()` does not catch grouped owned limit errors** (inspect_ai, `_limit.py:179-186`). The swarm's wrapper classifies leaves itself.
 - **`CompactionAuto` swallows a `LimitExceededError` from native compaction** (inspect_ai) and logs it as a compaction failure before falling back.
