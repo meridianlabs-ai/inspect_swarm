@@ -471,6 +471,7 @@ M1 writes these as `InfoEvent`s with `source="inspect_swarm"` and a versioned pa
 The ledger states its coverage and how each kind of call is charged, because no single Inspect record covers everything.
 
 - **Totals per arm come from Inspect's sample usage** (`model_usage` and `role_usage`, with cost on each `ModelUsage`). This is what Inspect's limits are charged from (`record_and_check_model_usage`, `src/inspect_ai/model/_model.py:3045-3095`). It counts newly incurred usage, excludes response-cache replays, and includes native provider compaction. Every arm gets it the same way, so arm-to-arm comparisons use it.
+  - It also includes scorer model calls, and per-member scoring makes more of them in the swarm arm. So arm totals exclude the usage of model events in the `scorers` span ([swarm-scoring.md](swarm-scoring.md#cost-comparisons-exclude-scoring)).
 - **Attribution per member comes from the model events in each member's span**, with these rules:
   - **Cache replays.** An event with `cache="read"` (`src/inspect_ai/event/_model.py:135`) replays the original call's output and usage, but costs nothing new (`_model.py:1537-1564`). It is counted as a replay and charged zero, not summed. A naive sum would double-count it (the round-2 review: 50 tokens incurred, 100 summed).
   - **Native compaction.** `Model.compact()` records usage with no model event (`_model.py:1349-1361`), and a `CompactionEvent` carries no billable usage. `deepagent()` defaults to automatic compaction, which tries native compaction first. In M1 this usage appears as the difference between the sample total and the member-attributed sum, reported as *unattributed*, not hidden. Attributing it needs an inspect_ai change, for example usage on the compaction event.
@@ -490,7 +491,7 @@ The reserve and exhaustion policy, and its limits:
   - `TerminateSampleError`;
   - any other error.
   A group that mixes the swarm's own limit error with anything else propagates too.
-- **Provisional answer.** If an outer limit ends the sample first, there is no final step. The controller therefore keeps a provisional answer current as members submit; for answer-scored tasks it is the current vote or the first verified submission. `as_solver()` copies the agent's output to the task state even when an exception ends the agent (`src/inspect_ai/agent/_as_solver.py:65-80`), so it survives, provided the controller sets it on the `AgentState` object it was passed. A provisional answer exists only once something has been submitted, or verified when the mode requires it. If the sample ends before that, the output is empty and the sample's metadata records that the swarm produced no answer and why. Nothing is invented.
+- **Provisional answer.** If an outer limit ends the sample first, there is no final step. The controller therefore keeps a provisional answer current as members submit: the final-answer chain, without `synthesize`, applied to the submissions so far ([swarm-scoring.md](swarm-scoring.md#the-final-answer-chain)). `as_solver()` copies the agent's output to the task state even when an exception ends the agent (`src/inspect_ai/agent/_as_solver.py:65-80`), so it survives, provided the controller sets it on the `AgentState` object it was passed. A provisional answer exists only once something has been submitted, or verified under a strict `final="verify"`. If the sample ends before that, the output is empty and the sample's metadata records that the swarm produced no answer and why. Nothing is invented.
 - **Roles.** Per-member usage is also mapped to model roles where members use different models, so `role_usage` in the log stays meaningful.
 - **Communication volume, as a diagnostic.** Realized totals stay whole-call usage. Inspect reports usage for a whole generation (`src/inspect_ai/core/_model_output.py:13-40`), and one generation's input mixes task instructions, several peers' earlier tool results and cached prefixes, so no measured charge belongs to any one message. Communication is therefore reported separately, and never as a partition of the bill:
   - **Measured:** counts and sizes of messages, notes and posts sent and read, per member and per sender, plus the usage of generations whose tool calls were swarm communication tools.
@@ -522,7 +523,7 @@ Inspect scorers take a `TaskState` and a target, and many inspect or modify the 
 **Answer-scored tasks.** The scorer reads a final answer, for example a FrontierMath-style value or a BrowseComp answer.
 
 - Each member's submission is a stable artifact, so the task's own scorer can score it on a copy of the state carrying that answer.
-- This gives per-member correctness and team@k, which compare directly with best@k and pass@k from epochs.
+- This gives per-member correctness and team@k, which compare directly with best@k and pass@k from epochs. team@k is the best member's result, Test-Time Communication's "any of the k agents"; it selects with the target, as best@k does. The swarm's selected answer (final@k) compares instead with the same final-answer rule applied to k epochs (select@k). [swarm-scoring.md](swarm-scoring.md#comparison-quantities) defines each quantity.
 - Voting additionally needs a task-defined comparable form: a normaliser or equivalence rule, such as the match rules a scorer already applies (`src/inspect_ai/scorer/_match.py:9-45`).
 - Free-form proofs or code have no such form, so `vote` is unavailable for them.
 
@@ -534,7 +535,7 @@ Inspect scorers take a `TaskState` and a target, and many inspect or modify the 
 - Per-member correctness can be claimed only if the task gives each member a stable artifact of its own (its own worktree, branch or output directory) and a way to score it.
 - The comparison with epochs is then team result against best@k or pass@k at equal realized cost. Test-Time Communication draws the same distinction: it compares best-of-member results with a single shared container's result on Terminal-Bench ([Appendix A.6](https://arxiv.org/html/2609.21032v1)).
 
-**What M1 does.** M1's per-member, team@k and voting helpers support answer-scored tasks only. For shared-artifact tasks, M1 reports the team environment score with realized cost. It does not claim that recording member strings makes every coding benchmark comparable to epochs.
+**What M1 does.** [swarm-scoring.md](swarm-scoring.md) details the contract, the record, the scorers and the comparisons. M1's per-member, team@k and voting helpers support answer-scored tasks only. For shared-artifact tasks, M1 reports the team environment score with realized cost. It does not claim that recording member strings makes every coding benchmark comparable to epochs.
 
 ### Controller: topology, termination, final answer
 
@@ -567,6 +568,8 @@ The defaults:
 
 - coordinator topologies: `reporter`;
 - leaderless swarms: `verify` when the task supplies a verifier, otherwise `vote` when the task defines a comparable answer form, otherwise `first` (decision: Ransom, 2026-10-07).
+
+The default is a chain that falls through: when nothing verifies the swarm votes, and when nothing can vote it takes the first submission. A single mode, such as `final="verify"`, is strict. [swarm-scoring.md](swarm-scoring.md#the-final-answer-chain) specifies each mode, `synthesize` and the verifier.
 
 The leaderless default matches how leaderless swarms succeed in practice: the C compiler's oracle, Test-Time Communication's dense verifier. Voting means nothing without a comparable answer form. Every member's own submission is recorded regardless, so the effect of the final step can be measured separately.
 
@@ -781,7 +784,7 @@ Untrusted input reaches this code from several directions.
   - response-cache replays are counted as replays and charged zero;
   - native compaction usage appears as unattributed and agrees with the sample totals;
   - calls cancelled in flight are counted as unknown, and the total is then reported as a lower bound;
-  - zero submissions, and zero verified submissions, leave an empty output with the reason recorded;
+  - zero submissions, and zero verified submissions under a strict `final="verify"`, leave an empty output with the reason recorded;
   - the controller recovers its own cap's exhaustion both as an `ExceptionGroup` and as a lone `LimitExceededError` (which `collect()` unwraps);
   - sample-level limits, `TerminateSampleError`, other errors and mixed groups propagate unchanged;
   - an outer limit that trips before the reserve is used leaves the provisional answer as the output;
@@ -860,6 +863,7 @@ Each milestone is a small series of PRs, and the project convention applies: dis
   - Joint-monitor helpers on sentinel.
   - An optional scheduled (turn-based) execution mode.
 - **Optional, unscheduled: red-team features.** Injection with forged or hidden senders, secret channels, and injection into a specific member. They may never be built; they need M2's bus.
+- **Per-member artifacts for shared-artifact tasks.** Per-member scores when the task supplies each member's artifact ([swarm-scoring.md](swarm-scoring.md#shared-artifact-tasks-and-per-member-artifacts)). Independent of the rest.
 - **Optional, if needed: other sandbox topologies.** A sandbox per member, or partial isolation ([Sandbox topology](#sandbox-topology)).
 
 ## Open questions
