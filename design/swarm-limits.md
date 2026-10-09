@@ -239,9 +239,25 @@ Its accumulated `ModelUsage` and cost are the member's meter for the ledger. The
 
 This keeps the sample's own nodes untouched: a sample limit reached inside a bridged member still ends the sample, as it should.
 
-**Calls the runtime and the controller make.** M1's runtime makes no model calls, and a controller normally makes none. After M2 the runtime calls the task's verifier on each submission while members run ([swarm-scoring.md](swarm-scoring.md#the-final-answer-chain)). swarm-api.md and swarm-scoring.md leave the node that meters such calls to this design. They run under the *runtime lever*: a pair below the swarm caps, beside the members' levers, entered around the controller's `run` and around each in-run verification.
+**Calls the runtime and the controller make.** M1's runtime makes no model calls, and a controller normally makes none. After M2 the runtime calls the task's verifier on each submission while members run ([swarm-scoring.md](swarm-scoring.md#the-final-answer-chain)). swarm-api.md and swarm-scoring.md leave the node that meters such calls to this design. They run under the *runtime lever*: a pair below the swarm caps, beside the members' levers.
 - They count against the swarm's caps, as members' calls do, and the ledger reports them as the swarm's, not any member's.
-- The soft stop closes the runtime lever as it closes a member's. A verification that the lever or a reached cap refuses leaves the submission unverified, and finalisation verifies it again inside the final meter (swarm-scoring.md's finalisation, step 1).
+- **Two contexts, so the levers stay siblings.** A task inherits the limit leaves of the context it is started from ([Limit trees](#limit-trees)), and swarm-api.md's controller starts members from inside its own `run` through the synchronous `start()`. If members were started from the controller's context, the runtime lever would be an ancestor of every member's lever, and a member's call would be charged to both. So the runtime sets the contexts up once per sample:
+
+  ```python
+  with swarm_meter, *caps:                        # pairs: token-tree and cost-tree nodes
+      async with anyio.create_task_group() as members_tg:
+          member_ctx = contextvars.copy_context()  # the caps, no runtime lever
+          async with anyio.create_task_group() as runtime_tg:
+              with runtime_lever:                  # entered once per sample (limits are single-use)
+                  runtime_tg.start_soon(run_controller)    # in its own cancel scope
+                  runtime_tg.start_soon(run_verifier)      # after M2: one submission at a time
+      ...                                          # stop, grace and drain end both groups
+  ```
+
+  `start()` spawns each member from a copy of the saved context, `member_ctx.copy().run(members_tg.start_soon, _run_member, m)`. Both backends copy the current context when a task is spawned, so the member's lever is a child of the caps and never of the runtime lever, whenever the controller starts it: all at once, as `leaderless` does, or later, as a staged controller does. *Spike:* with this arrangement on asyncio and trio, two members started from the controller's task had the cap node as their lever's parent, and the verifier task's leaf was the runtime lever on each of two verifications.
+- **Verification runs in the runtime's task, not the member's.** A member's wrapper hands its submission to the runtime's verifier task, which verifies submissions one at a time, as swarm-scoring.md requires, and queues the member's `MemberEnded` after the verdict. A verifier call made in the member's task would be charged to the member's lever.
+- **Cancelling the controller cancels no member.** `run_controller` has its own cancel scope inside `runtime_tg`, and members live in `members_tg`, so step 0 of a stop cancels the controller and leaves the members to the soft stop and grace ([Stopping](#stopping)).
+- The soft stop closes the runtime lever as it closes a member's, and the runtime ends its verifier task after grace. A verification that the lever or a reached cap refused, or that had not started, leaves its submission unverified, and finalisation verifies it inside the final meter (swarm-scoring.md's finalisation, step 1).
 - Errors are classified as in the member wrapper ([Stopping](#stopping)): a swarm cap leaf becomes `stop("swarm_cap")`, a refusal by the runtime lever ends only that call, and anything else propagates as swarm-api.md specifies for an exception from `run`.
 
 ### What each kind does in a swarm
@@ -358,7 +374,9 @@ After the members have stopped, the runtime leaves the cap nodes and runs the fi
 
 - **What the reserve is for in M1.** M1's final answer is `first`, which picks among existing submissions and makes no model call ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)). swarm-scoring.md leaves to this design whether M1 keeps a reserve. It does: the reserve is headroom for the stop's overshoot (calls in flight at the soft stop, and native compactions). It keeps the sample's limit from tripping during the stop, so the stop stays orderly: members soft-stopped, ledger complete, stop reason `swarm_cap` rather than a sample limit. Without it, a swarm stopping at the sample's own limit would end on the sample limit every time, as [open question 1](#open-questions)'s option (b) describes.
 - **After M2.** The final step can make model calls: verification of submissions not yet verified (including those from members that ended during grace), and `synthesize` ([swarm-scoring.md](swarm-scoring.md#the-final-answer-chain)). Both run in the final meter, so the reserve also covers them. `vote` and `reporter` make no calls.
-- **Provisional answer.** The runtime keeps a provisional answer current as members submit: `first` in M1, and after M2 the chain without `synthesize` ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)). Except with `synthesize`, it is the answer the final step would pick, so a sample limit that ends the swarm early costs the orderly stop, not the answer.
+- **Provisional answer.** The runtime keeps a provisional answer current as members submit, from the submissions and verdicts available so far: `first` in M1, and after M2 the chain without `synthesize` ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)). An outer limit leaves it as the sample's output, with the record's `provisional: true`.
+  - **In M1 it is stable.** `first` is the earliest submission, and no later one can displace it, so a sample limit that ends the swarm early costs the orderly stop, not the answer.
+  - **After M2 it can differ from the final answer.** Finalisation verifies submissions whose verification was refused or not yet run (a member that submitted late, or during grace), then reapplies the chain, so a submission that was unverified provisionally can pass and be chosen. A sample limit that ends the swarm before finalisation leaves the provisional answer, which may not be the one finalisation would have chosen. `synthesize` likewise has no provisional equivalent.
 - **When the reserve holds.** The reserve covers the stop if it is at least the overshoot plus the final step's cost (none in M1). The swarm's caps see every recorded call before any descendant check can raise, cost included, so a reached cap admits only calls that already hold a connection slot ([Overshoot](#overshoot-and-connection-slots)), plus one native compaction per running agent loop (member or subagent). Each call is at most the model's context window of input plus its `max_tokens` of output.
   - With prices, that is a dollar bound. It depends on the models' configured maximum connections and call size, not on the member count, which refines swarm.md's per-member bound.
   - Fan-out inside a member (a synchronous deepagent's parallel subagent calls) is covered too, because those calls also hold connection slots. So are approval and review calls: the cost pair meters them through the cost tree, and pre-dispatch cost checks refuse them once the cap or a stop gate is reached. Unpriced calls are not covered, because no cost cap meters them.
@@ -624,13 +642,16 @@ All runtime tests use mockllm with scripted outputs, usage and `ModelCost` set t
   - each stop reason and member status is recorded, including a controller's own reason as `controller:<reason>`;
   - `stop()` is idempotent: a second member reaching the cap, or the timer firing during grace, leaves the first reason;
   - the order of step 0: once a stop has begun, `start()` raises and no member model call is dispatched (swarm-api.md's stop-ordering test), and after M2 a member waiting in `read_messages` is released before grace starts;
-  - a model call a controller makes while members run is metered by the runtime lever, counts against the swarm cap, and is refused once the lever is closed.
+  - a model call a controller makes while members run is metered by the runtime lever, counts against the swarm cap, and is refused once the lever is closed;
+  - the runtime lever and members' levers stay siblings: under `leaderless`, which starts every member from its `run`, and under a staged controller that starts a member after an earlier one ends, each member's \$10 call is charged to its lever, the caps and the swarm meter but not to the runtime lever; with two verifier calls of \$10 each as well, the runtime lever reads \$20, the member levers \$10 each and the swarm meter their sum, and the runtime lever is entered once, with no single-use error on the second verification;
+  - cancelling the controller at a `swarm_cap` stop leaves its started members running into grace.
 - **Exhaustion:**
   - the swarm cap recovered when it arrives bare, in a group, or after a tool error;
   - a member limit, a share and a lever stop raised inside a custom agent's task group (grouped) give the same status as when bare, and siblings continue;
   - a group mixing a member's own limit with a foreign error re-raises only the foreign leaf;
   - sample limits, `TerminateSampleError` and crashes propagate, with the swarm's own errors removed from mixed groups;
   - a sample time limit and a working-limit cancellation leave the ledger and the provisional answer written;
+  - after M2, with the chain `verify` then `first`: member A submits and is verified-failed, member B submits during grace unverified, so A is provisional; a sample limit during finalisation's verification of B leaves A as the output with `provisional: true`, and without the limit B, verified, is the final answer;
   - the swarm's returned messages stay within a small sample message limit.
 - **Splits:**
   - equal and weighted shares, and a member stopping on its share while others continue;
