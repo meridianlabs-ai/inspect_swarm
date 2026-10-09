@@ -212,7 +212,7 @@ class Member(BaseModel):
     role: str | None = None       # data; given to the controller and in the member's preamble
     count: int = 1                # members built from this record: name-1 ... name-k when count > 1
     limits: list[Limit] = []      # the member's own limits (limits deep dive); serialised by kind and value
-    # fields the sibling deep dives add: delivery (communication), bridged (limits),
+    # fields the sibling deep dives add: delivery and, after M2, remind (communication), bridged (limits),
     # input and exposure (ORBIT)
 
 def member(
@@ -507,7 +507,7 @@ The rule a task author follows is the one `eval_set()`'s error message gives: di
 | Scoring (#2) | `reporter` mode, reserved | valid only on controllers with a reporter; `coordinator(lead=...)` defaults to it |
 | Scoring (#2) | `baseline(agent, result)` | after M2, `swarm(members=member(agent), controller=leaderless(final="first"), channels=[], result=result)` |
 | Communication (#3) | `channels=["filesystem", messages(...)]` | the same call; `messages` is a `@channel` factory, `"messages"` resolves to it |
-| Communication (#3) | `member(delivery=)` | a `member()` field |
+| Communication (#3) | `member(delivery=)`; after M2, `member(remind=)` | `member()` fields |
 | Communication (#3) | `swarm(policy=)` | `swarm(policy=)` from M2, the setting of the observer's interception point; a callable, so it is logged by name and varied across arms through a task argument or a registered swarm builder ([Task identity](#task-identity-what-makes-two-arms-distinct)) |
 | Communication (#3) | the `Channel` protocol | M2's operations on `Channel`, with per-sample state moved off the shared object |
 | Communication (#3) | `swarm_tools()`, `swarm_on_continue()`, `swarm_bridged_tools()` | unchanged: member-side helpers, not `swarm()` arguments; a member using them is built by a registered member builder so the log can rebuild it |

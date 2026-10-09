@@ -10,7 +10,7 @@ Decisions Ransom took on the first draft (2026-10-07) are marked inline as "(dec
 - limits stay soft;
 - Python 3.11+;
 - inspect_ai internals may be used;
-- peer messages are model output, delivered as tool output with distinct provenance;
+- peer messages are model output, delivered as tool output with distinct provenance (made the default rather than an absolute on 2026-10-09: user-role injection is allowed as an opt-in experimental arm after M2);
 - no internal experiment gate;
 - M1 then M2, the rest in any order;
 - a shared sandbox by default;
@@ -409,21 +409,21 @@ The [CoAgent paper](https://arxiv.org/abs/2606.15376) argues that blocking locks
 
 ### Delivery: peer messages are model output
 
-A peer's text is another model's output, so it reaches a member's model only as **tool output**: the result of a swarm tool the member calls (`read_messages()`, a notes read, a thread read). It is never a `ChatMessageUser` or `UserMessage` turn, and never carries `source` `input` or `operator` (decision: Ransom, 2026-10-07). A header saying "this is not a user instruction" would be a prompt-level mitigation; tool output is structural, and it matches the trust models in [Security](#security).
+A peer's text is another model's output, so it reaches a member's model only as **tool output**: the result of a swarm tool the member calls (`read_messages()`, a notes read, a thread read). It is never a `ChatMessageUser` or `UserMessage` turn, and never carries `source` `input` or `operator` (decision: Ransom, 2026-10-07). That is the default rather than an absolute: after M2 an eval author may opt an arm into injecting fenced bodies as a marked user-role message, as an explicit experimental arm with its weaker boundary stated (decision: Ransom, 2026-10-09; [swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)). A header saying "this is not a user instruction" would be a prompt-level mitigation; tool output is structural, and it matches the trust models in [Security](#security).
 
 Delivery has two modes, an axis because they change behaviour:
 
 - `poll`: no notice. The member learns of messages only by calling the read tools.
 - `notify` (default): at the member's next turn boundary, the swarm injects a **notice** that carries only metadata. The member then reads the content with a tool.
 
-ORBIT's third mode, which injects full bodies (`auto`), is deliberately not offered.
+ORBIT's third mode, which injects full bodies (`auto`), is not offered in M2. After M2 it is the opt-in mode `inject`, alongside two other opt-in push options, reminders and urgent messages that interrupt a recipient's turn; each is off by default and a logged ablation axis ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)).
 
-The notice is the one swarm-authored text that enters a member's context outside a tool result.
+In M2 the notice is the one swarm-authored text that enters a member's context outside a tool result.
 - It is a fixed template, in the manner of deepagent's background-completion notice: "3 unread messages from `worker-2`, `worker-4`; call `read_messages()`".
 - Its only variables are counts, channel kinds, and names the eval author or controller assigned: member names from the roster, and board channels the task defined.
 - It never includes a message body, a subject line, a thread title, or a name a member chose. A board channel or thread a member created is referred to by a swarm-assigned id.
 
-So the notice does not let peer text into the user role. [swarm-communication.md](swarm-communication.md) settles the rest: the notice is appended at the member's turn boundary by a swarm `on_continue` hook, bridged members get `poll` only, and in M2 wake means ending a member's wait in `read_messages`.
+So the notice does not let peer text into the user role; only an opt-in `inject` arm after M2 does. [swarm-communication.md](swarm-communication.md) settles the rest: the notice is appended at the member's turn boundary by a swarm `on_continue` hook, bridged members get `poll` only, and in M2 wake means ending a member's wait in `read_messages`.
 
 Tool output is a better place than the user role, but it is not a trust boundary by itself. ADK's own fencing module calls peers' turns and tool results "attacker-reachable" ([`_fencing.py`](https://github.com/google/adk-python/blob/main/src/google/adk/flows/llm_flows/context/_fencing.py)). So the read tools also follow three rules taken from the frameworks surveyed:
 - **Fence each message as data.** Each message sits between begin and end markers under a sender line the bus stamps. Copies of the markers inside the payload are removed, so a payload cannot close its own block. A fixed note says the content is another agent's message to read, not instructions to follow.
@@ -440,7 +440,7 @@ The two ways to mark the notice:
 
 M2 uses a marked message: a `ChatMessageUser` with swarm metadata and no `source`, which needs no inspect_ai change ([swarm-communication.md](swarm-communication.md)).
 
-Vendor swarms differ. Codex's multi-agent v2 delivers peer text as author-attributed user messages, and the bridge reproduces that ([Bridged agents](#bridged-agents)). That is the vendor's design, evaluated as shipped; native members never receive peer text that way.
+Vendor swarms differ. Codex's multi-agent v2 delivers peer text as author-attributed user messages, and the bridge reproduces that ([Bridged agents](#bridged-agents)). That is the vendor's design, evaluated as shipped; native members receive peer text in the user role only in an arm that opts into injection.
 
 ### Sandbox topology
 
@@ -639,7 +639,7 @@ The leaderless default matches how leaderless swarms succeed in practice: the C 
 |---|---|---|
 | `swarm()`, controller, members, budget, bus, channels, evidence, metrics, scorers, prompts, Scout scanners | inspect_swarm | Fast iteration; the runtime is opinionated and experimental. |
 | Registry types `controller` and `channel` | inspect_ai, before M1 (decision: Ransom, 2026-10-08) | `RegistryType` is a closed literal; scout and sentinel added their types the same way ([swarm-api.md](swarm-api.md#resolving-names)). |
-| Notifying members and delivering peer messages | inspect_swarm (M2), no inspect_ai change | Content is tool output from swarm tools. The metadata-only notice is a marked message appended by a swarm `on_continue` hook, as deepagent does; the swarm never posts into members' agent channels ([swarm-communication.md](swarm-communication.md)). An agent-channel item rendered by `react()` is the possible later upgrade. |
+| Notifying members and delivering peer messages | inspect_swarm (M2), no inspect_ai change | Content is tool output from swarm tools. The metadata-only notice is a marked message appended by a swarm `on_continue` hook, as deepagent does; the swarm never posts into members' agent channels ([swarm-communication.md](swarm-communication.md)). After M2, optional urgent messages need an inspect_ai `Steer` agent-channel item whose recovery does not wait for an operator ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)). |
 | Clean re-entry of `react()` on an existing state (no second system prompt), or an idle state | inspect_ai (coordinator topologies), optional | Persistent members; the alternative is a `submit=False` member protocol inside inspect_swarm. |
 | A scoped owner for `background()` work, so a swarm can own and drain a member's descendants | inspect_ai, when background deepagent members are needed | Today `background()` attaches to the sample's task group; without an owner the swarm cannot drain `deepagent(background=True)` members. |
 | `span(..., metadata=)` and per-span usage in the log, including native compaction usage (for example on `CompactionEvent`) | inspect_ai, nice to have | Member identity and complete per-member cost without side records or an unattributed remainder. |
@@ -780,7 +780,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 
 - Simplest to build. Every provider renders it, and it is what Codex's own swarm does.
 - It puts another model's output in the most trusted role (user), or makes it look like the recipient's own words (assistant). LangGraph's documentation warns that relaying full histories confuses the receiving agent.
-- Rejected (decision: Ransom, 2026-10-07) in favour of tool output with fencing and metadata-only notices ([Delivery](#delivery-peer-messages-are-model-output)).
+- Rejected as the default (decision: Ransom, 2026-10-07) in favour of tool output with fencing and metadata-only notices ([Delivery](#delivery-peer-messages-are-model-output)). The user-role form with fenced bodies is offered after M2 as an opt-in experimental arm (decision: Ransom, 2026-10-09).
 
 **A scheduler that activates agents in turns, as the default** (ORBIT, Concordia's sequential engine, Terrarium, AgentsNet's synchronous rounds).
 
@@ -837,7 +837,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 Untrusted input reaches this code from several directions.
 
 - **Peer messages are model output** and may be adversarial: a compromised member, or ordinary prompt injection relayed from a web page.
-  - They reach a member only as tool output, never in the user role (decision: Ransom, 2026-10-07). Notices carry metadata only, with no peer-chosen strings ([Delivery](#delivery-peer-messages-are-model-output)). Claude Code teams take the same stance: an agent message is never user consent.
+  - They reach a member only as tool output, never in the user role (decision: Ransom, 2026-10-07), unless an arm opts into injection after M2 (decision: Ransom, 2026-10-09), which deliberately measures that weaker boundary ([swarm-communication.md](swarm-communication.md#security)). Notices carry metadata only, with no peer-chosen strings ([Delivery](#delivery-peer-messages-are-model-output)). Claude Code teams take the same stance: an agent message is never user consent.
   - Approval and sentinel decisions are never taken from message content.
   - The `synthesize` final-answer mode is the one place peer text enters a prompt the harness composes. It quotes member submissions as delimited data in a separate model call, not in any member's context. That is a weaker boundary, so `synthesize` is never the default.
 - **Message volume.** Storm controls (rate, deduplication, inbox and size caps) bound how much one member can push into others' contexts and into the log.
@@ -956,6 +956,7 @@ Each milestone is a small series of PRs, and the project convention applies: dis
   - the deferred solve/scoring cost boundary.
 
   `synthesize` reuses M2's fencing; otherwise these are independent of the rest.
+- **Push delivery, optional** ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)): reminders, content injection (`delivery="inject"`), and urgent messages that interrupt a recipient's turn, plus notices to a member's running subagent. Each is off by default and needs M2; urgent messages and nested notices also need an inspect_ai PR adding the `Steer` agent-channel item. Push for bridged members is inspect_swe work.
 - **Optional, if needed: other sandbox topologies.** A sandbox per member, or partial isolation ([Sandbox topology](#sandbox-topology)).
 
 ## Open questions
