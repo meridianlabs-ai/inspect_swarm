@@ -141,7 +141,7 @@ Three design consequences follow from the first two rows.
 
 - Make agent count, topology, communication channels and budget split ordinary, sweepable task parameters for Inspect evals.
 - Account for realized cost and usage per member and per swarm, under a swarm-wide cap set the same way as a single agent's limit.
-- Make every sanctioned communication observable, attributable and interceptable at one point, and keep unsanctioned channels (the filesystem, shared caches) observable through the tool calls that use them.
+- Make every sanctioned communication observable, attributable and interceptable at one point, and keep unsanctioned channels (the filesystem, shared caches, tool state in the sample store) observable through the tool calls that use them.
 - Let any Inspect `Agent` be a member: `react()`, `deepagent()`, or a bridged agent (Claude Code, Codex) through inspect_swe. The swarm must own and drain all of a member's work, including descendants. Until the swarm can do that for `background()` work, M1 accepts only members whose work stays inside their invocation ([Members](#members)).
 - Evaluate vendor swarms (Codex multi-agent, Claude Code agent teams) with the same evidence model and metrics as native ones.
 - Keep inspect_ai changes to small, general extension points needed for behaviour. The swarm runtime itself lives here.
@@ -170,6 +170,22 @@ This section covers only what the design depends on. All paths are in inspect_ai
   - `background()` starts work on the sample's task group (`src/inspect_ai/util/_background.py:19-81`). The runner cancels that task group when the solver ends (`src/inspect_ai/_eval/task/run.py:2930-2934`).
 - `run(agent, input, limits=[...], name=...)` runs any agent in an agent span with its own limits. It catches its own limit errors and returns them (`src/inspect_ai/agent/_run.py:35-111`).
 - There is no per-sample cap on concurrent agents. The binding constraint is the model's `max_connections`, shared by every member and every sample.
+
+### The sample store
+
+References in this subsection are to inspect_ai `main` at `215cf087` (2026-10-08) and inspect_evals at `eb5383ef`; it was added on 2026-10-09, after Ransom asked whether the store could serve as a less-audited channel between members.
+
+- **Every agent in a sample uses one store.** The runner installs the sample's `Store` in a context variable before the solver runs, and `store()` returns it (`src/inspect_ai/_eval/task/run.py:2491`, `src/inspect_ai/util/_store.py:110-119`). Concurrent agents' tasks inherit the context, so they hold the same object. `subtask()` is the exception: it gives its body a store of its own (`src/inspect_ai/util/_subtask.py:122`).
+- **Tools keep per-sample state there, keyed by an `instance` argument that defaults to `None`.** A model cannot reach the store, but `store_as(Model, instance=...)` gives a tool a typed view namespaced by the instance (`src/inspect_ai/util/_store_model.py:104-105`). The built-in tools with such state:
+  - `memory()` keeps its files (`src/inspect_ai/tool/_tools/_memory.py:113`, `:162`);
+  - `bash_session()` keeps the id of its shell process, so one instance is one shell (`_bash_session.py:195`);
+  - `web_browser()` keeps its browser session (`_web_browser/_web_browser.py:157`, `:428`); the tool is deprecated, and its fallback for old sandboxes ignores the instance (`_web_browser/_back_compat.py:37`);
+  - the skill tool keeps its list of installed skills (`_skill/tool.py:59`).
+
+  So agents in one sample given the same tool with the default instance share one memory, one shell or one browser. A spike ran two `react()` agents concurrently in one sample on mockllm, each with `memory()`: the second read a file the first had created. With `memory(instance="A")` and `memory(instance="B")` it got "does not exist".
+- **`deepagent()` adds `memory()` with the default instance** inside each invocation when `memory=True`, its default (`src/inspect_ai/agent/_deepagent/deepagent.py:191-193`). Its only way to choose the instance is to pass one's own `memory(instance=...)` in `tools`. Its subagents with `memory="readwrite"` share their parent's memory, as deepagent intends. So `member(deepagent(...), count=4)` gives four members one memory today.
+- **Tasks keep their environment in the store too.** inspect_evals' AgentDojo puts its simulated environment in the store, its tools change it, and its scorer rebuilds the environment from every store key (`inspect_evals: src/inspect_evals/agentdojo/dataset.py:228`, `tools/banking_client.py:28`, `scorer.py:12`). tau2 does the same through `store_as` (`tau2/common/scorer.py:141`). For these tasks the store is the shared environment, as the sandbox is for SWE tasks.
+- **inspect_sentinel keeps protocol state in it.** `Context.store_as` namespaces a protocol's state by its path in the store the host supplies (`inspect_sentinel: src/inspect_sentinel/_context.py:63-71`), and the dispatcher on inspect_ai's `feature/sentinel` branch supplies `store()` (`src/inspect_ai/_sentinel/_dispatch.py:168`). That is what gives protocols a joint view of a swarm.
 
 ### `deepagent()` and background subagents
 
@@ -333,6 +349,30 @@ The final-answer chain is the controller's `final=` parameter. Names resolve to 
   - **Supported from M1.** Members whose work stays inside their invocation: `react()`, `deepagent()` without background dispatch (synchronous subagents are awaited), and bridged agents whose agent process the member awaits.
   - **Not supported in M1.** Members that use `background()`, which today attaches work to the sample's task group with no owner the swarm can drain. This includes `deepagent(background=True)` and any custom agent that calls `background()`. The swarm rejects `deepagent(background=True)` members where it can detect them, and the restriction is documented for custom agents.
   - **Lifting the restriction.** It needs a change in behaviour, not just access to private names: a scoped owner that `background()` attaches to when one encloses the caller (defaulting to the sample's task group, as now). The swarm would then own each member's descendants. This is an inspect_ai change, proposed when a swarm of background deepagents is needed, not in M1.
+- **Per-member tool state.** Each member keeps its own tool state, as it would running alone; sharing it with another member is a choice the eval author makes explicitly ([The sample store](#the-sample-store)). Ransom asked for the store to be covered on 2026-10-09; how the default is enforced is [open question 2](#open-questions), and this is the recommended design.
+  - The runtime runs each member inside a **tool-state scope** named after the member. Tools that keep agent-private state resolve `instance=None` to the scope, so each member gets its own memory, shell session, browser and skill list. A deepagent member's subagents run inside the member, so a `readwrite` subagent still shares its parent's memory, and no other member's.
+  - The scope is a small inspect_ai change, made before M1 beside the registry types ([Where each part lives](#where-each-part-lives)):
+
+    ```python
+    # inspect_ai/util/_tool_state.py, exported from inspect_ai.util
+
+    # Within the block, tool state left at the default instance belongs to `name`.
+    # Nested scopes join with "/" ("outer/inner"). A ContextVar, so tasks started inside inherit it.
+    @contextmanager
+    def tool_state_scope(name: str) -> Iterator[None]: ...
+
+    # An explicit instance is returned as given; None becomes the enclosing scope's name,
+    # or stays None outside any scope.
+    def tool_state_instance(instance: str | None) -> str | None: ...
+    ```
+
+    `memory()`, `bash_session()`, `web_browser()` and the skill tool call `tool_state_instance(instance)` once per call and use the result for `store_as` and any other per-instance key (the skill tool's install lock). Outside a scope nothing changes, so existing evals are unaffected. A spike patched the resolver into `memory()`: two members in scopes `w-1` and `w-2` with `memory()` each got their own files (`MemoryStore:w-1:...`, `MemoryStore:w-2:...`), and with `memory(instance="team")` they shared them.
+  - **An explicit instance is used as given.** Two members that name the same instance share that state on purpose: it is a channel, treated like the filesystem ([Security](#security)). A member with `count > 1` is one agent object invoked for each copy ([swarm-api.md](swarm-api.md#members)), so an explicit instance in it is shared by all its copies; the scope is what separates copies.
+  - **What stays shared**, stated in `member()`'s contract:
+    - the sample store itself, and with it any environment a task keeps there (AgentDojo, tau2), as the sandbox is shared;
+    - state that custom tools or agent code keep with `store_as` or `store()` and no instance, unless they resolve their instance through `tool_state_instance()`. The swarm cannot see them or tell private state from environment state, so it does not check them;
+    - inspect_sentinel's protocol state, which names its own instance and so is unaffected.
+  - A bridged member's `bridged_tools` run in a task started from the member's context ([swarm-communication.md](swarm-communication.md#bridged-tools)), so they see its scope.
 - **Sandbox processes.** Processes a member starts in the sandbox that outlive its tool calls (for example under `nohup`) are outside any Inspect task group. They are part of the [filesystem observation limit](#security), not something the drain can promise to stop.
 - **The deepagent baseline arm** keeps its existing semantics. Children are abandoned when the parent returns and cancelled when the solver ends, and their spend up to then is part of the arm's realized cost.
 - **Persistent members** (idle after submitting, woken by a message) are needed by coordinator topologies, not by the first slice. A blocking `on_continue` alone cannot provide them, because a successful submit leaves `react()` before `on_continue` runs. Two candidates for the coordinator-topologies work:
@@ -596,6 +636,7 @@ The leaderless default matches how leaderless swarms succeed in practice: the C 
 | Clean re-entry of `react()` on an existing state (no second system prompt), or an idle state | inspect_ai (coordinator topologies), optional | Persistent members; the alternative is a `submit=False` member protocol inside inspect_swarm. |
 | A scoped owner for `background()` work, so a swarm can own and drain a member's descendants | inspect_ai, when background deepagent members are needed | Today `background()` attaches to the sample's task group; without an owner the swarm cannot drain `deepagent(background=True)` members. |
 | `span(..., metadata=)` and per-span usage in the log, including native compaction usage (for example on `CompactionEvent`) | inspect_ai, nice to have | Member identity and complete per-member cost without side records or an unattributed remainder. |
+| A tool-state scope, so each member's `memory()`, `bash_session()`, `web_browser()` and skill state is its own | inspect_ai, before M1 ([open question 2](#open-questions)) | Built-in tools resolve their default instance inside the tool; the swarm cannot reach it ([Members](#members)). |
 | Correct `StoreEvent` attribution under concurrent spans | inspect_ai, bug-class | Affects any concurrent agents, not only swarms. |
 | A first-class inter-agent message event, if one is wanted | inspect_ai, [open question 1](#open-questions) | Shared by native swarms and bridged Codex `agent_message` traffic; a schema change. |
 | Turning on and mapping Codex multi-agent v2 and Claude Code agent teams | inspect_swe | Agent-specific configuration and event reconstruction already live there. |
@@ -746,6 +787,18 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 - Breaks response caching, couples to model internals, and cannot tell a peer message from any other input.
 - Rejected in favour of a bus chokepoint plus sentinel's tool stages.
 
+**Isolate the whole sample store per member**, as `subtask()` does, by giving each member task its own `Store`.
+
+- Separates every kind of state, custom tools' included, with no inspect_ai change.
+- It also separates what must be shared. Tasks that keep their environment in the store (AgentDojo, tau2) would see each member change its own copy, and their scorers would read none of it. Sentinel's dispatcher reads `store()`, so protocols would lose their joint view of the swarm. Seeding each member's store from the sample's, and merging back afterwards, has no right answer when two members changed the same key.
+- Rejected in favour of a scope that separates only the state tools mark as agent-private ([Members](#members)).
+
+**Refuse shared store-backed tools at construction** instead of scoping them (option (b) of [open question 2](#open-questions)).
+
+- No inspect_ai change. `swarm()` can see the tools a registered agent was built with (for `react(tools=[...])` they are in its registry params with any explicit `instance`) and `deepagent()`'s `memory` flag. It would refuse two members holding the same store-backed tool with the default instance, and any such tool in a member with `count > 1`.
+- It refuses the most common configuration, `member(deepagent(...), count=4)`, because deepagent adds `memory()` by default. The fixes are `deepagent(memory=False)` or a separate member record per copy, each with its own `memory(instance=...)`. It cannot see tools a builder creates inside its invocation, a `ToolSource`'s tools or a bridged member's.
+- The fallback if the inspect_ai change is not wanted. A warning instead of a refusal (option (c)) would fire on that common configuration every time and be ignored.
+
 **A new event type from day one.**
 
 - Clean, and gives the viewer a real view.
@@ -762,6 +815,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 - **inspect_ai extension points**, where behaviour needs them, are additive:
   - the `controller` and `channel` registry types, two entries in a literal that is not part of the log schema ([swarm-api.md](swarm-api.md#compatibility-and-migration));
   - no binder hook: M2 needs no inspect_ai change ([swarm-communication.md](swarm-communication.md));
+  - the tool-state scope, if chosen ([open question 2](#open-questions)), changes nothing outside a scope. Inside one, a built-in tool's store keys gain the member's name (`MemoryStore:w-1:files` rather than `MemoryStore:files`), in a swarm of one too, so a scorer or analysis that reads a built-in tool's state from the store must use the scoped key. In inspect_evals one task does: gdm_self_proliferation's sp01 and sp05 scorers read the default-instance `web_browser()` state (`inspect_evals: src/inspect_evals/gdm_self_proliferation/custom_scorers/sp01.py:45`, `sp05.py:45`). In a scoped swarm they find no browser state; without the scope they would read whichever member used the shared browser last. Neither is a meaningful score for a swarm, so M1 documents tasks whose scorers read a member's tool state as unsupported;
   - extending the `source` literal changes the log schema and the generated TypeScript types, so it goes through inspect_ai's type-generation pipeline and a ts-mono PR;
   - a new `source` value is additive for new writers, but readers whose literal still has only `input`, `generate` and `operator` would reject logs containing it. M2's detailed design must either state the minimum reader version or carry the swarm notice's provenance in message `metadata`. The second avoids version skew and is preferred unless the viewer needs the distinction. Peer content itself needs neither, because it is tool output ([Delivery](#delivery-peer-messages-are-model-output)).
 - **A new event type**, if one is proposed ([open question 1](#open-questions)), is the largest change: the event union, schema, ts-mono types, viewer renderer, dataframes and Scout's event handling. M1 uses existing event types; whether and when to add a new event type remains open.
@@ -785,6 +839,12 @@ Untrusted input reaches this code from several directions.
   - Containment probes are an eval in their own right, not a property the library can promise.
   - Samples must not share sandboxes. Isolation between samples is Inspect's sandbox's job, and nothing here weakens it.
   - **Observation limit.** Tool calls are evidence of possible filesystem communication, not a complete audit. Processes a member starts in the sandbox can read, write or exchange files between logged tool calls, and after the member has ended. Experiments that attribute communication to the filesystem must state this limit, or add independent instrumentation such as filesystem snapshots or audit logs in the sandbox.
+- **Tool state in the sample store** is another channel outside the bus, and an easier one to create by accident than the filesystem: `react(tools=[memory()])` on every member, or `deepagent()` with its default memory, would give all members one memory ([The sample store](#the-sample-store)).
+  - The tool-state scope removes the accidental case for the built-in tools: each member's state is its own unless the eval author names a shared instance ([Members](#members)).
+  - **A deliberately shared instance is a channel**, treated like the filesystem: observed, not monitored. Members' uses of it are tool calls, recorded as `ToolEvent`s and seen by sentinel's tool stages for native members, but the bus does not see them, so storm controls, the policy hook and evidence records do not apply. An explicit instance is visible in the member's logged parameters when the tool is (`react(tools=[...])`), not when a builder creates it inside its invocation. `StoreEvent`s are not evidence of who wrote what, because they are misattributed under concurrent spans ([Transcript and events](#transcript-and-events)).
+  - **The same observation limit applies.** Tool calls are evidence of possible communication, not an audit: a command one member starts in a shared `bash_session()` keeps writing output that another member reads later.
+  - Sharing could later be routed through the bus, for example as a channel whose shared notes are records, with evidence and the policy hook. Until then, an arm meant to have messages as its only channel uses no shared instance.
+  - What the scope does not cover stays shared: environment state a task keeps in the store, which members can use to signal each other as they can through the sandbox, and custom tools that keep private state with the default instance.
 - **Red-team features** (forged senders, injected records, secret channels) are optional and may never be built. If they are, they create adversarial content deliberately, so they must be configured only by the eval author, recorded in the evidence events with their true origin, and never reachable from member tools.
 - **Log contents.** Evidence payloads are model text. They are written as JSON data in `InfoEvent`s, not as Markdown, so the viewer does not render them as formatted content.
 - **Bridged members** run in the sandbox. The swarm's tools reach them through `bridged_tools`, which execute host-side only for calls the model proposed (`bridge.py:141-146`). Today sentinels do not see bridged agents' tool calls, so a swarm of bridged members gets bus-level interception but not tool-level monitoring until that gap is closed.
@@ -804,6 +864,7 @@ Untrusted input reaches this code from several directions.
   - sample-level limits, `TerminateSampleError`, other errors and mixed groups propagate unchanged;
   - an outer limit that trips before the reserve is used leaves the provisional answer as the output;
   - drain cancels and awaits members;
+  - per-member tool state: two members with `memory()`, and the copies of `member(deepagent(...), count=2)`, cannot read each other's memory files; two members given `memory(instance="team")` can; a deepagent member's `readwrite` subagent reads its parent's memory; a store value a setup solver wrote is visible to every member and to the scorer, and a member's change to it is visible to the others;
   - `deepagent(background=True)` members are rejected while background ownership is unsupported;
   - the task's own scorer scores the swarm's final answer, or for a shared-artifact task the drained environment, unchanged (per-member scores, team@k and voting are tested with that work, after M2);
   - `first` selects the earliest submission (after M2, each further final-answer mode selects as specified);
@@ -835,10 +896,11 @@ Each milestone is a small series of PRs, and the project convention applies: dis
 
 **Before M1: scaffold to Python 3.11.** A separate `chore:` PR moves `AGENTS.md`, `pyproject.toml`, `CONTRIBUTING.md` and the CI matrix from 3.10 to 3.11 ([Compatibility](#compatibility-and-migration)).
 
-**M1. Leaderless filesystem swarm with full accounting** (inspect_swarm, after a one-line inspect_ai PR adding the `controller` and `channel` registry types, decision: Ransom, 2026-10-08; [swarm-api.md](swarm-api.md#implementation-plan)).
+**M1. Leaderless filesystem swarm with full accounting** (inspect_swarm, after a one-line inspect_ai PR adding the `controller` and `channel` registry types, decision: Ransom, 2026-10-08; [swarm-api.md](swarm-api.md#implementation-plan); and, if [open question 2](#open-questions) takes the recommendation, a small inspect_ai PR adding the tool-state scope).
 - The API skeleton of [swarm-api.md](swarm-api.md): `@controller` and `@channel`, `member()` records, name resolution, faithful logging, and the built-ins `leaderless` and `filesystem`.
 - `swarm()` with leaderless topology over members whose work stays inside their invocation (`react()`, synchronous `deepagent()`, bridged agents). Background deepagent members are rejected.
 - The shared-sandbox default and its filesystem prompt convention: shared directory, append-only notes file, per-member scratch directories or worktrees ([Sandbox topology](#sandbox-topology)).
+- Per-member tool state: each member runs in a tool-state scope named after it, and `member()` documents what stays shared ([Members](#members)).
 - A swarm cap node, member limits, a final-answer reserve, and a provisional answer.
 - Recovery from its own cap only.
 - A realized-cost ledger taken after the drain, with its coverage rules: arm totals from sample usage; member attribution from events, with cache replays charged zero; unattributed native compaction; cancelled and unpriced calls reported as unknown.
@@ -898,11 +960,21 @@ Each milestone is a small series of PRs, and the project convention applies: dis
 
    Recommendation: (a). The shape should be settled with bridged traffic in view, and the schema change is costly.
 
+2. **How the swarm keeps members' tool state apart** (raised 2026-10-09, when Ransom asked for the sample store to be covered). Built-in tools share their store state between agents in a sample unless each has its own `instance`, and `deepagent()` adds a shared `memory()` by default ([The sample store](#the-sample-store)).
+   - (a) A tool-state scope in inspect_ai: the runtime scopes each member, and built-in tools resolve their default instance to it ([Members](#members)). Costs a small inspect_ai PR before M1; covers deepagent's memory and `count` copies; custom tools can opt in.
+   - (b) No inspect_ai change: `swarm()` refuses members whose visible store-backed tools would be shared. Refuses `member(deepagent(...), count=4)` unless `memory=False`, and cannot see tools built inside a builder ([Alternatives](#alternatives-considered)).
+   - (c) Document the hazard and warn at construction. Leaves the common configuration sharing a memory nobody asked for.
+
+   Recommendation: (a). A member should behave as the same agent alone, and the common configuration should not need a workaround. If the inspect_ai PR is not wanted, (b).
+
 ## Not this design
 
 Adjacent problems noticed and left out, for Ransom to file if wanted:
 
 - **`StoreEvent` attribution under concurrent spans** (inspect_ai). Store diffs are taken at span entry and exit, so with concurrent agents one span's event can include another's writes. This affects deepagent background subagents today.
+- **Tool-state scopes outside swarms** (inspect_ai). Other code that runs several independent agents in one sample could use the same scope; this design proposes it for members only.
+- **Routing deliberately shared tool state through the bus**, as a channel with records and evidence. Later work, if shared memory proves useful.
+- **Copying the chosen member's tool state to the unscoped keys** at finalisation, so scorers that read a built-in tool's state (gdm_self_proliferation's) see the state of the member whose answer was chosen. It would make a swarm of one match a plain agent there too; it depends on inspect_ai's store key format.
 - **Per-span or per-agent usage in the eval log** (inspect_ai). Today only per-model and per-role usage is stored.
 - **`span(..., metadata=)`** (inspect_ai). Would let member identity and roles be stamped on spans instead of carried in names.
 - **Sentinels for bridged agents' tool calls** (inspect_sentinel, already a known gap in its workstreams).

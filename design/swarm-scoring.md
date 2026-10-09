@@ -2,6 +2,25 @@
 
 Status: proposed, 2026-10-08; restructured the same day after Ransom moved scoring work beyond M1's final answer to after M2. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
 
+## Overview
+
+A swarm is scored the way any agent is. It is the task's solver, so the task's own scorers grade what it leaves behind: its answer, or the shared environment its members worked in. This design says what the swarm must leave behind for that to work in M1, and sketches what could be added after M2 for richer comparisons.
+
+**In M1 the swarm adds no scorer.**
+
+- The swarm's answer is the first submission: the member that submitted earliest wins, and a tie goes to the member listed first. Answer scorers such as `match()` or a model grader read it as they read any agent's output.
+- Tasks scored on the environment, such as a repository the members edited together, are scored on the shared sandbox after every member has stopped.
+- If a limit ends the sample early, a submission already made still counts. If no member submitted, the output is empty, rather than one member's unfinished work.
+- The swarm records what each member did (its state, whether and when it submitted, its output) and which answer it chose and why, so analyses can look past the single score.
+- Sample usage includes the scorers' model calls, as in every Inspect eval, so arms are compared with grading included.
+
+**After M2, optionally:**
+
+- A task can declare what a result is, so the swarm can check submissions with a verifier and choose its answer by verifying, then voting, then taking the first; or combine answers with a model call.
+- Every member's submission can be scored, giving team-level numbers (did any member solve it, how did the average member do) to compare with best-of-k and epochs.
+- Helpers run the same agent as a swarm of one for a baseline, select among attempts, and analyse arms side by side.
+- Environment-scored tasks can get per-member artifacts, and solve cost can be separated from scoring cost.
+
 A deeper dive on one topic of [swarm.md](swarm.md): how a swarm's results are scored. It details [Results and scoring](swarm.md#results-and-scoring-a-task-owned-contract) (the task-owned result contract) and the final-answer modes of [Controller](swarm.md#controller-topology-termination-final-answer). It covers answer-scored and shared-artifact tasks, per-member submissions, the comparisons with epochs (team@k, best@k, pass@k), the final-answer chain, verifiers, `synthesize`, per-member artifacts in a shared sandbox, what inspect_swarm ships for scoring, how all of it appears in logs and eval sets, and how a task opts in.
 
 **How it is organised.** Ransom (2026-10-08): "let's limit M1 to first. Defer the cost boundary - already an issue with existing inspect evals. [...] M1 work at the top of -scoring, everything that is past M2 later in the doc."

@@ -75,7 +75,7 @@ From inspect_sentinel `main`:
 - Stages are `BeforeToolCall` and `AfterToolCall` only; the decorators reject any other step type (`src/inspect_sentinel/_step.py:17-75`, `_decorators.py:394-398`). Generate stages are designed, not built. There is no API for running protocols on a non-tool step.
 - Actions are `continue`, `modify`, `reject`, `escalate` and `terminate`, with precedence `terminate > reject > modify > escalate > continue` (`_report.py:16-22`). `modify` replaces the call's arguments only (`_validate.py:32-44`). `reject` gives the model a tool error carrying `Decision.message` (`design/sentinel-reference.md:425`, `_report.py:79-80`). An `escalate` that reaches the root proceeds with a warning (`design/pr-series.md:492`).
 - A step's `conversation` is the current agent span id (`design/sentinel-reference.md:1429`). Each member runs in its own agent span, so sentinel tells members apart with no swarm code, though it does not know their names.
-- `Context.store_as` is per sample (`_context.py:63-71`, `_host.py:156-169`), so a protocol can keep state across all members.
+- `Context.store_as` is per sample (`_context.py:63-71`, `_host.py:156-169`), so a protocol can keep state across all members. It names its own instance (the protocol's path), so swarm.md's per-member tool-state scope, which applies only to tools left at the default instance, does not change this ([Tool state in the sample store](#tool-state-in-the-sample-store)).
 - The dispatcher lives on inspect_ai's `feature/sentinel` branch and has not reached `main` (`design/pr-series.md:13-14`, `design/workstreams.md:69-76`).
 - Sentinels never run for a bridged agent's tool calls; only calls through `execute_tools` are checked (`design/workstreams.md:117`).
 
@@ -435,6 +435,16 @@ The shared sandbox stays an **observed** channel. swarm-api.md's `filesystem()` 
 - **Messages do not bound communication.** Members with messages and a shared filesystem can still talk through files. An arm meant to have messaging as its *only* channel needs filesystem isolation (the optional sandbox topologies in swarm.md), and an arm meant to have *no* communication needs the same.
 - **What this design adds:** nothing at runtime. Scanners that label shared-directory writes and reads per member are later analysis work (swarm.md's Scout scanners). Sandbox instrumentation such as snapshots or audit logs is listed under Not this design.
 
+### Tool state in the sample store
+
+Built-in tools that keep per-sample state in the store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) share it between members that use the same `instance`. swarm.md gives each member its own state by default, through a tool-state scope the runtime enters for each member ([Members](swarm.md#members), [The sample store](swarm.md#the-sample-store)). What this design adds is how a shared instance relates to the bus:
+
+- **A shared instance is an observed channel**, like the filesystem. The eval author creates it by naming the same `instance` in two members' tools, or by giving a counted member's agent an explicit instance. No swarm tool carries the traffic, so `deliver()` never sees it, and storm controls, the policy hook, notices and evidence records do not apply.
+- **What is observable.** Each use is a native member's tool call, with a `ToolEvent` that sentinel's tool stages see. `StoreEvent`s do not show who wrote what, because concurrent member spans misattribute them (swarm.md, [Transcript and events](swarm.md#transcript-and-events)). The observation limit of [the filesystem channel](#the-filesystem-channel) applies: a shared `bash_session()` keeps running what one member started, and another member reads its output later.
+- **Messages do not bound communication** here either: an arm meant to have messages as its only channel gives no two members a shared instance, as it needs filesystem isolation.
+- **Routing it through the bus later.** Shared memory could become a channel whose writes are records, with evidence, storm controls and the policy hook: a later structured channel, alongside notes. Nothing in M2 depends on it.
+- **What this design adds:** nothing at runtime.
+
 ### How channels plug into the bus
 
 A channel is swarm-api.md's `Channel`: an object returned by a `@channel` factory, holding configuration only, and shared by every sample that runs the task ([swarm-api.md](swarm-api.md#channels)). M1 gives it `instructions()`. M2 adds the operations below, split as the API asks: configuration and checks stay on the shared `Channel`, and everything that changes during a run (inboxes, read marks, versions, leases) lives on a `ChannelState` that the runtime creates for each swarm run. The messages channel is the first implementation; later channels (notes, task list, board) are more `@channel` factories, and reuse the bus steps, evidence, fencing, notices, storm controls, the policy hook and addressing. The two things messages do not exercise, operation data and records the swarm creates itself, are part of the contract now so the later channels need no bus change.
@@ -540,7 +550,7 @@ Untrusted input reaching this code, and how it is handled:
 - **Policy hook and operator:** both are eval-author or operator controlled, never reachable from member tools. Approval and policy decisions never read instructions from payloads.
 - **Bridged members:** tools run host-side only for proposed calls with validated arguments; sentinel does not see them yet, so the bus hook is the interception point. Any loop of a bridged CLI can read the member's inbox, which is the documented contract rather than a hidden leak.
 - **Exposure evidence** is anchored to tool call ids for native reads, so fence tags that a task, a tool or a model reproduce cannot create false exposure records; bridged exposure is labelled inferred.
-- **The filesystem** is outside all of this ([The filesystem channel](#the-filesystem-channel)): an observed, unmonitored channel, and the reason containment is an experimental question, not a guarantee.
+- **The filesystem** is outside all of this ([The filesystem channel](#the-filesystem-channel)): an observed, unmonitored channel, and the reason containment is an experimental question, not a guarantee. So is tool state shared through an explicit `instance` ([Tool state in the sample store](#tool-state-in-the-sample-store)); each member's tool state is its own by default.
 - **Isolation between samples:** the bus, each `ChannelState` and the member handles are per swarm run, reached through ContextVars; the shared `swarm()`, `Channel` and member objects hold configuration only, so one sample's messages cannot reach another's members.
 
 ## Testing
@@ -586,6 +596,7 @@ Adjacent problems noticed and left out, for Ransom to file if wanted:
 - **Deterministic ACP target in a swarm** (inspect_ai). ACP binds whichever member opens its channel first, and nothing rebinds after that member ends. Letting a swarm name the operator's target needs ACP to accept a chosen binding.
 - **A viewer rendering for swarm notices and peer fences** (ts-mono). Today they show as an ordinary user message and tool result.
 - **Sandbox instrumentation for the filesystem channel**: snapshots or audit logs that attribute file traffic between tool calls.
+- **Shared tool state as a bus channel**: records for writes to a shared `memory()` instance, with evidence and the policy hook.
 - **Checkpointing bus state** (inboxes, ids, leases) with inspect_ai's sample checkpoints; swarm.md already leaves checkpointing out.
 - **Non-text payloads** (images, file attachments) in messages.
 - **Urgent messages that preempt a recipient's turn.** They would need a channel interrupt whose recovery does not wait for an operator.
