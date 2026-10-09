@@ -70,12 +70,13 @@ A swarm of one member with no channels is a single agent with the same accountin
 - M2 uses sentinel directly if its dispatcher has reached inspect_ai `main`, otherwise a minimal hook in sentinel's action vocabulary.
 ([The bus](swarm.md#the-bus-one-interception-point))
 
-**Peer messages are model output, delivered as tool output with distinct provenance.** A peer's text reaches a member only as the result of a swarm tool (`read_messages()` and the like), never as a user-role message.
+**Peer messages are model output, delivered as tool output with distinct provenance.** By default a peer's text reaches a member only as the result of a swarm tool (`read_messages()` and the like), never as a user-role message. That is the default, not an absolute (decision: Ransom, 2026-10-09): after M2 an arm may opt into injection, below.
 - Inside the tool result each message is fenced as data under a sender line the bus stamps, and carries only what the sender wrote, never its tool calls or transcript. Tool output alone is not a trust boundary.
 - At a turn boundary the swarm injects at most a metadata-only notice, such as "3 unread from `worker-2`", as deepagent does for background completions.
 - Logs and evidence mark peer content and notices distinctly, preferring metadata to a new `source` value.
 - The notice is a marked message appended by a swarm `on_continue` hook; the swarm never posts into members' agent channels, so M2 needs no inspect_ai change beyond the registry types ([swarm-communication.md](swarm-communication.md)).
-- Vendor swarms such as Codex deliver peer text in the user role; native members never do.
+- Vendor swarms such as Codex deliver peer text in the user role; native members do only in an opt-in arm.
+- **Push after M2, optional and off by default**, each a logged ablation axis: reminders that repeat the notice while messages stay unread; injection of the fenced bodies as a marked user-role message (`delivery="inject"`), a deliberately weaker boundary offered for experiments; and urgent messages that interrupt a recipient blocked in a long call, which need a small inspect_ai change (a `Steer` agent-channel item) ([push delivery](swarm-communication.md#push-delivery-after-m2-optional)).
 ([Delivery](swarm.md#delivery-peer-messages-are-model-output))
 
 **Red-team features are optional and unscheduled.** Forged senders, secret channels and targeted injection may never be built. The single interception point keeps them possible. ([The bus](swarm.md#the-bus-one-interception-point))
@@ -95,7 +96,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 | Repository | What |
 |---|---|
 | **inspect_swarm** | `swarm()`, controller, members, budget and ledger, bus and channels, evidence, metrics, scorers, prompts, Scout scanners |
-| **inspect_ai** | Only where needed: the `controller` and `channel` registry types (before M1), a tool-state scope for members (before M1, if chosen), a scoped owner for `background()`, clean `react()` re-entry, per-span usage |
+| **inspect_ai** | Only where needed: the `controller` and `channel` registry types (before M1), a tool-state scope for members (before M1, if chosen), a scoped owner for `background()`, clean `react()` re-entry, per-span usage, a `Steer` agent-channel item (only for optional urgent messages after M2) |
 | **inspect_swe** | Enabling and mapping Codex multi-agent v2 and Claude Code agent teams |
 | **inspect_sentinel** | Monitors and protocols |
 | **ORBIT-like packages** | Scenarios, attacks, defenses |
@@ -114,6 +115,7 @@ M1, then M2; after that, a menu in any order or in part, driven by user feedback
   - background deepagents as members;
   - bridged swarms;
   - safety hooks;
+  - push delivery: reminders, injection and urgent messages, each opt-in ([push delivery](swarm-communication.md#push-delivery-after-m2-optional));
   - scoring and selection beyond `first`: the result contract, the verify/vote/synthesize chain, per-member scores and the comparisons with epochs ([scoring](swarm-scoring.md#part-2-after-m2-optional));
   - optionally, red-team features and other sandbox topologies.
 
