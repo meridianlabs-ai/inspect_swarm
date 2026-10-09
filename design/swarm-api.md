@@ -58,7 +58,7 @@ class Channel:
 - **Channels** add instructions to each member's preamble in M1, and tools and delivery from M2 ([Channels](#channels)).
 - **The observer** has no `observer=` argument: what it records is fixed and versioned. Monitors (inspect_sentinel), scores (the task's scorers) and labels (Scout) are configured where Inspect configures them; the communication deep dive's bus hook, `policy=`, is the one setting on `swarm()` from M2 ([Observer](#observer)).
 - **Names, logging and task identity.** A string resolves to a registered controller or channel with its defaults ([Resolving names](#resolving-names)). Every argument this API defines is logged faithfully ([Logging and replay](#logging-and-replay)). An **arm** is one condition of an experiment; in Inspect terms, one task in an eval set: a `Task` instantiated with its arguments and run with a given solver, model and limits, which Inspect tells apart by `task_identifier()`. A swarm is the task's solver, so its arguments, including the nested controller, channel, member and `Budget` parameters, are in the plan step's `params_passed`, which `task_identifier()` hashes: two arms that differ in any of them are distinct in an eval set ([Task identity](#task-identity-what-makes-two-arms-distinct)).
-- **One inspect_ai prerequisite**: `"controller"` and `"channel"` added to inspect_ai's `RegistryType`, before M1 (decision: Ransom, 2026-10-08; [The registry](#the-registry)).
+- **Two inspect_ai prerequisites before M1**: `"controller"` and `"channel"` added to inspect_ai's `RegistryType` (decision: Ransom, 2026-10-08; [The registry](#the-registry)), and the tool-state scope (decision: Ransom, 2026-10-09; [Members](#members)).
 
 ## Why
 
@@ -422,7 +422,7 @@ A string for `controller=` or in `channels=` is resolved by `resolve(type, name)
 
 The resolved registry name is recorded in the swarm's evidence for each sample, so a log shows which object a bare name meant. inspect_swarm declares an `inspect_ai` entry point (`inspect_swarm = "inspect_swarm._entrypoint"`) that imports the built-ins, so `inspect_swarm/...` names resolve without importing the package first, as inspect_sentinel's does.
 
-Both registry types need inspect_ai's `RegistryType` to list them ([The registry](#the-registry)): one inspect_ai PR adds `"controller"` and `"channel"`, as inspect_ai#4359 added `validation_predicate`. That is the only inspect_ai change this API needs. It lands before M1, with plain names; namespacing is left to that PR's review (decision: Ransom, 2026-10-08).
+Both registry types need inspect_ai's `RegistryType` to list them ([The registry](#the-registry)): one inspect_ai PR adds `"controller"` and `"channel"`, as inspect_ai#4359 added `validation_predicate`. It lands before M1, with plain names; namespacing is left to that PR's review (decision: Ransom, 2026-10-08). The tool-state scope PR is also required before M1 (decision: Ransom, 2026-10-09; [Implementation plan](#implementation-plan)).
 
 ### Logging and replay
 
