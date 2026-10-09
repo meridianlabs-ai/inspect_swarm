@@ -61,7 +61,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 - Concurrent edits, git index locks and resource contention in a shared sandbox are handled by the task's layout: per-member worktrees or scratch directories, and a sandbox sized for the members.
 ([Sandbox topology](swarm.md#sandbox-topology))
 
-**Each member's tool state is its own; the sample store is still shared.** Built-in tools such as `memory()` and `bash_session()` keep state in the sample store, and agents in one sample share it unless each tool has its own `instance`; `deepagent()` adds a shared `memory()` by default. The recommended design runs each member in a tool-state scope (a small inspect_ai change before M1) so that the default instance is per member. A shared instance named on purpose is a channel, observed like the filesystem. How to enforce the default is open. ([Members](swarm.md#members), [Security](swarm.md#security))
+**Each member's tool state is its own; the sample store is still shared.** Built-in tools such as `memory()` and `bash_session()` keep state in the sample store, and agents in one sample share it unless each tool has its own `instance`; `deepagent()` adds a shared `memory()` by default. Each member runs in a tool-state scope (a small inspect_ai change before M1) so that the default instance is per member (decision: Ransom, 2026-10-09). A shared instance named on purpose is a channel, observed like the filesystem. The alternatives, refusing such members at construction or only warning, were rejected. ([Members](swarm.md#members), [Security](swarm.md#security))
 
 **One bus for all sanctioned communication.** Every message, note, claim or post goes through `deliver()`: monitor, then storm controls, then evidence, then delivery. Nothing else writes to a member's inbox. The filesystem stays an *observed* channel, seen only through tool calls, with the limits that implies. ([The bus](swarm.md#the-bus-one-interception-point), [Security](swarm.md#security))
 
@@ -95,7 +95,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 | Repository | What |
 |---|---|
 | **inspect_swarm** | `swarm()`, controller, members, budget and ledger, bus and channels, evidence, metrics, scorers, prompts, Scout scanners |
-| **inspect_ai** | Only where needed: the `swarm_controller` and `swarm_channel` registry types (before M1), a tool-state scope for members (before M1, if chosen), a scoped owner for `background()`, clean `react()` re-entry, per-span usage |
+| **inspect_ai** | Only where needed: the `swarm_controller` and `swarm_channel` registry types (before M1), a tool-state scope for members (before M1), a scoped owner for `background()`, clean `react()` re-entry, per-span usage |
 | **inspect_swe** | Enabling and mapping Codex multi-agent v2 and Claude Code agent teams |
 | **inspect_sentinel** | Monitors and protocols |
 | **ORBIT-like packages** | Scenarios, attacks, defenses |
@@ -106,7 +106,7 @@ Detail: [where each part lives](swarm.md#where-each-part-lives).
 
 M1, then M2; after that, a menu in any order or in part, driven by user feedback with no internal evidence gate. ([Implementation plan](swarm.md#implementation-plan))
 
-- **M1: leaderless filesystem swarm with full accounting.** The `swarm()` API with `@swarm_controller` and `@swarm_channel`, shared sandbox, per-member tool state, cap and ledger, drain, the final answer `first` with every member's submission recorded, `InfoEvent` evidence and metrics. Existing task scorers score it unchanged. Its inspect_ai changes land first: a one-line PR adding two registry types (decision: Ransom, 2026-10-08) and, if chosen, the tool-state scope.
+- **M1: leaderless filesystem swarm with full accounting.** The `swarm()` API with `@swarm_controller` and `@swarm_channel`, shared sandbox, per-member tool state, cap and ledger, drain, the final answer `first` with every member's submission recorded, `InfoEvent` evidence and metrics. Existing task scorers score it unchanged. Its inspect_ai changes land first: a one-line PR adding two registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09).
 - **M2: the bus and direct messages.** `deliver()`, the `messages` channel with `send_message`, delivery modes, monitoring through sentinel, and metadata-only notices; no inspect_ai change ([swarm-communication.md](swarm-communication.md)).
 - **Later, any order:**
   - structured channels (each needs M2; quiescence needs persistent members);
@@ -119,5 +119,4 @@ M1, then M2; after that, a menu in any order or in part, driven by user feedback
 
 ## Open
 
-- **How members' tool state is kept apart.** A tool-state scope in inspect_ai (recommended), a refusal at construction, or a warning. ([Open questions](swarm.md#open-questions))
 - **Transcript representation for swarm evidence.** M1 uses versioned `InfoEvent`s as a working default. Whether to propose a first-class inter-agent message event in inspect_ai, and when, is undecided. ([Open questions](swarm.md#open-questions))
