@@ -15,19 +15,24 @@ It is an eval library, not a production orchestration framework. The runtime liv
 | Component | What it is |
 |---|---|
 | **Members** | The agents: each a name, role, `Agent`, model, tools, limits and conversation. Any `Agent` that keeps its work inside its invocation: `react()`, synchronous `deepagent()`, or a bridged Claude Code or Codex. ([Members](swarm.md#members)) |
-| **Substrate** | How members share information: the shared sandbox filesystem from M1; direct messages from M2; later, optionally, a notes/fact log, a task list with claims, and a board. ([Substrate](swarm.md#substrate)) |
-| **Controller** | How the swarm runs: topology (leaderless first; coordinator tree and lead-with-teammates later), start and wake, termination, drain, and the final answer. ([Controller](swarm.md#controller-topology-termination-final-answer)) |
+| **Channels** | How members share information: the shared sandbox filesystem from M1; direct messages from M2; later, optionally, a notes/fact log, a task list with claims, and a board. Each is a `@swarm_channel` registry object. ([Channels](swarm.md#channels)) |
+| **Controller** | How the swarm runs: topology (leaderless first; coordinator tree and lead-with-teammates later), start and wake, termination, and the final-answer chain. Each topology is a `@swarm_controller` registry object; the swarm's fixed runtime does the drain and finalisation. ([Controller](swarm.md#controller-topology-termination-final-answer)) |
 | **Observer** | What is recorded and where monitors attach: one bus for every sanctioned message, evidence events, a realized-cost ledger, and swarm metrics. ([Observer](swarm.md#observer-evidence-accounting-and-metrics)) |
+
+`swarm()`'s arguments mirror the components ([API](swarm-api.md)). The common case is `swarm(members=member(deepagent(...), count=4))`; written out:
 
 ```python
 swarm(
     members=member(deepagent(...), count=4),
-    topology="leaderless",
-    channels=["filesystem"],
-    budget=cost_limit(40.0),
-    final="verify",
+    controller="leaderless",   # a name or a @swarm_controller object, including a user's own
+    channels=["filesystem"],   # names or @swarm_channel objects
+    budget=Budget(),           # caps derived from the sample's limits
 )
 ```
+
+After M2, a strict, verifier-only answer is a controller parameter and needs the task's verifier: `controller=leaderless(final="verify")` with `result=answer_result(verifier=...)`.
+
+The observer has no argument: what it records is a fixed, versioned contract that scorers and analysis read, the same in a swarm and in its baselines. Monitors are configured through inspect_sentinel, scores through the task's own scorers, and labels through Scout ([API](swarm-api.md#observer)). The API's own arguments are logged faithfully, so names, task parameters and Python sweeps all work; members configured with hooks and the task's result contract are rebuilt through registered builders or the task ([API](swarm-api.md#logging-and-replay)). A swarm is the task's solver, so its arguments are part of Inspect's task identity, and two *arms* (two tasks in an eval set, each a `Task` with its arguments, solver, model and limits) that differ in any of them are distinct ([API](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
 
 A swarm of one member with no channels is a single agent with the same accounting, so it is the natural baseline.
 
@@ -44,17 +49,19 @@ A swarm of one member with no channels is a single agent with the same accountin
 - the final-answer reserve is best-effort.
 ([Eval questions](swarm.md#eval-questions-and-the-experimental-design-they-imply), [Accounting](swarm.md#observer-evidence-accounting-and-metrics))
 
-**The task decides what a member's result is.**
+**The task decides what a member's result is.** M1 adds no scorer: the task's own scorers score the swarm's answer or the environment it leaves, as after any agent. Per-member claims come after M2 (decision: Ransom, 2026-10-08; [scoring](swarm-scoring.md)).
 - *Answer-scored tasks* (a final answer string) get per-member scores and team@k, comparable with best@k from epochs. Voting needs a task-defined comparable answer form.
 - *Shared-artifact tasks* (scored on the sandbox, like SWE-bench) get one team score. Individual correctness is unavailable unless each member leaves its own artifact.
 ([Results and scoring](swarm.md#results-and-scoring-a-task-owned-contract))
 
-**Default final answer for leaderless swarms: `verify`, else `vote`, else `first`.** Use the task's in-loop verifier when it has one, otherwise vote when answers are comparable, otherwise take the first submission. Every member's submission is recorded regardless. For shared-artifact tasks the result is the drained environment. ([Final answer](swarm.md#controller-topology-termination-final-answer))
+**Default final answer for leaderless swarms: `verify`, else `vote`, else `first`.** Use the task's in-loop verifier when it has one, otherwise vote when answers are comparable, otherwise take the first submission. Every member's submission is recorded regardless. For shared-artifact tasks the result is the drained environment. M1 builds `first` only; the chain comes after M2 (decision: Ransom, 2026-10-08). ([Final answer](swarm.md#controller-topology-termination-final-answer))
 
 **Members share the sample's sandbox by default.** The filesystem is M1's only channel, and bridged members already run there.
 - A sandbox per member, or partial isolation, is optional later work. Possible reasons: isolation matching the epochs arm, or containment baselines.
 - Concurrent edits, git index locks and resource contention in a shared sandbox are handled by the task's layout: per-member worktrees or scratch directories, and a sandbox sized for the members.
 ([Sandbox topology](swarm.md#sandbox-topology))
+
+**Each member's tool state is its own; the sample store is still shared.** Built-in tools such as `memory()` and `bash_session()` keep state in the sample store, and agents in one sample share it unless each tool has its own `instance`; `deepagent()` adds a shared `memory()` by default. Each member runs in a tool-state scope (a small inspect_ai change before M1) so that the default instance is per member (decision: Ransom, 2026-10-09). A shared instance named on purpose is a channel, observed like the filesystem. The alternatives, refusing such members at construction or only warning, were rejected. ([Members](swarm.md#members), [Security](swarm.md#security))
 
 **One bus for all sanctioned communication.** Every message, note, claim or post goes through `deliver()`: monitor, then storm controls, then evidence, then delivery. Nothing else writes to a member's inbox. The filesystem stays an *observed* channel, seen only through tool calls, with the limits that implies. ([The bus](swarm.md#the-bus-one-interception-point), [Security](swarm.md#security))
 
@@ -67,7 +74,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 - Inside the tool result each message is fenced as data under a sender line the bus stamps, and carries only what the sender wrote, never its tool calls or transcript. Tool output alone is not a trust boundary.
 - At a turn boundary the swarm injects at most a metadata-only notice, such as "3 unread from `worker-2`", as deepagent does for background completions.
 - Logs and evidence mark peer content and notices distinctly, preferring metadata to a new `source` value.
-- How the bus obtains each member's channel ref (the binder) and how the notice is rendered are settled in M2's design, possibly on inspect_ai internals.
+- The notice is a marked message appended by a swarm `on_continue` hook; the swarm never posts into members' agent channels, so M2 needs no inspect_ai change beyond the registry types ([swarm-communication.md](swarm-communication.md)).
 - Vendor swarms such as Codex deliver peer text in the user role; native members never do.
 ([Delivery](swarm.md#delivery-peer-messages-are-model-output))
 
@@ -88,7 +95,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 | Repository | What |
 |---|---|
 | **inspect_swarm** | `swarm()`, controller, members, budget and ledger, bus and channels, evidence, metrics, scorers, prompts, Scout scanners |
-| **inspect_ai** | Only where behaviour needs it: possibly a binder hook (M2), a scoped owner for `background()`, clean `react()` re-entry, per-span usage |
+| **inspect_ai** | Only where needed: the `swarm_controller` and `swarm_channel` registry types (before M1), a tool-state scope for members (before M1), a scoped owner for `background()`, clean `react()` re-entry, per-span usage |
 | **inspect_swe** | Enabling and mapping Codex multi-agent v2 and Claude Code agent teams |
 | **inspect_sentinel** | Monitors and protocols |
 | **ORBIT-like packages** | Scenarios, attacks, defenses |
@@ -99,14 +106,15 @@ Detail: [where each part lives](swarm.md#where-each-part-lives).
 
 M1, then M2; after that, a menu in any order or in part, driven by user feedback with no internal evidence gate. ([Implementation plan](swarm.md#implementation-plan))
 
-- **M1: leaderless filesystem swarm with full accounting.** Shared sandbox, cap and ledger, drain, final-answer modes, the result contract, `InfoEvent` evidence and metrics. No inspect_ai changes.
-- **M2: the bus and direct messages.** `deliver()`, `send_message`, delivery modes, monitoring through sentinel, and the binder.
+- **M1: leaderless filesystem swarm with full accounting.** The `swarm()` API with `@swarm_controller` and `@swarm_channel`, shared sandbox, per-member tool state, cap and ledger, drain, the final answer `first` with every member's submission recorded, `InfoEvent` evidence and metrics. Existing task scorers score it unchanged. Its inspect_ai changes land first: a one-line PR adding two registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09).
+- **M2: the bus and direct messages.** `deliver()`, the `messages` channel with `send_message`, delivery modes, monitoring through sentinel, and metadata-only notices; no inspect_ai change ([swarm-communication.md](swarm-communication.md)).
 - **Later, any order:**
   - structured channels (each needs M2; quiescence needs persistent members);
   - coordinator topologies and persistent members;
   - background deepagents as members;
   - bridged swarms;
   - safety hooks;
+  - scoring and selection beyond `first`: the result contract, the verify/vote/synthesize chain, per-member scores and the comparisons with epochs ([scoring](swarm-scoring.md#part-2-after-m2-optional));
   - optionally, red-team features and other sandbox topologies.
 
 ## Open
