@@ -15,8 +15,8 @@ It is an eval library, not a production orchestration framework. The runtime liv
 | Component | What it is |
 |---|---|
 | **Members** | The agents: each a name, role, `Agent`, model, tools, limits and conversation. Any `Agent` that keeps its work inside its invocation: `react()`, synchronous `deepagent()`, or a bridged Claude Code or Codex. ([Members](swarm.md#members)) |
-| **Channels** | How members share information: the shared sandbox filesystem from M1; direct messages from M2; later, optionally, a notes/fact log, a task list with claims, and a board. Each is a `@channel` registry object. ([Channels](swarm.md#channels)) |
-| **Controller** | How the swarm runs: topology (leaderless first; coordinator tree and lead-with-teammates later), start and wake, termination, and the final-answer chain. Each topology is a `@controller` registry object; the swarm's fixed runtime does the drain and finalisation. ([Controller](swarm.md#controller-topology-termination-final-answer)) |
+| **Channels** | How members share information: the shared sandbox filesystem from M1; direct messages from M2; later, optionally, a notes/fact log, a task list with claims, and a board. Each is a `@swarm_channel` registry object. ([Channels](swarm.md#channels)) |
+| **Controller** | How the swarm runs: topology (leaderless first; coordinator tree and lead-with-teammates later), start and wake, termination, and the final-answer chain. Each topology is a `@swarm_controller` registry object; the swarm's fixed runtime does the drain and finalisation. ([Controller](swarm.md#controller-topology-termination-final-answer)) |
 | **Observer** | What is recorded and where monitors attach: one bus for every sanctioned message, evidence events, a realized-cost ledger, and swarm metrics. ([Observer](swarm.md#observer-evidence-accounting-and-metrics)) |
 
 `swarm()`'s arguments mirror the components ([API](swarm-api.md)). The common case is `swarm(members=member(deepagent(...), count=4))`; written out:
@@ -24,8 +24,8 @@ It is an eval library, not a production orchestration framework. The runtime liv
 ```python
 swarm(
     members=member(deepagent(...), count=4),
-    controller="leaderless",   # a name or a @controller object, including a user's own
-    channels=["filesystem"],   # names or @channel objects
+    controller="leaderless",   # a name or a @swarm_controller object, including a user's own
+    channels=["filesystem"],   # names or @swarm_channel objects
     budget=Budget(),           # caps derived from the sample's limits
 )
 ```
@@ -95,7 +95,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 | Repository | What |
 |---|---|
 | **inspect_swarm** | `swarm()`, controller, members, budget and ledger, bus and channels, evidence, metrics, scorers, prompts, Scout scanners |
-| **inspect_ai** | Only where needed: the `controller` and `channel` registry types (before M1), a tool-state scope for members (before M1, if chosen), a scoped owner for `background()`, clean `react()` re-entry, per-span usage |
+| **inspect_ai** | Only where needed: the `swarm_controller` and `swarm_channel` registry types (before M1), a tool-state scope for members (before M1, if chosen), a scoped owner for `background()`, clean `react()` re-entry, per-span usage |
 | **inspect_swe** | Enabling and mapping Codex multi-agent v2 and Claude Code agent teams |
 | **inspect_sentinel** | Monitors and protocols |
 | **ORBIT-like packages** | Scenarios, attacks, defenses |
@@ -106,7 +106,7 @@ Detail: [where each part lives](swarm.md#where-each-part-lives).
 
 M1, then M2; after that, a menu in any order or in part, driven by user feedback with no internal evidence gate. ([Implementation plan](swarm.md#implementation-plan))
 
-- **M1: leaderless filesystem swarm with full accounting.** The `swarm()` API with `@controller` and `@channel`, shared sandbox, per-member tool state, cap and ledger, drain, the final answer `first` with every member's submission recorded, `InfoEvent` evidence and metrics. Existing task scorers score it unchanged. Its inspect_ai changes land first: a one-line PR adding two registry types (decision: Ransom, 2026-10-08) and, if chosen, the tool-state scope.
+- **M1: leaderless filesystem swarm with full accounting.** The `swarm()` API with `@swarm_controller` and `@swarm_channel`, shared sandbox, per-member tool state, cap and ledger, drain, the final answer `first` with every member's submission recorded, `InfoEvent` evidence and metrics. Existing task scorers score it unchanged. Its inspect_ai changes land first: a one-line PR adding two registry types (decision: Ransom, 2026-10-08) and, if chosen, the tool-state scope.
 - **M2: the bus and direct messages.** `deliver()`, the `messages` channel with `send_message`, delivery modes, monitoring through sentinel, and metadata-only notices; no inspect_ai change ([swarm-communication.md](swarm-communication.md)).
 - **Later, any order:**
   - structured channels (each needs M2; quiescence needs persistent members);
