@@ -40,7 +40,7 @@ What the plan starts from, checked on 2026-10-13:
 - **No runtime code.** `src/inspect_swarm/` holds only `__init__.py` (exporting `__version__` and nothing else), `_version.py` and `py.typed`; `tests/` holds the scaffold's package test.
 - **The merged designs:** [swarm-overview.md](swarm-overview.md), [swarm.md](swarm.md), [swarm-api.md](swarm-api.md), [swarm-communication.md](swarm-communication.md) (with its optional push delivery), [swarm-limits.md](swarm-limits.md), [swarm-scoring.md](swarm-scoring.md), [swarm-lean-open-problems.md](swarm-lean-open-problems.md) and [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md).
 - **The inspect_ai prerequisites have not landed.** inspect_ai `main`'s `RegistryType` has no `swarm_controller` or `swarm_channel` (`src/inspect_ai/_util/registry.py`), and `inspect_ai.util` has no `tool_state_scope`. This repository's lockfile installs inspect_ai `0.3.278.dev1+gfccfb298e`; the latest inspect_ai release is 0.3.279 (2026-10-12).
-- **inspect_sentinel's dispatcher has reached inspect_ai `main`.** `src/inspect_ai/_sentinel/` (with `_dispatch.py`) is on `main`, with commits through 2026-10-12 (#5811, "sentinel monitors can watch every agent's model calls"). swarm-communication.md, citing `feature/sentinel`, says it has not ([inspect_sentinel](swarm-communication.md#inspect_sentinel)). Whether the dispatcher on `main` now covers bridged agents' tool calls or non-tool steps was not checked ([Open question 5](#open-questions)).
+- **inspect_sentinel's dispatcher has reached inspect_ai `main`.** `src/inspect_ai/_sentinel/` (with `_dispatch.py`) is on `main`, with commits through 2026-10-12 (#5811, "sentinel monitors can watch every agent's model calls"). swarm-communication.md, citing `feature/sentinel`, says it has not ([inspect_sentinel](swarm-communication.md#inspect_sentinel)). Its tool stages still do not run for bridged agents: `warn_sentinel_bridged()` (`src/inspect_ai/_sentinel/_context.py:57-64`, at `81c1668d3`) warns that bridged agents' tool calls are not monitored, only their model calls (inspect_ai#5759). So the bus's `policy=` hook is still needed for bridged sends ([Open question 5](#open-questions)).
 - **The scaffold is still on Python 3.10.** `pyproject.toml` (`requires-python = ">=3.10"`, pyright `pythonVersion = "3.10"`), `AGENTS.md`, `CONTRIBUTING.md` and the CI matrix in `.github/workflows/build.yaml` (`["3.10", "3.14"]`) predate the 3.11 decision (decision: Ransom, 2026-10-07; [swarm.md Compatibility](swarm.md#compatibility-and-migration)).
 - **Releases are off.** `.github/workflows/release.yaml` has only `workflow_dispatch`; its comment says to restore the `push` trigger to cut 0.1.0. `release-pin-deps.yml` rewrites the `inspect-ai @ git+...@main` dependency to `inspect-ai>=<latest release>` on the release pull request, so a release needs every inspect_ai change it uses to be in a PyPI release of inspect_ai.
 - **Sibling packages' layout for docs and examples.** inspect_sentinel and inspect_flow keep a Quarto site in `docs/` (`_quarto.yml`); inspect_sentinel keeps runnable `examples/`. This repository's `pyproject.toml` already excludes `docs/` from the wheel and from ruff.
@@ -233,7 +233,7 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 
 **M1-10. Evidence, timelines, metrics and harness-validity checks.** A named timeline per member (`transcript().add_timeline()`), the metrics swarm.md lists (per-member and total tokens and cost from the ledger, wall clock, idle time, per-member time waiting for a model connection), and harness-validity checks reported apart from the task score (a member that never acted, members stuck in loops).
 - Files: `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_swarm.py`.
-- Tests: `tests/test_metrics.py`, on mockllm runs.
+- Tests: `tests/test_metrics.py`, on mockllm runs, including a deterministic contention test (two members queued on one model connection) showing each member's connection wait apart from the sample's aggregate waiting time, which Inspect merges across overlapping waits (`src/inspect_ai/_util/working.py:90-113`, at `81c1668d3`).
 - Depends on: M1-5, M1-6.
 - Implements: [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics) ("Metrics", "Member views", the harness-validity bullet of "Analysis").
 
@@ -270,11 +270,14 @@ flowchart LR
   M1 --> M2_5
   M1 --> M2_6[M2-6 bus core]
   M2_6 --> M2_7[M2-7 member binding]
-  D1[D-1 memory channel design] --> M2_8
+  D1[D-1 memory channel design] --> M2_7
+  D1 --> M2_8
   M2_7 --> M2_8[M2-8 memory channel]
   M2_8 --> M2_9[M2-9 notices]
   M2_8 --> M2_10[M2-10 exposure and comm metrics]
+  D3[D-3 artifact scoring under per-member sandboxes design] --> M2_11
   M1 --> M2_11[M2-11 result contract]
+  D3 --> M2_13
   M2_11 --> M2_12[M2-12 member scores and baseline]
   M2_12 --> M2_13[M2-13 per-member sandbox scoring]
   M2_1 --> M2_13
@@ -287,13 +290,13 @@ flowchart LR
 
 - **Isolation and limits:** M2-1, M2-2, M2-3 and M2-4, each alone.
 - **Background members:** D-2 → AI-5 → M2-5. D-2 can start during M1.
-- **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10}, with D-1 before M2-8. D-1 can start during M1.
-- **Scoring:** M2-11 → M2-12 → {M2-13 (also after M2-1), M2-14}.
+- **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8. D-1 can start during M1.
+- **Scoring:** D-3 → M2-11 → M2-12 → {M2-13 (also after M2-1 and D-3), M2-14}. D-3 can start during M1.
 - **Release:** M2-15 and M2-16, after the four strands above.
 
 ### Designs
 
-**D-1. Design: the shared-memory channel.** A `@swarm_channel` with memory's command set over per-run channel state, built on the bus: what a write record is, how reads fence each file with its last writer, what notices say when files change, and the semantics Recommendation 7 leaves to its design (refuse or version `create` over an existing file and `delete` of another member's file; `str_replace` as compare-and-swap).
+**D-1. Design: the shared-memory channel.** A `@swarm_channel` with memory's command set over per-run channel state, built on the bus: what a write record is, how reads fence each file with its last writer, what notices say when files change, and the semantics Recommendation 7 leaves to its design (refuse or version `create` over an existing file and `delete` of another member's file; `str_replace` as compare-and-swap). It must also decide whether a member's descendants (deepagent's `general()` subagents, background ones included) can read and write the board, as Epoch's children do today, and if so how the binding rule of [Members and identity](swarm-communication.md#members-and-identity) changes for this channel, how a write is attributed to the member and to the loop that made it, and what `read` and `exposed` evidence mean with several readers per member ([Open question 7](#open-questions)).
 - Files: `design/swarm-memory-channel.md`.
 - Depends on: nothing; [swarm-communication.md How channels plug into the bus](swarm-communication.md#how-channels-plug-into-the-bus) is the interface it implements.
 - Implements: nothing yet; prepares [Lean Rec. 7](swarm-lean-open-problems.md#7-after-m2-a-shared-memory-channel-through-the-bus).
@@ -302,6 +305,11 @@ flowchart LR
 - Files: `design/swarm-background-members.md`.
 - Depends on: nothing.
 - Implements: nothing yet; prepares [swarm.md Members](swarm.md#members) ("Lifting the restriction") and [Lean Rec. 3](swarm-lean-open-problems.md#3-later-first-background-deepagent-members).
+
+**D-3. Design: artifact scoring under per-member sandboxes.** Lean Recommendation 8 states the quantities (final@k on the selected member's sandbox, `empty_value` with no submission, team@k over every started member's sandbox, run-time verification apart) but assigns no code to them, and the merged scoring design assumes one shared environment ([Open question 8](#open-questions)). This design assigns responsibility, with files and dependencies, for: how the task's own (headline) scorer comes to grade the selected member's sandbox, since Inspect scores in the parent sample's context, where `sandbox()` is `default`; the headline value when no member submitted, although a sandbox may hold a passing artifact; which sandbox the runtime verifier runs in for each submission; and where the drained `final_verdict` is implemented, since swarm-scoring.md attaches it to the final-answer chain (its step 2), which is future work here.
+- Files: `design/swarm-artifact-scoring.md` (or a section added to swarm-scoring.md, as Ransom prefers).
+- Depends on: nothing; it builds on M2-1's routing as Lean Recommendation 1 specifies it.
+- Implements: nothing yet; prepares [Lean Rec. 8](swarm-lean-open-problems.md#8-after-m2-per-member-sandboxes-in-the-scoring-contract).
 
 ### inspect_ai
 
@@ -314,7 +322,7 @@ flowchart LR
 None in M2, and none in M1.
 
 - **inspect_swe.** Bridged members are accepted from M1 unchanged; swarm-limits.md detects them by their inspect_swe registry names. The two pieces of work that need inspect_swe changes, users isolation ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#implementation-plan) step 3) and bridged swarms, are future work.
-- **inspect_sentinel.** A native member's call to a channel tool is an ordinary tool call, which sentinel's tool stages see with no change; the bus's `policy=` hook covers what sentinel does not ([swarm-communication.md Monitoring](swarm-communication.md#monitoring-sentinel-first-the-bus-hook-for-the-rest)). [Open question 5](#open-questions) asks whether the dispatcher's arrival on inspect_ai `main` changes M2's monitoring.
+- **inspect_sentinel.** A native member's call to a channel tool is an ordinary tool call, which sentinel's tool stages see with no change; the bus's `policy=` hook covers what sentinel does not ([swarm-communication.md Monitoring](swarm-communication.md#monitoring-sentinel-first-the-bus-hook-for-the-rest)). The dispatcher on inspect_ai `main` still skips bridged agents' tool stages ([Current state](#current-state)), so that hook stays as designed ([Open question 5](#open-questions)).
 
 ### inspect_swarm
 
@@ -356,13 +364,13 @@ None in M2, and none in M1.
 
 **M2-7. Member binding.** The member handle gains M2's fields (effective delivery, inbox, wait event, bound loop) and the member ContextVar; `Member` gains `delivery`; `swarm_tools()` with first-resolution binding and the ACP-bound flag.
 - Files: `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_member.py`, `src/inspect_swarm/_bus/_tools.py`.
-- Tests: `tests/test_binding.py`.
-- Depends on: M2-6.
+- Tests: `tests/test_binding.py`, including the descendant cases D-1 decides.
+- Depends on: M2-6, D-1 (the binding rule for a member's descendants).
 - Implements: swarm-communication.md step 2; [Members and identity](swarm-communication.md#members-and-identity), [Tools reach members through a tool source](swarm-communication.md#tools-reach-members-through-a-tool-source).
 
 **M2-8. The shared-memory channel.** As D-1 specifies: the `@swarm_channel` factory, its `ChannelState`, its tools, fenced reads and its evidence; exported and imported by the entry point. In place of the `messages` channel, it is the first channel with records, so the bus's fencing (`src/inspect_swarm/_fence.py`, shared later with `synthesize`) lands here.
 - Files: `src/inspect_swarm/_channel/memory.py` (name as D-1 decides), `src/inspect_swarm/_fence.py`, `src/inspect_swarm/__init__.py`, `src/inspect_swarm/_entrypoint.py`.
-- Tests: as D-1 specifies; `tests/test_fence.py`.
+- Tests: as D-1 specifies; `tests/test_fence.py`. If D-1 gives descendants the board, a synchronous `general()` child of a `deepagent()` member reads and writes it here, and a background `general()` child does so in a test that lands with whichever of M2-5 and M2-8 merges second; if D-1 restricts the board to the member's top-level loop, a test pins that restriction instead.
 - Depends on: D-1, M2-7.
 - Implements: [Lean Rec. 7](swarm-lean-open-problems.md#7-after-m2-a-shared-memory-channel-through-the-bus); [swarm-communication.md Fencing](swarm-communication.md#fencing).
 
@@ -381,7 +389,7 @@ None in M2, and none in M1.
 **M2-11. The result contract and record additions.** `ResultSpec`, `answer_result`, `artifact_result`, `Verdict`, `Verifier` and `MemberArtifacts`; `swarm(result=)` with the `TypeError` for the string a replay passes; the record's added fields; the runtime verifies submissions and writes `verdict` events, and puts each `VerdictSummary` on the handle and `MemberEnded`.
 - Files: `src/inspect_swarm/_result.py`, `src/inspect_swarm/_swarm.py`, `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_record.py`, `src/inspect_swarm/__init__.py`.
 - Tests: `tests/test_result.py`.
-- Depends on: M1-5.
+- Depends on: M1-5, D-3 (which sandbox the verifier runs in under per-member sandboxes; until D-3 is decided, M2-11 follows swarm-scoring.md, which assumes the shared sandbox).
 - Implements: [swarm-scoring.md](swarm-scoring.md#implementation-plan-after-m2) step 1; [The result contract](swarm-scoring.md#the-result-contract), [What the record adds](swarm-scoring.md#what-the-record-adds).
 
 **M2-12. Member scores, `best_at(k)` and `baseline()`.** `member_scores` and `MEMBER_METRICS` (answer kind; artifact kind returns unavailable until M2-13), the `best_at(k)` reducer, and `baseline()`.
@@ -390,10 +398,10 @@ None in M2, and none in M1.
 - Depends on: M2-11. [Open question 4](#open-questions) concerns `baseline()`'s form without the final-answer chain.
 - Implements: swarm-scoring.md step 4; [Answer-scored tasks: per-member scores](swarm-scoring.md#answer-scored-tasks-per-member-scores), [Opting in](swarm-scoring.md#opting-in).
 
-**M2-13. Per-member sandboxes in the scoring contract.** `member_scores` for artifact tasks under per-member sandboxes: final@k on the chosen member's sandbox, team@k as the oracle over every started member's final sandbox, run-time verification kept apart, and the record naming the sandbox each grade read. No `materialize()`.
-- Files: `src/inspect_swarm/scorer/_member_scores.py`, `src/inspect_swarm/_record.py`.
-- Tests: with stub sandbox environments per member; one Docker test, marked slow.
-- Depends on: M2-12, M2-1.
+**M2-13. Per-member sandboxes in the scoring contract.** As D-3 specifies: final@k on the chosen member's sandbox, team@k as the oracle over every started member's final sandbox through `member_scores`, run-time verification kept apart, the drained `final_verdict`, and the record naming the sandbox each grade read. No `materialize()`.
+- Files: as D-3 specifies; at least `src/inspect_swarm/scorer/_member_scores.py` and `src/inspect_swarm/_record.py`, plus whatever routes the headline scorer and the verifier.
+- Tests: with stub sandbox environments per member: the chosen member is not the one whose sandbox is `default`, and the headline score grades the chosen member's sandbox; no member submits while a member's sandbox holds a passing artifact; a sandbox changes after its run-time check, and the final grade differs from the recorded verdict. One Docker test, marked slow.
+- Depends on: D-3, M2-12, M2-1.
 - Implements: [Lean Rec. 8](swarm-lean-open-problems.md#8-after-m2-per-member-sandboxes-in-the-scoring-contract); the per-member-sandbox case of swarm-scoring.md step 6.
 
 **M2-14. The analysis helper.** `attempt_rows`, `compare_arms`, `best_at_k`, `select_at_k` and the target-assisted flag, on top of M1-12's helpers.
@@ -494,13 +502,23 @@ Gaps and contradictions planning exposed, each with a recommendation. The plan d
    - The scoped owner for `background()`: swarm.md sketches it in two sentences.
    - M1's critical path for leaderless swarms ("settling it is part of M1's metrics work", swarm.md Observer), and the thresholds for "stuck in loops".
 
-   Recommendation: D-1 and D-2 as design pull requests in this repository, started during M1; the critical-path definition as a short design section before M1-11, with M1-11 allowed to trail M1, since first internal use compares cost, not latency.
+   Open questions 7 and 8 add two more, found by review: descendants' access to the board (D-1) and artifact scoring under per-member sandboxes (D-3).
+
+   Recommendation: D-1, D-2 and D-3 as design pull requests in this repository, started during M1; the critical-path definition as a short design section before M1-11, with M1-11 allowed to trail M1, since first internal use compares cost, not latency.
 
 4. **`baseline()` is written with the chain's parameter.** swarm-scoring.md defines `baseline(agent, result)` as `swarm(..., controller=leaderless(final="first"), ...)` ([Opting in](swarm-scoring.md#opting-in)), but `leaderless(final=)` arrives with the chain (its step 2), which is future work here. Recommendation: in M2, `baseline()` builds the swarm of one with plain `leaderless()`, whose only mode is `first`, and gains the explicit `final="first"` when the chain lands; the selected answer is the same either way.
 
-5. **inspect_sentinel's dispatcher is on inspect_ai `main`.** swarm-communication.md's M2 used "sentinel directly if its dispatcher has reached inspect_ai `main` by then; otherwise the minimal hook". It has. Recommendation: M2 builds the `policy=` hook as designed, because it covers bridged sends and internal records, which the design says sentinel does not; at the start of M2-6, check what the dispatcher on `main` covers and record the result in the pull request. Replacing `policy=` with a sentinel adapter stays future work.
+5. **inspect_sentinel's dispatcher is on inspect_ai `main`.** swarm-communication.md's M2 used "sentinel directly if its dispatcher has reached inspect_ai `main` by then; otherwise the minimal hook". It has, but its tool stages still skip bridged agents (inspect_ai#5759), and internal bus records are not tool calls. Recommendation: M2 builds the `policy=` hook as designed, and native members' channel tool calls are also seen by sentinel's tool stages with no change. Replacing `policy=` with a sentinel adapter stays future work.
 
 6. **What the first release calls supported.** Recommendation: `swarm()`, `member()`, `Budget`, the built-in controller and channel names, `member_scores`, `best_at` and `baseline()`, and the version-1 record and evidence formats are supported, with breaking changes called out in release notes; the `Controller`/`SwarmControl` and `Channel`/`ChannelState` interfaces for user-written controllers and channels are experimental, as swarm-communication.md already says of the channel operations. Docs as a Quarto site in `docs/`, like inspect_sentinel's and inspect_flow's.
+
+7. **The bus's binding rule would take the board away from a member's subagents.** M2-7 implements [Members and identity](swarm-communication.md#members-and-identity): the swarm's tool source binds to the member's first agent loop and returns no tools in any nested loop, so that each inbox has one reader. Epoch's members give their deepagent's `general()` children the same `memory()`, which deepagent passes on (`src/inspect_ai/agent/_deepagent/deepagent.py:328-335`, inspect_ai at `81c1668d3`), so today up to 64 background children per member read and write the board ([Lean, Their swarm](swarm-lean-open-problems.md#their-swarm)). Under the messaging rule a bus-routed board would be visible only to the member's top-level loop, which changes the background arm M2 promises.
+   - (a) D-1 decides descendant access for the memory channel, with how writes are attributed to the member and its loop and what read and exposure evidence mean with several readers; M2-7 follows D-1's rule.
+   - (b) The board stays parent-only, like messages. The port then differs from Epoch's experiment, and M2's acceptance criterion must say so.
+
+   Recommendation: (a). It keeps Epoch's arm, and only the board's design knows whether one-reader evidence matters for files as it does for inboxes.
+
+8. **Artifact scoring under per-member sandboxes has no owner.** M2-1 routes each member's `sandbox()` to its own environment, but Inspect runs the task's scorers in the parent sample's context, where `sandbox()` resolves to `default` (`src/inspect_ai/agent/_as_solver.py:71-82`, `src/inspect_ai/_eval/task/run.py:3093-3095`, at `81c1668d3`; the round-1 review checked the context resolution on both anyio backends). So when `first` selects `agent-1`, the task's own scorer still grades `default`, and with no submission it still grades `default`'s possibly passing artifact. Both contradict Lean Recommendation 8's final@k. The verifier's sandbox for each submission is unassigned too, and the drained `final_verdict` belongs to the chain step this plan leaves for later. Recommendation: D-3 assigns these before M2-11 and M2-13, as above. If no acceptable mechanism exists for the headline scorer, the fallback is that per-member-sandbox tasks score per member only through `member_scores` and say so, which would change Lean Recommendation 8.
 
 ## Follow-ups: milestone wording in the deep dives
 
