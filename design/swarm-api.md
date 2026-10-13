@@ -214,7 +214,7 @@ class Member(BaseModel):
     role: str | None = None       # data; given to the controller and in the member's preamble
     count: int = 1                # members built from this record: name-1 ... name-k when count > 1
     limits: list[Limit] = []      # the member's own limits (limits deep dive); serialised by kind and value
-    # fields the sibling deep dives add: delivery (communication), bridged (limits),
+    # fields the sibling deep dives add: delivery and, after M2, remind (communication), bridged (limits),
     # input and exposure (ORBIT)
 
 def member(
@@ -392,7 +392,7 @@ The observer is what the swarm records and where monitors attach: evidence event
 |---|---|---|---|
 | Evidence events, the ledger and its coverage rules, metrics, the per-member result record | Fixed | inspect_swarm (versioned) | No |
 | What the result record can hold (after M2): verdicts and a comparable answer form exist only when the task's result contract supplies a verifier and an answer key | The task's result contract, `swarm(result=)` | The swarm's arguments, in the task | Yes, where the controller uses them: its `final` chain (`verify`, `vote`) and `stop_on_verified` |
-| The bus hook: continue, modify, reject or terminate each sanctioned record (M2) | `swarm(policy=...)`, until the communication deep dive replaces it with sentinel protocols (its open question 2) | The swarm's arguments, in the task | Yes |
+| The bus hook: continue, modify, reject or terminate each sanctioned record (M2) | `swarm(policy=...)`, until the communication deep dive replaces it with sentinel protocols (its open question 1) | The swarm's arguments, in the task | Yes |
 | Live monitors and protocols (tool calls, including sends and reads) | inspect_sentinel's `@monitor` and `@protocol`, through `Task(sentinel=...)` or `eval(sentinel=...)` / `eval_set(sentinel=...)` (inspect_ai `feature/sentinel`, `src/inspect_ai/_eval/task/task.py:107`) | The task, or eval options | Yes: a protocol can reject, modify or terminate |
 | Scores: the task's headline score and per-member scores | The task's `@scorer`s ([Scores](#scores-the-task-scores-the-observer-records)) | The task | Not through the swarm, which never calls a scorer. But a member may: a retrying agent's in-loop scoring uses the task's scorers ([Scores](#scores-the-task-scores-the-observer-records)) |
 | Post-hoc labels (coordination failures, message storms) | Scout `@scanner`s over the logs | A Scout scan job, outside the eval | No |
@@ -509,7 +509,7 @@ The rule a task author follows is the one `eval_set()`'s error message gives: di
 | Scoring (#2) | `reporter` mode, reserved | valid only on controllers with a reporter; `coordinator(lead=...)` defaults to it |
 | Scoring (#2) | `baseline(agent, result)` | after M2, `swarm(members=member(agent), controller=leaderless(final="first"), channels=[], result=result)` |
 | Communication (#3) | `channels=["filesystem", messages(...)]` | the same call; `messages` is a `@swarm_channel` factory, `"messages"` resolves to it |
-| Communication (#3) | `member(delivery=)` | a `member()` field |
+| Communication (#3) | `member(delivery=)`; after M2, `member(remind=)` | `member()` fields |
 | Communication (#3) | `swarm(policy=)` | `swarm(policy=)` from M2, the setting of the observer's interception point; a callable, so it is logged by name and varied across arms through a task argument or a registered swarm builder ([Task identity](#task-identity-what-makes-two-arms-distinct)) |
 | Communication (#3) | the `Channel` protocol | M2's operations on `Channel`, with per-sample state moved off the shared object |
 | Communication (#3) | `swarm_tools()`, `swarm_on_continue()`, `swarm_bridged_tools()` | unchanged: member-side helpers, not `swarm()` arguments; a member using them is built by a registered member builder so the log can rebuild it |
