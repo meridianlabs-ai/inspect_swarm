@@ -569,7 +569,7 @@ Everything in this section comes after M2, is opt-in and is off by default. With
 #### Configuration after M2
 
 ```python
-@channel
+@swarm_channel
 def messages(
     delivery: Literal["notify", "poll", "inject"] = "notify",   # "inject" after M2
     max_bytes: int = 8_000,
