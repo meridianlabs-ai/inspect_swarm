@@ -898,67 +898,21 @@ The plan fixes only the first two milestones: M1, then M2. After that, the remai
 - the order is left open to feedback from users, external ones included, as the library is built;
 - there is no internal experiment or evidence gate between milestones.
 
-Each milestone is a small series of PRs, and the project convention applies: discuss and review after each one, and do not start the next automatically.
+The milestones were redefined on 2026-10-13 around their audiences (decision: Ransom). [swarm-implementation-plan.md](swarm-implementation-plan.md) is the plan: it breaks each milestone into pull requests, in this repository and in inspect_ai, with their dependencies, which can be built in parallel, and the design sections each implements. Each pull request is reviewed before the next that depends on it starts, as the project convention requires.
 
-**M0. This design.** Feedback from Ransom.
+**M1. Ready for first internal usage.** The leaderless filesystem swarm with full accounting, as this section described it before 2026-10-13: the API skeleton of [swarm-api.md](swarm-api.md) with the built-ins `leaderless` and `filesystem`; members whose work stays inside their invocation, with background members rejected; the shared-sandbox default and its filesystem convention; per-member tool state; the cap, member limits, soft stop, recovery from the swarm's own cap, the ledger and splits ([swarm-limits.md](swarm-limits.md#implementation-plan)); drain; the final answer `first` with every member's submission recorded ([swarm-scoring.md](swarm-scoring.md#part-1-m1)); `InfoEvent` evidence, a timeline per member, metrics, harness-validity checks and a critical-path definition; thin analysis helpers. It first needs a `chore:` PR moving the scaffold to Python 3.11 ([Compatibility](#compatibility-and-migration)) and two small inspect_ai PRs: the `swarm_controller` and `swarm_channel` registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09, [open question 2](#open-questions)). It also takes two small items from [swarm-lean-open-problems.md](swarm-lean-open-problems.md#recommended-changes-to-our-designs): an `unsubmitted` status, so `first` never selects a `react()` member that returned after refusals or a context overflow, and the rejection of an integer `background` ([swarm-implementation-plan.md](swarm-implementation-plan.md#where-the-deep-dives-milestone-items-land)).
 
-**Before M1: scaffold to Python 3.11.** A separate `chore:` PR moves `AGENTS.md`, `pyproject.toml`, `CONTRIBUTING.md` and the CI matrix from 3.10 to 3.11 ([Compatibility](#compatibility-and-migration)).
+**M2. Ready for external usage.** What an external team needs to port its agent-swarm experiment and gain from it, with Epoch's LeanOpenProblems swarm as the test: per-member sandboxes; background deepagent members, through an inspect_ai PR giving `background()` a scoped owner ([Members](#members)); custom limits that end only the member; budget visibility for members; gate-check metrics; a shared-memory channel through the bus, and the bus it needs ([swarm-communication.md](swarm-communication.md)); the result contract, per-member scores, `best_at(k)`, `baseline()` and the analysis helper, with per-member sandboxes in the scoring contract ([swarm-scoring.md](swarm-scoring.md#part-2-after-m2-optional)); user docs, examples, an API statement and a first release. Direct messages, which were M2 before 2026-10-13, move to the later work unless Ransom keeps them ([swarm-implementation-plan.md open question 2](swarm-implementation-plan.md#open-questions)).
 
-**M1. Leaderless filesystem swarm with full accounting** (inspect_swarm, after two small inspect_ai PRs: a one-line PR adding the `swarm_controller` and `swarm_channel` registry types, decision: Ransom, 2026-10-08, and a PR adding the tool-state scope, decision: Ransom, 2026-10-09, [open question 2](#open-questions); [swarm-api.md](swarm-api.md#implementation-plan)).
-- The API skeleton of [swarm-api.md](swarm-api.md): `@swarm_controller` and `@swarm_channel`, `member()` records, name resolution, faithful logging, and the built-ins `leaderless` and `filesystem`.
-- `swarm()` with leaderless topology over members whose work stays inside their invocation (`react()`, synchronous `deepagent()`, bridged agents). Background deepagent members are rejected.
-- The shared-sandbox default and its filesystem prompt convention: shared directory, append-only notes file, per-member scratch directories or worktrees ([Sandbox topology](#sandbox-topology)).
-- Per-member tool state: each member runs in a tool-state scope named after it, and `member()` documents what stays shared ([Members](#members)).
-- A swarm cap node, member limits, a final-answer reserve, and a provisional answer ([swarm-limits.md](swarm-limits.md#implementation-plan)).
-- Recovery from its own cap only.
-- A realized-cost ledger taken after the drain, with its coverage rules: arm totals from sample usage; member attribution from per-member meter nodes, including native compaction; counts from events, with cache replays charged zero; cancelled and unpriced calls reported as unknown.
-- Drain on termination.
-- The final answer `first`. The modes `vote`, `verify` and `synthesize` and the decided default chain follow M2 (decision: Ransom, 2026-10-08).
-- Per-member submissions recorded.
-- Evidence and metrics written to `InfoEvent`s, store and metadata; a named timeline per member; a recorded stop reason.
-- Harness-validity checks (a member that never acted, loops, deadlock) reported separately from the task score.
-- A definition of critical path for leaderless swarms.
-- Scoring through the task's own scorers, unchanged; M1 adds no scorer ([swarm-scoring.md](swarm-scoring.md#part-1-m1)).
-- Thin analysis helpers for realized-cost comparison and λ fits, for users running scaling experiments.
-- Files: `src/inspect_swarm/_swarm.py`, `_member.py`, `_budget.py`, `_final.py`, `_record.py`, `_metrics.py`, `_evidence.py`, `tests/`.
+**Later work, in any order or in part.** [swarm-implementation-plan.md](swarm-implementation-plan.md#future-work) lists the items. The real dependencies between them are noted here so that whichever is picked first is not blocked unexpectedly:
 
-**M2. The bus and direct messages.**
-- `deliver()` with storm controls (including back-pressure to the sender) and evidence kinds `sent`, `delivered`, `read` and `exposed`, with causation ids.
-- Fenced, text-only read tools, with sender identity bound at the bus ([Delivery](#delivery-peer-messages-are-model-output)).
-- Monitoring through inspect_sentinel: its protocols directly if its dispatcher is on inspect_ai `main` by then; otherwise the minimal hook in its action vocabulary ([The bus](#the-bus-one-interception-point)).
-- `send_message`, `read_messages` and `list_members`, with delivery modes `poll` and `notify`. Content is delivered as tool output, and notices are metadata-only ([Delivery](#delivery-peer-messages-are-model-output)).
-- Notices through a swarm `on_continue` hook, and a `read_messages` wait that `wake` ends; no inspect_ai change and no binder hook ([swarm-communication.md](swarm-communication.md)).
-
-**Later work, in any order or in part.** The real dependencies between items are noted so that whichever is picked first is not blocked unexpectedly.
-
-- **Structured channels.** Notes/fact log, task list with claims and leases, and board with subscriptions; each can be built alone. [Channels](#channels) says what each adds over the filesystem convention.
-  - Each needs M2's bus.
-  - Quiescence-based termination needs the persistent members below.
-- **Coordinator topologies and persistent members.**
-  - Coordinator tree with path addressing; lead and teammates; idle and wake; `followup_task`-style waking.
-  - Either the `submit=False` member protocol or an inspect_ai PR for clean `react()` re-entry ([Members](#members)).
-  - Needs M2's messages.
-- **Background deepagents as members.** An inspect_ai PR giving `background()` a scoped owner. Independent of the rest.
-- **Bridged swarms.**
-  - inspect_swe options to enable Codex multi-agent v2 and Claude Code agent teams.
-  - Mapping their traffic into the same evidence records, after measuring what each vendor's traffic exposes (encrypted Codex messages, Claude Code mailbox files), with unknown fields kept unknown.
-  - Bridged agents as native members via `bridged_tools`, which needs M2 for anything beyond the filesystem.
-- **Safety and security hooks.**
-  - Roles as data; per-member prompt, model and tool overrides for compromised members.
-  - Joint-monitor helpers on sentinel.
-  - An optional scheduled (turn-based) execution mode.
-- **Optional, unscheduled: red-team features.** Injection with forged or hidden senders, secret channels, and injection into a specific member. They may never be built; they need M2's bus.
-- **Scoring and selection beyond `first`** ([swarm-scoring.md](swarm-scoring.md#part-2-after-m2-optional)), each piece optional:
-  - the task's result contract;
-  - the `verify`, `vote` and `synthesize` modes and the decided default chain;
-  - per-member scores (team@k, mean member) and `best_at(k)`;
-  - `baseline()`, select@k and the analysis helper;
-  - per-member artifacts for shared-artifact tasks ([swarm-scoring.md](swarm-scoring.md#shared-artifact-tasks-and-per-member-artifacts));
-  - the deferred solve/scoring cost boundary.
-
-  `synthesize` reuses M2's fencing; otherwise these are independent of the rest.
-- **Push delivery, optional** ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)): reminders, content injection (`delivery="inject"`), and urgent messages that interrupt a recipient's turn, plus notices to a member's running subagent. Each is off by default and needs M2; urgent messages and nested notices also need an inspect_ai PR adding the `Steer` agent-channel item. Push for bridged members is inspect_swe work.
-- **Optional, if needed: other sandbox topologies.** A sandbox per member, or partial isolation ([Sandbox topology](#sandbox-topology)).
+- **Structured channels** (notes or fact log, task list, board; [Channels](#channels)) and **direct messages** need M2's bus. Quiescence-based termination needs persistent members.
+- **Coordinator topologies and persistent members** need either the `submit=False` member protocol or an inspect_ai PR for clean `react()` re-entry ([Members](#members)), and a channel that can wake a member.
+- **Bridged swarms** need inspect_swe options for Codex multi-agent v2 and Claude Code agent teams, and measurement of what each vendor's traffic exposes before it is mapped into evidence; bridged members on bus channels need `bridged_tools` for those channels.
+- **Push delivery** needs a bus channel with notices; urgent messages and nested notices also need the inspect_ai `Steer` PR ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)).
+- **The final-answer chain and `synthesize`** need M2's result contract; `synthesize` reuses the bus's fencing ([swarm-scoring.md](swarm-scoring.md#part-2-after-m2-optional)).
+- **Users isolation in one sandbox** needs its inspect_ai and inspect_swe PRs ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#implementation-plan)).
+- **Red-team features** (optional, unscheduled, may never be built) need the bus.
 
 ## Open questions
 

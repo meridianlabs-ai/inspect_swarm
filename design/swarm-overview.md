@@ -105,19 +105,11 @@ Detail: [where each part lives](swarm.md#where-each-part-lives).
 
 ## Plan
 
-M1, then M2; after that, a menu in any order or in part, driven by user feedback with no internal evidence gate. ([Implementation plan](swarm.md#implementation-plan))
+M1, then M2; after that, a menu in any order or in part, driven by user feedback with no internal evidence gate. Milestones redefined 2026-10-13 (decision: Ransom); [swarm-implementation-plan.md](swarm-implementation-plan.md) breaks each into pull requests, with their dependencies and the design sections each implements.
 
-- **M1: leaderless filesystem swarm with full accounting.** The `swarm()` API with `@swarm_controller` and `@swarm_channel`, shared sandbox, per-member tool state, cap and ledger, drain, the final answer `first` with every member's submission recorded, `InfoEvent` evidence and metrics. Existing task scorers score it unchanged. Its inspect_ai changes land first: a one-line PR adding two registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09).
-- **M2: the bus and direct messages.** `deliver()`, the `messages` channel with `send_message`, delivery modes, monitoring through sentinel, and metadata-only notices; no inspect_ai change ([swarm-communication.md](swarm-communication.md)).
-- **Later, any order:**
-  - structured channels (each needs M2; quiescence needs persistent members);
-  - coordinator topologies and persistent members;
-  - background deepagents as members;
-  - bridged swarms;
-  - safety hooks;
-  - push delivery: reminders, injection and urgent messages, each opt-in ([push delivery](swarm-communication.md#push-delivery-after-m2-optional));
-  - scoring and selection beyond `first`: the result contract, the verify/vote/synthesize chain, per-member scores and the comparisons with epochs ([scoring](swarm-scoring.md#part-2-after-m2-optional));
-  - optionally, red-team features and other sandbox topologies.
+- **M1: ready for first internal usage.** The leaderless filesystem swarm with full accounting: the `swarm()` API with `@swarm_controller` and `@swarm_channel`, shared sandbox, per-member tool state, cap and ledger, drain, the final answer `first` with every member's submission recorded, `InfoEvent` evidence and metrics. Existing task scorers score it unchanged. Its inspect_ai changes land first: a one-line PR adding two registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09).
+- **M2: ready for external usage**, measured by whether Epoch's LeanOpenProblems swarm could port to it and gain ([swarm-lean-open-problems.md](swarm-lean-open-problems.md)): per-member sandboxes, background deepagent members (an inspect_ai scoped owner for `background()`), custom limits that end only the member, budget visibility for members, gate-check metrics, a shared-memory channel through the bus, per-member scores and the comparisons with epochs, and user docs, examples, an API statement and a first release. Direct messages, the previous M2, move to later work unless Ransom keeps them ([open question 2](swarm-implementation-plan.md#open-questions)).
+- **Later, any order:** [future work](swarm-implementation-plan.md#future-work).
 
 ## Open
 
