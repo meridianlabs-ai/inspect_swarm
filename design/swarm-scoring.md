@@ -767,7 +767,7 @@ class SwarmResultRecord(BaseModel):   # adds, with the cost boundary
 | Transcript | `InfoEvent`s of kinds `member_result` and `final` (M1) and `verdict` (Part 2), with source `inspect_swarm`, at the time they happened; `member_scores`' per-member spans under the scorer span |
 | Sample scores | The task's scorer (final@k, or team@k for artifact tasks); the task's member scorer with `best_member` and `mean_member`, per-member detail in its metadata |
 | Eval results | One `EvalScore` per task scorer and reducer; the member scorer contributes `best_member` and `mean_member` as separate `EvalScore`s with `scored_samples` and `unscored_samples` counts |
-| Eval spec (plan) | `swarm()`'s `result` argument is logged as the type name `"ResultSpec"`, because it holds callables; the record carries the facts. The chain is logged faithfully inside the controller's params, for example `{"type": "controller", "name": "inspect_swarm/leaderless", "params": {"final": ["verify", {"mode": "synthesize", ...}], "stop_on_verified": false}}` |
+| Eval spec (plan) | `swarm()`'s `result` argument is logged as the type name `"ResultSpec"`, because it holds callables; the record carries the facts. The chain is logged faithfully inside the controller's params, for example `{"type": "swarm_controller", "name": "inspect_swarm/leaderless", "params": {"final": ["verify", {"mode": "synthesize", ...}], "stop_on_verified": false}}` |
 
 Nothing here needs a new event type, schema change or viewer change. The viewer shows the store, `InfoEvent`s and dict scores generically.
 
