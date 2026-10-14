@@ -55,8 +55,8 @@ def filesystem(shared: str = "/shared", notes: str = "notes.md", scratch: str = 
 
 class Channel:
     def instructions(self, member: MemberInfo) -> str | None: ...   # M1: text for the member's preamble
-    # M2: name, prefix, check() and open(), which returns a per-run ChannelState with the
-    # communication deep dive's operations (tools, validate, apply, notice_lines, quiescent)
+    # M2: name, prefix, reach, check() and open(), which returns a per-run ChannelState with the
+    # communication deep dive's operations (tools, validate, admit, apply, notice_lines, quiescent)
 ```
 
 - **Members** are built agents or pydantic `member()` records. A record holds a built agent, or a registered `@agent` factory and its arguments: `member(deepagent, args={"tools": [bash()]}, count=4)`, which the runtime builds once for each member in each sample. `count > 1` needs the factory form, and one agent object cannot be in two members, so no agent object runs twice at once in one sample ([Members](#members)).
@@ -425,13 +425,13 @@ class Channel:
         """Text added to the member's preamble, or None. M1."""
         return None
 
-    # M2 adds the communication deep dive's name, prefix, check() and open(); open() gives a
-    # per-run ChannelState with tools, validate, apply, notice_lines and quiescent.
+    # M2 adds the communication deep dive's name, prefix, reach, check() and open(); open() gives a
+    # per-run ChannelState with tools, validate, admit, apply, notice_lines and quiescent.
 
 def swarm_channel(func=None, *, name: str | None = None): ...   # as @swarm_controller, with type "swarm_channel"
 ```
 
-- **Built-ins.** `inspect_swarm/filesystem` (M1) carries the shared-sandbox convention as parameters, for example `filesystem(shared="/shared", notes="notes.md", scratch="/scratch/{member}")`; its `instructions()` states them for each member. M2's first channel with tools is a shared memory routed through the bus (D-1 in [swarm-implementation-plan.md](swarm-implementation-plan.md#designs) designs it). `inspect_swarm/messages`, later work, is the communication deep dive's `messages(delivery=, max_bytes=, ...)` as a `@swarm_channel` factory. Later channels (notes, task list, board) are more `@swarm_channel` factories.
+- **Built-ins.** `inspect_swarm/filesystem` (M1) carries the shared-sandbox convention as parameters, for example `filesystem(shared="/shared", notes="notes.md", scratch="/scratch/{member}")`; its `instructions()` states them for each member. M2's first channel with tools is a shared memory routed through the bus, `inspect_swarm/shared_memory` ([swarm-memory-channel.md](swarm-memory-channel.md), D-1 in [swarm-implementation-plan.md](swarm-implementation-plan.md#designs)). `inspect_swarm/messages`, later work, is the communication deep dive's `messages(delivery=, max_bytes=, ...)` as a `@swarm_channel` factory. Later channels (notes, task list, board) are more `@swarm_channel` factories.
 - **User channels.** In M1 a user channel can only add instructions, which already makes named, sweepable conventions possible: `lockfiles(dir="/shared/locks")`, after the C compiler's lock files, against `filesystem()` alone. From M2 a user channel implements the communication deep dive's operations; the first release calls them experimental ([swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 6).
 - **Per-sample state.** `Channel` objects are shared by concurrent samples, so their state cannot live on them. Inboxes, versions and other run state live on a `ChannelState` the runtime opens per run ([swarm-communication.md](swarm-communication.md#how-channels-plug-into-the-bus)).
 - **No channel, no instructions.** `channels=[]` gives members no channel instructions or swarm tools. The shared sandbox is still shared: what is shared is the sandbox topology's business (swarm.md, [Sandbox topology](swarm.md#sandbox-topology)), not the channel list's.

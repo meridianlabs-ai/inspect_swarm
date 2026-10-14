@@ -415,11 +415,7 @@ The plan's M2-7 and M2-8 carry this design, after M2-6; notices and exposure for
 
 ### Changes to other designs and the plan
 
-Follow-ups, not edits made here:
-
-- **swarm-implementation-plan.md.** M2-6 gains the four bus refinements and their tests. M2-7 gains `Channel.reach` and the member-reach rule in `swarm_tools()`; its "descendant cases D-1 decides" are those under Testing. M2-8's file name is `_channel/shared_memory.py`, its tests as listed; the plan's own statement about the background-child test stands. M2-10's exposure walk finds the reading loop in the member's span subtree and matches within that loop only. The Future-work item for the dependency-linked critical path can cite [Evidence](#evidence).
-- **swarm-communication.md.** [Members and identity](swarm-communication.md#members-and-identity): the `reach` exception. [Records and the bus](swarm-communication.md#records-and-the-bus): unaddressed records, sender liveness at step 2, and the commit sequence in `delivered` (record ids are attempt ids). [How channels plug into the bus](swarm-communication.md#how-channels-plug-into-the-bus): `admit()`, with compare-and-swap moved there from `apply()`, and `reach`; its "a note is a record with recipients `all`" becomes an unaddressed record when notes are built. [Fencing](swarm-communication.md#fencing): marker removal covers every channel's tags. [Evidence and provenance](swarm-communication.md#evidence-and-provenance): an exact native match is within the reading loop, since tool call ids are unique only within a conversation.
-- **swarm-lean-open-problems.md.** The port sketch's channel becomes `shared_memory` per [Relation to `memory(instance="...")`](#relation-to-memoryinstance), with M2-11's example.
+Applied on 2026-10-14 by a follow-up pull request: the plan's M2-6 to M2-10, swarm-communication.md, the Lean port sketch, and the other designs' references to this one now match this design.
 
 ## Open questions
 

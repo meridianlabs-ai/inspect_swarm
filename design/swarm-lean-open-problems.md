@@ -182,44 +182,30 @@ Losses and costs:
 
 ### A port, sketch
 
-A sketch, not an implementation: it assumes recommendations 1 and 2 have landed (both M2) and recommendation 3 has not, and shows where each part of their swarm goes. With recommendation 3, also M2, their builder keeps `background=64`. Names from LeanOpenProblems are theirs; nothing here was run.
+A sketch, not an implementation: it assumes recommendations 1, 2 and 7 have landed (all M2) and recommendation 3 has not, and shows where each part of their swarm goes. Its board is the shared-memory channel, migrated from their `memory()` as [swarm-memory-channel.md Relation to `memory(instance="...")`](swarm-memory-channel.md#relation-to-memoryinstance) describes; M2-11's example shaped like their port uses it ([swarm-implementation-plan.md](swarm-implementation-plan.md#m2-pull-requests)). With recommendation 3, also M2, their builder keeps `background=64`. Names from LeanOpenProblems are theirs; nothing here was run.
 
 ```python
 # apn/swarm_inspect.py (sketch)
 from inspect_ai import Task, task
 from inspect_ai.agent import Agent, AgentState, agent
-from inspect_ai.tool import memory, text_editor
+from inspect_ai.tool import text_editor
 from inspect_ai.util import LimitExceededError, store
 from inspect_swarm import (
-    Budget, Channel, Controller, MemberEnded, StopReason, SwarmControl,
-    member, swarm, swarm_channel, swarm_controller,
+    Budget, Controller, MemberEnded, StopReason, SwarmControl,
+    member, swarm, swarm_controller, swarm_on_continue, swarm_tools,
 )
 
 
-@swarm_channel
-def memory_board() -> Channel:
-    """Instructions only (M1): the board itself is a shared memory() instance in each member's tools."""
-
-    class _Board(Channel):
-        def instructions(self, m) -> str:
-            return ("Coordinate with your peers through the `memory` tool. It is shared by "
-                    "all peers and is the only channel between you. Prefix files you create "
-                    "with your name.")
-
-    return _Board()
-
-
 @agent
-def lean_member(
-    name: str, sandbox_name: str, agent_type: AgentType = "react", board: str = "board"
-) -> Agent:
+def lean_member(name: str, sandbox_name: str, agent_type: AgentType = "react") -> Agent:
     # Called once per member per sample (swarm-api.md, the member contract), so `inner` is this member's own.
     inner = build_agent(
-        agent_type,                                 # "deep" must not set background in M1
-        tools=[text_editor(), bash(timeout=300), resources(), memory(instance=board)],
+        agent_type,                                 # "deep" must not set background before Rec. 3, and
+                                                    # passes memory=False: no private memory() beside the board
+        tools=[text_editor(), bash(timeout=300), resources(), swarm_tools()],   # the shared_memory tool (Rec. 7)
         attempts=AgentAttempts(attempts=99_999_999, incorrect_message=gated_incorrect_message),
         submit=AgentSubmit(tool=submit(), name="submit_proof", keep_in_messages=True),
-        on_continue=continue_unless_looping("Continue working on the problem."),
+        on_continue=swarm_on_continue(continue_unless_looping("Continue working on the problem.")),  # board notices
         compaction=CompactionSummary(threshold=300_000),
     )
 
@@ -286,7 +272,7 @@ def apn_swarm(
         solver=swarm(
             members=members,
             controller=until_proved() if stop == "first_proof" else "leaderless",
-            channels=[memory_board()],       # not "filesystem": nothing is shared on disk
+            channels=["shared_memory"],      # not "filesystem": nothing is shared on disk
             budget=Budget(),                 # pooled cap = 95% of Hawk's cost_limit
         ),
         scorer=swarm_scorer(SandboxComparator(), swarm_size=swarm_size),   # unchanged
@@ -297,8 +283,8 @@ def apn_swarm(
 Where each part of their swarm goes:
 
 - **Members.** One record per member, because each names its own sandbox and its builder takes the member's name and sandbox (a counted member would use Recommendation 1's `{member}` template, and its builder could read its copy's name from `tool_state_instance(None)`, which returns the member's tool-state scope). Their builder becomes a registered `@agent` with ordinary parameters, passed uncalled with its arguments in `args`, so the plan logs it faithfully and the runtime builds each member's agent from it ([swarm-api.md Members](swarm-api.md#members)). `name=f"agent-{i}"` keeps their names; count expansion would give `agent-1` to `agent-32`.
-- **Prompt.** Their task prompt, with its "shared budget" sentence, moves to a setup solver that sets the sample input, as their single-agent `lean_prover` does (`apn/solver.py:222-227`). Their swarm paragraph becomes the swarm's preamble (name, roster size) plus `memory_board()`'s instructions. Once Recommendation 4 lets the preamble state the split, the budget sentence can come out of their prompt.
-- **Channel.** `memory(instance=board)` in every member's tools. Under the tool-state scope an explicit instance is used as given, so all members and their `general()` subagents share it; deepagent adds no memory of its own, because one is already present. `board` is a builder parameter, so the shared instance is in the plan's logged parameters and two arms that name different boards are distinct.
+- **Prompt.** Their task prompt, with its "shared budget" sentence, moves to a setup solver that sets the sample input, as their single-agent `lean_prover` does (`apn/solver.py:222-227`). Their swarm paragraph becomes the swarm's preamble (name, roster size) plus the shared-memory channel's instructions, and their prompt's tool and path names (`memory`, `/memories`) become `shared_memory` and `/shared_memory`. Once Recommendation 4 lets the preamble state the split, the budget sentence can come out of their prompt.
+- **Channel.** `"shared_memory"` in `channels=` and `swarm_tools()` in every member's tools, with `swarm_on_continue()` around their continue hook for change notices ([swarm-memory-channel.md](swarm-memory-channel.md#relation-to-memoryinstance), migration steps 1 to 4). Members and their `general()` subagents read and write the board as the member ([Descendants](swarm-memory-channel.md#descendants)); a `"deep"` member passes `memory=False`, because deepagent cannot see the board as a memory tool and would otherwise add a private `memory()`. Writes that replace, move or delete content need a current view, and files and the board are bounded, which is what changes for their members. Before the channel exists, the same port keeps `memory(instance="board")` in every member's tools under an instructions-only channel, an observed board shared by every member and subagent; the two are different arms ([swarm-communication.md Tool state in the sample store](swarm-communication.md#tool-state-in-the-sample-store)).
 - **Budget.** `Budget()` reads the Hawk config's per-sample `cost_limit` (\$1,600) and stops at \$1,520, keeping \$80 for overshoot. Their 72-hour `working_limit` gets the swarm's start-up warning ([swarm-limits.md](swarm-limits.md#the-budget-parameter)). Cost data comes from their `model_cost_config`.
 - **Termination.** `leaderless` reproduces today's behaviour; `until_proved` adds the early stop as a separate arm. Either way the stop reason is recorded.
 - **Scoring.** Their scorer gains one line: on a passing in-loop check it sets `verified:<member>` in the store, which the builder reads when the inner agent returns. Otherwise it is unchanged. In the loop it still runs inside the member's context, where the runtime has entered the member's sandbox (Recommendation 1) and the builder has set their workspace ContextVar. At the end it re-checks every member. Because the builder turns every unverified return into `member_limit:custom`, `first` picks the earliest verified member's output, which their scorer ignores; the result record says which member it was. A member that wrote a valid proof but was stopped before `submit_proof` still passes the end-of-sample re-check without being `submitted`, which is why [Recommendation 8](#8-after-m2-per-member-sandboxes-in-the-scoring-contract) keeps the final-artifact grade apart from the selected answer.
@@ -367,7 +353,7 @@ Tests the recommendations would need, in inspect_swarm unless noted (mockllm, as
 - **Recommendation 5:** a `react(attempts=...)` member with scripted failing then passing submissions records two gate checks, one pass and the pass's time; one submission under two task scorers records one gate check; a failing first scorer with a passing second scorer records no pass; a deepagent member's subagent that calls `score()` does not add to the member's own count; a member with no in-loop scoring records zero.
 - **Recommendation 6:** a `react()` member given three content-filter outputs ends `unsubmitted` while a sibling continues, later submits and is selected by `first`; a member ending on an unhandled `model_length` overflow is `unsubmitted`; the example controller ignores the refusing member, stops the swarm at the sibling's submission with reason `controller:proved`, and soft-stops the rest; a builder that raises a member-local custom limit on an unverified return ends that member `member_limit:custom`.
 - **Recommendation 3** (inspect_ai): its own tests, with the scoped `background()` owner; in M1, `member()` rejects a `deepagent` member with `args={"background": 64}` as well as `True`.
-- **Recommendation 7** is tested in its own design (D-1, for M2), and **Recommendation 8** in its own, after M2.
+- **Recommendation 7** is tested in its own design (D-1, for M2: [swarm-memory-channel.md Testing](swarm-memory-channel.md#testing)), and **Recommendation 8** in its own, after M2.
 
 ## Recommended changes to our designs
 
@@ -440,7 +426,7 @@ Two limits are stated with the metric. `react()` does not score the submission t
 
 ### 7. M2: a shared-memory channel through the bus
 
-**Change.** Make the first structured channel a `@swarm_channel` with memory's command set (view, create, str_replace, insert, delete, rename) over per-run channel state. Writes are bus records with the bus-bound sender, so reads fence each file with its last writer and notices tell members when files changed. `str_replace` is the compare-and-swap; `create` over an existing file and `delete` of another member's file are refused or versioned (to be decided in its design). Notes, tasks and the board follow in any order.
+**Change.** Make the first structured channel a `@swarm_channel` with memory's command set (view, create, str_replace, insert, delete, rename) over per-run channel state. Writes are bus records with the bus-bound sender, so reads fence each file with its last writer and notices tell members when files changed. `str_replace` is the compare-and-swap; `create` over an existing file and `delete` of another member's file are refused or versioned (to be decided in its design; [swarm-memory-channel.md](swarm-memory-channel.md#the-tool) decided both are allowed only to a loop that has viewed the file's current version). Notes, tasks and the board follow in any order.
 
 In M1, document in `member()` and the sample-store section that a board shared on purpose is `memory(instance="...")`, that the default instance is private, and that a hand-rolled swarm relying on the shared default loses its channel silently.
 
@@ -448,7 +434,7 @@ In M1, document in `member()` and the sample-store section that a board shared o
 
 **Why.** A shared memory is the channel the only external swarm we know chose, and models already know the tool. Today it is our least-observed channel: no sender, no fence, no evidence, last writer wins. Routing it through the bus gives it the same treatment as messages, and the notices address the reported reluctance of agents to read boards ([swarm-communication.md Why](swarm-communication.md#why)).
 
-**Milestone.** M2, with the bus it needs: its design (D-1, started during M1), then the bus, binding and the channel (M2-6 to M2-8). The documentation part is M1 (M1-3, M1-13) ([Open questions](#open-questions), item 2).
+**Milestone.** M2, with the bus it needs: its design (D-1, started during M1 and merged as [swarm-memory-channel.md](swarm-memory-channel.md)), then the bus, binding and the channel (M2-6 to M2-8). The documentation part is M1 (M1-3, M1-13) ([Open questions](#open-questions), item 2).
 
 ### 8. After M2: per-member sandboxes in the scoring contract
 
