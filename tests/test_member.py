@@ -1,12 +1,23 @@
 from collections import UserDict, UserList
 from collections.abc import Callable, Sequence
+from fractions import Fraction
 from typing import Any
 
 import pytest
-from inspect_ai._util.registry import registry_kwargs
+from inspect_ai._util.registry import (
+    registry_kwargs,
+    registry_params,
+    set_registry_params,
+)
 from inspect_ai.agent import Agent, AgentState, agent, deepagent, react
 from inspect_ai.tool import bash, python
-from inspect_ai.util import cost_limit, time_limit, token_limit, working_limit
+from inspect_ai.util import (
+    TokenLimit,
+    cost_limit,
+    time_limit,
+    token_limit,
+    working_limit,
+)
 
 from inspect_swarm import (
     Budget,
@@ -333,7 +344,28 @@ _FACTORY_DICT: dict[str, Any] = {"factory": "react", "args": {"prompt": "a"}}
             "limits must be a list of limit dicts",
         ),
         ({"budget": UserDict(cost=1.0)}, "Budget or its logged dict"),
-        ({"budget": {"split": UserList([1.0])}}, "split must be a list or tuple"),
+        (
+            {
+                "members": {
+                    **_FACTORY_DICT,
+                    "limits": [
+                        {
+                            "limit": "token",
+                            "value": TokenLimit(tokens=100, type="output"),
+                        }
+                    ],
+                }
+            },
+            "limits must be a list of limit dicts",
+        ),
+        ({"members": {**_FACTORY_DICT, "count": Fraction(2)}}, "count must be plain"),
+        ({"budget": {"split": UserList([1.0])}}, "split must be plain"),
+        ({"budget": {"split": [Fraction(1, 2)]}}, "split must be plain"),
+        ({"budget": {"cost": Fraction(1, 2)}}, "cost must be plain"),
+        ({"budget": {"tokens": Fraction(100)}}, "tokens must be plain"),
+        ({"budget": {"time": Fraction(1, 2)}}, "time must be plain"),
+        ({"budget": {"reserve": Fraction(1, 10)}}, "reserve must be plain"),
+        ({"budget": {"grace": Fraction(1, 2)}}, "grace must be plain"),
     ],
 )
 def test_swarm_refuses_logged_forms_inspect_cannot_log(
@@ -343,3 +375,47 @@ def test_swarm_refuses_logged_forms_inspect_cannot_log(
     kwargs.setdefault("members", react(prompt="a"))
     with pytest.raises(TypeError, match=match):
         _swarm(**kwargs)
+
+
+@agent(name="member_test_replaced")
+def to_be_replaced() -> Agent:
+    return react()
+
+
+def _mutated_factory_args() -> Member:
+    record = member(deepagent)
+    record.args["background"] = 64
+    return record
+
+
+def _mutated_agent_params() -> Member:
+    built = deepagent()
+    record = member(built)
+    set_registry_params(built, {**registry_params(built), "background": 64})
+    return record
+
+
+def _replaced_factory() -> Member:
+    record = member(to_be_replaced)
+
+    @agent(name="member_test_replaced")
+    def replacement() -> Agent:
+        return react()
+
+    return record
+
+
+@pytest.mark.parametrize(
+    "record,error,match",
+    [
+        (_mutated_factory_args, ValueError, "background"),
+        (_mutated_agent_params, ValueError, "background"),
+        (_replaced_factory, TypeError, "@agent"),
+    ],
+)
+def test_swarm_rechecks_member_records(
+    record: Callable[[], Member], error: type[Exception], match: str
+) -> None:
+    # a record's args or the registry can change after member() checked it
+    with pytest.raises(error, match=match):
+        _swarm(record())

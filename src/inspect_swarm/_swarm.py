@@ -72,7 +72,8 @@ def _members(members: object) -> list[Member]:
 
 def _member(item: object) -> Member:
     if isinstance(item, Member):
-        return item
+        # rerun the record's checks: its args or the registry may have changed since
+        return Member.model_validate(item)
     if isinstance(item, Mapping):
         return Member.model_validate(_logged_member(cast(Mapping[str, object], item)))
     if is_factory(item):
@@ -132,9 +133,9 @@ def _budget(budget: object) -> Budget:
     if isinstance(budget, Budget):
         return budget
     if _is_dict(budget):
-        split = cast(dict[str, object], budget).get("split")
-        if split is not None and not isinstance(split, str | list | tuple):
-            raise _logged_form_error("budget", "split", "a list or tuple")
+        for field, value in cast(dict[str, object], budget).items():
+            if not _is_plain(value):
+                raise _logged_form_error("budget", field, _PLAIN)
         return Budget.model_validate(budget)
     raise TypeError(
         f"budget= must be a Budget or its logged dict, got a {type(budget).__name__}."
@@ -154,12 +155,29 @@ def _logged_member(item: Mapping[str, object]) -> object:
         raise _logged_form_error("members", "factory", "a registry name")
     if not _is_dict(item.get("args", {})):
         raise _logged_form_error("members", "args", "a dict")
+    for field in ("name", "role", "count"):
+        if not _is_plain(item.get(field)):
+            raise _logged_form_error("members", field, _PLAIN)
     limits = item.get("limits", [])
-    if not isinstance(limits, list | tuple) or any(
-        not _is_dict(limit) for limit in cast(Sequence[object], limits)
+    if not isinstance(limits, list | tuple) or not all(
+        _is_dict(limit)
+        and all(_is_plain(v) for v in cast(dict[str, object], limit).values())
+        for limit in cast(Sequence[object], limits)
     ):
-        raise _logged_form_error("members", "limits", "a list of limit dicts")
+        raise _logged_form_error(
+            "members", "limits", f"a list of limit dicts holding {_PLAIN}"
+        )
     return item
+
+
+_PLAIN = "plain values (strings, numbers, booleans, None, or lists of them)"
+
+
+def _is_plain(value: object) -> bool:
+    # what Inspect logs as itself; other objects are logged as a name or null
+    if isinstance(value, list | tuple):
+        return all(_is_plain(v) for v in cast(Sequence[object], value))
+    return isinstance(value, str | int | float | bool) or value is None
 
 
 def _is_dict(value: object) -> bool:
