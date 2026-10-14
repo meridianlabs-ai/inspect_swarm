@@ -1,10 +1,10 @@
 # Inspect Swarm: the `swarm()` API
 
-Status: proposed, 2026-10-08. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
+Status: proposed, 2026-10-08; amended 2026-10-14 so that each member gets its own agent ([Members](#members)). Issue: none. Author: agent (Claude), reviewed by Codex; see the PRs.
 
 A deeper dive on one topic of [swarm.md](swarm.md), the high-level design: the public shape of `swarm()`. Its arguments mirror the four components (members, channels, controller, observer). Controllers and channels are Inspect registry objects (`@swarm_controller`, `@swarm_channel`), selectable by name, with their parameters in the log.
 
-It respects the decisions recorded in swarm.md (Ransom, 2026-10-07): Python 3.11+, inspect_ai internals may be used, inspect_ai limits stay soft, M1 then M2 then the rest in any order, members share the sample sandbox by default, monitoring aligns with inspect_sentinel, red-team features are optional, peer messages are model output delivered as tool output with distinct provenance, and the transcript representation is open. It records two of its own (decision: Ransom, 2026-10-08; [Open questions](#open-questions)): the component is called **Channels**, and a one-line inspect_ai PR adding two registry types lands before M1. Its sibling deep dives are [swarm-limits.md](swarm-limits.md), [swarm-scoring.md](swarm-scoring.md), [swarm-communication.md](swarm-communication.md) and [ORBIT on inspect_swarm](https://github.com/meridianlabs-ai/inspect_swarm/pull/4), an open draft cited at its head on 2026-10-08. This document says where their parameters go in the API ([table](#where-the-sibling-designs-parameters-go)) and does not design their semantics.
+It respects the decisions recorded in swarm.md (Ransom, 2026-10-07): Python 3.11+, inspect_ai internals may be used, inspect_ai limits stay soft, M1 then M2 then the rest in any order, members share the sample sandbox by default, monitoring aligns with inspect_sentinel, red-team features are optional, peer messages are model output delivered as tool output with distinct provenance, and the transcript representation is open. It records two of its own (decision: Ransom, 2026-10-08; [Open questions](#open-questions)): the component is called **Channels**, and a one-line inspect_ai PR adding two registry types lands before M1. A third, of 2026-10-14, is that a member names an `@agent` factory and its arguments rather than a built agent, so that no agent object is shared between members or samples ([The member contract](#the-member-contract)). Its sibling deep dives are [swarm-limits.md](swarm-limits.md), [swarm-scoring.md](swarm-scoring.md), [swarm-communication.md](swarm-communication.md) and [ORBIT on inspect_swarm](https://github.com/meridianlabs-ai/inspect_swarm/pull/4), an open draft cited at its head on 2026-10-08. This document says where their parameters go in the API ([table](#where-the-sibling-designs-parameters-go)) and does not design their semantics.
 
 Code references are to inspect_ai `main` at `fccfb298` (2026-10-07, the version this repository's lockfile installs), inspect_ai `feature/sentinel` at `eff42b6f`, inspect_sentinel at `c8cd71d` and inspect_scout at `d746d2a3` (both 2026-10-07). Paths are relative to each repository's root.
 
@@ -15,7 +15,7 @@ Three shapes determine everything else, and are what to review first: `swarm()`'
 ```python
 @agent
 def swarm(
-    members: Member | Agent | Sequence[Member | Agent],    # member(agent, name=, role=, count=, limits=)
+    members: Member | AgentFactory | Sequence[Member | AgentFactory],   # member(factory, args=, name=, role=, count=, limits=)
     *,
     controller: str | Controller = "leaderless",            # a name, or a @swarm_controller object
     channels: str | Channel | Sequence[str | Channel] = ("filesystem",),   # names or @swarm_channel objects
@@ -53,12 +53,12 @@ class Channel:
     # communication deep dive's operations (tools, validate, apply, notice_lines, quiescent)
 ```
 
-- **Members** are pydantic records around a registered `Agent`; a bare `Agent` is one member ([Members](#members)).
+- **Members** are pydantic records that name a registered `@agent` factory and its arguments: `member(deepagent, args={"tools": [bash()]}, count=4)`. The runtime calls the factory once for each member in each sample, so no two members and no two samples share an agent object. A bare factory is one member ([Members](#members)).
 - **The controller** decides which members start, when and with what input, when the swarm is done, and the final-answer chain. inspect_swarm's fixed runtime owns everything else: member tasks, limits, stopping, verification, finalisation and the record. A controller sees states, statuses and a verdict's pass flag and value, never member text ([Controller and runtime](#controller-and-runtime), [Controllers](#controllers)).
 - **Scoring's parts follow M2.** M1 builds this API without the scoring deep dive's post-M2 parts: `result=`, `leaderless()`'s `final` and `stop_on_verified`, `Controller(final=)`, and the `verdict` on handles and `MemberEnded`. M1's final answer is always `first` (decision: Ransom, 2026-10-08; [swarm-scoring.md](swarm-scoring.md#what-m1-leaves-out-of-the-merged-api)). Each is added later as a keyword with a default that keeps M1's behaviour, or as a field that defaults to `None`.
 - **Channels** add instructions to each member's preamble in M1, and tools and delivery from M2 ([Channels](#channels)).
 - **The observer** has no `observer=` argument: what it records is fixed and versioned. Monitors (inspect_sentinel), scores (the task's scorers) and labels (Scout) are configured where Inspect configures them; the communication deep dive's bus hook, `policy=`, is the one setting on `swarm()` from M2 ([Observer](#observer)).
-- **Names, logging and task identity.** A string resolves to a registered controller or channel with its defaults ([Resolving names](#resolving-names)). Every argument this API defines is logged faithfully ([Logging and replay](#logging-and-replay)). An **arm** is one condition of an experiment; in Inspect terms, one task in an eval set: a `Task` instantiated with its arguments and run with a given solver, model and limits, which Inspect tells apart by `task_identifier()`. A swarm is the task's solver, so its arguments, including the nested controller, channel, member and `Budget` parameters, are in the plan step's `params_passed`, which `task_identifier()` hashes: two arms that differ in any of them are distinct in an eval set ([Task identity](#task-identity-what-makes-two-arms-distinct)).
+- **Names, logging and task identity.** A string resolves to a registered controller or channel with its defaults ([Resolving names](#resolving-names)). Every argument this API defines is logged faithfully ([Logging and replay](#logging-and-replay)). An **arm** is one condition of an experiment; in Inspect terms, one task in an eval set: a `Task` instantiated with its arguments and run with a given solver, model and limits, which Inspect tells apart by `task_identifier()`. A swarm is the task's solver, so its arguments, including the nested controller, channel and `Budget` parameters and each member's factory and arguments, are in the plan step's `params_passed`, which `task_identifier()` hashes: two arms that differ in any of them are distinct in an eval set ([Task identity](#task-identity-what-makes-two-arms-distinct)).
 - **Two inspect_ai prerequisites before M1**: `"swarm_controller"` and `"swarm_channel"` added to inspect_ai's `RegistryType` (decision: Ransom, 2026-10-08; [The registry](#the-registry); the prefix: [The shape of the call](#the-shape-of-the-call)), and the tool-state scope (decision: Ransom, 2026-10-09; [Members](#members)).
 
 ## Why
@@ -68,6 +68,7 @@ The API's shape matches the components, with a controller registry object in pla
 - **An extension point for how a swarm runs.** Research arms run swarms differently: a cheap member first and the rest only if it fails, members started in waves, ORBIT's scheduled rounds. A closed list of topology names has nowhere to put them; the ORBIT deep dive defines its own `ActivationPolicy` protocol for exactly this (PR #4, "P4. The turn seam and activation policies"). Channels need the same: a way to add one without changing inspect_swarm.
 - **The component boundaries in the call.** The final-answer default and the valid modes depend on the topology (`reporter` for coordinators, the verify/vote/first chain for leaderless swarms; swarm.md, [Final answer](swarm.md#controller-topology-termination-final-answer)). Passed as two separate settings, they must be validated against each other; held by one controller object, they cannot disagree.
 - **Arguments that reach the log faithfully.** Inspect logs an agent's arguments by its own rules ([How arguments reach the log](#how-arguments-reach-the-log)). Against the installed inspect_ai, an argument `cost_limit(40.0)` is logged as the string `"_CostLimit"`, and inside a list as `null`; a frozen dataclass is logged as its type name. Two `eval_set` arms that differ only in such an argument get the same task identifier, and `eval_set` refuses them: "The task 'arm' is not distinct." (spike below). Sweepability is a goal of swarm.md ("agent count, topology, communication channels and budget split ordinary, sweepable task parameters"), so this matters.
+- **Members that do not share an agent.** Inspect builds a task's agent once and runs it for every sample, so an agent must keep per-sample state in its invocation ([Current behaviour](#registry-objects-are-shared-by-concurrent-samples)). A swarm asks more: `count=4` runs one record four times at once in the same sample, sandbox and store. State an agent's factory keeps in its closure (hooks, caches, tool objects, a session id) is then shared by the copies, silently. inspect_swe's `claude_code()` is a real case: it allocates its Claude Code session id once per agent object, so four copies of one object would run `claude --session-id` with the same id in one sandbox. This amendment builds an agent per member instead of documenting the hazard (raised by a Meridian colleague; decision: Ransom, 2026-10-14).
 - **One place for the sibling deep dives' parameters.** Each adds parameters to `swarm()`: `budget=Budget(...)`, `result=`, a `final=` chain, `messages(...)` in `channels=`, `policy=`, `routes=`, `member(delivery=, bridged=, input=, exposure=)`, and an activation-policy protocol. Without one shape for the call, those land as a flat list of keyword arguments with no rule for which component each belongs to or how it is logged.
 
 ## Goals and non-goals
@@ -76,8 +77,9 @@ The API's shape matches the components, with a controller registry object in pla
 
 - `swarm()`'s arguments mirror the components: `members=`, `channels=`, `controller=`. The observer has no component argument ([why](#observer)).
 - The components users extend are Inspect registry objects, with Inspect's conventions: decorated factories, package-qualified registry names, creation parameters captured into the log, lookup by name, and an `inspect_ai` entry point. Those are controllers (`@swarm_controller`) and channels (`@swarm_channel`).
-- The common case stays one line, and the arguments work as task parameters (`-T`), in a Python `eval_set` sweep and in the log. Names resolve to registry objects. Everything this API defines (member records, controllers, channels, the budget) is logged faithfully and can be rebuilt from the log. What it cannot rebuild alone (a member agent configured with callables, a sample-scoped agent, the task's result contract) has a stated route: a registered builder or the task ([Logging and replay](#logging-and-replay)).
+- The common case stays one line, and the arguments work as task parameters (`-T`), in a Python `eval_set` sweep and in the log. Names resolve to registry objects. Everything this API defines (member records, controllers, channels, the budget) is logged faithfully and can be rebuilt from the log. What it cannot rebuild alone (a member factory given callables, the task's result contract) has a stated route: a registered builder or the task ([Logging and replay](#logging-and-replay)).
 - One place for each sibling design's parameters.
+- Each member gets its own agent, built for it inside the sample it runs in, so state an agent keeps in its own object is never shared between members or between concurrent samples ([The member contract](#the-member-contract); decision: Ransom, 2026-10-14).
 - For everything that configures how a swarm runs or is measured, a stated answer to whether it distinguishes arms in an eval set ([Task identity](#task-identity-what-makes-two-arms-distinct)).
 
 ### Non-goals
@@ -129,11 +131,24 @@ Where that log goes:
 
 ### Registry objects are shared by concurrent samples
 
-A task's plan is built once, and every sample runs the same objects (`src/inspect_ai/_eval/task/run.py:2831`, `await plan(state, generate)`). So an agent, solver, controller or channel object is shared by all concurrently running samples, and anything per-sample must live in the call, not on the object. Most agents meet this: `react()`, `deepagent()` and inspect_swe's bridged CLI agents keep their state in the invocation. Not all do. inspect_swe's ACP agents (`interactive_claude_code`, `interactive_codex_cli`, `interactive_gemini_cli`) refuse to be constructed outside an active sample and keep the live connection, session and readiness event on the instance (`inspect_swe@a54461e7: src/inspect_swe/acp/agent.py:97-110`, `:190-196`), so they cannot be built at task construction or shared.
+A task's plan is built once, and every sample runs the same objects (`src/inspect_ai/_eval/task/run.py:2831`, `await plan(state, generate)`). So an agent, solver, controller or channel object is shared by all concurrently running samples, and anything per-sample must live in the call, not on the object. `handoff()` and `as_tool()` likewise take a built agent and run that one object on every call (`src/inspect_ai/agent/_handoff.py:19`, `_as_tool.py:23`). Inspect's own agents meet this contract by building in the call: `deepagent()` builds its subagents, tools and inner `react()` inside `execute()`, with the comment "All setup runs per-sample inside execute() so there is no shared mutable state across concurrent samples" (`src/inspect_ai/agent/_deepagent/deepagent.py:122-124`), and its background reminder hook keeps a counter in a closure that is built there too (`lifecycle_tools.py:567-570`).
+
+The contract is across samples, which run in separate sandboxes. It does not promise that one object can run several times at once in the same sample, and some agents rely on that:
+
+- **inspect_swe's `claude_code()`** allocates its session id in the factory, "once per agent instance so that all calls to execute() for the same sample share the same session", runs `claude --session-id <id>` on a first call and `claude --resume <id>` on later ones, and rebinds the id from a checkpoint with `nonlocal` (`inspect_swe@678e6a0: src/inspect_swe/_claude_code/claude_code.py:295-308`, `:362-366`, `:479-517`). Its system-prompt pinning filter is built once per instance for the same reason (`:301-308`). Two concurrent calls of one object in one sandbox therefore drive one Claude Code session from two processes.
+- **inspect_swe's ACP agents** (`interactive_claude_code`, `interactive_codex_cli`, `interactive_gemini_cli`) refuse to be constructed outside an active sample and keep the live connection, session and readiness event on the instance (`inspect_swe@678e6a0: src/inspect_swe/acp/agent.py:97-104`, `:195-253`), so they cannot be built at task construction or shared. Their `__call__` opens the session, sets `ready` and then blocks "until either the caller cancels the task or the ACP adapter process exits"; the caller drives the conversation through `conn.prompt()` (`:85-94`, `:251-253`).
+- **Tools built at construction** hold Python state too: `web_search()` creates its search provider lazily in a closure shared by every caller of that tool object (`src/inspect_ai/tool/_tools/_web_search/_web_search.py:203-214`). Stateful tools mostly avoid this by keeping state elsewhere: the built-in tools in the sample store under an `instance` name ([Members](#members), Tool state), and local MCP servers in a session per async task, "keyed by the running task OBJECT, rather than per sample" (`src/inspect_ai/tool/_mcp/_local.py:148-171`).
+
+### How Inspect separates a factory from its arguments
+
+- **Tasks.** `eval()` and `eval_set()` take a `@task` function and `task_args`, and call the function with them (`src/inspect_ai/_eval/loader.py:174-185`); a `Task` object passed directly gets no `task_args` (`:147-160`). `eval-retry` rebuilds a task the same way, from its registry name and logged arguments.
+- **Solvers.** `SolverSpec(solver, args)` names a solver and its arguments for `--solver name -S ...` and retries (`src/inspect_ai/solver/_solver.py:65-75`).
+- **inspect_flow.** `FlowSolver` and `FlowAgent` are "a registry `name` (or `factory`) plus its `args`" (`inspect_flow@4028c0f0: src/inspect_flow/_types/flow_types.py:309-360`).
+- **Registry objects do not keep their arguments.** The `@agent` wrapper calls the factory and tags the returned object with `registry_tag()`, which stores only the serialised form of the arguments, `extract_named_params()` (`src/inspect_ai/agent/_agent.py:172-213`; `registry.py:151-183`, `:186-249`). So a built agent cannot be rebuilt from itself: its callables are names, its non-registry objects type names ([How arguments reach the log](#how-arguments-reach-the-log)). A factory is told apart from an agent it built by the registry: the factory is the object registered under its name, `registry_lookup("agent", registry_info(f).name) is f`, and an agent it built is not (spike: `True` for `deepagent`, `False` for `deepagent(tools=[bash()])`).
 
 ### Precedent for member-like records
 
-deepagent's `Subagent` is a plain dataclass built by `subagent()` (`src/inspect_ai/agent/_deepagent/subagent.py:13-53`). It is configuration, not a registry object, and it is logged by its `name` only (table above).
+deepagent's `Subagent` is a plain dataclass built by `subagent()` (`src/inspect_ai/agent/_deepagent/subagent.py:13-53`). It is configuration, not a registry object, and it is logged by its `name` only (table above). deepagent copies its subagent list in each call but keeps the tool, model and limit objects in it, "Preserves Tool/Model/Limit object identity" (`deepagent.py:401-414`): Inspect shares objects passed as arguments and builds fresh what the factory makes.
 
 ## Design
 
@@ -141,7 +156,7 @@ deepagent's `Subagent` is a plain dataclass built by `subagent()` (`src/inspect_
 
 | Component | Argument | Value | Registry type |
 |---|---|---|---|
-| Members | `members=` | `member(agent, ...)` records; a bare `Agent` is one member | none: the member's `Agent` is already an `@agent` registry object |
+| Members | `members=` | `member(factory, args=..., ...)` records; a bare factory is one member | none: the member's factory is already a registered `@agent` |
 | Channels | `channels=` | channel names or `@swarm_channel` objects | `swarm_channel` (new) |
 | Controller | `controller=` | a controller name or a `@swarm_controller` object | `swarm_controller` (new) |
 | Observer | none; from M2, `policy=` sets its bus hook | always on | none |
@@ -152,9 +167,11 @@ Two arguments are not components: `budget=` (the swarm-wide cap; the limits deep
 
 ```python
 # src/inspect_swarm/_swarm.py
+AgentFactory = Callable[..., Agent]     # a registered @agent factory, such as `deepagent`
+
 @agent
 def swarm(
-    members: Member | Agent | Sequence[Member | Agent],
+    members: Member | AgentFactory | Sequence[Member | AgentFactory],
     *,
     controller: str | Controller = "leaderless",
     channels: str | Channel | Sequence[str | Channel] = ("filesystem",),
@@ -164,7 +181,7 @@ def swarm(
     """A swarm of agents working on one sample.
 
     Args:
-        members: The roster. Each `Member` may stand for several members (`count`). A bare `Agent` is `member(agent)`.
+        members: The roster. Each `Member` may stand for several members (`count`). A bare factory is `member(factory)`.
         controller: How the swarm runs: topology, start and wake, termination and the final answer. A name resolves to a registered controller with its default parameters.
         channels: How members share information. `[]` means none: members get no channel instructions or tools, though a shared sandbox is still shared.
         budget: The swarm-wide cap.
@@ -172,11 +189,11 @@ def swarm(
     """
 ```
 
-The common case is one line, `swarm(members=member(deepagent(...), count=4))`, and means:
+The common case is one line, `swarm(members=member(deepagent, args={...}, count=4))`, and means:
 
 ```python
 swarm(
-    members=member(deepagent(...), count=4),
+    members=member(deepagent, args={...}, count=4),   # four deepagents, each built for its member
     controller="leaderless",      # = leaderless(), whose final chain is scoring's default
     channels=["filesystem"],      # = [filesystem()]
     budget=Budget(),              # caps derived from the sample's limits
@@ -185,7 +202,7 @@ swarm(
 
 `swarm()` validates at construction and raises `ValueError` (or `TypeError` for wrong types), naming the argument:
 
-- every member's agent is a registered agent (`is_registry_object(agent, "agent")`), as `as_solver()` already requires (`_as_solver.py:45-48`), so the log can name it;
+- every member's factory is a registered `@agent` factory and its arguments bind to its signature ([The member contract](#the-member-contract)), so the log can name it and the runtime can call it;
 - member names, after `count` expansion, are unique;
 - each channel name appears at most once;
 - names resolve ([Resolution](#resolving-names));
@@ -203,23 +220,28 @@ A controller cannot break an invariant because it never holds what the runtime o
 
 ### Members
 
-Members are data around an `Agent`, which is already a registry object, so they get a record, not a decorator.
+Members are data around an `@agent` factory, which is already a registry object, so they get a record, not a decorator. The record holds the factory and its arguments; the runtime builds each member's agent from them ([The member contract](#the-member-contract)).
 
 ```python
 # src/inspect_swarm/_member.py
 class Member(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    agent: Agent                  # validated as a registered agent; serialised with registry_value()
-    name: str | None = None       # default: the agent's unqualified registry name
+    factory: AgentFactory         # a registered @agent factory; serialised as its registry name
+    args: dict[str, Any] = {}     # the factory's keyword arguments; serialised as @agent logs an agent's params
+    name: str | None = None       # default: the factory's unqualified registry name
     role: str | None = None       # data; given to the controller and in the member's preamble
     count: int = 1                # members built from this record: name-1 ... name-k when count > 1
     limits: list[Limit] = []      # the member's own limits (limits deep dive); serialised by kind and value
     # fields the sibling deep dives add: delivery and, after M2, remind (communication), bridged (limits),
     # input and exposure (ORBIT)
 
+    def build(self) -> Agent:     # self.factory(**self.args); called by the runtime, never by member()
+        ...
+
 def member(
-    agent: Agent,
+    factory: AgentFactory,
+    args: Mapping[str, Any] | None = None,
     *,
     name: str | None = None,
     role: str | None = None,
@@ -228,28 +250,43 @@ def member(
 ) -> Member: ...
 ```
 
-- **Why pydantic.** A pydantic model is logged as its fields, at top level and inside lists ([table](#how-arguments-reach-the-log)). Two field serialisers make it faithful: `agent` is written with `registry_value()`, so it appears as `{"type": "agent", "name": "react", "params": {...}}`; each limit is written as `{"limit": "cost", "value": 2.0}` (with the metering type for tokens, which the limits deep dive reads from the object). A spike with this model logged a member as `{"agent": {"type": "agent", "name": "react", "params": {"prompt": "solve"}}, "name": "w", "count": 4}`.
-- **Replay.** Rebuilding the swarm from the log hands `swarm()` a dict whose `agent` is already an `Agent` again (`registry_kwargs()` rebuilt it; the same spike confirmed this). `swarm()` therefore accepts a mapping wherever it accepts a `Member` and validates it with `Member.model_validate()`. A limit dict is rebuilt by a validator that calls the matching Inspect limit factory.
-- **Names.** With `count=1` the member is called `name`. With `count=k>1` the members are `name-1` to `name-k`. A name is an identifier the eval author chose; members never choose names (swarm.md, [Delivery](swarm.md#delivery-peer-messages-are-model-output)).
-- **Background deepagents** are rejected by `member()` while background ownership is unsupported, as swarm.md's [Members](swarm.md#members) says: an integer `background` (`deepagent(background=64)`) as well as `True`. M2 lifts the rejection ([swarm-implementation-plan.md](swarm-implementation-plan.md#m2-ready-for-external-usage)).
-- **The member contract.** A member's agent is built once, when the task is built, and the swarm invokes that one object for every member the record stands for and in every sample, concurrently. So the agent must be safe to invoke concurrently, with its state local to each invocation, as `react()`, synchronous `deepagent()` and the bridged CLI agents are ([Current behaviour](#registry-objects-are-shared-by-concurrent-samples)). An agent that must be created inside a sample, such as inspect_swe's ACP agents, is not a valid prebuilt member. It can be wrapped in a registered agent that creates it per invocation:
+The common case, `member(deepagent, args={"tools": [bash(), python()]}, count=4)`, is four deepagents, each built for its own member in each sample. With no arguments it is `member(deepagent, count=4)`.
 
-  ```python
-  @agent
-  def per_invocation_claude_code(model: str | None = None) -> Agent:
-      async def execute(state: AgentState) -> AgentState:
-          inner = interactive_claude_code(model=model)   # built inside the sample, per member
-          return await inner(state)
-      return execute
-  ```
+#### The member contract
 
-  M1 does not test or support ACP members; the wrapper is the route when someone needs one. `swarm()` cannot detect an unsafe agent in general, so the contract is documented on `member()`.
-- **Tool state.** The runtime runs each member inside an inspect_ai tool-state scope named after the member, so built-in tools that keep state in the sample store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default (swarm.md, [Members](swarm.md#members); decision: Ransom, 2026-10-09, on swarm.md's [open question 2](swarm.md#open-questions)). This is why `member(deepagent(...), count=4)` gives four memories rather than one. `member()`'s docstring states the rest of the contract:
-  - an explicit `instance` is used as given, so members, or the copies of one counted member, that name the same instance share that state, which is a channel outside the bus ([Security](#security));
+A member record names a factory and its arguments, never a built agent (decision: Ransom, 2026-10-14: fix the shared agent in the API rather than by documenting it; the factory-and-arguments form is this amendment's proposal, [open question 3](#open-questions)).
+
+- **One agent per member, per run.** The runtime calls `build()`, that is `factory(**args)`, once for each member the record stands for, each time the swarm runs: once per member in each sample, epoch and retry. It calls it in the member's task, inside every scope the runtime enters for the member (its tool-state scope; from M2 its sandbox), before `run()` opens the member's span and limits ([swarm-limits.md](swarm-limits.md#stopping), "Member wrapper and statuses"). The member keeps that agent for its whole life in the run; a persistent member, later, is woken on the same agent. Nothing the factory builds is shared: its closures, hooks, caches and the tools it constructs, and `claude_code()`'s session id. A spike with a stub `Member` of this shape and a factory whose agent counts its calls in a closure ran `count=3` over two samples on mockllm: six builds, each agent called once. One agent object passed to three concurrent calls in the same two samples counted up to six.
+- **Per member and per sample, not per copy.** Building the `count` copies once, at construction, would separate the copies within a sample but still share each copy across concurrent samples, and could not build agents that exist only inside a sample (inspect_swe's ACP agents). Building in the sample costs one factory call per member per sample, 50 to 200 microseconds for `deepagent(tools=[bash(), python()])`, `react(tools=[bash(), python()])` and a builder that constructs its own tools (timeit, 2026-10-14), against model calls that take seconds. The factory runs in the sample, so a `get_model()` it calls resolves against the sample's active model and roles.
+- **Construction checks.** `member()` raises `TypeError`, naming the factory:
+  - when `factory` is a built agent. `member(deepagent(...))` gives "member() takes the @agent factory and its arguments, so that each member gets its own agent: write member(deepagent, args={...}) instead of member(deepagent(...))". A factory is the object registered under its own name, and an agent it built is not ([How Inspect separates a factory from its arguments](#how-inspect-separates-a-factory-from-its-arguments));
+  - when `factory` is not a registered `@agent` factory: a lambda, a plain function that returns an agent, or a factory whose registry name now resolves to another object. The message says to decorate it with `@agent`, so that the log can name it and replay can find it;
+  - when `args` do not bind to the factory's signature (an unknown name, or a required parameter missing), checked with the same `inspect.signature(...).bind()` that `registry_tag()` uses.
+
+  `member()` does not call the factory, so a factory's own checks run when the member is built. A probe build at construction would fail for a factory that refuses to run outside a sample, and would run any factory's side effects at task construction. Inspect already validates some agent arguments in the call (deepagent's `max_depth`, `src/inspect_ai/agent/_deepagent/deepagent.py:133-134`). A factory that raises is a foreign error to the member wrapper, since it has no limit source: the member is `errored` and the error propagates and fails the sample, as an agent that raises in its own call does today.
+- **What stays shared: objects passed in `args`.** The task builds them once, and every call of the factory receives the same object, as deepagent's per-call copies of its subagents keep their tools ([Precedent](#precedent-for-member-like-records)). This is the one case the contract leaves to documentation: the swarm cannot tell a stateful object from a stateless one, and copying does not help, because `copy.deepcopy` returns a function unchanged and a copied model or MCP server would lose its connection state. In practice:
+  - Inspect's built-in tools keep their state in the sample store or the sandbox, not in the tool object, so the tool-state scope separates members whether the tool is passed in `args` or built by the factory;
+  - a local MCP server keeps one session per async task, and each member runs in its own task, so each member gets its own session;
+  - a custom tool or helper that keeps state in its Python object (a counter in a closure, a cache, `web_search()`'s lazily created provider) is shared by every member and sample when passed in `args`. To make it per member, construct it in a member builder (below). `member()`'s docstring says so. Such an object used on purpose to pass information between members is a channel outside the bus ([Security](#security)).
+- **Bridged agents** are factories like any other: `member(claude_code, args={...}, count=4)` builds four `claude_code()` agents in each sample, each with its own session id. The limits deep dive's bridged detection reads the factory's registry name ([swarm-limits.md](swarm-limits.md#swarm-nodes)).
+- **ACP agents are refused when built.** Building in the sample removes their construction problem, but an ACP agent's call opens a session and then waits until its caller cancels it, while the caller drives the conversation through `conn.prompt()` ([Current behaviour](#registry-objects-are-shared-by-concurrent-samples)). A member must return when its work is done, so an ACP member would run until a cap stopped it. After building, the runtime checks the agent's class: if one of its bases is a class named `ACPAgent` defined in an `inspect_swe` module (checked by name, so inspect_swarm does not import inspect_swe), it raises `TypeError`, "ACP agents are interactive sessions driven by their caller and cannot be swarm members", which fails the sample. A builder that drives an ACP agent and returns is later work; M1 does not support ACP members.
+
+#### Records, logging and names
+
+- **Why pydantic.** A pydantic model is logged as its fields, at top level and inside lists ([table](#how-arguments-reach-the-log)). Field serialisers make it faithful: `factory` is written as its registry name (`registry_log_name()`, which drops `inspect_ai/`), and `args` with `extract_named_params(factory, False, **args)`, the function `@agent` uses for a built agent's params, so a member's arguments log exactly as the agent's own params would have (spike: `{"tools": [{"type": "tool", "name": "bash", "params": {}}, {"type": "tool", "name": "python", "params": {}}]}`, equal to `registry_params(deepagent(tools=[bash(), python()]))`). Each limit is written as `{"limit": "cost", "value": 2.0}` (with the metering type for tokens, which the limits deep dive reads from the object). A member logs as `{"factory": "react", "args": {"prompt": "solve"}, "name": "w", "count": 4, ...}`.
+- **Not a registry dict.** The member's logged form has no `{"type": "agent", "name", "params"}` dict for its agent, on purpose. Replay turns every such dict into an object at task construction (`registry_kwargs()`, `registry.py:689-704`), which would build the agent outside any sample and hand `swarm()` the built agent that `member()` refuses.
+- **Replay.** Rebuilding the swarm from the log hands `swarm()` a dict whose `factory` is a string and whose `args` have had their nested registry dicts rebuilt into objects by `registry_kwargs()` (spike: `bash` and `python` came back as tools). `swarm()` therefore accepts a mapping wherever it accepts a `Member` and validates it with `Member.model_validate()`. The validator resolves `factory` with `registry_lookup("agent", name)`, which loads a `package/name`'s entry point first, and raises `ValueError` for an unknown name; a limit dict is rebuilt by a validator that calls the matching Inspect limit factory.
+- **Names.** With `count=1` the member is called `name`, by default the factory's unqualified registry name. With `count=k>1` the members are `name-1` to `name-k`. A name is an identifier the eval author chose; members never choose names (swarm.md, [Delivery](swarm.md#delivery-peer-messages-are-model-output)).
+- **Background deepagents** are rejected by `member()` while background ownership is unsupported, as swarm.md's [Members](swarm.md#members) says: a `deepagent` factory whose `args` set `background` to `True` or to an integer (`args={"background": 64}`). M2 lifts the rejection ([swarm-implementation-plan.md](swarm-implementation-plan.md#m2-ready-for-external-usage)).
+
+#### Tool state and member builders
+
+- **Tool state.** The runtime runs each member inside an inspect_ai tool-state scope named after the member, so built-in tools that keep state in the sample store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default (swarm.md, [Members](swarm.md#members); decision: Ransom, 2026-10-09, on swarm.md's [open question 2](swarm.md#open-questions)). This is why `member(deepagent, count=4)` gives four memories rather than one. Building an agent per member does not make the scope unnecessary: built-in tools keep their state in the sample store under their instance name, and a new tool object with the default instance reaches the same key as any other (`store_as(MemoryStore, instance=instance)`, `src/inspect_ai/tool/_tools/_memory.py:113`). The per-member build separates Python objects; the scope separates store keys, including those of tools passed in `args`. `member()`'s docstring states the rest of the contract:
+  - an explicit `instance` is used as given, so members, or the copies of one counted member (built from the same `args`), that name the same instance share that state, which is a channel outside the bus ([Security](#security));
   - the sample store itself is shared, including any environment a task keeps there;
   - state that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with `tool_state_instance()`;
   - built-in tool state a setup solver prepared at the default instance before the swarm runs is not the members': each member starts with its own, so tasks that rely on it are unsupported in M1.
-- **Faithful only as far as the agent's own params.** `registry_value(agent)` writes what Inspect captured when the agent was built. Ordinary values (`react(prompt=..., tools=[bash()])`) round-trip. A callable argument (an `on_continue` hook, a model filter, a `ToolSource` such as the communication deep dive's `swarm_tools()`) is logged as its name and cannot be rebuilt ([table](#how-arguments-reach-the-log)); two members that differ only in such a callback even collide in `eval_set`. The route is a **member builder**: a registered `@agent` factory with ordinary parameters that builds the configured agent inside, so the log records the builder and its parameters and replay calls it again:
+- **Faithful only as far as the factory's arguments.** `args` are logged by Inspect's rules. Ordinary values (`args={"prompt": ..., "tools": [bash()]}`) round-trip. A callable argument (an `on_continue` hook, a model filter, a `ToolSource` such as the communication deep dive's `swarm_tools()`) is logged as its name and cannot be rebuilt ([table](#how-arguments-reach-the-log)); two members that differ only in such a callback even collide in `eval_set`. The run itself is unaffected, because the runtime calls the factory with the objects in `args`, not with their logged form; what is lost is raw-solver replay and eval-set identity. The route is a **member builder**: a registered `@agent` factory with ordinary parameters that builds the configured agent inside, so the log records the builder and its parameters and replay calls it again:
 
   ```python
   @agent
@@ -257,7 +294,7 @@ def member(
       return react(prompt=prompt, tools=[bash(), python(), swarm_tools()], on_continue=swarm_on_continue())
   ```
 
-  `member(worker(), count=3)` logs `{"type": "agent", "name": "worker", "params": {"prompt": "..."}}`; a spike confirmed that the outer factory's identity and parameters replace `react()`'s and that `create_registry_object()` rebuilds it. The examples below use builders wherever a member has hooks.
+  `member(worker, args={"prompt": "..."}, count=3)` logs `{"factory": "worker", "args": {"prompt": "..."}, "count": 3, ...}`, and replay looks `worker` up and calls it with that prompt. A builder is a factory like any other, so its body runs once per member per sample, and the hooks and tools it builds are that member's own. The examples below use builders wherever a member has hooks.
 
 ### Controllers
 
@@ -429,7 +466,7 @@ Both registry types need inspect_ai's `RegistryType` to list them ([The registry
 
 ### Logging and replay
 
-**The rule for what this API defines.** Every argument of `swarm()`, `member()` and every controller and channel factory is a plain value, a registry object, a list or dict of those, or a pydantic model whose fields follow the same rule (with field serialisers for registry objects, limits and models, as `Member` has). Then the plan step logs the argument faithfully, two arms that differ in it get different eval-set identifiers, and `create_registry_object()` can rebuild it. Replay turns registry objects back into objects but leaves pydantic models as dicts, so every factory that takes a pydantic argument also accepts its dict form and validates it, as `swarm()` does for `Member`.
+**The rule for what this API defines.** Every argument of `swarm()`, `member()` and every controller and channel factory is a plain value, a registry object, a list or dict of those, or a pydantic model whose fields follow the same rule (with field serialisers for registry objects, factories, limits and models, as `Member` has). Then the plan step logs the argument faithfully, two arms that differ in it get different eval-set identifiers, and `create_registry_object()` can rebuild it. Replay turns registry objects back into objects but leaves pydantic models as dicts, so every factory that takes a pydantic argument also accepts its dict form and validates it, as `swarm()` does for `Member`.
 
 Under this rule, the swarm-wide cap is the limits deep dive's `Budget`, not a bare `Limit` (logged as `"_CostLimit"`), and `Budget` must be a frozen pydantic model, not a frozen dataclass (logged as `"Budget"`). The scoring deep dive's `FinalMode` values (`synthesize(model=...)`, and `reporter("<member>")`) must be pydantic models too, with a discriminator field so that a chain of mixed strings and modes validates back from JSON, and a serialiser and validator for a `Model` field (`registry_value()` writes a `Model` as a model dict, `registry.py:678-684`, but only at top level, not inside a pydantic model). Only string chains were spiked here; the scoring deep dive's spike verified the mixed form, which is built with the chain after M2.
 
@@ -437,22 +474,21 @@ Under this rule, the swarm-wide cap is the limits deep dive's `Budget`, not a ba
 
 | What | Why | Route |
 |---|---|---|
-| A member agent configured with callables (hooks, filters, tool sources) | Inspect logs a callable as its name ([table](#how-arguments-reach-the-log)) | A registered member builder with ordinary parameters ([Members](#members)) |
-| A member agent that must be created inside a sample (inspect_swe's ACP agents) | It cannot be built at task construction at all | A registered wrapper that creates it per invocation ([Members](#members)) |
+| A member factory given callables in `args` (hooks, filters, tool sources) | Inspect logs a callable as its name ([table](#how-arguments-reach-the-log)) | A registered member builder with ordinary parameters ([Members](#tool-state-and-member-builders)) |
 | `result=` (after M2), the task's `ResultSpec` | It holds the task's callables (answer key, verifier); the scoring deep dive logs it as its type name, `"ResultSpec"` | Rebuild through the task, or through a registered swarm builder (below) |
 | `policy=` (M2), the communication deep dive's `CommPolicy` | A plain callable, logged as its name | The same as `result=` |
 
 **Two kinds of reconstruction.** They differ, and the guarantees differ:
 
 - **Through the task.** `eval-retry` and eval-set retries of a task file or registered task re-run the task's code (`src/inspect_ai/_eval/eval.py:1737-1756`), which builds the swarm, its `result=` and its member builders afresh. Everything is rebuilt; this is the supported path for any swarm. (A run that overrode the solver with `--solver` is retried from its solver spec, `:1758-1762`, which is the second path.)
-- **From the solver's logged arguments.** `--solver inspect_swarm/swarm -S ...`, inspect_flow's solver specs, or `create_registry_object()` on a plan step rebuild the raw `swarm()` call from its params. This rebuilds the reconstructible subset: member records, controllers, channels, `Budget`, and member agents whose own params are ordinary. `result` comes back as the string `"ResultSpec"`; `swarm()` raises `TypeError` for a string `result` ("a result contract cannot be rebuilt from a log; rebuild the swarm through its task or a registered builder") rather than treating it as `None`, which would silently change the final-answer chain and per-member claims.
+- **From the solver's logged arguments.** `--solver inspect_swarm/swarm -S ...`, inspect_flow's solver specs, or `create_registry_object()` on a plan step rebuild the raw `swarm()` call from its params. This rebuilds the reconstructible subset: member records, controllers, channels, `Budget`, and member factories whose `args` are ordinary. Member agents are not built here: the rebuilt records name their factories, which the runtime calls in the sample, as in the original run. `result` comes back as the string `"ResultSpec"`; `swarm()` raises `TypeError` for a string `result` ("a result contract cannot be rebuilt from a log; rebuild the swarm through its task or a registered builder") rather than treating it as `None`, which would silently change the final-answer chain and per-member claims.
 - **A registered swarm builder** makes the second path complete: an `@agent` factory with ordinary parameters that returns the configured `swarm(...)`, result contract included. It logs as `{"type": "agent", "name": "math_swarm", "params": {"k": 4}}` and replays by calling the builder.
 
   ```python
   @agent
   def math_swarm(k: int = 4, cost: float = 40.0) -> Agent:
       return swarm(
-          members=member(deepagent(tools=[bash(), python()]), name="solver", count=k),
+          members=member(deepagent, args={"tools": [bash(), python()]}, name="solver", count=k),
           budget=Budget(cost=cost),
           result=answer_result(answer_key=boxed_number, verifier=check_answer),
       )
@@ -460,22 +496,22 @@ Under this rule, the swarm-wide cap is the limits deep dive's `Budget`, not a ba
 
 For eval-set identity, `result` logged as a type name is harmless when the arms share their result contract, which arms of one task normally do; a task whose arms differ in it takes the difference from a task argument ([Task identity](#task-identity-what-makes-two-arms-distinct)). Member callbacks are not harmless (two arms differing only in a hook collide), which is why the builder route is the documented way to configure members with hooks.
 
-A spike confirmed the whole path with a simulated registry type (`RegistryInfo.model_construct()` stands in for the literal entry; the spike used `"controller"`, and a re-run of its registry part under `"swarm_controller"` on 2026-10-09 logged and rebuilt the controller the same way, with only the type string changed): `swarm(members=[member(react(prompt="solve"), name="w", count=4)], controller=leaderless(final=["verify", "first"]))` logged the following (the names are unprefixed because the spike ran outside a package; in inspect_swarm they are `inspect_swarm/leaderless`, since `registry_log_name()` strips only `inspect_ai/`, `registry.py:521-535`)
+Spikes confirmed the whole path. The controller part used a simulated registry type (`RegistryInfo.model_construct()` stands in for the literal entry; the spike used `"controller"`, and a re-run of its registry part under `"swarm_controller"` on 2026-10-09 logged and rebuilt the controller the same way, with only the type string changed). The member part was re-run on 2026-10-14 with a stub `Member` holding `factory`, `args`, `name` and `count`. `swarm(members=[member(react, args={"prompt": "solve"}, name="w", count=4)], controller=leaderless(final=["verify", "first"]))` logs the following (the names are unprefixed because the spikes ran outside a package; in inspect_swarm the controller is `inspect_swarm/leaderless`, since `registry_log_name()` strips only `inspect_ai/`, `registry.py:521-535`)
 
 ```json
 {
-  "members": [{"agent": {"type": "agent", "name": "react", "params": {"prompt": "solve"}}, "name": "w", "count": 4}],
+  "members": [{"factory": "react", "args": {"prompt": "solve"}, "name": "w", "count": 4}],
   "controller": {"type": "swarm_controller", "name": "leaderless", "params": {"final": ["verify", "first"]}}
 }
 ```
 
-and `create_registry_object("agent", ...)` on those params called `swarm()` again with a `Controller` object for `controller` and, for the member, a dict whose `agent` was an `Agent`.
+and `create_registry_object("agent", ...)` on those params called `swarm()` again with a `Controller` object for `controller` and, for the member, a dict whose `factory` is the string `"react"`, which `Member`'s validator resolves to the registered factory. The member spike also ran the stub runtime on two samples, and an `eval_set` of two arms that differ only in a member's `args` accepted them as distinct.
 
 ### Sweeping
 
 - **Task parameters.** A task exposes the axes it wants, and names resolve: `-T controller=escalate`, `-T channels=filesystem,messages`. A single `-T channels=filesystem` arrives as a string, which `channels=` accepts.
 - **Python sweeps.** `eval_set([task(controller=leaderless(final=f)) for f in ...])` (after M2) and inspect_flow work on solver arguments too, because they are logged faithfully and so give distinct task identifiers.
-- **`--solver inspect_swarm/swarm`.** It works through the `@agent` path, but `members=` needs a dict on the command line (`-S 'members={agent: {type: agent, name: react, params: {}}, count: 4}'`), and it cannot carry a result contract. A registered swarm builder (`--solver math_swarm -S k=8`) has neither problem ([Logging and replay](#logging-and-replay)). Tasks are the intended surface.
+- **`--solver inspect_swarm/swarm`.** It works through the `@agent` path, but `members=` needs a dict on the command line (`-S 'members={factory: react, count: 4}'`), and it cannot carry a result contract. A registered swarm builder (`--solver math_swarm -S k=8`) has neither problem ([Logging and replay](#logging-and-replay)). Tasks are the intended surface.
 
 ### Task identity: what makes two arms distinct
 
@@ -485,8 +521,8 @@ A swarm is an agent used as the task's solver, so it is part of the identifier t
 
 | What differs between two arms | Reaches `task_identifier()`? | How, and does it matter |
 |---|---|---|
-| `controller=`, `channels=`, `budget=`, `members=` (count, names, roles, limits, the member agent's own params) | Yes | The plan's `params_passed`, nested registry dicts and pydantic fields included. Tested ([Testing](#testing)). |
-| A member agent's callback (hook, filter, tool source) | Only by name | Logged as `__name__`: two arms differing only in such a callback collide. Configure it in a registered member builder with ordinary parameters, whose params are hashed ([Members](#members)). |
+| `controller=`, `channels=`, `budget=`, `members=` (factory, its `args`, count, names, roles, limits) | Yes | The plan's `params_passed`, nested registry dicts and pydantic fields included. Tested ([Testing](#testing)). |
+| A callable in a member's `args` (hook, filter, tool source) | Only by name | Logged as `__name__`: two arms differing only in such a callback collide. Configure it in a registered member builder with ordinary parameters, whose `args` are hashed ([Members](#tool-state-and-member-builders)). |
 | `result=` | No (logged as `"ResultSpec"`) | Arms of one task normally share it. If they differ (a different verifier), the task builds it from a task argument, which `args_hash` covers, or the arms use different registered swarm builders. |
 | `policy=` (M2) | Only by name | A `CommPolicy` is a plain callable, logged as `__name__`. A task that varies the policy takes it from a task argument, or sets it inside a registered swarm builder. |
 | The task's scorers, headline or per-member | No | Same as every Inspect task: scorers are part of the task, so they distinguish arms only through the task's name or arguments (spike: two otherwise identical tasks with different scorers are "not distinct"). A scorer can change the run: a member with in-loop scoring (`react(attempts=3)` and the other retrying agents in [Scores](#scores-the-task-scores-the-observer-records)) stops or retries on the task scorer's verdict. So a scorer ablation is an arm of its own, selected by a task argument or name. Re-scoring one run's log with `inspect score` is a substitute only when the scorer that changed was not consulted during solving (no member scores in the loop) and does not need the sandbox (the scoring deep dive's re-scoring rules). |
@@ -508,12 +544,12 @@ The rule a task author follows is the one `eval_set()`'s error message gives: di
 | Scoring | `swarm(result=...)` | after M2, `swarm(result=)`; rebuilt through the task or a registered swarm builder, never from a raw solver spec ([Logging and replay](#logging-and-replay)) |
 | Scoring | `Verdict(passed, value, explanation)` | after M2, controllers see `VerdictSummary(passed, value)`; the explanation stays in the result record |
 | Scoring | `reporter` mode, reserved | valid only on controllers with a reporter; `coordinator(lead=...)` defaults to it |
-| Scoring | `baseline(agent, result)` | after M2, `swarm(members=member(agent), controller=leaderless(final="first"), channels=[], result=result)` |
+| Scoring | `baseline(member, result)` | after M2, `swarm(members=member, controller=leaderless(final="first"), channels=[], result=result)`, where `member` is a `Member` or a bare factory, as in `members=` |
 | Communication | `channels=["filesystem", messages(...)]` | the same call; `messages` is a `@swarm_channel` factory, `"messages"` resolves to it |
 | Communication | `member(delivery=)`; after M2, `member(remind=)` | `member()` fields |
 | Communication | `swarm(policy=)` | `swarm(policy=)` from M2, the setting of the observer's interception point; a callable, so it is logged by name and varied across arms through a task argument or a registered swarm builder ([Task identity](#task-identity-what-makes-two-arms-distinct)) |
 | Communication | the `Channel` protocol | M2's operations on `Channel`, with per-sample state on a per-run `ChannelState` |
-| Communication | `swarm_tools()`, `swarm_on_continue()`, `swarm_bridged_tools()` | member-side helpers, not `swarm()` arguments; a member using them is built by a registered member builder so the log can rebuild it |
+| Communication | `swarm_tools()`, `swarm_on_continue()`, `swarm_bridged_tools()` | member-side helpers, not `swarm()` arguments; a member using them is a registered member builder, which builds them per member and which the log can name |
 | ORBIT (#4) | `member(input=, role=, exposure=)` | `member()` fields; `input` is the default for `SwarmControl.start(input=None)` |
 | ORBIT (#4) | `ActivationPolicy`, `SwarmControl`, `MemberHandle` | a controller's `run`, and methods added to these handles |
 | ORBIT (#4) | `round_robin(max_rounds=)` | a `@swarm_controller` |
@@ -536,7 +572,7 @@ def research_math(k: int = 4, cost: float = 40.0, controller: str = "leaderless"
     return Task(
         dataset=...,
         solver=swarm(
-            members=member(deepagent(tools=[bash(), python()]), name="solver", count=k),
+            members=member(deepagent, args={"tools": [bash(), python()]}, name="solver", count=k),
             controller=controller,
             budget=Budget(cost=cost),
         ),
@@ -545,11 +581,11 @@ def research_math(k: int = 4, cost: float = 40.0, controller: str = "leaderless"
     )
 ```
 
-`inspect eval research_math.py -T k=8 -T cost=80` runs eight members, `solver-1` to `solver-8`, in the sample's sandbox, with the filesystem channel, under a cost cap of 80 (dollars), each started with the sample's input and its preamble; it stops when all have ended, and the final answer is the first submission. After M2, with the scoring deep dive's `result=answer_result(answer_key=boxed_number, verifier=check_answer)`, the default answer is scoring's default chain. The explicit form of the same arm after M2, with a strict verifier-only answer and the swarm stopping at the first verified answer:
+`inspect eval research_math.py -T k=8 -T cost=80` runs eight members, `solver-1` to `solver-8`, each with its own deepagent, in the sample's sandbox, with the filesystem channel, under a cost cap of 80 (dollars), each started with the sample's input and its preamble; it stops when all have ended, and the final answer is the first submission. After M2, with the scoring deep dive's `result=answer_result(answer_key=boxed_number, verifier=check_answer)`, the default answer is scoring's default chain. The explicit form of the same arm after M2, with a strict verifier-only answer and the swarm stopping at the first verified answer:
 
 ```python
 swarm(
-    members=member(deepagent(tools=[bash(), python()]), name="solver", count=4),
+    members=member(deepagent, args={"tools": [bash(), python()]}, name="solver", count=4),
     controller=leaderless(final="verify", stop_on_verified=True),
     channels=[filesystem(notes="notes.md")],
     budget=Budget(cost=40.0),
@@ -577,7 +613,7 @@ def leaderless(final: FinalSpec | None = None, stop_on_verified: bool = False) -
     return Controller(run, final=final)
 ```
 
-**A coordinator swarm (later: coordinator topologies, on the later messages channel).** A lead and three workers. All start together; workers wait for the lead's instructions with `read_messages(wait_seconds=...)`, and the lead's submission is the answer. Members with hooks and tool sources are registered builders, so the log can rebuild them ([Members](#members)).
+**A coordinator swarm (later: coordinator topologies, on the later messages channel).** A lead and three workers. All start together; workers wait for the lead's instructions with `read_messages(wait_seconds=...)`, and the lead's submission is the answer. Members with hooks and tool sources are registered builders, passed uncalled, so the log can name them and each member gets its own hooks ([Members](#tool-state-and-member-builders)).
 
 ```python
 from inspect_ai.agent import Agent, agent, react
@@ -596,7 +632,7 @@ def worker(prompt: str = WORKER_PROMPT) -> Agent:
 
 
 swarm(
-    members=[member(lead(), name="lead", role="coordinator"), member(worker(), name="worker", count=3)],
+    members=[member(lead, name="lead", role="coordinator"), member(worker, name="worker", count=3)],
     controller=coordinator(lead="lead"),
     channels=["filesystem", messages(delivery="notify")],
 )
@@ -657,7 +693,7 @@ def escalate(first: str, final: FinalSpec | None = None) -> Controller:
 
 
 swarm(
-    members=[member(react(model="openai/gpt-5-mini"), name="scout"), member(deepagent(), name="worker", count=4)],
+    members=[member(react, args={"model": "openai/gpt-5-mini"}, name="scout"), member(deepagent, name="worker", count=4)],
     controller=escalate(first="scout"),
     result=answer_result(verifier=check_answer),
 )
@@ -669,7 +705,7 @@ Defined in a task file, its registry name is `escalate`; in an installed package
 
 **Closed string settings** for the topology and the final answer, and a fixed list of channel names. The least machinery. There is no way to add a topology or a channel without changing inspect_swarm, the final-answer chain has to be validated against a separate `topology=`, and ORBIT's scheduled mode needs a protocol of its own anyway. Rejected.
 
-**Plain config objects and protocols, no registry** (deepagent's `Subagent`; the ORBIT deep dive's `ActivationPolicy` passed as an object). No inspect_ai change. But a user's controller cannot be named from `-T` or a config, parameters are not captured automatically, and an object that is not a pydantic model is logged as its type name, which makes otherwise different arms "not distinct" in `eval_set` (spike). Rejected for controllers and channels; adopted for members, where the object being named (the `Agent`) is already in the registry.
+**Plain config objects and protocols, no registry** (deepagent's `Subagent`; the ORBIT deep dive's `ActivationPolicy` passed as an object). No inspect_ai change. But a user's controller cannot be named from `-T` or a config, parameters are not captured automatically, and an object that is not a pydantic model is logged as its type name, which makes otherwise different arms "not distinct" in `eval_set` (spike). Rejected for controllers and channels; adopted for members, where the object being named (the agent's `@agent` factory) is already in the registry.
 
 **Register controllers and channels under existing types** (`solver` or `agent`, with metadata saying what they are). No inspect_ai change. But `--solver leaderless` would then resolve to a controller and fail obscurely, and anything that lists solvers or agents would list controllers. Rejected; the literal entry is one line with precedent.
 
@@ -681,7 +717,23 @@ Defined in a task file, its registry name is `escalate`; in an installed package
 
 **Hook-style controllers** (a class with `on_start`, `on_member_ended`, `should_stop` methods, as Inspect's `Hooks` are). Declarative and harder to misuse. But sequencing (escalate, waves, ORBIT's plans) becomes a state machine spread across callbacks, and Inspect's class registration does not capture constructor parameters into the log the way factory decoration does. Rejected in favour of one `run` coroutine over an event stream.
 
-**A factory field on `member()`** (`member(factory=lambda: react(...))`) instead of registered member builders. It would also rebuild hooks per invocation, but the factory is a callable, so the log records only its name and replay cannot call it. A registered `@agent` builder uses Inspect's own registry and logging, and needs nothing new. Rejected.
+**Members as built agents** (`member(deepagent(...), count=4)`, this design's form until 2026-10-14), with the contract that a member's agent is safe to invoke concurrently. The shortest call, and the one `handoff()` and `as_tool()` use. But the swarm runs one object `count` times at once in one sample, sandbox and store, a stronger demand than Inspect's across-samples contract, and nothing checks it: `claude_code()` fails it through its per-instance session id, and any closure state an agent keeps fails it silently. Rejected in favour of a fix in the API (decision: Ransom, 2026-10-14).
+
+**Keep built agents, and rebuild each copy from its registry info** (`create_registry_object("agent", name, registry_params(agent))` per member). The call stays the same. But a built agent keeps only the logged form of its arguments ([How Inspect separates a factory from its arguments](#how-inspect-separates-a-factory-from-its-arguments)), so the rebuild is only as faithful as the log, and the loss cannot be detected: an `on_continue` hook comes back as its name, a string that a submitting `react()` accepts as continuation text, so the rebuilt agent's params equal the original's while its behaviour differs. deepagent's `Subagent` objects come back as their names. Refusing the agents whose params do not round-trip would need the raw arguments, which are gone. Rejected.
+
+**Keep built agents, and have inspect_ai keep their raw creation arguments** (an inspect_ai PR in which `registry_tag()` also stores the bound arguments, unlogged, and a `registry_recreate(agent)` calls the factory again with them). The call, its static typing and the log shape stay as they were, and the rebuild is exact. But it needs an inspect_ai change for every registry object, which then holds references to all its arguments; the agent passed to `member()` is built at task construction only to be discarded, which an agent that exists only inside a sample cannot be; and `member(deepagent(...))` reads as handing the swarm an object that it then never runs. The factory-and-arguments form gets the same result with no inspect_ai change and in Inspect's own idiom for factories ([Current behaviour](#how-inspect-separates-a-factory-from-its-arguments)). It is the strongest alternative, kept as [open question 3](#open-questions).
+
+**Factory arguments as keywords of `member()`** (`member(deepagent, count=4, tools=[bash()])`). Shorter. But factory parameters collide with member fields: `react()` takes `name` and `description`, inspect_swe's `claude_code()` takes `name` and `sandbox`, and M2 adds `member(sandbox=)`. A collision would silently send an argument to the wrong place, or need a rule for which wins. Rejected for `args=`, as `eval(task_args=)`, `SolverSpec.args` and inspect_flow's `FlowAgent(args=)` keep arguments apart.
+
+**`functools.partial`** (`member(partial(deepagent, tools=[bash()]), count=4)`). Type checkers check the bound arguments, which an `args` dict does not get. But it allows positional arguments, which the log must then rebind, it is not an idiom Inspect uses anywhere, and `member()` would have to unwrap a `partial` to find and validate the registered factory. Kept as an option under [open question 3](#open-questions); `args=` is recommended.
+
+**One agent per copy, built at construction.** `count` agents built once by `member()`. It separates the copies within a sample, but each copy is still shared by every concurrent sample, so closure state (a hook's counter, a cache) still mixes samples, and it cannot build an agent that exists only inside a sample. Building per member per sample costs one factory call of 50 to 200 microseconds ([The member contract](#the-member-contract)). Rejected.
+
+**Copy the agent per member** (`copy.deepcopy(agent)`). No API change. But `copy.deepcopy` returns a function unchanged, so a closure-based agent, which is every `@agent`, is not copied at all, and copying the objects it closes over would break models and MCP servers. Rejected.
+
+**Build a probe agent in `member()`** to raise a factory's own errors at task construction. Earlier errors for misconfigured arguments. But an agent that exists only inside a sample cannot be probed, and the probe runs the factory's side effects at task construction. Argument binding is checked without building; the factory's own checks run when the member is built, as deepagent's already do in its call. Rejected.
+
+**A plain callable factory** (`member(lambda: react(...))`). Any code can build the agent. But the log records only the callable's name, so replay cannot call it and two arms that differ inside it collide. A registered `@agent` factory, a member builder where needed, uses Inspect's registry and logging. Rejected.
 
 **Controllers that run members themselves** (`await member.run()` in an anyio task group). Familiar to anyio users. But the controller would then own member tasks, so drain and cap recovery would depend on every controller cancelling correctly, and a controller bug could leave a member running during finalisation. Rejected: the runtime owns member tasks, and the controller only starts them.
 
@@ -696,6 +748,7 @@ Defined in a task file, its registry name is `escalate`; in an installed package
 - **inspect_swarm** has no released API ([swarm.md](swarm.md#compatibility-and-migration)). Its first release, in M2, calls `swarm()`, `member()`, `Budget`, the built-in controller and channel names and the version-1 record and evidence formats supported, and the `Controller`/`SwarmControl` and `Channel`/`ChannelState` interfaces for user-written controllers and channels experimental ([swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 6).
 - **inspect_ai.** Two entries in `RegistryType`. They are additive: nothing in inspect_ai uses the type set except `RegistryInfo`'s validation and `is_registry_dict()`, which then recognises two more kinds of logged object, and the literal is not in the log schema or the generated TypeScript types (verified above). inspect_swarm needs the inspect_ai version that has them; it tracks inspect_ai `main`, and the release floor pinned by `release-pin-deps.yml` covers released versions. Imported with an older inspect_ai, inspect_swarm's decorators fail at import with pydantic's `ValidationError` on `RegistryInfo`.
 - **Registry dict shapes.** With the new types, any dict of exactly the shape `{"type": "swarm_controller" | "swarm_channel", "name": str, "params": dict}` inside replayed arguments is rebuilt as an object instead of staying data (`is_registry_dict()`, `registry_arg()`, `registry.py:647-701`). Neither string occurs anywhere in inspect_ai, inspect_sentinel, inspect_scout or inspect_flow (checked 2026-10-09), so no existing caller uses those shapes; the inspect_ai PR states this reservation in its compatibility note.
+- **Member records.** Members name a factory and its arguments from the first release; no released code or log holds the earlier form, which took a built agent and logged it as a `{"type": "agent", ...}` dict. `member()` refuses a built agent with a message that shows the new call ([The member contract](#the-member-contract)).
 - **Eval logs.** The swarm's plan step gains nested `{"type": "swarm_controller" | "swarm_channel", "name", "params"}` objects and member dicts. These are ordinary JSON inside `params`, which is `dict[str, Any]` (`src/inspect_ai/log/_log.py:705-718`), so every log reader accepts them. An inspect_ai that lacks the types treats them as plain dicts on replay; replaying a swarm log needs inspect_swarm installed anyway.
 
 ## Security
@@ -705,6 +758,8 @@ Defined in a task file, its registry name is `escalate`; in an installed package
 - **No model text reaches a controller.** Handles and events carry states, statuses, member names chosen by the eval author, and a verdict's pass flag and numeric value; never a member's output, a message payload or a verifier's explanation, which may quote the answer or a judge model ([Controllers](#controllers)). So a controller cannot relay model output into another member's input. `start(input=...)` takes the eval author's text; its documentation says never to put member output there.
 - **The preamble** contains the member's name and role, the roster size, and channel instructions, all from the eval author. Nothing a member wrote enters it.
 - **Shared tool state.** Members cannot pick a tool's `instance`; the eval author does, in the member's agent. The default is per member, and a shared instance is a channel the bus does not see, observed like the filesystem (swarm.md, [Security](swarm.md#security)).
+- **Shared objects in `args`.** Each member's agent is built for it, so nothing the factory builds is shared. An object the eval author passes in `args` is one object for every copy and sample; if it keeps Python state that members' tool calls can write and read, it is a channel outside the bus, like a shared tool instance. Only the eval author can create one, and `member()`'s docstring says so ([The member contract](#the-member-contract)).
+- **Factories from a log.** Replay resolves a member's `factory` by registry name, which only finds registered `@agent` factories, the same lookup `--solver` and `registry_kwargs()` already make; the factory then runs inside the sample, with the arguments the log recorded.
 - **Logged parameters** are the eval author's arguments, written as JSON data in the plan, as Inspect already writes solver parameters.
 
 ## Testing
@@ -721,7 +776,8 @@ All in inspect_swarm, with mockllm, on asyncio and trio, no network or Docker:
   - plan-step `params` and `params_passed` for the common case, the explicit form and a heterogeneous roster match expected JSON, including nested agents and limits;
   - raw-solver replay: `create_registry_object()` on the params of a swarm without `result=` rebuilds an equivalent swarm whose params are equal; with `result=` (after M2) it raises the documented `TypeError`, never substituting `None`;
   - task replay (after M2): retrying a task-file swarm with a verifier result rebuilds the result contract and selects the same final answer (a separate case from raw-solver replay);
-  - member builders: two `worker(prompt=...)` builders with different prompts log differently, get different `eval_set` identifiers and rebuild with their `on_continue` hook intact; a registered swarm builder (`math_swarm`) replays through `--solver`-style params (after M2, with its result contract);
+  - member records log as `{"factory": ..., "args": ...}` with `args` equal to what `@agent` would log for the built agent (`deepagent` with `tools=[bash(), python()]`), and raw-solver replay resolves the factory by name and rebuilds the tools in `args` without building any agent;
+  - member builders: two `member(worker, args={"prompt": ...})` records with different prompts log differently, get different `eval_set` identifiers and, replayed, run with their `on_continue` hook intact; a registered swarm builder (`math_swarm`) replays through `--solver`-style params (after M2, with its result contract);
   - `eval_set` accepts two arms that differ only in a controller parameter, a channel parameter, a member's `count` or `limits`, or `Budget`, and assigns them different identifiers;
   - (after M2) a final chain mixing strings and pydantic `FinalMode` values (including a `synthesize` with a model) validates back from its logged JSON;
   - `-T channels=filesystem` (a string) and `-T channels=filesystem,messages` (a list) both resolve.
@@ -735,11 +791,12 @@ All in inspect_swarm, with mockllm, on asyncio and trio, no network or Docker:
   - a custom reason is recorded as `controller:<reason>`;
   - no member text: a member that outputs a distinctive string, and after M2 a verifier whose explanation echoes it, and the string appears in no event or handle field;
   - one swarm object serves two concurrent samples with no shared controller state;
+  - each member gets its own agent: a factory whose agent counts its calls in a closure, with `count=3` over two concurrent samples, is built six times and each agent is called once; the build happens inside the member's tool-state scope (the factory reads `tool_state_instance(None)` and gets the member's name); an object passed in `args` is the same object in every member (the documented sharing); a factory that raises makes the member `errored` and fails the sample; an agent whose class derives from a class named `ACPAgent` in a module under `inspect_swe` is refused with `TypeError` when built;
   - each member runs in its own tool-state scope: members with `memory()`, and the copies of a counted member, each see only their own memory files, while members given `memory(instance="team")` share them; two deepagent members' `general` subagents each see only their own installed skills; default-instance tool state a setup solver prepared is not visible to members (the rest of the four-tool cases are swarm.md's runtime tests);
   - `check` errors, and after M2 an invalid `final` (including `final="verify"` without a verifier), raise at `swarm()` construction.
 - `tests/test_scoring_loop.py`: in M1, only the trajectory case described last; after M2, with the scoring deep dive's `member_scores`, also its in-loop guard test run inside a swarm. Members are `react(attempts=3)` and the task lists `member_scores` after its headline scorer; each member gets the same feedback and the same number of task-scorer calls as with the headline scorer alone, and `member_scores` returns `None` while `completed=False`. A second case shows that a scorer change is a trajectory change: with identical mockllm submissions, a passing task scorer ends a member after one call and a failing one makes it retry, and the two arms are distinct in `eval_set` only when the scorer is chosen by a task argument.
 - `tests/test_channel.py`: `filesystem()`'s instructions appear in each member's preamble with that member's scratch directory; `channels=[]` adds none; a duplicate channel raises.
-- `tests/test_member.py`: count expansion and names; duplicate names raise; unregistered agents, `deepagent(background=True)` and `deepagent(background=64)` are rejected; `Member` validates from its own logged dict.
+- `tests/test_member.py`: count expansion and names, with the default name taken from the factory; duplicate names raise; a built agent (`member(deepagent())`), a lambda and an unregistered function are rejected with `TypeError`, the built agent's message showing the factory form; `args` with an unknown name or a missing required parameter raise `TypeError`; `member(deepagent, args={"background": True})` and `args={"background": 64}` are rejected; `Member` validates from its own logged dict, and an unknown factory name raises `ValueError`; `member()` never calls the factory (a factory that raises outside a sample is accepted).
 
 In inspect_ai, the registry PR adds a test to `tests/util/test_registry.py` that registers, looks up and round-trips (`is_registry_dict()`) one object of each new type, as inspect_ai#4359 did for `validation_predicate`. The tool-state scope PR adds `tests/util/test_tool_state.py` (an explicit instance is returned as given; `None` resolves to the scope, to `None` outside one, and to `outer/inner` in nested scopes; the scope does not leak out of its block or into a sibling task) and tool cases for the whole family: `tests/tools/test_memory.py` (two scopes in one sample keep separate files, writable and readonly; no scope keeps today's keys); `tests/tools/test_skill.py` (direct default skill tools and deepagent child skill tools are per scope; `private_tool_instance()` names keep today's keys outside a scope); `bash_session()` and `web_browser()` cases with the sandbox RPC stubbed, so no Docker (separate session ids per scope, one reused session within a scope); and the legacy browser fallback raising a `ToolError` inside a scope.
 
@@ -748,8 +805,8 @@ In inspect_ai, the registry PR adds a test to `tests/util/test_registry.py` that
 1. **inspect_ai: two registry types.** Add `"swarm_controller"` and `"swarm_channel"` to `RegistryType`, with a test in `tests/util/test_registry.py`. Files: `src/inspect_ai/_util/registry.py`, `tests/util/test_registry.py`. inspect_ai's changelog is written from the pull request title, so neither inspect_ai PR here edits `CHANGELOG.md` (decision: Ransom, 2026-10-13). Before M1 (decision: Ransom, 2026-10-08), with the `swarm_` prefix ([The shape of the call](#the-shape-of-the-call)).
    With it, also before M1, a second small PR: **the tool-state scope** (decision: Ransom, 2026-10-09; swarm.md's [open question 2](swarm.md#open-questions)). `tool_state_scope()`, `tool_state_instance()` and `private_tool_instance()` in a new `src/inspect_ai/util/_tool_state.py`, exported from `inspect_ai.util`; used by `memory()`, `bash_session()`, `web_browser()` (which also refuses its legacy fallback inside a scope) and the skill tool; and deepagent's child skill instance changed to `private_tool_instance(sa.name)`. Files: that module, `src/inspect_ai/util/__init__.py`, `src/inspect_ai/tool/_tools/_memory.py`, `_bash_session.py`, `_web_browser/_web_browser.py`, `_skill/tool.py`, `src/inspect_ai/agent/_deepagent/agent_tool.py`, `tests/util/test_tool_state.py`, `tests/tools/test_memory.py`, `tests/tools/test_skill.py`, a stubbed-RPC test for `bash_session()` and `web_browser()`.
 2. **inspect_swarm: registry plumbing** (M1). The decorators, `Controller`, `Channel`, `MemberInfo`, `resolve()`, and the entry point. Files: `src/inspect_swarm/_controller/_controller.py`, `src/inspect_swarm/_channel/_channel.py`, `src/inspect_swarm/_registry.py`, `src/inspect_swarm/_entrypoint.py`, `pyproject.toml` (`[project.entry-points.inspect_ai]`), `tests/test_registry.py`.
-3. **Members and the `swarm()` signature** (M1). `Member` and `member()` with their serialisers; `swarm()`'s arguments, validation and resolution; exports in `src/inspect_swarm/__init__.py`. Files: `src/inspect_swarm/_member.py`, `src/inspect_swarm/_swarm.py`, `src/inspect_swarm/__init__.py`, `tests/test_member.py`, `tests/test_api_log.py`.
-4. **The controller surface in the runtime** (M1). `SwarmControl`, `MemberHandle`, `MemberEnded`, `events()`, `start()` and the preamble, each member's task entered in its tool-state scope, in the M1 runtime the limits and scoring deep dives describe; the built-ins `leaderless` and `filesystem`. Files: `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_controller/leaderless.py`, `src/inspect_swarm/_channel/filesystem.py`, `src/inspect_swarm/_swarm.py`, `tests/test_controller.py`, `tests/test_channel.py`, `tests/test_scoring_loop.py` (its M1 case).
+3. **Members and the `swarm()` signature** (M1). `Member` and `member()` with the factory and `args` fields, their serialisers, the construction checks and `build()`; `swarm()`'s arguments, validation and resolution; exports in `src/inspect_swarm/__init__.py`. Files: `src/inspect_swarm/_member.py`, `src/inspect_swarm/_swarm.py`, `src/inspect_swarm/__init__.py`, `tests/test_member.py`, `tests/test_api_log.py`.
+4. **The controller surface in the runtime** (M1). `SwarmControl`, `MemberHandle`, `MemberEnded`, `events()`, `start()` and the preamble, each member's task entered in its tool-state scope and its agent built there (with the ACP refusal), in the M1 runtime the limits and scoring deep dives describe; the built-ins `leaderless` and `filesystem`. Files: `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_controller/leaderless.py`, `src/inspect_swarm/_channel/filesystem.py`, `src/inspect_swarm/_swarm.py`, `tests/test_controller.py`, `tests/test_channel.py`, `tests/test_scoring_loop.py` (its M1 case).
 5. **M2.** The communication deep dive's operations on `Channel` with per-run state, and `swarm(policy=)`, which raises `TypeError` for the string a raw-solver replay passes, as `result=` does (tested in `tests/test_api_log.py`); the shared-memory channel is M2's first `@swarm_channel` with tools ([swarm-implementation-plan.md](swarm-implementation-plan.md#m2-pull-requests)). `messages` as a `@swarm_channel` is later work.
 6. **Later.** The scoring deep dive's `result=`, `final=`, `stop_on_verified` and verdicts, with its post-M2 work and the `member_scores` case of `tests/test_scoring_loop.py` ([swarm-scoring.md](swarm-scoring.md#implementation-plan-after-m2)); `coordinator` with the coordinator topologies (and the `lead_done` reason); new event kinds with persistent members; the ORBIT deep dive's scheduled mode as controllers.
 
@@ -757,10 +814,16 @@ Steps 2 to 4 are the skeleton of M1, not a separate milestone: swarm.md's M1 bui
 
 ## Open questions
 
-None open. Both questions this design raised are decided (Ransom, 2026-10-08), each taking the recommendation:
+The first two questions this design raised are decided (Ransom, 2026-10-08), each taking the recommendation. The third, from the 2026-10-14 amendment, is open.
 
 1. **The component's name** is **Channels**: "channels is fine for now". The name may be revisited later; the names compared are in the [appendix](#appendix-why-the-component-is-called-channels).
 2. **An inspect_ai PR before M1.** "a is fine": a one-line PR adds the two registry types to `RegistryType`, with a test as inspect_ai#4359 had, and lands before M1 ([Implementation plan](#implementation-plan), step 1). The types are `swarm_controller` and `swarm_channel` (decision: Ransom, 2026-10-09; [The shape of the call](#the-shape-of-the-call)). The alternative of letting packages declare their own registry types is under [Alternatives](#alternatives-considered).
+3. **How a member names its factory's arguments** (open). Ransom decided that members get their own agents through the API (2026-10-14); the form of the call is this amendment's proposal. The options, all building the agent per member per sample:
+   - (a) `member(deepagent, args={"tools": [bash()]}, count=4)`, a factory and an `args` dict. Inspect's own idiom (`task_args`, `SolverSpec.args`, inspect_flow's `args`), no inspect_ai change, no collision with member fields. The arguments are checked against the factory's signature when `member()` runs, not by a type checker.
+   - (b) `member(partial(deepagent, tools=[bash()]), count=4)`. Statically typed, but not an Inspect idiom, and positional arguments must be rebound for the log.
+   - (c) `member(deepagent(tools=[bash()]), count=4)` as before, with an inspect_ai PR that keeps each registry object's raw creation arguments so the swarm can call the factory again. The familiar call, typed, and the same log shape; it costs an inspect_ai change to every registry object and builds an agent at task construction only to discard it.
+
+   Recommendation: (a), which this document specifies. (b) or (c) changes only `member()`'s signature and its validation, not the runtime or the log.
 
 ## Not this design
 
@@ -770,6 +833,9 @@ None open. Both questions this design raised are decided (Ransom, 2026-10-08), e
 - **A generic swarm task** (`inspect_swarm/swarm_task`) that wraps any dataset, so arms can be swept with no task code.
 - **Listing controllers and channels** (`inspect list`-style discovery of registered names).
 - **Sentinel configuration is not part of `task_identifier()`** (inspect_ai `feature/sentinel`). Two tasks that differ only in `Task(sentinel=...)` are "not distinct", and a re-run of an eval set with a different sentinel matches the earlier logs. Sentinel changes how a run behaves, so it arguably belongs in the identifier's additional hash, as the sample limits are. Until then a monitoring ablation takes the sentinel from a task argument ([Task identity](#task-identity-what-makes-two-arms-distinct)).
+- **Refusing member `args` that do not round-trip.** `member()` holds a factory's raw arguments, so it could refuse callables and other values Inspect logs only by name, turning the member-builder rule into a check. Today they run correctly and are logged by name, with builders as the documented route ([Tool state and member builders](#tool-state-and-member-builders)).
+- **`claude_code()` shares its session id across concurrent calls of one object.** Inside a swarm each member has its own agent, but other code that runs one `claude_code()` object twice at once in one sandbox (two parallel `as_tool()` calls, for example) still drives one Claude Code session from two processes. An inspect_swe matter.
+- **Per-copy factory arguments.** The `count` copies of a record are built from the same `args`. A factory that needs its own member's name reads `tool_state_instance(None)`, which returns the member's tool-state scope; a `{member}` template in `args`, like M2's sandbox template, can wait for a user.
 
 ## Appendix: why the component is called Channels
 

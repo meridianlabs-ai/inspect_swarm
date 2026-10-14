@@ -83,7 +83,7 @@ inspect_ai already has a second principal in a sandbox, documented in `design/sa
 
 Spike: in an Inspect eval with two users created as root, `bash(user="swarm-w1")` ran as `uid=1000(swarm-w1)` with `HOME=/scratch/w1` and cwd `/`; `bash_session(user="swarm-w1")` ran as `swarm-w1`; `text_editor(user="swarm-w2")` created a file owned by `swarm-w2` and was refused a peer's private file with `Permission denied` *(spike)*.
 
-Every one of these takes its user when the tool is **constructed**. A swarm member's agent is built once and invoked for every member its record stands for, in every sample (swarm-api.md, [the member contract](swarm-api.md#members)), so a tool cannot be built with a per-member user.
+Every one of these takes its user when the tool is **constructed**. A swarm member's agent is built for that member, but from its record's factory and arguments, which are the same for every copy of the record; the factory is not told which member it builds, and a tool passed in the arguments is one object for every copy and sample (swarm-api.md, [the member contract](swarm-api.md#the-member-contract)). So a tool cannot be built with a per-member user.
 
 ### How `sandbox()` resolves
 
@@ -141,7 +141,7 @@ What follows for the design:
 from inspect_swarm import Share, member, swarm, users
 
 swarm(
-    members=member(worker(), count=4),
+    members=member(worker, count=4),
     channels=["filesystem"],
     isolation=users(
         shared=[Share(path="/shared", access="rw"), Share(path="/data", access="ro")],
@@ -242,7 +242,7 @@ Setup takes one exec for the script, one for the uid scan, and two per member fo
 
 ### Members' commands run as their users
 
-The member's tools are built once, so the user has to reach them at call time. The swarm cannot do that from outside without private, fragile code ([Alternatives](#alternatives-considered)), so this design asks inspect_ai for a scope, like the tool-state scope swarm.md already relies on ([Members](swarm.md#members)), as a small, general inspect_ai PR before this work (decision: Ransom, 2026-10-13):
+The member's tools are built from arguments that every copy of the record shares, or passed in as shared objects, so the user has to reach them at call time. The swarm cannot do that from outside without private, fragile code ([Alternatives](#alternatives-considered)), so this design asks inspect_ai for a scope, like the tool-state scope swarm.md already relies on ([Members](swarm.md#members)), as a small, general inspect_ai PR before this work (decision: Ransom, 2026-10-13):
 
 ```python
 # inspect_ai/util/_sandbox/identity.py, exported from inspect_ai.util
@@ -304,7 +304,7 @@ inspect_swe does work of its own before it launches a CLI, and every member shar
 - **Unsupported scaffolds refuse.** `claude_code()` and `codex_cli()` are supported headless, as members run them. Their `centaur` option, which runs the CLI under Inspect's human agent instead (`inspect_swe: _claude_code/claude_code.py:461-468`, `_codex_cli/codex_cli.py:661-669`), exports its environment through a bashrc and connects as the sandbox's default user (`_util/centaur.py:25-31`; `inspect_ai: src/inspect_ai/agent/_human/agent.py:57`, `:79`), bypassing both the identity and the token wrapper, so either agent with `centaur` set raises inside a scope before any setup ("claude_code(centaur=...) does not support swarm users isolation"); interactive members would be a separate integration. Outside a scope `centaur` is unchanged. inspect_swe's `gemini_cli`, `opencode`, `kimi_code` (whose config holds a literal key), `mini_swe_agent`, `antigravity` and its ACP adapters raise inside a scope ("gemini_cli does not support swarm users isolation"), each until its identity and token handling is added. A custom scaffold gets the 401 above on its first request. ACP agents are not M1 members anyway (swarm-api.md, [Members](swarm-api.md#members)).
 - **One bridged agent type per sandbox, until inspect_swe's ports are fixed.** inspect_swe gives each agent type its own port counter starting at 3000, so the first Claude Code member and the first Codex member in one sandbox both bind 3001 (`claude_code.py:311-314`, `codex_cli.py:356-359`). That collision exists in the shared default too and is not this design's to fix ([Not this design](#not-this-design)); until a single counter across types lands in inspect_swe, a swarm mixes bridged agent types only across sandboxes, and the tests below run Claude Code and Codex members in separate samples.
 
-Until these land, `swarm()` cannot tell a bridged member from a native one (the member's agent may be a builder), so the restriction is documented on `users()`: bridged members under users isolation need inspect_swe and inspect_ai at or after those changes.
+Until these land, `swarm()` cannot tell a bridged member from a native one (the member's factory may be a builder), so the restriction is documented on `users()`: bridged members under users isolation need inspect_swe and inspect_ai at or after those changes.
 
 ### Working directories
 
@@ -424,7 +424,7 @@ The cheapest rung that removes most of the remaining channels is Landlock where 
 **Make the swarm build per-member tools** (a member builder that takes a user, with `bash(user=...)` per member).
 
 - No inspect_ai change for native tools.
-- The member contract builds one agent for all copies and samples, so each copy would need its own record; it does not reach deepagent's subagents' tools, inspect_swe's install steps, or tools a builder creates inside its invocation.
+- The member contract builds each copy from the same factory and arguments, so each copy would need its own record to get its own user; it does not reach deepagent's subagents' tools, inspect_swe's install steps, or tools a builder creates inside its invocation.
 - Rejected for the same reason the tool-state scope was chosen over refusing shared tools (swarm.md, [Alternatives](swarm.md#alternatives-considered)): the common configuration should not need a workaround.
 
 **Apply the identity in `SandboxEnvironment.exec()` itself** (every exec with no user inside a scope runs as the member).

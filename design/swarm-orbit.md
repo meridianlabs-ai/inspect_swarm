@@ -296,7 +296,7 @@ So ORBIT's `model_step` scheduling, and its repeatable conversational `completio
 
 | ORBIT | inspect_swarm | Notes |
 |---|---|---|
-| `AgentSpec` (name, role, model, prompt, tools) | `member(agent, name=, role=, limits=)` | ORBIT builds each `Agent` itself. Members with hooks are rebuilt through ORBIT's task ([swarm-api.md](swarm-api.md#logging-and-replay)). |
+| `AgentSpec` (name, role, model, prompt, tools) | `member(factory, args=, name=, role=, limits=)` | ORBIT's member builder, a registered `@agent`, builds each agent from the spec's fields, once per member per sample ([swarm-api.md](swarm-api.md#the-member-contract)). Members with hooks are rebuilt through ORBIT's task ([swarm-api.md](swarm-api.md#logging-and-replay)). |
 | `AgentSpec.max_messages` | An eligibility check in ORBIT's controller, against the member's [snapshot](#member-handles-and-snapshots) | Not Inspect's `message_limit`, which stops before a generation, not before an activation. |
 | `AgentGroup.goal` | `input=` on `start()` or `activate()`, from ORBIT's controller | No member field is needed ([P1](#p1-members-input-and-output-no-new-api)). |
 | `AgentSpec.submit=False` | `swarm_on_continue(no_tool_calls="stop")` under a scheduled activation ([P4](#p4-scheduled-mode-the-turn-seam-and-activation)) | A tool-free reply ends the activation, not the member. |
@@ -334,7 +334,7 @@ Four items, P2 to P5, all future work. The plan already lists the scheduled mode
 - **The answer.** swarm-scoring.md makes only a submission an answer: `first` in M1, and `reporter(member)` once the final-answer chain is built. ORBIT's `output_agent` takes the output member's latest output whether or not it submitted. ORBIT keeps that rule on its own side, in an ORBIT solver that wraps the swarm, as its `mas_orchestrator` wraps its executor today ([below](#orbits-solver-wrapper)).
 
   The swarm's own answer, and the record's `final`, are unaffected. A conversational member released at the stop after a tool-free reply ends `submitted` ([P4](#stopping-a-scheduled-swarm)), so under `reporter` such a member's last reply is an answer too.
-- **Member conversations.** The swarm returns the sample's input and its answer, not the members' conversations ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)). For `history_projection`, ORBIT wraps each member's agent in a registered `@agent` of its own. In a synchronous `finally` block, the wrapper writes the final `AgentState.messages` to an ORBIT store key under the member's name. Because `react()` updates the state it was given in place, the wrapper sees the final conversation after a submission, a limit, a stop release, a hard stop or a cancellation.
+- **Member conversations.** The swarm returns the sample's input and its answer, not the members' conversations ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)). For `history_projection`, ORBIT's member builder, a registered `@agent` of its own, builds each member's agent and wraps it. In a synchronous `finally` block, the wrapper writes the final `AgentState.messages` to an ORBIT store key under the member's name. Because `react()` updates the state it was given in place, the wrapper sees the final conversation after a submission, a limit, a stop release, a hard stop or a cancellation.
 
 ##### ORBIT's solver wrapper
 
@@ -625,7 +625,7 @@ No conflict breaks an ORBIT requirement. The closest is swarm-scoring.md's rule 
 
 These are the changes for the `common/v1` configurations that can move, in the order of the [migration path](#migration-path). A port also needs a supported-configuration check that keeps every combination in [What stays ORBIT-specific](#what-stays-orbit-specific) on ORBIT's executor.
 
-- **Agents.** `build_turn_react_agents` builds `react()` (or `deepagent()`) with `on_continue=swarm_on_continue(no_tool_calls="stop" if not submit else "continue")` and `swarm_tools()` in place of `turn_react`, inside ORBIT's member wrapper ([P1](#p1-members-input-and-output-no-new-api)).
+- **Agents.** `build_turn_react_agents` becomes ORBIT's member builder, which the runtime calls per member per sample: it builds `react()` (or `deepagent()`) with `on_continue=swarm_on_continue(no_tool_calls="stop" if not submit else "continue")` and `swarm_tools()` in place of `turn_react`, inside ORBIT's member wrapper ([P1](#p1-members-input-and-output-no-new-api)). Each `AgentSpec` becomes a `member(orbit_member, args={...}, name=..., role=...)` record whose `args` are the spec's fields, so the plan logs them.
 - **Executor.**
   - `ScheduledExecutor` and `AgentScheduler` become ORBIT's `@swarm_controller`. `ScheduleRuntime` keeps deciding which agents each step runs.
   - `_execute_agent` becomes an eligibility check on `snapshot()`, followed by `activate()`.

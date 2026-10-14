@@ -225,8 +225,8 @@ Swarm nodes differ from Inspect's in three more ways:
 
 **Knowing a member is bridged.** A member is bridged from its first instruction, so the swarm decides before the member starts rather than inferring it from a generation (bridge compaction and filters run before the bridge's mark, [Bridged generations](#bridged-generations)):
 
-- `member(agent, bridged=None)` takes an explicit `bridged: bool | None`, a field of the `Member` record.
-- With `None` (the default), the member counts as bridged when its agent's registry name is in the `inspect_swe/` namespace (`registry_info(agent).name`; extension packages register as `package/name`, `src/inspect_ai/_util/registry.py:252-259`). That covers all of inspect_swe's agents, headless and interactive. Every other agent counts as native.
+- `member(factory, bridged=None)` takes an explicit `bridged: bool | None`, a field of the `Member` record.
+- With `None` (the default), the member counts as bridged when its factory's registry name is in the `inspect_swe/` namespace (`registry_info(factory).name`, read from the record before any agent is built; extension packages register as `package/name`, `src/inspect_ai/_util/registry.py:252-259`). That covers all of inspect_swe's agents, headless and interactive. Every other agent counts as native.
 - A node checked inside `in_bridge_model_generate()` for a member counted as native marks it bridged and takes the bridged branch, which catches a bridged agent the rule missed at its first marked generation. Before that point (an initial bridge compaction or filter generation) such an agent can still end the sample. This is documented in `member()`, which names `bridged=True` as the remedy, and the ledger records the cause.
 
 The wrapper sets a `_current_member` ContextVar so a node knows which member it is checking for.
@@ -271,7 +271,7 @@ This keeps the sample's own nodes untouched: a sample limit reached inside a bri
 | message | no | yes | no | Per conversation. A node above members has no meaning. |
 | working | no | rejected (`ValueError`) | no | Never enforced below the sample, and collapses under contention. |
 
-- **Member limits** come from `member(agent, limits=[...])`, a field of swarm-api.md's `Member` record, which logs each limit by kind and value (with the metering type, for tokens) and rebuilds it with the matching Inspect factory on replay ([swarm-api.md](swarm-api.md#members)). `member()` raises `ValueError` for a `working_limit`. The runtime reads each object's value (and metering type, for tokens) and creates fresh nodes from them on every invocation: a pair for cost; a `_SwarmTokenNode`, `_SwarmTurnNode` or `_SwarmMessageNode` for tokens, turns and messages; and a new Inspect `time_limit(value)` for time. The time limit keeps its cancel-scope semantics, so it stops a bridged member without going through the sandbox service.
+- **Member limits** come from `member(factory, limits=[...])`, a field of swarm-api.md's `Member` record, which logs each limit by kind and value (with the metering type, for tokens) and rebuilds it with the matching Inspect factory on replay ([swarm-api.md](swarm-api.md#members)). `member()` raises `ValueError` for a `working_limit`. The runtime reads each object's value (and metering type, for tokens) and creates fresh nodes from them on every invocation: a pair for cost; a `_SwarmTokenNode`, `_SwarmTurnNode` or `_SwarmMessageNode` for tokens, turns and messages; and a new Inspect `time_limit(value)` for time. The time limit keeps its cancel-scope semantics, so it stops a bridged member without going through the sandbox service.
 - **The task's objects are never entered.** Limits are single-use ([Limit trees](#limit-trees)), so entering the task's objects would fail on a second member from `member(..., count=k)`, on the next sample, or on a second invocation. Re-creating them per invocation is what deepagent does for its subagents.
 
 ### Splits
@@ -326,7 +326,8 @@ async def _run_member(m: Member) -> None:
     try:
         # tool_state_scope: swarm.md's per-member tool state; output kept as swarm-scoring.md says
         with tool_state_scope(m.name), anyio.CancelScope() as m.scope:
-            _, err = await run(m.agent, m.input, limits=nodes, name=m.name)
+            agent = m.build()  # this member's own agent, built in its scope (swarm-api.md, the member contract)
+            _, err = await run(agent, m.input, limits=nodes, name=m.name)
         if m.scope.cancelled_caught:
             m.status = m.stop_cause or "cancelled"  # hard stop, or the bridged branch
         else:
@@ -487,7 +488,7 @@ def research_math(
     return Task(
         dataset=...,
         solver=swarm(
-            members=member(deepagent(...), name="solver", count=k),
+            members=member(deepagent, args={...}, name="solver", count=k),
             budget=Budget(split=split),
         ),
         scorer=...,

@@ -101,7 +101,7 @@ Non-goals:
 
 From the merged designs; each line links to its section.
 
-- `swarm()` is an `Agent`; members are `member()` records around registered agents; a `@swarm_controller` decides who starts and when the swarm is done; `@swarm_channel` objects say how members share information ([swarm-api.md](swarm-api.md#the-api-at-a-glance)).
+- `swarm()` is an `Agent`; members are `member()` records that name a registered `@agent` factory and its arguments, from which the runtime builds each member's agent in each sample; a `@swarm_controller` decides who starts and when the swarm is done; `@swarm_channel` objects say how members share information ([swarm-api.md](swarm-api.md#the-api-at-a-glance)).
 - M1: a leaderless swarm with the filesystem of a shared sandbox as its channel; members' work must stay inside their invocation, so background deepagents are rejected; each member's built-in tool state is private through a tool-state scope ([swarm.md M1](swarm.md#implementation-plan), [Members](swarm.md#members), [Sandbox topology](swarm.md#sandbox-topology)).
 - Budget: caps derived from the sample's limits minus a 5% reserve, a pool by default with optional splits, a soft stop with grace, and a ledger of realized cost per member with stated coverage ([swarm-limits.md](swarm-limits.md#the-budget-parameter)).
 - Final answer `first` in M1; a per-member result record in the store; the task's scorers unchanged; per-member scores, `verify`, `vote` and `baseline()` after M2 ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)).
@@ -115,7 +115,7 @@ Each row classifies the difference: **match**; **gap** (their swarm needs someth
 |---|---|---|---|
 | Topology | Leaderless; all members start together with the same input | `leaderless`, M1 ([Controller](swarm.md#controller-topology-termination-final-answer)) | Match |
 | Member preamble | Name, roster size, "you work in separate environments", the channel (`apn/swarm.py:89-95`) | Name, role, roster size and each channel's instructions ([swarm-api.md Controllers](swarm-api.md#controllers), `start()`) | Match; the "separate environments" line needs the sandbox topology to be known to the swarm |
-| Member construction | Agent built per invocation inside the member's task | One prebuilt agent per member record, invoked concurrently; member builders for hooks ([swarm-api.md Members](swarm-api.md#members)) | Match: their builder is a registered member builder in our terms |
+| Member construction | Agent built per invocation inside the member's task | Agent built per member per sample inside the member's task, from the record's factory and arguments; member builders for hooks ([swarm-api.md, the member contract](swarm-api.md#the-member-contract)) | Match: their builder is a registered member builder in our terms |
 | Member agents | `react()` or `deepagent(background=64)` | `react()`, synchronous `deepagent()`, bridged; background rejected in M1 ([Members](swarm.md#members)) | **Gap.** Both their configs use background deepagents ([Recommendation 3](#3-m2-background-deepagent-members)) |
 | Sandbox | One per member, network-isolated, plus one shared trusted service | One shared sandbox by default; per-member an M2 opt-in ([Sandbox topology](swarm.md#sandbox-topology)) | **Gap; support.** The first concrete external user needs per-member sandboxes, and our reason for sharing (the filesystem is M1's only channel) does not apply when the channel is elsewhere ([Recommendation 1](#1-m2-per-member-sandboxes-as-an-opt-in-member-field)) |
 | Channel | Shared default-instance `memory()` board | Filesystem in M1; a shared memory through the bus in M2; direct messages, notes, tasks, board later; a shared tool-state instance is an "observed channel" ([Channels](swarm.md#channels), [swarm-communication.md](swarm-communication.md#tool-state-in-the-sample-store)) | **Assumption; support.** Our design treats a shared store-backed tool as an accident to prevent; they chose it as the channel. The scope keeps it possible with an explicit `instance` ([Recommendation 7](#7-m2-a-shared-memory-channel-through-the-bus)) |
@@ -157,7 +157,7 @@ Gains, in M1:
 - **An orderly stop.** At 95% of the pool members stop at their next call and in-flight calls finish and are recorded, instead of a sample limit cancelling 31 members' calls mid-flight ([swarm-limits.md Stopping](swarm-limits.md#stopping)).
 - **A ledger.** Realized cost per member, including its subagents and compaction, with flags that say when totals are lower bounds ([The ledger](swarm-limits.md#the-ledger)). Today they have only the sample total. For a \$1,600 sample, "which members spent the money" is the first question after "did anyone prove it".
 - **Stop reasons and statuses.** Why the swarm stopped and how each member ended, rather than inferring it from the transcript.
-- **A swarm-of-one baseline with the same accounting**, `swarm(members=member(agent), channels=[])`, for their \$50 single-agent arm ([swarm-scoring.md Comparisons in M1](swarm-scoring.md#comparisons-in-m1)).
+- **A swarm-of-one baseline with the same accounting**, `swarm(members=member(factory, args={...}), channels=[])`, for their \$50 single-agent arm ([swarm-scoring.md Comparisons in M1](swarm-scoring.md#comparisons-in-m1)).
 - **Per-member built-in tool state** by default. Their custom attempt counter stays sample-wide unless task code scopes it explicitly (with `tool_state_instance()`); making it member-local also needs member-qualified sidecar names, since per-member counters would otherwise collide on `attempt-NNNNN.tar`.
 - **Harness-validity checks** (a member that never acted, members stuck in loops) reported apart from the score ([Observer](swarm.md#observer-evidence-accounting-and-metrics)).
 - **Budget splits** as a sweepable condition, if they want to test whether one member starving the others matters ([Splits](swarm-limits.md#splits)).
@@ -178,7 +178,7 @@ Losses and costs:
 - **Background deepagents** until the scoped owner exists, in M2: the one change they cannot work around.
 - **inspect_ai version coupling.** inspect_swarm tracks inspect_ai `main` and needs its registry types and the tool-state scope; their configs pin 0.3.273 "in sync with epoch-research/benchmarks@main" (`configs/erdos3-swarm32-sol61-1600usd.yaml:57-60`). Python is not a problem: they require 3.13 (`pyproject.toml:7`), inside our 3.11+.
 - **A young dependency** with M1's API still settling.
-- **Their own conveniences.** `_only_sandboxes` uses a private inspect_ai name; a port keeps it, as inspect_swarm may ([Goals](swarm.md#goals)). Their per-sample check lock needs a new home, because member builders are built once per task and shared by concurrent samples ([swarm-api.md](swarm-api.md#registry-objects-are-shared-by-concurrent-samples)).
+- **Their own conveniences.** `_only_sandboxes` uses a private inspect_ai name; a port keeps it, as inspect_swarm may ([Goals](swarm.md#goals)). Their per-sample check lock needs a new home: their builder is called once per member, so a lock it created would be per member, while the lock must be shared by the members of one sample ([swarm-api.md](swarm-api.md#the-member-contract)).
 
 ### A port, sketch
 
@@ -213,7 +213,7 @@ def memory_board() -> Channel:
 def lean_member(
     name: str, sandbox_name: str, agent_type: AgentType = "react", board: str = "board"
 ) -> Agent:
-    # One builder object per member record, shared by every sample; per-sample state lives in execute().
+    # Called once per member per sample (swarm-api.md, the member contract), so `inner` is this member's own.
     inner = build_agent(
         agent_type,                                 # "deep" must not set background in M1
         tools=[text_editor(), bash(timeout=300), resources(), memory(instance=board)],
@@ -269,7 +269,8 @@ def apn_swarm(
     pin = fc_commit(dataset_dir)
     members = [
         member(
-            lean_member(name=f"agent-{i}", sandbox_name=_sandbox_name(i), agent_type=agent_type),
+            lean_member,
+            args={"name": f"agent-{i}", "sandbox_name": _sandbox_name(i), "agent_type": agent_type},
             name=f"agent-{i}",
             sandbox=_sandbox_name(i),        # Recommendation 1: "default", "agent-1", ...
             visible_sandboxes=["comparator"],  # Recommendation 1: shared service the scorer needs
@@ -295,13 +296,13 @@ def apn_swarm(
 
 Where each part of their swarm goes:
 
-- **Members.** One record per member, because each names its own sandbox and its builder takes the member's name and sandbox (a counted member would use Recommendation 1's `{member}` template, and its builder could read its copy's name from `tool_state_instance(None)`, which returns the member's tool-state scope). Their builder becomes a registered `@agent` with ordinary parameters, so the plan logs it faithfully ([swarm-api.md Members](swarm-api.md#members)). `name=f"agent-{i}"` keeps their names; count expansion would give `agent-1` to `agent-32`.
+- **Members.** One record per member, because each names its own sandbox and its builder takes the member's name and sandbox (a counted member would use Recommendation 1's `{member}` template, and its builder could read its copy's name from `tool_state_instance(None)`, which returns the member's tool-state scope). Their builder becomes a registered `@agent` with ordinary parameters, passed uncalled with its arguments in `args`, so the plan logs it faithfully and the runtime builds each member's agent from it ([swarm-api.md Members](swarm-api.md#members)). `name=f"agent-{i}"` keeps their names; count expansion would give `agent-1` to `agent-32`.
 - **Prompt.** Their task prompt, with its "shared budget" sentence, moves to a setup solver that sets the sample input, as their single-agent `lean_prover` does (`apn/solver.py:222-227`). Their swarm paragraph becomes the swarm's preamble (name, roster size) plus `memory_board()`'s instructions. Once Recommendation 4 lets the preamble state the split, the budget sentence can come out of their prompt.
 - **Channel.** `memory(instance=board)` in every member's tools. Under the tool-state scope an explicit instance is used as given, so all members and their `general()` subagents share it; deepagent adds no memory of its own, because one is already present. `board` is a builder parameter, so the shared instance is in the plan's logged parameters and two arms that name different boards are distinct.
 - **Budget.** `Budget()` reads the Hawk config's per-sample `cost_limit` (\$1,600) and stops at \$1,520, keeping \$80 for overshoot. Their 72-hour `working_limit` gets the swarm's start-up warning ([swarm-limits.md](swarm-limits.md#the-budget-parameter)). Cost data comes from their `model_cost_config`.
 - **Termination.** `leaderless` reproduces today's behaviour; `until_proved` adds the early stop as a separate arm. Either way the stop reason is recorded.
 - **Scoring.** Their scorer gains one line: on a passing in-loop check it sets `verified:<member>` in the store, which the builder reads when the inner agent returns. Otherwise it is unchanged. In the loop it still runs inside the member's context, where the runtime has entered the member's sandbox (Recommendation 1) and the builder has set their workspace ContextVar. At the end it re-checks every member. Because the builder turns every unverified return into `member_limit:custom`, `first` picks the earliest verified member's output, which their scorer ignores; the result record says which member it was. A member that wrote a valid proof but was stopped before `submit_proof` still passes the end-of-sample re-check without being `submitted`, which is why [Recommendation 8](#8-after-m2-per-member-sandboxes-in-the-scoring-contract) keeps the final-artifact grade apart from the selected answer.
-- **Check lock.** Their per-sample `anyio.Lock` cannot live on the builder, which every sample shares. `comparator_lock()` returns one lock per sample from a module-level `weakref.WeakKeyDictionary` keyed on the sample's comparator `SandboxEnvironment`, with no new API ([Not this design](#not-this-design)).
+- **Check lock.** Their per-sample `anyio.Lock` cannot be created in the builder, which runs once per member, because the members of one sample must share it, nor held on any object every sample shares. `comparator_lock()` returns one lock per sample from a module-level `weakref.WeakKeyDictionary` keyed on the sample's comparator `SandboxEnvironment`, with no new API ([Not this design](#not-this-design)).
 - **Arms in Hawk.** Unchanged in shape: `swarm_size`, `agent_type` and a new `stop` are task arguments, so arms stay distinct; `cost_limit` and `working_limit` stay eval-set options.
 - **What it cannot do yet.** `agent_type="deep"` with background dispatch, until recommendation 3 (M2). The port must disable background dispatch in its builder. Direct background deepagents are rejected at construction; a custom wrapper such as `lean_member` hides its inner agent's parameters from the registry (`inspect_ai: src/inspect_ai/agent/_agent.py:173-208`), so it must obey the documented restriction itself ([Members](swarm.md#members)).
 
@@ -365,7 +366,7 @@ Tests the recommendations would need, in inspect_swarm unless noted (mockllm, as
 - **Recommendation 4:** the budget tool reports the swarm cap, pool usage and the member's share under `pool`, `equal` and weights, and stays consistent with the ledger after a run.
 - **Recommendation 5:** a `react(attempts=...)` member with scripted failing then passing submissions records two gate checks, one pass and the pass's time; one submission under two task scorers records one gate check; a failing first scorer with a passing second scorer records no pass; a deepagent member's subagent that calls `score()` does not add to the member's own count; a member with no in-loop scoring records zero.
 - **Recommendation 6:** a `react()` member given three content-filter outputs ends `unsubmitted` while a sibling continues, later submits and is selected by `first`; a member ending on an unhandled `model_length` overflow is `unsubmitted`; the example controller ignores the refusing member, stops the swarm at the sibling's submission with reason `controller:proved`, and soft-stops the rest; a builder that raises a member-local custom limit on an unverified return ends that member `member_limit:custom`.
-- **Recommendation 3** (inspect_ai): its own tests, with the scoped `background()` owner; in M1, `member()` rejects `deepagent(background=64)` as well as `background=True`.
+- **Recommendation 3** (inspect_ai): its own tests, with the scoped `background()` owner; in M1, `member()` rejects a `deepagent` member with `args={"background": 64}` as well as `True`.
 - **Recommendation 7** is tested in its own design (D-1, for M2), and **Recommendation 8** in its own, after M2.
 
 ## Recommended changes to our designs
@@ -374,7 +375,7 @@ In priority order. Each names the section it would change and the milestone. The
 
 ### 1. M2: per-member sandboxes as an opt-in member field
 
-**Change.** Add `member(sandbox: str | None = None, visible_sandboxes: Sequence[str] = ())`. With `sandbox` set, the runtime enters `sandbox_default(sandbox)` for the member and restricts the member's sandbox environments to its own plus the listed services (the same reset of `sandbox_environments_context_var` their `_only_sandboxes` makes), so `sandbox(name)` in the member's context cannot reach another member's sandbox. A `{member}` template expands to each copy's name, so `member(agent, name="agent", count=32, sandbox="{member}")` runs `agent-1` to `agent-32` in services of the same names. The swarm validates at start that every named environment exists, and raises `ValueError` naming the member otherwise. The result record and evidence list each member's sandbox. The preamble says whether members share a sandbox, and `swarm()` raises `ValueError` if `filesystem` is listed while any member has its own sandbox.
+**Change.** Add `member(sandbox: str | None = None, visible_sandboxes: Sequence[str] = ())`. With `sandbox` set, the runtime enters `sandbox_default(sandbox)` for the member and restricts the member's sandbox environments to its own plus the listed services (the same reset of `sandbox_environments_context_var` their `_only_sandboxes` makes), so `sandbox(name)` in the member's context cannot reach another member's sandbox. A `{member}` template expands to each copy's name, so `member(factory, name="agent", count=32, sandbox="{member}")` runs `agent-1` to `agent-32` in services of the same names. The swarm validates at start that every named environment exists, and raises `ValueError` naming the member otherwise. The result record and evidence list each member's sandbox. The preamble says whether members share a sandbox, and `swarm()` raises `ValueError` if `filesystem` is listed while any member has its own sandbox.
 
 **Sections.** [swarm.md Sandbox topology](swarm.md#sandbox-topology) ("a sandbox per member" as an M2 opt-in; the default stays shared); [swarm-api.md Members](swarm-api.md#members) (two fields); [swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records) (a `sandbox` field on `MemberResult`).
 
@@ -477,7 +478,7 @@ None. The two this analysis raised are decided:
 Observed and left out, for Ransom to file or pass on if wanted:
 
 - **Observations for Epoch** about their branch, which are theirs to act on: the smoke config's second item names a benchmark the head commit removed (`configs/b68-solved5-swarm.yaml:22`, `apn/task.py:336-343`); attempt sidecars are numbered by a counter shared by all members and named without the member (`apn/scorer.py:48-49`, `:112`); members keep spending after one has proved the conjecture; a finished deepagent member's background subagents run until the solver ends; per-index accuracy across samples is not a swarm measure; their 72-hour working limit may barely advance while members queue for 40 connections, by the mechanism [swarm-limits.md](swarm-limits.md#each-limit-kind) measured (not measured on their runs). Whether and how to share these is Ransom's call.
-- **Per-sample state shared by members** (their comparator lock). Member builders and channels are shared by every sample, and M1 channels hold no state, so a lock or cache that members of one sample share has no home in the API. A weak-keyed map on a per-sample object works; an API for it can wait for a second user.
+- **Per-sample state shared by members** (their comparator lock). Member builders run once per member, channels are shared by every sample, and M1 channels hold no state, so a lock or cache that members of one sample share has no home in the API. A weak-keyed map on a per-sample object works; an API for it can wait for a second user.
 - **Shared services in per-member topologies.** Their comparator is a trusted service all members' checks queue on. A queue metric (time waiting for the lock) would explain slow swarms; it belongs to the metrics work if Recommendation 1 lands.
 - **Kubernetes cost of per-member sandboxes.** 32 copies of a 32 GiB container per sample. Sizing guidance belongs in the per-member topology's documentation, not in the runtime.
 - **The memory tool's private framing.** Its description and deepagent's memory prompt tell agents the memory is their own, which contradicts a shared board. If inspect_ai's `memory()` gains a shared mode, its description should change with it (inspect_ai).
