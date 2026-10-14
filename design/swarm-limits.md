@@ -54,7 +54,7 @@ Each of these changes what the swarm's budget code must do. The users who need i
 - A reserve for the final step, with the conditions under which it holds.
 - A ledger whose per-member figures cover everything a member's work spends, with stated coverage rules and claims.
 - Budget splits (shared pool, equal shares, weights) as a sweepable task parameter.
-- The interactions with deepagent subagents, bridged members, compaction and (after M2) the messages channel, verified against the code.
+- The interactions with deepagent subagents, bridged members, compaction, the bus (M2) and the later messages channel, verified against the code.
 - The nodes that meter model calls the runtime and a controller make, which swarm-api.md and swarm-scoring.md leave to this design.
 - No inspect_ai changes for limits or the ledger.
 
@@ -220,7 +220,7 @@ The swarm meter, the cost cap, each lever, each cost share, the final meter and 
 Swarm nodes differ from Inspect's in three more ways:
 
 - **Ownership.** Each has an owner: the swarm, or one member. The runtime recognises its own errors by `error.source` identity against the nodes it created, split into *shared* nodes (swarm meter, caps, runtime lever, final meter) and *member-owned* nodes (that member's lever, shares and re-created limits).
-- **Messages.** When exceeded for a native member they raise `LimitExceededError` as usual, with the kind's `type`, except the lever, which raises `type="custom"`. The message names the swarm and the reason ("Swarm cost cap reached", "Stopped by the swarm: verified answer"). They write no `SampleLimitEvent`, which the viewer would show as a sample limit; the controller writes an `InfoEvent` instead ([Ledger](#the-ledger)).
+- **Messages.** When exceeded for a native member they raise `LimitExceededError` as usual, with the kind's `type`, except the lever, which raises `type="custom"`. The message names the swarm and the reason ("Swarm cost cap reached", "Stopped by the swarm: verified answer"). They write no `SampleLimitEvent`, which the viewer would show as a sample limit; the runtime writes an `InfoEvent` instead ([Ledger](#the-ledger)).
 - **Bridged members.** A node exceeded while checking for a bridged member does not raise, because a raise in the sandbox service ends the sample ([Bridged generations](#bridged-generations)). It records why the member must stop and cancels that member's cancel scope synchronously; if the node is a swarm cap, it also calls the runtime's `stop("swarm_cap")`. The bridged agent's pending call is cancelled at its next await, before or just after dispatch.
 
 **Knowing a member is bridged.** A member is bridged from its first instruction, so the swarm decides before the member starts rather than inferring it from a generation (bridge compaction and filters run before the bridge's mark, [Bridged generations](#bridged-generations)):
@@ -295,7 +295,7 @@ Every stop goes through one runtime method, `stop(reason)`. The first call wins:
 
 swarm-api.md fixes the steps around the soft stop, so that nothing starts once a stop has begun:
 
-0. **Close, synchronously.** Before its first await, `stop()` marks the swarm as stopping, so the controller's `start()` raises `RuntimeError` from then on; after M2 it also closes the bus, which releases every member waiting in `read_messages` ([swarm-communication.md](swarm-communication.md)). For a stop the controller did not request (`swarm_cap`, `swarm_time`), it cancels the controller's `run`, which runs in a scope of its own and cancels no member.
+0. **Close, synchronously.** Before its first await, `stop()` marks the swarm as stopping, so the controller's `start()` raises `RuntimeError` from then on; from M2 it also closes the bus, which, once the messages channel exists, releases every member waiting in `read_messages` ([swarm-communication.md](swarm-communication.md)). For a stop the controller did not request (`swarm_cap`, `swarm_time`), it cancels the controller's `run`, which runs in a scope of its own and cancels no member.
 1. **Soft stop.** For every member still running, set its lever to its current usage and close its stop gate. A native member raises at its next pre-dispatch check (or after its in-flight call completes), including calls made by an approval or review callback, so calls already in flight finish and are recorded, and no new call starts except at most one native compaction per agent loop, which has no pre-dispatch check. A bridged member is cancelled at its next check instead (see [Swarm nodes](#swarm-nodes)).
 2. **Grace.** Wait until every member has returned, or the effective grace has passed. Effective grace is `Budget.grace`. When the sample has a time limit, it is clipped to half the sample's remaining time at the moment of the stop, so the final step always keeps the other half.
 3. **Hard stop.** Cancel the cancel scope of every member still running. Calls they have in flight are cancelled, and the ledger then reports the totals as incomplete ([The ledger](#the-ledger)).
@@ -309,7 +309,7 @@ Why a soft stop:
 - It bounds overshoot the same way a reached cap does, by the calls holding a connection slot ([Overshoot](#overshoot-and-connection-slots)), plus at most one native compaction per running agent loop.
 - It needs nothing from inspect_ai beyond the limit setter.
 
-Grace bounds members that are inside a long tool call (a test suite in the sandbox) when the stop arrives. A member stopped while a tool call is running sees, at worst, a `limit` tool error from a nested model call, and then its next generate refuses. A member blocked in M2's `read_messages` wait is released by step 0, so it does not spend the grace blocked in a tool. Grace does not bound a bridged member's cleanup after cancellation: the bridge kills its proxy in a shielded scope (`src/inspect_ai/agent/_bridge/sandbox/bridge.py:271-275`), which the hard stop waits for.
+Grace bounds members that are inside a long tool call (a test suite in the sandbox) when the stop arrives. A member stopped while a tool call is running sees, at worst, a `limit` tool error from a nested model call, and then its next generate refuses. A member blocked in the later messages channel's `read_messages` wait is released by step 0, so it does not spend the grace blocked in a tool. Grace does not bound a bridged member's cleanup after cancellation: the bridge kills its proxy in a shielded scope (`src/inspect_ai/agent/_bridge/sandbox/bridge.py:271-275`), which the hard stop waits for.
 
 Triggers:
 
@@ -330,7 +330,7 @@ async def _run_member(m: Member) -> None:
         if m.scope.cancelled_caught:
             m.status = m.stop_cause or "cancelled"  # hard stop, or the bridged branch
         else:
-            m.status = _status_for(err)  # submitted, stopped, share, member_limit:<type>
+            m.status = _status_for(err)  # submitted, unsubmitted, stopped, share, member_limit:<type>
     except Exception as ex:
         group = ex if isinstance(ex, BaseExceptionGroup) else ExceptionGroup("member", [ex])
         caps, rest = group.split(lambda e: _source_in(e, swarm.cap_nodes))
@@ -351,9 +351,10 @@ async def _run_member(m: Member) -> None:
 - `_source_in(e, ns)` is true for a `LimitExceededError` whose `source` is one of `ns`.
 - A group containing only the member's own limits (a member limit, its share, or its lever during a soft stop) gives the same status as the bare error would.
 - A group with any foreign leaf re-raises only the foreign leaves.
+- From M2, a `LimitExceededError` with `type="custom"` and no `source`, which an agent raises to stop itself, counts as the member's own too, bare or grouped: the member ends `member_limit:custom` (M2-2 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m2-pull-requests); [swarm-lean-open-problems.md](swarm-lean-open-problems.md#2-m2-an-agent-raised-custom-limit-ends-only-the-member)). Until then it is foreign.
 - Swarm cap leaves are removed from what propagates. A cap leaf with no foreign leaves stops the swarm.
 
-Member statuses are a closed set: `submitted`, `stopped` (soft stop), `share`, `member_limit:<type>`, `swarm_cap`, `cancelled`, `errored`. swarm-api.md's `MemberHandle.status` and swarm-scoring.md's record use this set unchanged; `submitted` means the member finished normally, which is the scoring deep dive's submission. Each member's status and stop cause go into its evidence and the ledger.
+Member statuses are a closed set: `submitted`, `unsubmitted`, `stopped` (soft stop), `share`, `member_limit:<type>`, `swarm_cap`, `cancelled`, `errored`. swarm-api.md's `MemberHandle.status` and swarm-scoring.md's record use this set unchanged. `unsubmitted` is a normal return whose `output.stop_reason` is `content_filter` or `model_length`, which is how `react()` returns after three refusals or an unhandled context overflow rather than a submit; `submitted` is any other normal return, which is the scoring deep dive's submission (M1-9 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m1-pull-requests); [swarm-lean-open-problems.md](swarm-lean-open-problems.md#6-m1-tighten-submitted-m2-document-stopping-on-the-first-proof)). Each member's status and stop cause go into its evidence and the ledger.
 
 ### Exhaustion and errors
 
@@ -508,7 +509,7 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
 - Synchronous subagents run inside deepagent's `agent` tool, in the member's context, so the member's lever, share and limits meter them. A subagent's own `Subagent.limits` nest below, and its own limit errors come back to the member as a "Subagent stopped" result (`src/inspect_ai/agent/_deepagent/agent_tool.py:551-569`).
 - A swarm cap or lever reached inside a subagent becomes a `limit` tool error, and the member stops at its next generate ([Limit errors inside tools](#limit-errors-inside-tools-and-handoffs)).
 - Parallel-safe subagent calls run concurrently, so one deepagent member can hold several connection slots. The overshoot bound counts slots, not members, so it covers this.
-- Background subagents stay rejected in M1 (swarm.md). If a scoped owner for `background()` is added, children already inherit the member's context, so the lever stops them at their next call. The drain would then await them through that owner.
+- Background subagents stay rejected in M1 (swarm.md). M2 adds a scoped owner for `background()` (AI-5 and M2-5 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m2-pull-requests)). Children already inherit the member's context, so the lever stops them at their next call, and the drain awaits them through that owner, as its design (D-2) specifies.
 
 **Bridged members.**
 - Bridged generations are metered by the member's nodes. The swarm's nodes stop a bridged member by cancelling it, not by raising ([Swarm nodes](#swarm-nodes)), so swarm caps, shares, member limits and soft stops work without ending the sample. This needs the member to be known as bridged before it starts: inspect_swe agents are detected, and any other bridged agent must pass `bridged=True`.
@@ -517,10 +518,10 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
 - A vendor swarm as one member (Codex multi-agent, Claude Code teams) is metered as one member: all its internal agents' generations go through its bridge. Its member limits are the vendor swarm's budget.
 - A user-supplied bridged host tool that calls a model and reaches a swarm node raises inside the sandbox service, which ends the sample. The swarm's own tools make no model calls.
 
-**Messages (M2).** swarm-communication.md leaves to this design how limits treat its messages channel.
+**Bus channels (M2) and messages (later).** swarm-communication.md leaves to this design how limits treat its channels.
 - Its storm controls (payload size, rate, inbox cap) are bus rules, not Inspect limits. They never raise `LimitExceededError` and never touch a swarm node.
 - The swarm's communication tools make no model calls, so no swarm node is checked inside them, and a message costs its sender and its reader only the generations around the tool calls.
-- **Waiting in `read_messages`** is wall-clock time inside a tool call. It counts towards the member's time limit, the swarm's time cap and the sample's time limit, as any tool call does. Inspect reports waiting time only for connection slots, model retries and pauses (`src/inspect_ai/_util/working.py:41-48`, its callers in `util/_concurrency.py:300` and `model/_model.py`), not for a tool blocked on an event, so the wait also counts as working time at a sample `working_limit`. This design keeps it so: a wait reported as sample waiting time would collapse with the other members' waits, as connection waits do ([Each limit kind](#each-limit-kind)), and member working limits are rejected anyway. The idle-time metric measures these waits separately.
+- **Waiting in `read_messages`**, with the messages channel, is wall-clock time inside a tool call. It counts towards the member's time limit, the swarm's time cap and the sample's time limit, as any tool call does. Inspect reports waiting time only for connection slots, model retries and pauses (`src/inspect_ai/_util/working.py:41-48`, its callers in `util/_concurrency.py:300` and `model/_model.py`), not for a tool blocked on an event, so the wait also counts as working time at a sample `working_limit`. This design keeps it so: a wait reported as sample waiting time would collapse with the other members' waits, as connection waits do ([Each limit kind](#each-limit-kind)), and member working limits are rejected anyway. The idle-time metric measures these waits separately.
 - A stop releases every wait at once (step 0 of [Stopping](#stopping)), so a waiting member neither blocks the grace period nor needs the hard stop.
 
 **Compaction.**
@@ -641,7 +642,7 @@ All runtime tests use mockllm with scripted outputs, usage and `ModelCost` set t
   - the time cap stops members softly and leaves the final step its time;
   - each stop reason and member status is recorded, including a controller's own reason as `controller:<reason>`;
   - `stop()` is idempotent: a second member reaching the cap, or the timer firing during grace, leaves the first reason;
-  - the order of step 0: once a stop has begun, `start()` raises and no member model call is dispatched (swarm-api.md's stop-ordering test), and after M2 a member waiting in `read_messages` is released before grace starts;
+  - the order of step 0: once a stop has begun, `start()` raises and no member model call is dispatched (swarm-api.md's stop-ordering test), and, with the messages channel, a member waiting in `read_messages` is released before grace starts;
   - a model call a controller makes while members run is metered by the runtime lever, counts against the swarm cap, and is refused once the lever is closed;
   - the runtime lever and members' levers stay siblings: under `leaderless`, which starts every member from its `run`, and under a staged controller that starts a member after an earlier one ends, each member's \$10 call is charged to its lever, the caps and the swarm meter but not to the runtime lever; with two verifier calls of \$10 each as well, the runtime lever reads \$20, the member levers \$10 each and the swarm meter their sum, and the runtime lever is entered once, with no single-use error on the second verification;
   - cancelling the controller at a `swarm_cap` stop leaves its started members running into grace.
@@ -681,7 +682,9 @@ All in inspect_swarm, as part of M1 ([Implementation plan](swarm.md#implementati
 4. **The ledger.** `MemberLedger`, `SwarmLedger`, event counting, reconciliation and claims, written as an `InfoEvent` and a store entry. Files: `_budget.py` (or `_ledger.py` if it grows), `_evidence.py`, tests.
 5. **Splits and the sweep example.** Share nodes and validation, and a task example in the docs showing the three sweeps. Files: `_budget.py`, tests, `README.md`.
 
-After M2, the communication deep dive's bus is closed from step 0 of `stop()`, and verifier calls run under the runtime lever and the final meter; both are small additions to steps 2 and 3, made with that work.
+[swarm-implementation-plan.md](swarm-implementation-plan.md#m1-pull-requests) builds step 4 before step 3 (M1-6, then M1-7), so that step 3's test of the ledger surviving a sample limit lands with it.
+
+In M2 the communication deep dive's bus is closed from step 0 of `stop()` (M2-6), and after M2 verifier calls run under the runtime lever and the final meter; both are small additions to steps 2 and 3, made with that work.
 
 ## Open questions
 
