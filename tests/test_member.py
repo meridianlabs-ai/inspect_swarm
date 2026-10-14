@@ -419,3 +419,20 @@ def test_swarm_rechecks_member_records(
     # a record's args or the registry can change after member() checked it
     with pytest.raises(error, match=match):
         _swarm(record())
+
+
+@pytest.mark.parametrize("kind", ["token", "cost", "turn", "message", "time"])
+@pytest.mark.parametrize(
+    "fields,valid",
+    [({}, False), ({"vale": 2}, False), ({"value": None}, True), ({"value": 2}, True)],
+)
+def test_limit_dict_needs_a_value(
+    kind: str, fields: dict[str, Any], valid: bool
+) -> None:
+    logged = {"factory": "react", "limits": [{"limit": kind, **fields}]}
+    if valid:
+        record = Member.model_validate(logged)
+        assert record.model_dump()["limits"][0]["value"] == fields["value"]
+    else:
+        with pytest.raises(ValueError, match="needs a 'value' key"):
+            Member.model_validate(logged)

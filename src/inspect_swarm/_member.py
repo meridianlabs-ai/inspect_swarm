@@ -327,7 +327,12 @@ def _limit_dict(limit: Limit) -> dict[str, Any]:
 
 def _limit_from_dict(data: Mapping[str, Any]) -> Limit:
     kind = data.get("limit")
-    value = data.get("value")
+    if "value" not in data:
+        # a missing value would otherwise rebuild the limit as unlimited
+        raise ValueError(
+            f"A member limit dict needs a 'value' key (None for no limit), got {dict(data)!r}."
+        )
+    value = data["value"]
     match kind:
         case "token":
             return token_limit(value, type=data.get("type", "all"))
