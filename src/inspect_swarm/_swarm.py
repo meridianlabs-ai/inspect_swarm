@@ -74,7 +74,7 @@ def _member(item: object) -> Member:
     if isinstance(item, Member):
         return item
     if isinstance(item, Mapping):
-        return Member.model_validate(dict(item))  # pyright: ignore[reportUnknownArgumentType]
+        return Member.model_validate(_logged_member(cast(Mapping[str, object], item)))
     if is_factory(item):
         name = registry_unqualified_name(item)
         raise TypeError(
@@ -131,6 +131,43 @@ def _budget(budget: object) -> Budget:
     # replay passes a pydantic argument back as its logged dict
     if isinstance(budget, Budget):
         return budget
-    if isinstance(budget, Mapping):
-        return Budget.model_validate(dict(budget))  # pyright: ignore[reportUnknownArgumentType]
-    raise TypeError(f"budget= must be a Budget, got a {type(budget).__name__}.")
+    if _is_dict(budget):
+        split = cast(dict[str, object], budget).get("split")
+        if split is not None and not isinstance(split, str | list | tuple):
+            raise _logged_form_error("budget", "split", "a list or tuple")
+        return Budget.model_validate(budget)
+    raise TypeError(
+        f"budget= must be a Budget or its logged dict, got a {type(budget).__name__}."
+    )
+
+
+# A member's logged form, as replay passes it back. Inspect logs the caller's
+# arguments as given, so only the shapes it logs faithfully are accepted; others
+# would lose their contents in the log.
+def _logged_member(item: Mapping[str, object]) -> object:
+    if not _is_dict(item):
+        raise TypeError(
+            f"members= takes a member's logged form as a dict, got a {type(item).__name__}. Pass member(...) or a dict."
+        )
+    factory = item.get("factory")
+    if factory is not None and not isinstance(factory, str):
+        raise _logged_form_error("members", "factory", "a registry name")
+    if not _is_dict(item.get("args", {})):
+        raise _logged_form_error("members", "args", "a dict")
+    limits = item.get("limits", [])
+    if not isinstance(limits, list | tuple) or any(
+        not _is_dict(limit) for limit in cast(Sequence[object], limits)
+    ):
+        raise _logged_form_error("members", "limits", "a list of limit dicts")
+    return item
+
+
+def _is_dict(value: object) -> bool:
+    # Inspect logs a dict's contents, but another mapping as its type name
+    return isinstance(value, dict)
+
+
+def _logged_form_error(argument: str, field: str, expected: str) -> TypeError:
+    return TypeError(
+        f"{argument}=: in a logged dict, {field} must be {expected}, since Inspect logs other values without their contents. Pass {'member(...)' if argument == 'members' else 'Budget(...)'} instead."
+    )

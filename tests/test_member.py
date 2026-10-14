@@ -1,4 +1,4 @@
-from collections import UserList
+from collections import UserDict, UserList
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -300,3 +300,46 @@ def test_swarm_controller_check_refuses_roster() -> None:
 def test_swarm_accepts_budget_dict() -> None:
     # replay passes the budget back as its logged fields
     _swarm(react(prompt="a"), budget=Budget(cost=5.0).model_dump())
+
+
+_FACTORY_DICT: dict[str, Any] = {"factory": "react", "args": {"prompt": "a"}}
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"members": UserDict(_FACTORY_DICT)}, "logged form as a dict"),
+        ({"members": [UserDict(_FACTORY_DICT)]}, "logged form as a dict"),
+        ({"members": (UserDict(_FACTORY_DICT),)}, "logged form as a dict"),
+        (
+            {"members": {**_FACTORY_DICT, "factory": deepagent}},
+            "factory must be a registry name",
+        ),
+        (
+            {"members": {**_FACTORY_DICT, "args": UserDict(prompt="a")}},
+            "args must be a dict",
+        ),
+        (
+            {
+                "members": {
+                    **_FACTORY_DICT,
+                    "limits": [UserDict(limit="cost", value=1.0)],
+                }
+            },
+            "limits must be a list of limit dicts",
+        ),
+        (
+            {"members": {**_FACTORY_DICT, "limits": [cost_limit(1.0)]}},
+            "limits must be a list of limit dicts",
+        ),
+        ({"budget": UserDict(cost=1.0)}, "Budget or its logged dict"),
+        ({"budget": {"split": UserList([1.0])}}, "split must be a list or tuple"),
+    ],
+)
+def test_swarm_refuses_logged_forms_inspect_cannot_log(
+    kwargs: dict[str, Any], match: str
+) -> None:
+    # Inspect logs swarm()'s arguments as passed, and these shapes without their contents
+    kwargs.setdefault("members", react(prompt="a"))
+    with pytest.raises(TypeError, match=match):
+        _swarm(**kwargs)
