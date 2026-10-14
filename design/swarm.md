@@ -509,7 +509,7 @@ The bus uses sentinel's action vocabulary from the start. Sentinel's dispatcher 
 
 ### Observer: evidence, accounting and metrics
 
-**Evidence.** Each communication produces records of the kinds ORBIT uses: `sent`, `delivered`, `notified`, `read` and `exposed`, the last meaning it entered a model's input. Each record carries:
+**Evidence.** Each communication produces records of the kinds ORBIT uses: `sent`, `delivered`, `notified`, `read` and `exposed`, the last meaning it entered a model's input. Two of ORBIT's meanings differ: its `delivered` is content inserted into a conversation, and its `notified` a notice that reached a model's input ([swarm-orbit.md](swarm-orbit.md#p3-exposure) maps them). Each record carries:
 
 - sender and recipients (member names);
 - channel and kind;
@@ -689,16 +689,16 @@ The recommendation is to **align with ORBIT and aim to be a substrate it could r
 
 - **Reuse its vocabulary** where it fits: roster and roles as data, channels with reader and writer lists, delivery modes, evidence kinds, output member.
 - **Provide what it had to build itself**, without forking `react()` or wrapping `Model`:
-  - turn boundaries and an activation-policy interface, through a composed `on_continue` on `react()` members;
+  - turn boundaries and member activation for a scheduled controller, through the swarm's `on_continue` hook on `react()` members;
   - notices at turn boundaries and exposure evidence from the transcript, in place of ORBIT's `Model` wrappers (its defense-filter wrapper also has to refuse response caching);
-  - a public extension point on the bus for channel kinds such as ORBIT's reader and writer channels.
+  - user channels on the bus for channel kinds such as ORBIT's reader and writer channels.
 
   Tool gates come from approval policies and inspect_sentinel, not from the swarm.
 - **Leave scenarios, attack and defense registries and security scorers to ORBIT.**
 
 ORBIT's scheduled activation (rounds, plans with concurrent batches, and quanta) is a useful second execution mode for reproducible security experiments. inspect_swarm's default is continuously active members woken by messages, which is what vendor swarms do. Supporting a scheduled mode is later, optional work, not part of M1 or M2.
 
-[swarm-orbit.md](swarm-orbit.md) is the deep dive on this relationship: the concept map, what inspect_swarm provides at each milestone, what a port of ORBIT changes, the migration path, and what stays ORBIT-specific.
+[swarm-orbit.md](swarm-orbit.md) is the deep dive on this relationship: the concept map, what inspect_swarm would add (all later work), what a port of ORBIT changes, the migration path, and what stays ORBIT-specific.
 
 ### Related projects and what they teach
 
@@ -918,6 +918,7 @@ The milestones are defined by their audiences (decision: Ransom, 2026-10-13). [s
 - **Scoring beyond `first`** starts with the result contract; the final-answer chain, `synthesize`, per-member scores, `baseline()` and the analysis helper build on it, and `synthesize` reuses the bus's fencing ([swarm-scoring.md](swarm-scoring.md#part-2-after-m2-optional)). The `best_at(k)` reducer needs none of it. Per-member sandboxes in the scoring contract also need a design for routing the task's scorer to the selected member's sandbox.
 - **The dependency-linked critical path** needs the bus's attributed writes and reads.
 - **Users isolation in one sandbox** needs its inspect_ai and inspect_swe PRs ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#implementation-plan)).
+- **A scheduled execution mode** (ORBIT's rounds and plans) needs M1's controller handles and M2's `on_continue` hook; scheduled runs with channels also need M2's bus ([swarm-orbit.md](swarm-orbit.md#p4-scheduled-mode-the-turn-seam-and-activation)).
 - **Red-team features** (optional, unscheduled, may never be built) need the bus.
 
 ## Open questions
