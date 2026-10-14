@@ -415,7 +415,7 @@ The plan's M2-7 and M2-8 carry this design, after M2-6; notices and exposure for
 
 ### Changes to other designs and the plan
 
-Applied on 2026-10-14 by a follow-up pull request: the plan's M2-6 to M2-10, swarm-communication.md, the Lean port sketch, and the other designs' references to this one now match this design.
+Applied on 2026-10-14 in #23: the plan's M2-6 to M2-10, swarm-communication.md, the Lean port sketch, and the other designs' references to this one now match this design.
 
 ## Open questions
 
