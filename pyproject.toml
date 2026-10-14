@@ -4,8 +4,9 @@ dynamic = ["version"]
 description = "Evals with multi-agent swarms (experimental)."
 authors = [{ name = "Meridian Labs" }]
 readme = "README.md"
-# Matches inspect-ai's floor.
-requires-python = ">=3.10"
+# Above inspect-ai's 3.10 floor: the swarm runtime uses native ExceptionGroup
+# and except*, which are new in 3.11.
+requires-python = ">=3.11"
 license = { text = "MIT License" }
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -96,7 +97,7 @@ timeout = 120
 include = ["src", "tests"]
 typeCheckingMode = "strict"
 pythonPlatform = "All"
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 
 # tests may exercise private helpers directly
 [[tool.pyright.executionEnvironments]]

@@ -39,7 +39,7 @@
 
 Directory: `src/inspect_swarm/`
 
-Supports Python 3.10+ (the same floor as `inspect-ai`). Do not use syntax or stdlib features newer than 3.10.
+Supports Python 3.11+, above `inspect-ai`'s 3.10 floor, so the swarm runtime can use native `ExceptionGroup` and `except*`. Do not use syntax or stdlib features newer than 3.11.
 
 ### Scripts
 | Command | Description |
