@@ -1,3 +1,4 @@
+from collections import UserList
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -250,6 +251,17 @@ def test_member_unknown_factory_name_raises() -> None:
     "kwargs,error,match",
     [
         ({"members": []}, ValueError, "at least one member"),
+        # Inspect logs other containers as their type name, losing their contents
+        (
+            {"members": UserList([react(prompt="a")])},
+            TypeError,
+            "members= takes a list or tuple",
+        ),
+        (
+            {"channels": UserList([member_test_channel()])},
+            TypeError,
+            "channels= takes a list or tuple",
+        ),
         ({"members": ["react"]}, TypeError, "got a str"),
         (
             {"channels": [member_test_channel(), "member_test_channel"]},

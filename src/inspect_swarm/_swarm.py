@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+from typing import cast
 
 from inspect_ai._util.registry import registry_info, registry_unqualified_name
 from inspect_ai.agent import Agent, AgentState, agent
@@ -56,12 +57,14 @@ def swarm(
 
 
 def _members(members: object) -> list[Member]:
-    # a single member, or a sequence; a mapping is a member's logged form
-    items: list[object] = (
-        list(members)  # pyright: ignore[reportUnknownArgumentType]
-        if isinstance(members, Sequence) and not isinstance(members, str)
-        else [members]
-    )
+    # a single member, or a list or tuple; a mapping is a member's logged form
+    items: list[object]
+    if isinstance(members, list | tuple):
+        items = list(cast(Sequence[object], members))
+    elif isinstance(members, str) or not isinstance(members, Sequence):
+        items = [members]
+    else:
+        raise _container_error("members", cast(object, members))
     if not items:
         raise ValueError("members= must name at least one member.")
     return [_member(item) for item in items]
@@ -101,7 +104,12 @@ def _check_distinct_agents(
 
 
 def _channels(channels: str | Channel | Sequence[str | Channel]) -> list[Channel]:
-    items = [channels] if isinstance(channels, str | Channel) else list(channels)
+    if isinstance(channels, str | Channel):
+        items = [channels]
+    elif isinstance(channels, list | tuple):
+        items = list(channels)
+    else:
+        raise _container_error("channels", channels)
     resolved = [resolve("swarm_channel", item) for item in items]
     names = [registry_info(channel).name for channel in resolved]
     duplicates = sorted({name for name in names if names.count(name) > 1})
@@ -110,6 +118,13 @@ def _channels(channels: str | Channel | Sequence[str | Channel]) -> list[Channel
             f"channels=: each channel may be given once; {', '.join(duplicates)} is given more than once."
         )
     return resolved
+
+
+def _container_error(argument: str, value: object) -> TypeError:
+    # Inspect logs other containers as their type name, which replay and eval-set identity cannot use
+    return TypeError(
+        f"{argument}= takes a list or tuple, got a {type(value).__name__}. Pass list(...)."
+    )
 
 
 def _budget(budget: object) -> Budget:
