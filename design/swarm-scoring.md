@@ -154,6 +154,7 @@ class SwarmResultRecord(BaseModel):
   - An outer limit that ends the sample early therefore leaves an accurate record with `provisional: true`.
   - Members the controller never started stay `pending` in the final record, which is how the evidence records them as not started.
 - **Why the store.** It is in the store, not only in events, because re-scoring rebuilds `TaskState.store` and nothing else from the run (`src/inspect_ai/_eval/score.py:461-475`). Part 2's scorers read it from there.
+- **Owned by the runtime, readable by member code.** Only the runtime writes `inspect_swarm.result`; task code (tools, member builders, controllers, scorers, Sentinel protocols) must not write it. Every member's Python code shares the sample's one store, so it can read the record while the swarm runs, and the record holds each ended member's status and output. Models cannot reach the store themselves, and built-in tools read only their own namespaces, but a tool written to read this key gives the members that call it a view of each other's results: a channel between members outside the bus, with none of its fencing or evidence. The user docs say so (decision: Ransom, 2026-10-14).
 - **Evidence events.** Each member's end and the final selection also produce an evidence `InfoEvent` with `source="inspect_swarm"` and the payload shape swarm-communication.md uses for its own evidence:
   - `version: 1`, `type: "result"`, and `kind` one of `member_result` or `final`;
   - the common fields `member` and `span_id` (the swarm's span for `final`).
