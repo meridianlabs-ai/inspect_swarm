@@ -2,15 +2,15 @@
 
 Status: proposed, 2026-10-07. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
 
-This is the first design document for `inspect_swarm`. It is deliberately high level. It sets out what the library is for, which eval questions it should make answerable, the shape of the architecture and where its parts live, and a first slice small enough to build and learn from. It asks for feedback before any detailed design. API sketches are illustrative; names and signatures are not proposals yet.
+This is the high-level design for `inspect_swarm`. It sets out what the library is for, which eval questions it should make answerable, the shape of the architecture and where its parts live, and a first slice small enough to build and learn from. The deeper-dive designs settle the details; API sketches here are illustrative, and [swarm-api.md](swarm-api.md) designs the public `swarm()` API.
 
 [swarm-overview.md](swarm-overview.md) is the short form. It covers the components and the main decisions for a reader who knows inspect_ai, and links back here for detail.
 
-Decisions Ransom took on the first draft (2026-10-07) are marked inline as "(decision: Ransom, 2026-10-07)":
+Ransom's decisions of 2026-10-07 are marked inline as "(decision: Ransom, 2026-10-07)":
 - limits stay soft;
 - Python 3.11+;
 - inspect_ai internals may be used;
-- peer messages are model output, delivered as tool output with distinct provenance;
+- peer messages are model output, delivered as tool output with distinct provenance by default (user-role injection is allowed as an opt-in experimental arm after M2; decision: Ransom, 2026-10-09);
 - no internal experiment gate;
 - M1 then M2, the rest in any order;
 - a shared sandbox by default;
@@ -18,7 +18,7 @@ Decisions Ransom took on the first draft (2026-10-07) are marked inline as "(dec
 - monitoring through inspect_sentinel;
 - the default final answer.
 
-It synthesises the team's earlier design notes on swarms. One was a layered runtime RFC: a `swarm()` agent on `deepagent()` with messaging, a task list, a fact log, a board and a monitor hook. The other argued for cheap experiments first, using leaderless swarms that communicate through the filesystem. It also draws on published work, cited inline. Figures quoted from secondary sources, or that could not be checked against a primary source, are marked *unverified*.
+It draws on published work, cited inline. Figures quoted from secondary sources, or that could not be checked against a primary source, are marked *unverified*.
 
 Code references are to inspect_ai `main` at `aa20052a` (2026-10-06), inspect_swe at `a54461e7` (2026-10-05), inspect_sentinel at `0f9b5c71` (2026-10-06), inspect_evals at `cef701f5` and ORBIT at `588b3035`. Paths are relative to each repository's root.
 
@@ -112,6 +112,8 @@ Most of the feedback that shapes the plan is expected to come from these users, 
 
 The library is worth building to the extent that it makes these questions cheap to ask and hard to get wrong. The table says what users' experiments need from the harness. It is not a list of experiments this project commits to running (decision: Ransom, 2026-10-07).
 
+An **arm** is one condition of an experiment. In Inspect terms it is one task in an eval set: a `Task` instantiated with its arguments and run with a given solver (a single agent, a deepagent, a swarm), model and limits. Inspect tells arms apart by `task_identifier()` (`src/inspect_ai/_eval/evalset.py:2111-2282`), which hashes the task's name and arguments, the model, the solver plan with its parameters, and the sample limits, but not scorers or epochs; [swarm-api.md](swarm-api.md#task-identity-what-makes-two-arms-distinct) lists what does and does not distinguish swarm arms.
+
 | Question | Experimental design | What the harness must provide |
 |---|---|---|
 | Does a swarm beat more attempts or a bigger budget at the same cost? | Four arms with the same cap: single agent with budget B; k epochs at B/k each (pass@k, best@k); a deepagent with k background subagents and budget B; a swarm of k members with total budget B (team@k). Compared on realized cost, not on the cap. | A swarm-wide cap at the same level as the other arms' caps. Realized cost recorded per member and in total, including the final-answer step and calls in flight when the cap was hit. A task-owned result contract, so team@k, best@k and per-member correctness are claimed only where the task can score them ([Results and scoring](#results-and-scoring-a-task-owned-contract)). |
@@ -139,7 +141,7 @@ Three design consequences follow from the first two rows.
 
 - Make agent count, topology, communication channels and budget split ordinary, sweepable task parameters for Inspect evals.
 - Account for realized cost and usage per member and per swarm, under a swarm-wide cap set the same way as a single agent's limit.
-- Make every sanctioned communication observable, attributable and interceptable at one point, and keep unsanctioned channels (the filesystem, shared caches) observable through the tool calls that use them.
+- Make every sanctioned communication observable, attributable and interceptable at one point, and keep unsanctioned channels (the filesystem, shared caches, tool state in the sample store) observable through the tool calls that use them.
 - Let any Inspect `Agent` be a member: `react()`, `deepagent()`, or a bridged agent (Claude Code, Codex) through inspect_swe. The swarm must own and drain all of a member's work, including descendants. Until the swarm can do that for `background()` work, M1 accepts only members whose work stays inside their invocation ([Members](#members)).
 - Evaluate vendor swarms (Codex multi-agent, Claude Code agent teams) with the same evidence model and metrics as native ones.
 - Keep inspect_ai changes to small, general extension points needed for behaviour. The swarm runtime itself lives here.
@@ -169,6 +171,22 @@ This section covers only what the design depends on. All paths are in inspect_ai
 - `run(agent, input, limits=[...], name=...)` runs any agent in an agent span with its own limits. It catches its own limit errors and returns them (`src/inspect_ai/agent/_run.py:35-111`).
 - There is no per-sample cap on concurrent agents. The binding constraint is the model's `max_connections`, shared by every member and every sample.
 
+### The sample store
+
+References in this subsection are to inspect_ai `main` at `215cf087` (2026-10-08) and inspect_evals at `eb5383ef`.
+
+- **Every agent in a sample uses one store.** The runner installs the sample's `Store` in a context variable before the solver runs, and `store()` returns it (`src/inspect_ai/_eval/task/run.py:2491`, `src/inspect_ai/util/_store.py:110-119`). Concurrent agents' tasks inherit the context, so they hold the same object. `subtask()` is the exception: it gives its body a store of its own (`src/inspect_ai/util/_subtask.py:122`).
+- **Tools keep per-sample state there, keyed by an `instance` argument that defaults to `None`.** A model cannot reach the store, but `store_as(Model, instance=...)` gives a tool a typed view namespaced by the instance (`src/inspect_ai/util/_store_model.py:104-105`). The built-in tools with such state:
+  - `memory()` keeps its files (`src/inspect_ai/tool/_tools/_memory.py:113`, `:162`);
+  - `bash_session()` keeps the id of its shell process, so one instance is one shell (`_bash_session.py:195`);
+  - `web_browser()` keeps its browser session (`_web_browser/_web_browser.py:157`, `:428`); the tool is deprecated, and its fallback for old sandboxes ignores the instance (`_web_browser/_back_compat.py:37`);
+  - the skill tool keeps its list of installed skills (`_skill/tool.py:59`).
+
+  So agents in one sample given the same tool with the default instance share one memory, one shell or one browser. A spike ran two `react()` agents concurrently in one sample on mockllm, each with `memory()`: the second read a file the first had created. With `memory(instance="A")` and `memory(instance="B")` it got "does not exist".
+- **`deepagent()` adds `memory()` with the default instance** inside each invocation when `memory=True`, its default (`src/inspect_ai/agent/_deepagent/deepagent.py:191-193`). Its only way to choose the instance is to pass one's own `memory(instance=...)` in `tools`. Its subagents with `memory="readwrite"` share their parent's memory, as deepagent intends. So `member(deepagent(...), count=4)` gives four members one memory today.
+- **Tasks keep their environment in the store too.** inspect_evals' AgentDojo puts its simulated environment in the store, its tools change it, and its scorer rebuilds the environment from every store key (`inspect_evals: src/inspect_evals/agentdojo/dataset.py:228`, `tools/banking_client.py:28`, `scorer.py:12`). tau2 does the same through `store_as` (`tau2/common/scorer.py:141`). For these tasks the store is the shared environment, as the sandbox is for SWE tasks.
+- **inspect_sentinel keeps protocol state in it.** `Context.store_as` namespaces a protocol's state by its path in the store the host supplies (`inspect_sentinel: src/inspect_sentinel/_context.py:63-71`), and inspect_ai's sentinel dispatcher supplies `store()` (`src/inspect_ai/_sentinel/_dispatch.py`). That is what gives protocols a joint view of a swarm.
+
 ### `deepagent()` and background subagents
 
 - `deepagent(background=True | int)` dispatches subagents concurrently via `background()`. The default cap is 8 running agents (`src/inspect_ai/agent/_deepagent/deepagent.py:46`; `agent_tool.py:599-631`).
@@ -194,9 +212,9 @@ This section covers only what the design depends on. All paths are in inspect_ai
 - `before_turn()` appends every `UserMessage` item to the conversation as a `ChatMessageUser` (`channel.py:432-453`). A `UserMessage` is by definition an operator-injected turn (`items.py:37-46`), so it puts its text in the user role, the most trusted input a model has. The swarm therefore never delivers peer text this way ([Delivery](#delivery-peer-messages-are-model-output)).
 - deepagent already follows the pattern the swarm adopts. Its background-completion notice is harness-authored and metadata-only ("Background agent(s) finished — collect the result"), injected at a turn boundary, and the child's result is fetched with the `agent_status` tool, so it arrives as tool output (`src/inspect_ai/agent/_deepagent/lifecycle_tools.py:510-530`, `:597-634`).
 - **The binder.** A *binder* is how a producer obtains an execution's `AgentRef` so that it can post into that execution's channel. Today `agent_channel()` offers each new channel's ref to the sample's ACP session, first binder wins, so ACP is the only producer (`_channel/__init__.py:125-133`).
-  - The swarm's bus is a second producer: it needs each member's ref to deliver messages into it.
+  - The swarm's bus would be a second producer if it posted notices into members' channels.
   - The member's channel is opened inside that member's `react()`, so code running in the member (a tool, a model wrapper, `on_continue`) can reach it through the private `current_agent_channel()`. The swarm's controller, outside the member, cannot.
-  - How the bus obtains refs, and how that coexists with ACP's first-binder-wins rule, is deferred to M2's design.
+  - Settled in [swarm-communication.md](swarm-communication.md): M2 posts nothing into members' agent channels, so it needs no ref and no inspect_ai hook. A swarm `UserMessage` would satisfy ACP's post-interrupt redirect wait, and any other item is dropped by `react()`. The swarm binds each member's channel for identity only and leaves ACP's binding alone.
 - The channel brief names a "subagent supervisor" and "detached child channels" as intended future producers (`design/acp/agent_channel_brief.md:32`, `:178`).
 
 ### `react()` lifecycle
@@ -224,11 +242,13 @@ I checked this with a spike: three `react()` members under `collect()`, with moc
   - the swarm limit was raised inside all three members, and `collect()` re-raised them as an `ExceptionGroup` of three `LimitExceededError`s.
 - With the same members under `Task(token_limit=1000)` and no swarm limit, Inspect recorded a normal sample token limit and no error.
 
-Three caveats apply to using limit nodes as a budget:
+These caveats apply to using limit nodes as a budget. [swarm-limits.md](swarm-limits.md) covers each limit kind in detail.
 
 - **They do not bound spend.** Checks are cooperative and happen before dispatch and after a call completes (`src/inspect_ai/model/_model.py:3035-3043`, `:3082-3095`), so a cap is overshot by every call in flight across all members and their descendants when it is reached (see [Eval questions](#eval-questions-and-the-experimental-design-they-imply)).
 - **Who raises what depends on the group size.** When only one member raises, `collect()` re-raises that exception bare instead of as a group (`src/inspect_ai/util/_collect.py:44-48`). Ancestor limits are checked first, so an outer sample limit can win over the swarm's own (`_limit.py:1082-1092`).
-- **Token and cost nodes can disagree.** A call that trips a token limit raises before its cost is recorded into the cost nodes (`src/inspect_ai/model/_model.py:3089-3095`), although the call's `ModelUsage` still carries its cost. This was found by the round-1 review.
+- **Token and cost nodes can disagree.** A call that trips a token limit raises before its cost is recorded into the cost nodes (`src/inspect_ai/model/_model.py:3089-3095`), although the call's `ModelUsage` still carries its cost. This was found by the round-1 review. With child token limits it repeats on every call, so a `cost_limit` node can be bypassed indefinitely; the swarm therefore meters its cost cap in the token tree ([swarm-limits.md](swarm-limits.md#swarm-nodes)).
+- **Working limits do not work below the sample.** A nested `working_limit()` is never checked, and the sample's working time collapses while members queue for model connections ([swarm-limits.md](swarm-limits.md#each-limit-kind)).
+- **A limit reached inside a bridged agent ends the sample**, whichever node it came from (`src/inspect_ai/util/_sandbox/service.py:540-560`). The swarm's own nodes therefore stop a bridged member by cancelling it ([swarm-limits.md](swarm-limits.md#swarm-nodes)).
 
 What the log keeps:
 
@@ -257,7 +277,7 @@ What the log keeps:
 
 - Tool approval already offers `approve`, `modify`, `reject`, `terminate` and `escalate` per tool call (`src/inspect_ai/approval/_approval.py:7-15`).
 - [inspect_sentinel](https://github.com/meridianlabs-ai/inspect_sentinel) generalises this into monitors (which score) and protocols (which decide), at the `BeforeToolCall` and `AfterToolCall` stages. Generate stages are designed but not built (`inspect_sentinel: design/sentinel-overview.md`).
-  - Its inspect_ai dispatcher is on inspect_ai's `feature/sentinel` branch, not yet on `main` (`inspect_sentinel: design/pr-series.md`, "Decisions").
+  - Its inspect_ai dispatcher is on inspect_ai `main` ([swarm-implementation-plan.md Current state](swarm-implementation-plan.md#current-state), checked 2026-10-13).
   - Every step carries a `conversation` id meant to tell agents in one sample apart. Monitor state (`Context.store_as`) is per sample, so it is shared across a swarm's members.
   - Sentinels do not yet run for bridged agents' tool calls (`inspect_sentinel: design/workstreams.md`).
 
@@ -268,8 +288,8 @@ What the log keeps:
 A swarm is four things, and the library keeps them separate. ORBIT reached the same factoring, separating invocation, message routes, activation and conversation ownership.
 
 1. **Members**: who the agents are. Each has a name, a role (data), an `Agent`, its own model, tools and limits, and its own conversation.
-2. **Substrate**: how members share information. The shared sandbox filesystem, and optional explicit channels: direct messages, a shared notes/fact log, a task list with claims, a board.
-3. **Controller**: how the swarm runs. Topology (leaderless, coordinator tree, lead plus teammates), how members are started and woken, termination, and how the final answer is produced.
+2. **Channels**: how members share information. The shared sandbox filesystem, and optional explicit channels: direct messages, a shared notes/fact log, a task list with claims, a board. Each is a `@swarm_channel` registry object.
+3. **Controller**: how the swarm runs. Topology (leaderless, coordinator tree, lead plus teammates), how members are started and woken, termination, and how the final answer is produced. Each topology is a `@swarm_controller` registry object.
 4. **Observer**: what is recorded and who may intervene. Evidence events for every communication, per-member accounting, swarm metrics, and the interception point that monitors attach to (and optional red-team features could, if they are ever built).
 
 ```
@@ -294,28 +314,33 @@ A swarm is four things, and the library keeps them separate. ORBIT reached the s
 
 ### Entry point
 
-`swarm()` returns an `Agent`, so it works anywhere an agent does: as a solver via `as_solver`, under `run()`, or as a member of another swarm (not a goal). Illustratively:
+`swarm()` returns an `Agent`, so it works anywhere an agent does: as a solver via `as_solver`, under `run()`, or as a member of another swarm (not a goal). Its arguments mirror the components; [swarm-api.md](swarm-api.md) designs the API in full. The common case is one line:
 
 ```python
-from inspect_swarm import swarm, member
+from inspect_swarm import Budget, member, swarm
 
+agent = swarm(members=member(deepagent(...), count=4))
+```
+
+which means, written out:
+
+```python
 agent = swarm(
     members=member(deepagent(...), count=4),  # or a list of named, heterogeneous members
-    topology="leaderless",                    # later: "coordinator", "lead"
-    channels=["filesystem"],                  # later: "messages", "notes", "tasks", "board"
-    budget=cost_limit(40.0),                  # swarm-wide; reserve kept for the final answer
-    final="verify",                           # or "vote", "first", "synthesize", "reporter"
+    controller="leaderless",                  # a @swarm_controller: leaderless(final=..., stop_on_verified=...); later "coordinator"
+    channels=["filesystem"],                  # names or @swarm_channel objects: filesystem(...); later messages(...), notes, tasks, board
+    budget=Budget(),                          # swarm-wide cap (limits deep dive)
 )
 ```
 
-All of these are plain values, so a task can expose them as `-T` parameters and an eval set can sweep them. A swarm of one member with no channels is a single agent with the same accounting, which makes it the natural baseline arm.
+The final-answer chain is the controller's `final=` parameter. Names resolve to registry objects with their defaults, and the API's own arguments are logged faithfully, so a task can expose them as `-T` parameters and an eval set can sweep them; members configured with hooks and the task's result contract are rebuilt through registered builders or the task ([swarm-api.md](swarm-api.md#logging-and-replay)). A swarm of one member with no channels is a single agent with the same accounting, which makes it the natural baseline arm.
 
 ### Members
 
-- A member is a record: name, role, `Agent`, model, tools, limits, status (`running`, `idle`, `done`, `errored`, `cancelled`) and its conversation.
+- A member is a record: name, role, `Agent`, model, tools, limits, state (`pending`, `running` or `ended`; [swarm-api.md](swarm-api.md#controllers)), its status once ended (the closed set in [swarm-limits.md](swarm-limits.md#stopping)) and its conversation.
 - Each member runs under `run()` in its own agent span named after it, with its limits as a child of the swarm's budget node.
 - Members may be native agents or bridged agents.
-  - A bridged member reaches the substrate's tools through `bridged_tools`.
+  - A bridged member would reach bus channels' tools through `bridged_tools`. That is later work; until then a swarm that gives a bridged member a bus channel is refused at construction ([swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 2).
   - It reaches the shared filesystem through the sandbox it already has.
 - **Ownership boundary.** The swarm owns everything a member starts, including its descendants. Draining a member means cancelling and awaiting all of that work before the swarm finalises, records usage or returns. Otherwise:
   - a descendant could keep editing shared files while the final answer is produced;
@@ -324,20 +349,54 @@ All of these are plain values, so a task can expose them as `-T` parameters and 
 
   Members fall into three groups:
   - **Supported from M1.** Members whose work stays inside their invocation: `react()`, `deepagent()` without background dispatch (synchronous subagents are awaited), and bridged agents whose agent process the member awaits.
-  - **Not supported in M1.** Members that use `background()`, which today attaches work to the sample's task group with no owner the swarm can drain. This includes `deepagent(background=True)` and any custom agent that calls `background()`. The swarm rejects `deepagent(background=True)` members where it can detect them, and the restriction is documented for custom agents.
-  - **Lifting the restriction.** It needs a change in behaviour, not just access to private names: a scoped owner that `background()` attaches to when one encloses the caller (defaulting to the sample's task group, as now). The swarm would then own each member's descendants. This is an inspect_ai change, proposed when a swarm of background deepagents is needed, not in M1.
+  - **Not supported in M1.** Members that use `background()`, which today attaches work to the sample's task group with no owner the swarm can drain. This includes `deepagent(background=True)` and any custom agent that calls `background()`. The swarm rejects `deepagent()` members with `background` set, to `True` or to an integer, where it can detect them, and the restriction is documented for custom agents.
+  - **Lifting the restriction.** It needs a change in behaviour, not just access to private names: a scoped owner that `background()` attaches to when one encloses the caller (defaulting to the sample's task group, as now). The swarm would then own each member's descendants. This is an inspect_ai change in M2, specified first by a design in this repository that starts during M1 (decision: Ransom, 2026-10-14; D-2 in [swarm-implementation-plan.md](swarm-implementation-plan.md#designs)).
+- **Per-member tool state.** Each member keeps its own tool state, as it would running alone; sharing it with another member is a choice the eval author makes explicitly ([The sample store](#the-sample-store)). The mechanism is a tool-state scope in inspect_ai (decision: Ransom, 2026-10-09; [open question 2](#open-questions)).
+  - The runtime runs each member inside a **tool-state scope** named after the member. Tools that keep agent-private state resolve `instance=None` to the scope, so each member gets its own memory, shell session, browser and skill list. A deepagent member's subagents run inside the member, so a `readwrite` subagent still shares its parent's memory, and no other member's.
+  - The scope is a small inspect_ai change, made before M1 beside the registry types ([Where each part lives](#where-each-part-lives)):
+
+    ```python
+    # inspect_ai/util/_tool_state.py, exported from inspect_ai.util
+
+    # Within the block, tool state left at the default instance belongs to `name`.
+    # Nested scopes join with "/" ("outer/inner"). A ContextVar, so tasks started inside inherit it.
+    @contextmanager
+    def tool_state_scope(name: str) -> Iterator[None]: ...
+
+    # An explicit instance is returned as given; None becomes the enclosing scope's name,
+    # or stays None outside any scope. For instances an eval author chose.
+    def tool_state_instance(instance: str | None) -> str | None: ...
+
+    # For instances a library assigns itself, which must stay private to the scope:
+    # "<scope>/<name>" inside a scope, `name` unchanged outside one.
+    def private_tool_instance(name: str) -> str: ...
+    ```
+
+    `memory()` (writable and readonly), `bash_session()`, `web_browser()` (its execution path and its tool-call viewer) and the skill tool call `tool_state_instance(instance)` once per call and use the result for `store_as` and any other per-instance key (the skill tool's install lock). Outside a scope nothing changes, so existing evals are unaffected.
+    - **Library-assigned instances.** `deepagent()` gives each subagent's skill tool an explicit instance, the subagent's name (`instance=sa.name`, `src/inspect_ai/agent/_deepagent/agent_tool.py:891`), so two deepagent members would share `InstalledSkills:general:...` even inside their scopes. That name is the library's, not an eval author's choice of a shared channel, so the same PR changes it to `instance=private_tool_instance(sa.name)`. deepagent builds its child tools inside each invocation (`agent_tool()` is called from `deepagent()`'s `execute`, and resolves child tools at `agent_tool.py:276`), so the member's scope is active there. This is the only library-assigned instance in inspect_ai's agents and tools; any later one uses the same function.
+    - **The legacy browser path is refused in a scope.** When the sandbox lacks the current tool-support image, `web_browser()` falls back to code that reads the unscoped store and takes no instance (`_web_browser/_web_browser.py:421`, `_back_compat.py:37`). Inside a scope, `_web_browser_cmd` raises a `ToolError` saying the legacy browser sandbox is not supported for swarm members, instead of falling back. The tool is deprecated, and a search of inspect_evals, inspect_swe and inspect_flow found no configuration using the old image (`aisiuk/inspect-web-browser-tool`), so this path is guarded rather than extended. A spike patched the resolver into `memory()`: two members in scopes `w-1` and `w-2` with `memory()` each got their own files (`MemoryStore:w-1:...`, `MemoryStore:w-2:...`), and with `memory(instance="team")` they shared them.
+  - **An explicit instance is used as given.** Two members that name the same instance share that state on purpose: it is a channel, treated like the filesystem ([Security](#security)). A member with `count > 1` is one agent object invoked for each copy ([swarm-api.md](swarm-api.md#members)), so an explicit instance in it is shared by all its copies; the scope is what separates copies.
+  - **What stays shared**, stated in `member()`'s contract:
+    - the sample store itself, and with it any environment a task keeps there (AgentDojo, tau2), as the sandbox is shared;
+    - state that custom tools or agent code keep with `store_as` or `store()` and no instance, unless they resolve their instance through `tool_state_instance()`. The swarm cannot see them or tell private state from environment state, so it does not check them;
+    - inspect_sentinel's protocol state, which names its own instance and so is unaffected.
+  - A bridged member's `bridged_tools` run in a task started from the member's context ([swarm-communication.md](swarm-communication.md#bridged-tools)), so they see its scope.
+  - **Tool state prepared before the swarm is not the members'.** A setup solver that uses a built-in tool at the default instance (gdm_self_proliferation opens a browser and navigates it before the agent runs) writes the unscoped keys; each member, inside its scope, starts with fresh state of its own. The shared-store guarantee covers task and environment state, not these tool keys. M1 documents tasks that rely on such prepared tool state as unsupported ([Compatibility](#compatibility-and-migration)); it does not copy or merge tool state into members.
 - **Sandbox processes.** Processes a member starts in the sandbox that outlive its tool calls (for example under `nohup`) are outside any Inspect task group. They are part of the [filesystem observation limit](#security), not something the drain can promise to stop.
 - **The deepagent baseline arm** keeps its existing semantics. Children are abandoned when the parent returns and cancelled when the solver ends, and their spend up to then is part of the arm's realized cost.
 - **Persistent members** (idle after submitting, woken by a message) are needed by coordinator topologies, not by the first slice. A blocking `on_continue` alone cannot provide them, because a successful submit leaves `react()` before `on_continue` runs. Two candidates for the coordinator-topologies work:
   - **An altered submission protocol.** Run the member with `submit=False` and give it a swarm `report` tool that records an answer without ending the loop. Its `on_continue` then waits on the inbox when the model stops calling tools, and returns when woken. No inspect_ai change is needed, but the member's prompt and stop condition differ from a standard `react()` agent.
   - **Clean re-entry.** Re-enter `react()` on an existing state without inserting a second system prompt. This needs an inspect_ai change.
 
-### Substrate
+### Channels
+
+Each channel is a `@swarm_channel` registry object, named in `swarm(channels=[...])` ([swarm-api.md](swarm-api.md#channels)). inspect_ai's unrelated per-execution queue is always called the *agent channel* ([The agent channel](#the-agent-channel)).
 
 | Channel | What it is | When | What it adds over the filesystem convention |
 |---|---|---|---|
 | Filesystem | The shared sandbox ([Sandbox topology](#sandbox-topology)). Members read and write files; a convention (a shared directory, an append-only `notes.md`, per-member scratch directories) is given in the prompt. | M1 | (Baseline.) Free; the channel Test-Time Communication, the C compiler and the Hugging Face incident all used. Observable only through tool calls. |
-| Messages | `send_message(to, text)`, with wake or no-wake, `read_messages()` and `list_members()`. The recipient is notified at its next turn boundary and reads the content with `read_messages()`. | M2 | Addressed, attributable messages that wake the recipient; every message monitored and evidenced. The Codex v2 and Claude Code teams surface. |
+| Shared memory | `memory()`'s command set over per-run channel state. Writes are bus records with the bus-bound sender, so reads show each file's last writer, fenced, and members are notified when files change. Its design (D-1 in [swarm-implementation-plan.md](swarm-implementation-plan.md#designs)) settles the details. | M2 | The board models already know, with attributed, fenced writes and change notices instead of a file members must remember to reread; every write monitored and evidenced. LeanOpenProblems' channel ([swarm-lean-open-problems.md](swarm-lean-open-problems.md#7-m2-a-shared-memory-channel-through-the-bus)). |
+| Messages | `send_message(to, text)`, with wake or no-wake, `read_messages()` and `list_members()`. The recipient is notified at its next turn boundary and reads the content with `read_messages()`. | Later | Addressed, attributable messages that wake the recipient; every message monitored and evidenced. The Codex v2 and Claude Code teams surface. |
 | Notes / fact log | Append-only typed entries (`fact`, `fail`, `done`), read with a tool; members are notified of new entries. | Later, on request | Typed entries with a notice when they change, instead of a file members must remember to read; each entry monitored and evidenced. DeLM-style shared context. Unlike DeLM, entries are not injected into the prompt. |
 | Task list | Create, claim (first claim wins, optional lease), update, list, with dependencies. | Later, on request | Atomic claims and leases that cannot race the way lock files do; dependencies; a state the controller can read for quiescence. Claude Code teams and DeLM. |
 | Board | Channels, threads, posts, and subscriptions with metadata-only notifications. | Later, on request | Many-to-many discussion with subscriptions and notifications instead of polling files; posts monitored and evidenced. Codex's message board. |
@@ -353,21 +412,21 @@ The [CoAgent paper](https://arxiv.org/abs/2606.15376) argues that blocking locks
 
 ### Delivery: peer messages are model output
 
-A peer's text is another model's output, so it reaches a member's model only as **tool output**: the result of a swarm tool the member calls (`read_messages()`, a notes read, a thread read). It is never a `ChatMessageUser` or `UserMessage` turn, and never carries `source` `input` or `operator` (decision: Ransom, 2026-10-07). A header saying "this is not a user instruction" would be a prompt-level mitigation; tool output is structural, and it matches the trust models in [Security](#security).
+A peer's text is another model's output, so it reaches a member's model only as **tool output**: the result of a swarm tool the member calls (`read_messages()`, a notes read, a thread read). It is never a `ChatMessageUser` or `UserMessage` turn, and never carries `source` `input` or `operator` (decision: Ransom, 2026-10-07). That is the default rather than an absolute: after M2 an eval author may opt an arm into injecting fenced bodies as a marked user-role message, as an explicit experimental arm with its weaker boundary stated (decision: Ransom, 2026-10-09; [swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)). A header saying "this is not a user instruction" would be a prompt-level mitigation; tool output is structural, and it matches the trust models in [Security](#security).
 
 Delivery has two modes, an axis because they change behaviour:
 
 - `poll`: no notice. The member learns of messages only by calling the read tools.
 - `notify` (default): at the member's next turn boundary, the swarm injects a **notice** that carries only metadata. The member then reads the content with a tool.
 
-ORBIT's third mode, which injects full bodies (`auto`), is deliberately not offered.
+ORBIT's third mode, which injects full bodies (`auto`), is not offered in M2. After M2 it is the opt-in mode `inject`, alongside two other opt-in push options, reminders and urgent messages that interrupt a recipient's turn; each is off by default and a logged ablation axis ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)).
 
-The notice is the one swarm-authored text that enters a member's context outside a tool result.
-- It is a fixed template, in the manner of deepagent's background-completion notice: "3 unread messages from `worker-2`, `worker-4`; call `read_messages()`".
+In M2 the notice is the one swarm-authored text that enters a member's context outside a tool result.
+- It is a fixed template, in the manner of deepagent's background-completion notice; for the later messages channel, "3 unread messages from `worker-2`, `worker-4`; call `read_messages()`".
 - Its only variables are counts, channel kinds, and names the eval author or controller assigned: member names from the roster, and board channels the task defined.
 - It never includes a message body, a subject line, a thread title, or a name a member chose. A board channel or thread a member created is referred to by a swarm-assigned id.
 
-So the notice does not let peer text into the user role. How it is rendered, and how wake works for bridged members (which have no `react()` channel; they may get `poll` only), is part of M2's design.
+So the notice does not let peer text into the user role; only an opt-in `inject` arm after M2 does. [swarm-communication.md](swarm-communication.md) settles the rest: the notice is appended at the member's turn boundary by a swarm `on_continue` hook, bridged members get `poll` only, and, for the later messages channel, wake means ending a member's wait in `read_messages`.
 
 Tool output is a better place than the user role, but it is not a trust boundary by itself. ADK's own fencing module calls peers' turns and tool results "attacker-reachable" ([`_fencing.py`](https://github.com/google/adk-python/blob/main/src/google/adk/flows/llm_flows/context/_fencing.py)). So the read tools also follow three rules taken from the frameworks surveyed:
 - **Fence each message as data.** Each message sits between begin and end markers under a sender line the bus stamps. Copies of the markers inside the payload are removed, so a payload cannot close its own block. A fixed note says the content is another agent's message to read, not instructions to follow.
@@ -382,9 +441,9 @@ The two ways to mark the notice:
 - **A new `source` value**, which has the reader-compatibility cost described in [Compatibility](#compatibility-and-migration).
 - **Message `metadata`**, which does not.
 
-M2's design should lean towards metadata and a dedicated item, and add a `source` value only if the viewer must distinguish swarm notices without reading metadata. Whether either needs an inspect_ai change, given that private internals are allowed, is for M2's design.
+M2 uses a marked message: a `ChatMessageUser` with swarm metadata and no `source`, which needs no inspect_ai change ([swarm-communication.md](swarm-communication.md)).
 
-Vendor swarms differ. Codex's multi-agent v2 delivers peer text as author-attributed user messages, and the bridge reproduces that ([Bridged agents](#bridged-agents)). That is the vendor's design, evaluated as shipped; native members never receive peer text that way.
+Vendor swarms differ. Codex's multi-agent v2 delivers peer text as author-attributed user messages, and the bridge reproduces that ([Bridged agents](#bridged-agents)). That is the vendor's design, evaluated as shipped; native members receive peer text in the user role only in an arm that opts into injection.
 
 ### Sandbox topology
 
@@ -395,9 +454,9 @@ Which sandbox each member runs in is a decision, not an accident of the scaffold
 - Bridged members already run in the sample's sandbox.
 - It is also what the cited leaderless systems did: the C compiler's shared repository, Test-Time Communication's shared container.
 
-**Other topologies are optional and deferred to later work, if users need them.**
-- **A sandbox per member**, through Inspect's multiple named sandbox environments per sample (`sandbox(name)`, `src/inspect_ai/util/_sandbox/context.py:48`).
-- **Partial isolation**:
+**Other topologies are opt-in.**
+- **A sandbox per member**, through Inspect's multiple named sandbox environments per sample (`sandbox(name)`, `src/inspect_ai/util/_sandbox/context.py:48`). M2 adds it as an opt-in member field, `member(sandbox=..., visible_sandboxes=...)`, and the default stays shared ([swarm-lean-open-problems.md](swarm-lean-open-problems.md#1-m2-per-member-sandboxes-as-an-opt-in-member-field)).
+- **Partial isolation**, later work if users need it:
   - private sandboxes plus one shared volume or service;
   - or one shared sandbox with a Linux user and write scope per member, as SCHEME does ("All agents in a given sample share a single Docker sandbox", with per-agent file scopes).
 
@@ -418,7 +477,7 @@ Cases that might need them, none committed:
 
 ### The bus: one interception point
 
-All sanctioned communication goes through one function, `deliver(record)`, which runs these steps in order:
+[swarm-communication.md](swarm-communication.md) details the bus, its tools, addressing and evidence. All sanctioned communication goes through one function, `deliver(record)`, which runs these steps in order:
 
 1. **Policy and monitor.** Attached protocols decide `continue`, `modify` (rewrite the payload, e.g. paraphrase), `reject` (the sender gets a tool error it can react to) or `terminate`.
 2. **Storm controls.** Per-sender rate, deduplication, inbox cap and size cap. Claude Code ships these for cross-session messaging so that a message loop "stops on its own".
@@ -435,7 +494,7 @@ Nothing else writes to a member's inbox, so no sanctioned path between members b
 
 Monitoring aligns with inspect_sentinel; there is no separate `SwarmMonitor` type (decision: Ransom, 2026-10-07). The reasons:
 
-- A send is a tool call, so once sentinel's dispatcher lands, every send is already a `BeforeToolCall` step with the sender's `conversation` id. A sentinel protocol can then reject or modify it with no swarm-specific code.
+- A send is a tool call, so with sentinel's dispatcher on inspect_ai `main`, every native member's send is already a `BeforeToolCall` step with the sender's `conversation` id. A sentinel protocol can then reject or modify it with no swarm-specific code.
 - Monitor state is per sample, so a protocol can keep a joint, swarm-wide view. This is what the fragmentation result asks for.
 - Unsanctioned channels are tool calls too (a `bash` that writes into a shared cache). The same monitors see them.
 - Monitors need actions as well as messages.
@@ -446,11 +505,11 @@ Monitoring aligns with inspect_sentinel; there is no separate `SwarmMonitor` typ
 
 What sentinel does not cover is the delivery side: what each recipient was shown, after rewriting, notification and coalescing. The bus records that itself. If monitors turn out to need to act on deliveries rather than sends, it can become a sentinel stage later.
 
-The bus uses sentinel's action vocabulary from the start and adopts sentinel protocols when sentinel's dispatcher reaches inspect_ai `main`. Sentinel is under active development and may well be ready by M2. If it is, M2 uses it directly. If not, M2 carries the smallest protocol-shaped hook with sentinel's action names, to be replaced by sentinel, and nothing more.
+The bus uses sentinel's action vocabulary from the start. Sentinel's dispatcher reached inspect_ai `main` by 2026-10-13, so a native member's call to a channel tool is a step its protocols see with no swarm code. Its tool stages still skip bridged agents, though, and records that do not come from a tool call are no tool step at all. So M2 also carries the smallest protocol-shaped hook with sentinel's action names, to be replaced by sentinel once it covers those cases, and nothing more ([swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 5).
 
 ### Observer: evidence, accounting and metrics
 
-**Evidence.** Each communication produces records of kinds adapted from ORBIT's: `sent`, `delivered` (enqueued for a recipient), `read`, `notified` (a notice named it) and `exposed` (it entered a model's input). ORBIT's own `delivered` means content inserted into a conversation, which the bus never does; [swarm-orbit.md](swarm-orbit.md#p3-evidence-and-exposure-m2) maps the two. Each record carries:
+**Evidence.** Each communication produces records of the kinds ORBIT uses: `sent`, `delivered`, `notified`, `read` and `exposed`, the last meaning it entered a model's input. Each record carries:
 
 - sender and recipients (member names);
 - channel and kind;
@@ -465,32 +524,32 @@ M1 writes these as `InfoEvent`s with `source="inspect_swarm"` and a versioned pa
 
 **Accounting.** Two separate things:
 
-- **A stopping rule.** The swarm opens one cap node (a `cost_limit` or `token_limit`) around its members, and each member runs with its own limits below it. The spike above shows these nodes see every member's usage with no inspect_ai change.
-- **A ledger.** Realized usage and cost, taken after the drain so it includes descendants, calls that completed after the cap was hit, and the final-answer step. The ledger, not the cap, is what analysis compares across arms. It is not taken from limit nodes, because token and cost nodes can disagree (see [Limits and cost](#limits-and-cost)).
+- **A stopping rule.** The swarm opens one cap node (cost or tokens; the cost cap is metered in the token tree, as above) around its members, and each member runs with its own limits below it. The spike above shows these nodes see every member's usage with no inspect_ai change. [swarm-limits.md](swarm-limits.md) designs the nodes, the budget parameter and how the swarm stops.
+- **A ledger.** Realized usage and cost, taken after the drain so it includes descendants, calls that completed after the cap was hit, and the final-answer step. The ledger, not the cap, is what analysis compares across arms. It is not taken from the cap nodes, because token and cost nodes can disagree (see [Limits and cost](#limits-and-cost)); its per-member figures come from token meter nodes, whose `ModelUsage` carries each call's cost before any check can raise ([swarm-limits.md](swarm-limits.md#what-the-nodes-record)).
 
 The ledger states its coverage and how each kind of call is charged, because no single Inspect record covers everything.
 
 - **Totals per arm come from Inspect's sample usage** (`model_usage` and `role_usage`, with cost on each `ModelUsage`). This is what Inspect's limits are charged from (`record_and_check_model_usage`, `src/inspect_ai/model/_model.py:3045-3095`). It counts newly incurred usage, excludes response-cache replays, and includes native provider compaction. Every arm gets it the same way, so arm-to-arm comparisons use it.
-- **Attribution per member comes from the model events in each member's span**, with these rules:
+  - It also includes scorer model calls, as it does in every Inspect eval: `EvalSample.model_usage` is read after scoring. M1 accepts this, because every arm grades its own output with the task's scorers, as existing evals do (decision: Ransom, 2026-10-08). A boundary between solve and scoring usage is deferred with per-member scoring, which grades every member and so makes scoring usage differ between arms ([swarm-scoring.md](swarm-scoring.md#the-cost-boundary-deferred)).
+- **Attribution per member comes from a meter node the swarm opens around each member.** It records every call made in the member's context, with its cost, including descendants, compaction and bridged generations ([swarm-limits.md](swarm-limits.md#the-ledger)). Model events in the member's spans supply the counts, with these rules:
   - **Cache replays.** An event with `cache="read"` (`src/inspect_ai/event/_model.py:135`) replays the original call's output and usage, but costs nothing new (`_model.py:1537-1564`). It is counted as a replay and charged zero, not summed. A naive sum would double-count it (the round-2 review: 50 tokens incurred, 100 summed).
-  - **Native compaction.** `Model.compact()` records usage with no model event (`_model.py:1349-1361`), and a `CompactionEvent` carries no billable usage. `deepagent()` defaults to automatic compaction, which tries native compaction first. In M1 this usage appears as the difference between the sample total and the member-attributed sum, reported as *unattributed*, not hidden. Attributing it needs an inspect_ai change, for example usage on the compaction event.
+  - **Native compaction.** `Model.compact()` records usage with no model event (`_model.py:1349-1361`), and a `CompactionEvent` carries no billable usage. It records through the same path as a generation, so the member's meter node includes it when the provider reports usage. The provider may report none, and a cancelled, failed or direct call leaves no trace, so a run in a process that has loaded a provider with native compaction (today OpenAI or Anthropic) is reported as a lower bound ([swarm-limits.md](swarm-limits.md#the-ledger)). What remains *unattributed* is usage recorded outside the members' meters, chiefly approval and review calls, which run with token metering suspended.
   - **Cancelled calls.** A generation cancelled in flight (by the drain, or by a sibling's limit error) leaves an error event with no usage (`_model.py:1658-1674`), and the provider may still have charged for it. The ledger counts such calls as *unknown*, not zero. This applies to Inspect's sample totals too.
   - **Unpriced models.** Usage with no cost is reported as cost *unknown*.
-- **Claims.** A total is reported as complete realized expenditure only when there are no unknown entries and the unattributed remainder is zero or explained. Otherwise it is reported as a lower bound, with the number of unknown calls. This corrects the measurement contract only; reconciling against provider billing is out of scope.
+- **Claims.** A total is reported as complete realized expenditure only when nothing in the interval went unobserved: no agent loop was cancelled, no model call attempt ended in an error (including retried ones, since an errored attempt may have been billed) or returned without usage, every call was priced (checked per call from its model event), and no `ModelAPI` class with native compaction was loaded in the process, the only sound coverage boundary without an Inspect event for native compaction. Per-member attribution is complete only when, in addition, the unattributed remainder is zero ([swarm-limits.md](swarm-limits.md#the-ledger)). Otherwise each is reported as a lower bound, with the counts that made it one. This corrects the measurement contract only; reconciling against provider billing is out of scope.
 
 The reserve and exhaustion policy, and its limits:
 
-- **Reserve.** The swarm cap sits below the sample's limit by a reserve meant for the final-answer step. Overshoot from calls in flight can consume it, and the number of those calls depends on how much each member and its descendants run concurrently, not on the member count. So the reserve is best-effort.
-  - It becomes a guarantee only when the eval bounds both the number of concurrent calls across every member's tree and the size of each call. For example: plain `react()` members whose tools make no model calls, with output limits set, need headroom of at least the reserve plus one maximum-size call per member.
-  - A member that fans out raises that bound by its own fan-out; a synchronous deepagent is an example.
-  - Without such bounds, nothing about the member count makes finalisation certain.
-- **Exhaustion.** The swarm handles only its own cap. On a `LimitExceededError` whose `source` is the swarm's own node, arriving bare or inside an `ExceptionGroup`, it cancels and drains the remaining members, then finalises. Everything else propagates unchanged:
+- **Reserve.** The swarm cap sits below the sample's limit by a reserve for the stop's overshoot and, after M2, the final-answer step's model calls (M1's `first` makes none); by default the cap is derived from the sample's limit minus 5% ([swarm-limits.md](swarm-limits.md#the-budget-parameter)). Overshoot from calls in flight can consume it, and the number of those calls depends on how much each member and its descendants run concurrently, not on the member count. So the reserve is best-effort.
+  - A call holds a connection slot before it is checked, so after a token or cost cap is reached only calls already holding a slot can add to it. Because the swarm's caps, cost included, see every recorded call before a descendant check can raise, overshoot is therefore bounded by the models' configured maximum connections times the largest call, plus one native compaction per running agent loop ([swarm-limits.md](swarm-limits.md#the-final-step-and-the-reserve)).
+  - The reserve is a guarantee only when it covers that bound. Fan-out inside a member (a synchronous deepagent) is covered, because those calls hold slots too.
+- **Exhaustion.** The swarm handles only its own cap. On a `LimitExceededError` whose `source` is the swarm's own node, arriving bare or inside an `ExceptionGroup`, it stops and drains the remaining members, then finalises. It stops them softly: each member's meter node is lowered to its current usage and a stop gate in its cost-tree half is closed, so members stop at their next call (approval and review calls included) and calls in flight complete and are recorded; members still running after a grace period are cancelled ([swarm-limits.md](swarm-limits.md#stopping)). Everything else propagates, with the swarm's own errors removed from a mixed group so that the runner does not record them as a sample limit:
   - a sample-level limit;
   - a member's own limit already caught by `run()`;
   - `TerminateSampleError`;
   - any other error.
   A group that mixes the swarm's own limit error with anything else propagates too.
-- **Provisional answer.** If an outer limit ends the sample first, there is no final step. The controller therefore keeps a provisional answer current as members submit; for answer-scored tasks it is the current vote or the first verified submission. `as_solver()` copies the agent's output to the task state even when an exception ends the agent (`src/inspect_ai/agent/_as_solver.py:65-80`), so it survives, provided the controller sets it on the `AgentState` object it was passed. A provisional answer exists only once something has been submitted, or verified when the mode requires it. If the sample ends before that, the output is empty and the sample's metadata records that the swarm produced no answer and why. Nothing is invented.
+- **Provisional answer.** If an outer limit ends the sample first, there is no final step. The runtime therefore keeps a provisional answer current as members submit: in M1 the first submission; with the final-answer chain after M2, the controller's chain without `synthesize`, applied to the submissions so far ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)). `as_solver()` copies the agent's output to the task state even when an exception ends the agent (`src/inspect_ai/agent/_as_solver.py:65-80`), so it survives, provided the runtime sets it on the `AgentState` object it was passed. A provisional answer exists only once something has been submitted (after M2, under a strict `leaderless(final="verify")`, once something has been verified). If the sample ends before that, the output is empty and the sample's metadata records that the swarm produced no answer and why. Nothing is invented.
 - **Roles.** Per-member usage is also mapped to model roles where members use different models, so `role_usage` in the log stays meaningful.
 - **Communication volume, as a diagnostic.** Realized totals stay whole-call usage. Inspect reports usage for a whole generation (`src/inspect_ai/core/_model_output.py:13-40`), and one generation's input mixes task instructions, several peers' earlier tool results and cached prefixes, so no measured charge belongs to any one message. Communication is therefore reported separately, and never as a partition of the bill:
   - **Measured:** counts and sizes of messages, notes and posts sent and read, per member and per sender, plus the usage of generations whose tool calls were swarm communication tools.
@@ -502,7 +561,7 @@ The reserve and exhaustion policy, and its limits:
 
 - per-member and total tokens and cost;
 - wall clock;
-- critical-path steps. Kimi's CriticalSteps sums, over stages, the coordinator's steps plus the slowest subagent's. That formula assumes a staged coordinator; a leaderless, asynchronous swarm needs its own definition, for example the longest chain of member steps linked by reads of another member's writes. Settling it is part of M1's metrics work, and latency curves are not interpreted before then;
+- critical-path steps. Kimi's CriticalSteps sums, over stages, the coordinator's steps plus the slowest subagent's. That formula assumes a staged coordinator; a leaderless, asynchronous swarm needs its own definition. M1 uses a simple one: the selected member's steps to its answer, and the largest step count of any member (decision: Ransom, 2026-10-14; M1-11 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m1-pull-requests)). The dependency-linked definition, the longest chain of member steps linked by reads of another member's writes, is later work over the bus's attributed writes and reads, and latency curves are not interpreted before it exists;
 - idle time per member;
 - time each member spends waiting for a model connection, so that a 16-member swarm throttled by `max_connections` is not mistaken for a slow one. Inspect accounts waiting time per sample, counting overlapping waits once (`src/inspect_ai/_util/working.py:95-115`), so per-member waiting needs its own timing;
 - messages, notes, claims and posts per member, and blocked or rewritten communications.
@@ -512,7 +571,7 @@ The reserve and exhaustion policy, and its limits:
 **Analysis.**
 
 - Thin helpers that turn a set of logs from the four arms into comparisons on realized cost, and λ fits.
-- Harness-validity checks scored separately from the task, following Petri, which scores `auditor_failure` and `stuck_in_loops` and tells users to check them "before trusting the target-behavior scores". For a swarm: a member that never acted, members stuck in loops, deadlock or quiescence never reached, and message storms.
+- Harness-validity checks scored separately from the task, following Petri, which scores `auditor_failure` and `stuck_in_loops` and tells users to check them "before trusting the target-behavior scores". For a swarm: a member that never acted, members stuck in loops, deadlock or quiescence never reached, and message storms. Stuck in loops is reported as a signal, not a verdict: each member's longest run of consecutive identical tool calls (same function and arguments), with no threshold fixed until there is data (decision: Ransom, 2026-10-14; M1-10 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m1-pull-requests)).
 - Inspect Scout scanners that label coordination failures (MAST categories, duplicated work, message storms) over swarm transcripts.
 
 ### Results and scoring: a task-owned contract
@@ -522,7 +581,7 @@ Inspect scorers take a `TaskState` and a target, and many inspect or modify the 
 **Answer-scored tasks.** The scorer reads a final answer, for example a FrontierMath-style value or a BrowseComp answer.
 
 - Each member's submission is a stable artifact, so the task's own scorer can score it on a copy of the state carrying that answer.
-- This gives per-member correctness and team@k, which compare directly with best@k and pass@k from epochs.
+- This gives per-member correctness and team@k, which compare directly with best@k and pass@k from epochs. team@k is the best member's result, Test-Time Communication's "any of the k agents"; it selects with the target, as best@k does. The swarm's selected answer (final@k) compares instead with the same final-answer rule applied to k epochs (select@k). [swarm-scoring.md](swarm-scoring.md#comparison-quantities) defines each quantity.
 - Voting additionally needs a task-defined comparable form: a normaliser or equivalence rule, such as the match rules a scorer already applies (`src/inspect_ai/scorer/_match.py:9-45`).
 - Free-form proofs or code have no such form, so `vote` is unavailable for them.
 
@@ -534,15 +593,17 @@ Inspect scorers take a `TaskState` and a target, and many inspect or modify the 
 - Per-member correctness can be claimed only if the task gives each member a stable artifact of its own (its own worktree, branch or output directory) and a way to score it.
 - The comparison with epochs is then team result against best@k or pass@k at equal realized cost. Test-Time Communication draws the same distinction: it compares best-of-member results with a single shared container's result on Terminal-Bench ([Appendix A.6](https://arxiv.org/html/2609.21032v1)).
 
-**What M1 does.** M1's per-member, team@k and voting helpers support answer-scored tasks only. For shared-artifact tasks, M1 reports the team environment score with realized cost. It does not claim that recording member strings makes every coding benchmark comparable to epochs.
+**What M1 does.** M1 adds no scorer. The task's own scorers score the swarm's final answer, or the environment it leaves, as they would after a single agent. M1 records every member's submission. The contract above, per-member scores, team@k and voting are optional work after M2 (decision: Ransom, 2026-10-08). When built, they support per-member claims for answer-scored tasks only, and report the team environment score for shared-artifact tasks. [swarm-scoring.md](swarm-scoring.md) details both: M1's part first, then the contract, the record, the scorers and the comparisons. Recording member strings does not make every coding benchmark comparable to epochs.
 
 ### Controller: topology, termination, final answer
+
+Each topology is a controller: a `@swarm_controller` registry object chosen per arm, such as `leaderless()` ([swarm-api.md](swarm-api.md#controllers)). The controller decides which members start, when, and with what input, when the swarm is done, and which final-answer chain applies. Drain, recovery from the swarm's own cap, verification, the provisional answer and finalisation belong to the swarm's fixed runtime, not to the controller, wherever this document says "the controller" for them ([swarm-api.md](swarm-api.md#controller-and-runtime)).
 
 **Topologies.** Configuration over one runtime, not separate agents:
 
 | Topology | Started by | Typical channels | Ends when |
 |---|---|---|---|
-| Leaderless (M1) | The controller starts all members with the same task | filesystem; later notes and tasks | all members submitted, the budget or time is exhausted, or (optionally) the first answer passes a task-supplied verifier |
+| Leaderless (M1) | The controller starts all members with the same task | filesystem; later notes and tasks | all members submitted, the budget or time is exhausted, or (optionally, after M2) the first answer passes a task-supplied verifier |
 | Coordinator tree (later) | A root member spawns named children, which may spawn their own | messages; later tasks | the root submits |
 | Lead and teammates (later) | A lead with a fixed roster of teammates | messages, tasks | the lead submits |
 
@@ -550,12 +611,12 @@ A deepagent with `background=True` is not reimplemented. It stays a member type 
 
 **Termination.** Always bounded by the swarm budget and the sample's limits.
 
-- Leaderless swarms have no single submitter. In M1 they end when every member has submitted, or on budget, time or a verified answer. With explicit channels they would end by quiescence: every member idle, no open or claimed task, and empty inboxes. Quiescence needs members that can be idle and woken, so it depends on the persistent-members work ([Members](#members)).
-- Every run records why it stopped, as one of a fixed set of reasons: all submitted, verified answer, swarm cap, sample limit, time, quiescence. Strands and AutoGen report stop reasons the same way, and AutoGen's termination conditions compose with `&` and `|`. Later topologies may compose conditions the same way.
+- Leaderless swarms have no single submitter. In M1 they end when every member has submitted, or on budget or time; after M2, also on a verified answer. With explicit channels they would end by quiescence: every member idle, no open or claimed task, and empty inboxes. Quiescence needs members that can be idle and woken, so it depends on the persistent-members work ([Members](#members)).
+- Every run records why it stopped, as one of a fixed set of reasons: every member ended, verified answer, swarm cap, sample limit, time, quiescence ([swarm-limits.md](swarm-limits.md#stopping) names them). Strands and AutoGen report stop reasons the same way, and AutoGen's termination conditions compose with `&` and `|`. Later topologies may compose conditions the same way.
 - Quiescence, when explicit channels exist, can follow SCHEME's pattern: a shared status registry with `wait` and `done`, where a `wait` returns immediately once every other member is done. AG2's passive `max_silence` expectations are a related signal.
 - On termination the controller cancels and awaits the remaining members and their descendants (drain, within the [ownership boundary](#members)). It does not abandon them, so nothing edits the shared environment during finalisation and their usage is in the ledger before the sample is scored.
 
-**Final answer.** For shared-artifact tasks, the final result is the environment as the drained swarm leaves it. A later topology could add an integration member that runs last. For answer-scored tasks, `final=` selects one of:
+**Final answer.** For shared-artifact tasks, the final result is the environment as the drained swarm leaves it. A later topology could add an integration member that runs last. For answer-scored tasks, the controller's `final=` parameter selects one of:
 
 - `reporter`: the coordinator's or a designated member's submission.
 - `vote`: plurality over member submissions, using the task's comparable answer form. Unavailable when the task has none.
@@ -563,10 +624,14 @@ A deepagent with `background=True` is not reimplemented. It stays a member type 
 - `verify`: the first or best submission that a task-supplied verifier tool accepts. The verifier must be the task's in-loop checker, never the scorer's target.
 - `synthesize`: one extra model call over the member submissions and shared notes.
 
+M1 builds `first` only (decision: Ransom, 2026-10-08). The other modes and the default chain below are optional work after M2 ([swarm-scoring.md](swarm-scoring.md#part-2-after-m2-optional)).
+
 The defaults:
 
 - coordinator topologies: `reporter`;
 - leaderless swarms: `verify` when the task supplies a verifier, otherwise `vote` when the task defines a comparable answer form, otherwise `first` (decision: Ransom, 2026-10-07).
+
+The default is a chain that falls through: when nothing verifies the swarm votes, and when nothing can vote it takes the first submission. A single mode, such as `leaderless(final="verify")`, is strict. [swarm-scoring.md](swarm-scoring.md#the-final-answer-chain) specifies each mode, `synthesize` and the verifier.
 
 The leaderless default matches how leaderless swarms succeed in practice: the C compiler's oracle, Test-Time Communication's dense verifier. Voting means nothing without a comparable answer form. Every member's own submission is recorded regardless, so the effect of the final step can be measured separately.
 
@@ -575,10 +640,12 @@ The leaderless default matches how leaderless swarms succeed in practice: the C 
 | Part | Lives in | Why |
 |---|---|---|
 | `swarm()`, controller, members, budget, bus, channels, evidence, metrics, scorers, prompts, Scout scanners | inspect_swarm | Fast iteration; the runtime is opinionated and experimental. |
-| Notifying members and delivering peer messages | inspect_swarm, on inspect_ai's private channel internals where needed (M2) | Content is tool output from swarm tools, which needs nothing from inspect_ai. The metadata-only notice reaches a member at a turn boundary through its channel, or an `on_continue`-style injection as deepagent does. The open parts are: the [binder](#the-agent-channel), how the bus obtains each member's ref; and whether the notice is a dedicated channel item, which `react()` would need to render (an inspect_ai behaviour change), or a marked message. M2's design decides both, alongside ACP's first-binder-wins rule. Public exports are a later clean-up, not a prerequisite. |
+| Registry types `swarm_controller` and `swarm_channel` | inspect_ai, before M1 (decision: Ransom, 2026-10-08) | `RegistryType` is a closed literal; scout and sentinel added their types the same way ([swarm-api.md](swarm-api.md#resolving-names)). |
+| Notifying members (M2) and delivering peer messages (later) | inspect_swarm, no inspect_ai change | Content is tool output from swarm tools. The metadata-only notice is a marked message appended by a swarm `on_continue` hook, as deepagent does; the swarm never posts into members' agent channels ([swarm-communication.md](swarm-communication.md)). After M2, optional urgent messages need an inspect_ai `Steer` agent-channel item whose recovery does not wait for an operator ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)). |
 | Clean re-entry of `react()` on an existing state (no second system prompt), or an idle state | inspect_ai (coordinator topologies), optional | Persistent members; the alternative is a `submit=False` member protocol inside inspect_swarm. |
-| A scoped owner for `background()` work, so a swarm can own and drain a member's descendants | inspect_ai, when background deepagent members are needed | Today `background()` attaches to the sample's task group; without an owner the swarm cannot drain `deepagent(background=True)` members. |
+| A scoped owner for `background()` work, so a swarm can own and drain a member's descendants | inspect_ai, M2 | Today `background()` attaches to the sample's task group; without an owner the swarm cannot drain `deepagent(background=True)` members. |
 | `span(..., metadata=)` and per-span usage in the log, including native compaction usage (for example on `CompactionEvent`) | inspect_ai, nice to have | Member identity and complete per-member cost without side records or an unattributed remainder. |
+| A tool-state scope, so each member's `memory()`, `bash_session()`, `web_browser()` and skill state is its own | inspect_ai, before M1 (decision: Ransom, 2026-10-09; [open question 2](#open-questions)) | Built-in tools resolve their default instance inside the tool; the swarm cannot reach it ([Members](#members)). |
 | Correct `StoreEvent` attribution under concurrent spans | inspect_ai, bug-class | Affects any concurrent agents, not only swarms. |
 | A first-class inter-agent message event, if one is wanted | inspect_ai, [open question 1](#open-questions) | Shared by native swarms and bridged Codex `agent_message` traffic; a schema change. |
 | Turning on and mapping Codex multi-agent v2 and Claude Code agent teams | inspect_swe | Agent-specific configuration and event reconstruction already live there. |
@@ -671,7 +738,7 @@ All sources below were opened on 2026-10-07 unless marked *unverified*.
 | Strands Swarm, CrewAI, CAMEL, MetaGPT | Templated user input or task prompts. Strands has handoff and iteration caps plus optional repetitive-handoff detection; MetaGPT has a budget (`NoMoneyException`) and an all-idle stop. | Turn caps are the norm and are coarse; the swarm's budget is the primary stop. |
 | [mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail) | Tool output (`fetch_inbox`), prompted by a rate-limited reminder hook that carries only counts and fixed text (`scripts/hooks/check_inbox.sh`). Advisory file reservations with TTLs that report conflicts. | Direct precedent for tool-output delivery with metadata-only notices, and for leases that report conflicts. |
 | [Gas Town](https://github.com/gastownhall/gastown) | Mail bodies are read through `gt mail` (tool output). Its injected reminder lists each message's id, sender and **subject** (`internal/cmd/mail_check.go`, `formatInjectOutput`). Per-role mail budgets. | Bodies through tools, but its notice puts a sender-written subject in context, which inspect_swarm's notice contract excludes. Mail budgets as a norm. |
-| Letta | Shared memory blocks: insert is concurrency-safe, replace fails if the text changed, rethink is last-writer-wins. Peer messages arrive as a system-role notice (rendering *unverified*). | Explicit concurrency rules for shared state ([Substrate](#substrate)). |
+| Letta | Shared memory blocks: insert is concurrency-safe, replace fails if the text changed, rethink is last-writer-wins. Peer messages arrive as a system-role notice (rendering *unverified*). | Explicit concurrency rules for shared state ([Channels](#channels)). |
 
 Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 multi-agent mode (4 or 16 agents with a leader that synthesises; internal agent communication undocumented) are orchestrator-and-workers systems, like the vendor swarms above; their internals are *unverified*.
 
@@ -679,7 +746,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 
 ## Alternatives considered
 
-**Build `swarm()` inside inspect_ai.** This is the earlier RFC's placement.
+**Build `swarm()` inside inspect_ai.**
 
 - It would make channel items and persistent members easy, but couple an experimental, opinionated runtime to inspect_ai's release and compatibility bar.
 - The co-development setup (inspect_swarm tracks inspect_ai `main`) lets us move only the extension points into inspect_ai, as they prove necessary.
@@ -711,7 +778,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 - It is built around scheduled activation, where the scheduler decides who runs and messages do not wake agents. The swarms this design targets have continuously active members that wake each other.
 - It forks `react()`, so its members diverge from `react()` instead of tracking it. Its private inspect_ai imports are not a reason on their own, since inspect_swarm may use internals too.
 - It schedules with raw asyncio, where this repository runs on both anyio backends.
-- Its Python floor (3.11) matches inspect_swarm's, so that is no longer a difference.
+- Its Python floor (3.11) matches inspect_swarm's.
 - It is security-first, while the first users here are capability-scaling experiments that need realized-cost accounting and the result contract above.
 - Rejected as the substrate; aligned with instead.
 
@@ -719,7 +786,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 
 - Simplest to build. Every provider renders it, and it is what Codex's own swarm does.
 - It puts another model's output in the most trusted role (user), or makes it look like the recipient's own words (assistant). LangGraph's documentation warns that relaying full histories confuses the receiving agent.
-- Rejected (decision: Ransom, 2026-10-07) in favour of tool output with fencing and metadata-only notices ([Delivery](#delivery-peer-messages-are-model-output)).
+- Rejected as the default (decision: Ransom, 2026-10-07) in favour of tool output with fencing and metadata-only notices ([Delivery](#delivery-peer-messages-are-model-output)). The user-role form with fenced bodies is offered after M2 as an opt-in experimental arm (decision: Ransom, 2026-10-09).
 
 **A scheduler that activates agents in turns, as the default** (ORBIT, Concordia's sequential engine, Terrarium, AgentsNet's synchronous rounds).
 
@@ -732,6 +799,18 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 - Sees everything a member reads.
 - Filters below Inspect's cache lookup force response caching off (ORBIT's defense wrapper refuses it), every wrapper couples to model internals, and it cannot tell a peer message from any other input.
 - Rejected in favour of a bus chokepoint plus sentinel's tool stages.
+
+**Isolate the whole sample store per member**, as `subtask()` does, by giving each member task its own `Store`.
+
+- Separates every kind of state, custom tools' included, with no inspect_ai change.
+- It also separates what must be shared. Tasks that keep their environment in the store (AgentDojo, tau2) would see each member change its own copy, and their scorers would read none of it. Sentinel's dispatcher reads `store()`, so protocols would lose their joint view of the swarm. Seeding each member's store from the sample's, and merging back afterwards, has no right answer when two members changed the same key.
+- Rejected in favour of a scope that separates only the state tools mark as agent-private ([Members](#members)).
+
+**Refuse shared store-backed tools at construction** instead of scoping them (option (b) of [open question 2](#open-questions); rejected, decision: Ransom, 2026-10-09).
+
+- No inspect_ai change. `swarm()` can see the tools a registered agent was built with (for `react(tools=[...])` they are in its registry params with any explicit `instance`) and `deepagent()`'s `memory` flag. It would refuse two members holding the same store-backed tool with the default instance, and any such tool in a member with `count > 1`.
+- It refuses the most common configuration, `member(deepagent(...), count=4)`, because deepagent adds `memory()` by default. The fixes are `deepagent(memory=False)` or a separate member record per copy, each with its own `memory(instance=...)`. It cannot see tools a builder creates inside its invocation, a `ToolSource`'s tools or a bridged member's.
+- Rejected in favour of the tool-state scope (decision: Ransom, 2026-10-09). A warning instead of a refusal (option (c)) would fire on that common configuration every time and be ignored; also rejected.
 
 **A new event type from day one.**
 
@@ -747,9 +826,11 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
   - It must run on both anyio backends, which rules out raw `asyncio` primitives in the runtime.
 - **Eval logs.** M1 writes only existing event types (spans, tool and model events, `InfoEvent`s) plus store and metadata entries. Old viewers and readers see a swarm log as an ordinary log with concurrent agent spans. The `InfoEvent` payload carries a `version` field so later readers can tell formats apart.
 - **inspect_ai extension points**, where behaviour needs them, are additive:
-  - possibly a binder hook (M2's design decides);
+  - the `swarm_controller` and `swarm_channel` registry types, two entries in a literal that is not part of the log schema ([swarm-api.md](swarm-api.md#compatibility-and-migration));
+  - no binder hook: communication needs no inspect_ai change ([swarm-communication.md](swarm-communication.md)); M2's one inspect_ai change is the scoped owner for `background()` ([Members](#members));
+  - the tool-state scope (decision: Ransom, 2026-10-09; [open question 2](#open-questions)) changes nothing outside a scope. Inside one, a built-in tool's store keys gain the member's name (`MemoryStore:w-1:files` rather than `MemoryStore:files`), in a swarm of one too, so a scorer or analysis that reads a built-in tool's state from the store must use the scoped key. In inspect_evals one task does: gdm_self_proliferation's sp01 and sp05 scorers read the default-instance `web_browser()` state (`inspect_evals: src/inspect_evals/gdm_self_proliferation/custom_scorers/sp01.py:45`, `sp05.py:45`). In a scoped swarm they find no browser state; without the scope they would read whichever member used the shared browser last. Neither is a meaningful score for a swarm, so M1 documents tasks whose scorers read a member's tool state as unsupported. The converse is unsupported too: tasks whose setup prepares built-in tool state at the default instance for the agent to continue from ([Members](#members)). gdm_self_proliferation's `init_browser()` setup solver runs before the agent (`gdm_self_proliferation.py:215`) and drives the default browser (`custom_solvers.py:96`) for milestones with `web_browser_setup`, among them sp01's and sp08's download milestone (`data/sp08/subtasks.json:22`). sp08 is scored on the downloaded files (`custom_scorers/sp08.py:75-95`), not on browser state, yet its members would start from a fresh browser rather than the prepared page. The guarantee M1 gives is that task and environment state in the store stays shared; tool state a setup solver prepared is not carried into member scopes;
   - extending the `source` literal changes the log schema and the generated TypeScript types, so it goes through inspect_ai's type-generation pipeline and a ts-mono PR;
-  - a new `source` value is additive for new writers, but readers whose literal still has only `input`, `generate` and `operator` would reject logs containing it. M2's detailed design must either state the minimum reader version or carry the swarm notice's provenance in message `metadata`. The second avoids version skew and is preferred unless the viewer needs the distinction. Peer content itself needs neither, because it is tool output ([Delivery](#delivery-peer-messages-are-model-output)).
+  - a new `source` value is additive for new writers, but readers whose literal still has only `input`, `generate` and `operator` would reject logs containing it. M2's detailed design must either state the minimum reader version or carry the swarm notice's provenance in message `metadata`. The second avoids version skew and is preferred unless the viewer needs the distinction; [swarm-communication.md](swarm-communication.md#evidence-and-provenance) chose it. Peer content itself needs neither, because it is tool output ([Delivery](#delivery-peer-messages-are-model-output)).
 - **A new event type**, if one is proposed ([open question 1](#open-questions)), is the largest change: the event union, schema, ts-mono types, viewer renderer, dataframes and Scout's event handling. M1 uses existing event types; whether and when to add a new event type remains open.
 - **inspect_swe** changes are additive options on the Codex and Claude Code agents.
 - **Vendor traffic visibility.** Evidence for vendor swarms is limited by what the bridge sees.
@@ -762,7 +843,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 Untrusted input reaches this code from several directions.
 
 - **Peer messages are model output** and may be adversarial: a compromised member, or ordinary prompt injection relayed from a web page.
-  - They reach a member only as tool output, never in the user role (decision: Ransom, 2026-10-07). Notices carry metadata only, with no peer-chosen strings ([Delivery](#delivery-peer-messages-are-model-output)). Claude Code teams take the same stance: an agent message is never user consent.
+  - They reach a member only as tool output, never in the user role (decision: Ransom, 2026-10-07), unless an arm opts into injection after M2 (decision: Ransom, 2026-10-09), which deliberately measures that weaker boundary ([swarm-communication.md](swarm-communication.md#security)). Notices carry metadata only, with no peer-chosen strings ([Delivery](#delivery-peer-messages-are-model-output)). Claude Code teams take the same stance: an agent message is never user consent.
   - Approval and sentinel decisions are never taken from message content.
   - The `synthesize` final-answer mode is the one place peer text enters a prompt the harness composes. It quotes member submissions as delimited data in a separate model call, not in any member's context. That is a weaker boundary, so `synthesize` is never the default.
 - **Message volume.** Storm controls (rate, deduplication, inbox and size caps) bound how much one member can push into others' contexts and into the log.
@@ -771,6 +852,12 @@ Untrusted input reaches this code from several directions.
   - Containment probes are an eval in their own right, not a property the library can promise.
   - Samples must not share sandboxes. Isolation between samples is Inspect's sandbox's job, and nothing here weakens it.
   - **Observation limit.** Tool calls are evidence of possible filesystem communication, not a complete audit. Processes a member starts in the sandbox can read, write or exchange files between logged tool calls, and after the member has ended. Experiments that attribute communication to the filesystem must state this limit, or add independent instrumentation such as filesystem snapshots or audit logs in the sandbox.
+- **Tool state in the sample store** is another channel outside the bus, and an easier one to create by accident than the filesystem: `react(tools=[memory()])` on every member, or `deepagent()` with its default memory, would give all members one memory ([The sample store](#the-sample-store)).
+  - The tool-state scope removes the accidental case for the built-in tools: each member's state is its own unless the eval author names a shared instance ([Members](#members)).
+  - **A deliberately shared instance is a channel**, treated like the filesystem: observed, not monitored. Members' uses of it are tool calls, recorded as `ToolEvent`s and seen by sentinel's tool stages for native members, but the bus does not see them, so storm controls, the policy hook and evidence records do not apply. An explicit instance is visible in the member's logged parameters when the tool is (`react(tools=[...])`), not when a builder creates it inside its invocation. `StoreEvent`s are not evidence of who wrote what, because they are misattributed under concurrent spans ([Transcript and events](#transcript-and-events)).
+  - **The same observation limit applies.** Tool calls are evidence of possible communication, not an audit: a command one member starts in a shared `bash_session()` keeps writing output that another member reads later.
+  - M2 routes a shared memory through the bus, as a channel whose writes are records, with evidence and the policy hook ([Channels](#channels)). A shared instance outside that channel stays observed only, so an arm meant to have bus channels as its only channel uses no shared instance.
+  - What the scope does not cover stays shared: environment state a task keeps in the store, which members can use to signal each other as they can through the sandbox, and custom tools that keep private state with the default instance.
 - **Red-team features** (forged senders, injected records, secret channels) are optional and may never be built. If they are, they create adversarial content deliberately, so they must be configured only by the eval author, recorded in the evidence events with their true origin, and never reachable from member tools.
 - **Log contents.** Evidence payloads are model text. They are written as JSON data in `InfoEvent`s, not as Markdown, so the viewer does not render them as formatted content.
 - **Bridged members** run in the sandbox. The swarm's tools reach them through `bridged_tools`, which execute host-side only for calls the model proposed (`bridge.py:141-146`). Today sentinels do not see bridged agents' tool calls, so a swarm of bridged members gets bus-level interception but not tool-level monitoring until that gap is closed.
@@ -783,16 +870,17 @@ Untrusted input reaches this code from several directions.
   - the ledger records realized usage including overshoot from concurrent in-flight calls, finalisation and drained members, and differs from the cap when it should;
   - a synchronous deepagent member fanning out to parallel subagent calls overshoots the cap by its fan-out, and the reserve is reported as best-effort;
   - response-cache replays are counted as replays and charged zero;
-  - native compaction usage appears as unattributed and agrees with the sample totals;
+  - native compaction usage is attributed to the member through its meter node, and the ledger reconciles with the sample totals;
   - calls cancelled in flight are counted as unknown, and the total is then reported as a lower bound;
-  - zero submissions, and zero verified submissions, leave an empty output with the reason recorded;
+  - zero submissions leave an empty output with the reason recorded (after M2, so do zero verified submissions under a strict `leaderless(final="verify")`);
   - the controller recovers its own cap's exhaustion both as an `ExceptionGroup` and as a lone `LimitExceededError` (which `collect()` unwraps);
   - sample-level limits, `TerminateSampleError`, other errors and mixed groups propagate unchanged;
   - an outer limit that trips before the reserve is used leaves the provisional answer as the output;
   - drain cancels and awaits members;
-  - `deepagent(background=True)` members are rejected while background ownership is unsupported;
-  - answer-scored tasks get per-member and team@k scores, voting refuses tasks without a comparable answer form, and shared-artifact tasks report a team score with per-member correctness marked unavailable;
-  - each final-answer mode selects as specified;
+  - per-member tool state, across the four tools: two members with `memory()`, and the copies of `member(deepagent(...), count=2)`, cannot read each other's memory files; two members given `memory(instance="team")` can; a deepagent member's `readwrite` subagent reads its parent's memory; two deepagent members' `general` subagents each see only their own installed skills; two members' `bash_session()` and `web_browser()` get separate session ids (with the sandbox RPC stubbed, so no Docker); setup state: a store value a setup solver wrote is visible to every member and to the scorer, and a member's change to it is visible to the others, while default-instance `memory()` files a setup solver wrote are not visible to members (the documented restriction);
+  - `deepagent(background=True)` and `deepagent(background=64)` members are rejected while background ownership is unsupported;
+  - the task's own scorer scores the swarm's final answer, or for a shared-artifact task the drained environment, unchanged (per-member scores, team@k and voting are tested with that work, after M2);
+  - `first` selects the earliest submission (after M2, each further final-answer mode selects as specified);
   - every member's submission is recorded;
   - evidence events are written with the right ids, including causation ids;
   - storm controls and monitor verdicts (`continue`, `modify`, `reject`) behave as specified, and a full inbox reaches the sender as a tool error;
@@ -815,56 +903,22 @@ The plan fixes only the first two milestones: M1, then M2. After that, the remai
 - the order is left open to feedback from users, external ones included, as the library is built;
 - there is no internal experiment or evidence gate between milestones.
 
-Each milestone is a small series of PRs, and the project convention applies: discuss and review after each one, and do not start the next automatically.
+The milestones are defined by their audiences (decision: Ransom, 2026-10-13). [swarm-implementation-plan.md](swarm-implementation-plan.md) is the plan: it breaks each milestone into pull requests, in this repository and in inspect_ai, with their dependencies, which can be built in parallel, and the design sections each implements. Each pull request is reviewed before the next that depends on it starts, as the project convention requires.
 
-**M0. This design.** Feedback from Ransom.
+**M1. Ready for first internal usage.** The leaderless filesystem swarm with full accounting: the API skeleton of [swarm-api.md](swarm-api.md) with the built-ins `leaderless` and `filesystem`; members whose work stays inside their invocation, with background members rejected; the shared-sandbox default and its filesystem convention; per-member tool state; the cap, member limits, soft stop, recovery from the swarm's own cap, the ledger and splits ([swarm-limits.md](swarm-limits.md#implementation-plan)); drain; the final answer `first` with every member's submission recorded ([swarm-scoring.md](swarm-scoring.md#part-1-m1)); `InfoEvent` evidence, a timeline per member, metrics, harness-validity checks and a simple critical path (the steps to the answer and the longest member's step count; decision: Ransom, 2026-10-14); thin analysis helpers. It first needs a `chore:` PR moving the scaffold to Python 3.11 ([Compatibility](#compatibility-and-migration)) and two small inspect_ai PRs: the `swarm_controller` and `swarm_channel` registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09, [open question 2](#open-questions)). It also takes two small items from [swarm-lean-open-problems.md](swarm-lean-open-problems.md#recommended-changes-to-our-designs): an `unsubmitted` status, so `first` never selects a `react()` member that returned after refusals or a context overflow, and the rejection of an integer `background` ([swarm-implementation-plan.md](swarm-implementation-plan.md#where-the-deep-dives-milestone-items-land)).
 
-**Before M1: scaffold to Python 3.11.** A separate `chore:` PR moves `AGENTS.md`, `pyproject.toml`, `CONTRIBUTING.md` and the CI matrix from 3.10 to 3.11 ([Compatibility](#compatibility-and-migration)).
+**M2. Ready for external usage.** What an external team needs to port its agent-swarm experiment and gain from it, with Epoch's LeanOpenProblems swarm as the test: per-member sandboxes; background deepagent members, through an inspect_ai PR giving `background()` a scoped owner ([Members](#members)); custom limits that end only the member; budget visibility for members; gate-check metrics; a shared-memory channel through the bus, and the bus it needs ([swarm-communication.md](swarm-communication.md)); user docs, examples, an API statement and a first release. Direct messages and scoring beyond `first` ([swarm-scoring.md](swarm-scoring.md#part-2-after-m2-optional)) are later work (decision: Ransom, 2026-10-14; [swarm-implementation-plan.md](swarm-implementation-plan.md#decisions)).
 
-**M1. Leaderless filesystem swarm with full accounting** (inspect_swarm only; no inspect_ai changes).
-- `swarm()` with leaderless topology over members whose work stays inside their invocation (`react()`, synchronous `deepagent()`, bridged agents). Background deepagent members are rejected.
-- The shared-sandbox default and its filesystem prompt convention: shared directory, append-only notes file, per-member scratch directories or worktrees ([Sandbox topology](#sandbox-topology)).
-- A swarm cap node, member limits, a final-answer reserve, and a provisional answer.
-- Recovery from its own cap only.
-- A realized-cost ledger taken after the drain, with its coverage rules: arm totals from sample usage; member attribution from events, with cache replays charged zero; unattributed native compaction; cancelled and unpriced calls reported as unknown.
-- Drain on termination.
-- Final-answer modes `vote`, `first`, `verify` and `synthesize`, with the decided leaderless default.
-- Per-member submissions recorded.
-- Evidence and metrics written to `InfoEvent`s, store and metadata; a named timeline per member; a recorded stop reason.
-- Harness-validity checks (a member that never acted, loops, deadlock) reported separately from the task score.
-- A definition of critical path for leaderless swarms.
-- The task result contract: answer-scored tasks get per-member and team@k scorers; shared-artifact tasks get a team score only.
-- Thin analysis helpers for realized-cost comparison and λ fits, for users running scaling experiments.
-- Files: `src/inspect_swarm/_swarm.py`, `_member.py`, `_budget.py`, `_final.py`, `_metrics.py`, `_evidence.py`, `scorer/`, `tests/`.
+**Later work, in any order or in part.** [swarm-implementation-plan.md](swarm-implementation-plan.md#future-work) lists the items. The real dependencies between them are noted here so that whichever is picked first is not blocked unexpectedly:
 
-**M2. The bus and direct messages.**
-- `deliver()` with storm controls (including back-pressure to the sender) and evidence kinds `sent`, `delivered`, `read`, `notified` and `exposed`, with causation ids.
-- Fenced, text-only read tools, with sender identity bound at the bus ([Delivery](#delivery-peer-messages-are-model-output)).
-- Monitoring through inspect_sentinel: its protocols directly if its dispatcher is on inspect_ai `main` by then; otherwise the minimal hook in its action vocabulary ([The bus](#the-bus-one-interception-point)).
-- `send_message`, `read_messages` and `list_members`, with delivery modes `poll` and `notify`. Content is delivered as tool output, and notices are metadata-only ([Delivery](#delivery-peer-messages-are-model-output)).
-- Notices through inspect_ai's private channel internals, or an `on_continue`-style injection; M2's design picks one.
-- M2's design settles the binder: how the bus obtains each member's ref, and whether that needs a small inspect_ai hook for behaviour. Public exports are a later clean-up.
-
-**Later work, in any order or in part.** The real dependencies between items are noted so that whichever is picked first is not blocked unexpectedly.
-
-- **Structured channels.** Notes/fact log, task list with claims and leases, and board with subscriptions; each can be built alone. [Substrate](#substrate) says what each adds over the filesystem convention.
-  - Each needs M2's bus.
-  - Quiescence-based termination needs the persistent members below.
-- **Coordinator topologies and persistent members.**
-  - Coordinator tree with path addressing; lead and teammates; idle and wake; `followup_task`-style waking.
-  - Either the `submit=False` member protocol or an inspect_ai PR for clean `react()` re-entry ([Members](#members)).
-  - Needs M2's messages.
-- **Background deepagents as members.** An inspect_ai PR giving `background()` a scoped owner. Independent of the rest.
-- **Bridged swarms.**
-  - inspect_swe options to enable Codex multi-agent v2 and Claude Code agent teams.
-  - Mapping their traffic into the same evidence records, after measuring what each vendor's traffic exposes (encrypted Codex messages, Claude Code mailbox files), with unknown fields kept unknown.
-  - Bridged agents as native members via `bridged_tools`, which needs M2 for anything beyond the filesystem.
-- **Safety and security hooks.**
-  - Roles as data; per-member prompt, model and tool overrides for compromised members.
-  - Joint-monitor helpers on sentinel.
-  - An optional scheduled (turn-based) execution mode: a turn seam and an activation-policy interface ([swarm-orbit.md](swarm-orbit.md#p4-the-turn-seam-and-activation-policies-scheduled-mode-item)).
-- **Optional, unscheduled: red-team features.** Injection with forged or hidden senders, secret channels, and injection into a specific member. They may never be built; they need M2's bus.
-- **Optional, if needed: other sandbox topologies.** A sandbox per member, or partial isolation ([Sandbox topology](#sandbox-topology)).
+- **Structured channels** (notes or fact log, task list, board; [Channels](#channels)) and **direct messages** need M2's bus. Quiescence-based termination needs persistent members.
+- **Coordinator topologies and persistent members** need either the `submit=False` member protocol or an inspect_ai PR for clean `react()` re-entry ([Members](#members)), and a channel that can wake a member.
+- **Bridged swarms** need inspect_swe options for Codex multi-agent v2 and Claude Code agent teams, and measurement of what each vendor's traffic exposes before it is mapped into evidence; bridged members on bus channels need `bridged_tools` for those channels.
+- **Push delivery** needs a bus channel with notices; urgent messages and nested notices also need the inspect_ai `Steer` PR ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)).
+- **Scoring beyond `first`** starts with the result contract; the final-answer chain, `synthesize`, per-member scores, `baseline()` and the analysis helper build on it, and `synthesize` reuses the bus's fencing ([swarm-scoring.md](swarm-scoring.md#part-2-after-m2-optional)). The `best_at(k)` reducer needs none of it. Per-member sandboxes in the scoring contract also need a design for routing the task's scorer to the selected member's sandbox.
+- **The dependency-linked critical path** needs the bus's attributed writes and reads.
+- **Users isolation in one sandbox** needs its inspect_ai and inspect_swe PRs ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#implementation-plan)).
+- **Red-team features** (optional, unscheduled, may never be built) need the bus.
 
 ## Open questions
 
@@ -875,11 +929,22 @@ Each milestone is a small series of PRs, and the project convention applies: dis
 
    Recommendation: (a). The shape should be settled with bridged traffic in view, and the schema change is costly.
 
+2. **How the swarm keeps members' tool state apart** (decided 2026-10-09, below). Built-in tools share their store state between agents in a sample unless each has its own `instance`, and `deepagent()` adds a shared `memory()` by default ([The sample store](#the-sample-store)).
+   - (a) A tool-state scope in inspect_ai: the runtime scopes each member, built-in tools resolve their default instance to it, and deepagent's own child skill instances are made private to it ([Members](#members)). Costs a small inspect_ai PR before M1; covers deepagent's memory and skills and `count` copies; custom tools can opt in. Tool state a setup solver prepares at the default instance does not reach members, a documented M1 restriction.
+   - (b) No inspect_ai change: `swarm()` refuses members whose visible store-backed tools would be shared. Refuses `member(deepagent(...), count=4)` unless `memory=False`, and cannot see tools built inside a builder ([Alternatives](#alternatives-considered)).
+   - (c) Document the hazard and warn at construction. Leaves the common configuration sharing a memory nobody asked for.
+
+   Recommendation: (a). A member should behave as the same agent alone, and the common configuration should not need a workaround. If the inspect_ai PR is not wanted, (b).
+
+   Decided: (a), the recommendation (decision: Ransom, 2026-10-09). The tool-state scope PR is an unconditional inspect_ai step before M1 ([Where each part lives](#where-each-part-lives), [Implementation plan](#implementation-plan)). (b) and (c) are rejected ([Alternatives](#alternatives-considered)).
+
 ## Not this design
 
 Adjacent problems noticed and left out, for Ransom to file if wanted:
 
 - **`StoreEvent` attribution under concurrent spans** (inspect_ai). Store diffs are taken at span entry and exit, so with concurrent agents one span's event can include another's writes. This affects deepagent background subagents today.
+- **Tool-state scopes outside swarms** (inspect_ai). Other code that runs several independent agents in one sample could use the same scope; this design proposes it for members only.
+- **Copying the chosen member's tool state to the unscoped keys** at finalisation, so scorers that read a built-in tool's state (gdm_self_proliferation's) see the state of the member whose answer was chosen. It would make a swarm of one match a plain agent there too; it depends on inspect_ai's store key format.
 - **Per-span or per-agent usage in the eval log** (inspect_ai). Today only per-model and per-role usage is stored.
 - **`span(..., metadata=)`** (inspect_ai). Would let member identity and roles be stamped on spans instead of carried in names.
 - **Sentinels for bridged agents' tool calls** (inspect_sentinel, already a known gap in its workstreams).
