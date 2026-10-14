@@ -317,6 +317,7 @@ async def _bridge_generate(model: Model, compaction: _GenerateCompaction) -> Non
         [],
         None,
         GenerateConfig(),
+        requested_model=None,
     )
 
 
