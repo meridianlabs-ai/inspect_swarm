@@ -83,7 +83,7 @@ inspect_ai already has a second principal in a sandbox, documented in `design/sa
 
 Spike: in an Inspect eval with two users created as root, `bash(user="swarm-w1")` ran as `uid=1000(swarm-w1)` with `HOME=/scratch/w1` and cwd `/`; `bash_session(user="swarm-w1")` ran as `swarm-w1`; `text_editor(user="swarm-w2")` created a file owned by `swarm-w2` and was refused a peer's private file with `Permission denied` *(spike)*.
 
-Every one of these takes its user when the tool is **constructed**. A swarm member's agent is built for that member, but from its record's factory and arguments, which are the same for every copy of the record; the factory is not told which member it builds, and a tool passed in the arguments is one object for every copy and sample (swarm-api.md, [the member contract](swarm-api.md#the-member-contract)). So a tool cannot be built with a per-member user.
+Every one of these takes its user when the tool is **constructed**. A swarm member's agent is built in the member's own task, inside its scopes (swarm-api.md, [the member contract](swarm-api.md#the-member-contract)), so a builder that constructs its own tools could read the member's context and pass its user. That does not cover the tools that matter most: a tool passed in a record's arguments is one object for every copy and sample, deepagent's subagent tools and inspect_swe's install steps are built by library code that takes no user from the eval author, and a constructor argument cannot enforce the user the swarm chose. So the user has to reach tools at call time.
 
 ### How `sandbox()` resolves
 
@@ -242,7 +242,7 @@ Setup takes one exec for the script, one for the uid scan, and two per member fo
 
 ### Members' commands run as their users
 
-The member's tools are built from arguments that every copy of the record shares, or passed in as shared objects, so the user has to reach them at call time. The swarm cannot do that from outside without private, fragile code ([Alternatives](#alternatives-considered)), so this design asks inspect_ai for a scope, like the tool-state scope swarm.md already relies on ([Members](swarm.md#members)), as a small, general inspect_ai PR before this work (decision: Ransom, 2026-10-13):
+Tools passed in a member's arguments are shared objects, and library code builds others with no user, so the user has to reach them at call time; a builder's own tools can also read it, but the scope is what enforces it. The swarm cannot do that from outside without private, fragile code ([Alternatives](#alternatives-considered)), so this design asks inspect_ai for a scope, like the tool-state scope swarm.md already relies on ([Members](swarm.md#members)), as a small, general inspect_ai PR before this work (decision: Ransom, 2026-10-13):
 
 ```python
 # inspect_ai/util/_sandbox/identity.py, exported from inspect_ai.util
@@ -424,7 +424,7 @@ The cheapest rung that removes most of the remaining channels is Landlock where 
 **Make the swarm build per-member tools** (a member builder that takes a user, with `bash(user=...)` per member).
 
 - No inspect_ai change for native tools.
-- The member contract builds each copy from the same factory and arguments, so each copy would need its own record to get its own user; it does not reach deepagent's subagents' tools, inspect_swe's install steps, or tools a builder creates inside its invocation.
+- A builder runs in the member's task and could read its user from the member's context, but tools passed in a record's arguments are shared by every copy, and a builder's choice does not reach deepagent's subagents' tools or inspect_swe's install steps, nor stop other code from running as another user.
 - Rejected for the same reason the tool-state scope was chosen over refusing shared tools (swarm.md, [Alternatives](swarm.md#alternatives-considered)): the common configuration should not need a workaround.
 
 **Apply the identity in `SandboxEnvironment.exec()` itself** (every exec with no user inside a scope runs as the member).
