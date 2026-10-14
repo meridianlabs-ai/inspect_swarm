@@ -488,9 +488,9 @@ Cases that might need them, none committed:
      - a progress-aware stall counter like Magentic-One's, which rises on no progress or a detected loop, decays on progress, and acts at a threshold ([AutoGen](https://github.com/microsoft/autogen));
      - a unique-senders-in-window rule like Strands' repetitive-handoff detection.
 3. **Evidence.** One event per record, with the verdict and, when the payload was rewritten, the original. Each record also carries a causation id (the record it replies to), as AG2's hub envelopes do, so message → reply → effect chains can be followed.
-4. **Delivery** to the recipients' inboxes, waking them if requested.
+4. **Apply** the record to its channel's state, in commit order: for messages, delivery to the recipients' inboxes, waking them if requested; for the shared memory, whose writes are unaddressed records delivered to nobody, a new version of the board's files and notices to the members it is news to. Admission against the channel's current state (compare-and-swap, claims) runs with the storm controls, before the evidence, so an applied record cannot fail ([swarm-memory-channel.md Changes to the bus](swarm-memory-channel.md#changes-to-the-bus)).
 
-Nothing else writes to a member's inbox, so no sanctioned path between members bypasses the monitor or the transcript.
+Nothing else changes channel state or writes to a member's inbox, so no sanctioned path between members bypasses the monitor or the transcript.
 
 **Red-team features are optional and unscheduled** (decision: Ransom, 2026-10-07). These are records with a forged or hidden sender, secret channels, and injection into a specific member. They may never be built and no milestone commits to them. The single interception point keeps them possible: they would enter as records at step 1, under the safety constraints in [Security](#security).
 
