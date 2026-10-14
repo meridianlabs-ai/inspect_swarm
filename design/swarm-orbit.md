@@ -477,7 +477,7 @@ Background descendants are excluded. A `deepagent(background=True)` member, or o
 So:
 
 - `activate()` raises `ValueError` naming the member when its agent is a `deepagent()` with `background` set, to `True` or an integer. It detects this the same way M1-3's rejection does, before M2-5 lifts that rejection for `start()`.
-- `round_robin`'s `check` refuses such a member at `swarm()` construction. A user controller may do the same in its own `check`.
+- The refusal is in `activate()`, where the runtime holds the member's configuration. A controller's `check` cannot make it at construction, because it receives only `MemberInfo` (name and role, [swarm-api.md](swarm-api.md#controllers)), and this design does not widen that interface.
 - `start()` keeps M2-5's support for background members unchanged.
 - A custom agent that calls `background()` itself cannot be detected. `activate()` documents it as unsupported.
 - Scheduling a member's descendants as well is not this design.
@@ -821,7 +821,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
   - outside a scheduled activation, the hook passes swarm-communication.md's notice and continuation cases unchanged.
 - **Handles and stopping** (`tests/test_scheduled.py`):
   - `activate()` raises on a running, ended or `start()`-started member, and once stopping;
-  - `activate()` raises `ValueError` for `deepagent(background=True)` and `deepagent(background=4)` members, `round_robin` refuses them at construction, and after M2-5 the same members still run under `start()`;
+  - `activate()` raises `ValueError` for `deepagent(background=True)` and `deepagent(background=4)` members, including under `round_robin`, and after M2-5 the same members still run under `start()`;
   - a parked member is `running` to `list_members()` and to the bus's liveness check;
   - a member limit returns outcome `ended` with `member_limit:<type>`;
   - one member error cancels its siblings and the controller, and propagates;
@@ -880,7 +880,7 @@ Future work, after M1 and M2, in the plan's "Later, any order" menu. Each step i
      - `SwarmControl.sequence()` and `activation_read_cutoff()`;
      - the `schedule` evidence type and `scheduled_unwired`;
      - stop step 0 releasing parked members, and the member wrapper's stop cause on a normal return;
-     - the refusal of background-enabled `deepagent()` members in `activate()` and `round_robin`'s `check`;
+     - the refusal of background-enabled `deepagent()` members in `activate()`;
      - `round_robin`.
    - Files: `src/inspect_swarm/_bus/_notice.py`, `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_controller/_schedule.py` (new), `src/inspect_swarm/_controller/round_robin.py` (new), `src/inspect_swarm/_member.py`, `src/inspect_swarm/_swarm.py`, `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_entrypoint.py`.
    - Tests: the seam and handle cases of `tests/test_scheduled.py`.
