@@ -4,7 +4,7 @@ Status: proposed, 2026-10-13; revised 2026-10-14 with Ransom's decisions on its 
 
 ## Overview
 
-This is the build plan for inspect_swarm across the merged designs. It is a plan, not a design: each pull request below names the design sections it implements. The few things a pull request needs that no merged design decides (M1's critical-path definition, refusing bridged members in a swarm with a bus channel) are Ransom's decisions, recorded under [Decisions](#decisions); the rest waits for the design pull requests in the graph.
+This is the build plan for inspect_swarm across the merged designs. It is a plan, not a design: each pull request below names the design sections it implements. The few things a pull request needs that no merged design decides (M1's critical-path definition and stuck-in-loops signal, refusing bridged members in a swarm with a bus channel) are Ransom's decisions, recorded under [Decisions](#decisions); the rest waits for the design pull requests in the graph.
 
 There are two milestones (decision: Ransom, 2026-10-13):
 
@@ -238,9 +238,9 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 - Depends on: M1-5.
 - Implements: [Lean Rec. 6](swarm-lean-open-problems.md#6-m1-tighten-submitted-and-document-stopping-on-the-first-proof), first part.
 
-**M1-10. Evidence, timelines, metrics and harness-validity checks.** A named timeline per member (`transcript().add_timeline()`), the metrics swarm.md lists (per-member and total tokens and cost from the ledger, wall clock, idle time, per-member time waiting for a model connection), and harness-validity checks reported apart from the task score (a member that never acted, members stuck in loops; how a loop is detected is [Open question 1](#open-questions)).
+**M1-10. Evidence, timelines, metrics and harness-validity checks.** A named timeline per member (`transcript().add_timeline()`), the metrics swarm.md lists (per-member and total tokens and cost from the ledger, wall clock, idle time, per-member time waiting for a model connection), and harness-validity checks reported apart from the task score: a member that never acted, and members stuck in loops, reported as a signal rather than a verdict (decision: Ransom, 2026-10-14; [Decisions](#decisions), item 9). For the second, each member's metrics carry `longest_identical_tool_run`, the longest run of consecutive tool calls in the member's spans with the same function and the same arguments (compared as canonical JSON). No threshold is fixed until there is data; analysis applies one. A bridged member's tool calls have no `ToolEvent`s ([swarm-communication.md The filesystem channel](swarm-communication.md#the-filesystem-channel)), so its value is `None`, not 0.
 - Files: `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_swarm.py`.
-- Tests: `tests/test_metrics.py`, on mockllm runs, including a deterministic contention test (two members queued on one model connection) showing each member's connection wait apart from the sample's aggregate waiting time, which Inspect merges across overlapping waits (`src/inspect_ai/_util/working.py:90-113`, at `81c1668d3`).
+- Tests: `tests/test_metrics.py`, on mockllm runs, including a deterministic contention test (two members queued on one model connection) showing each member's connection wait apart from the sample's aggregate waiting time, which Inspect merges across overlapping waits (`src/inspect_ai/_util/working.py:90-113`, at `81c1668d3`); a scripted member repeating one call three times, then changing it, reports a run of 3, and the same function with different arguments does not extend a run.
 - Depends on: M1-5, M1-6.
 - Implements: [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics) ("Metrics", "Member views", the harness-validity bullet of "Analysis").
 
@@ -465,7 +465,7 @@ Each pull request carries the tests listed with it, from its design's Testing se
 
 ## Decisions
 
-The first draft's open questions, as Ransom answered them on 2026-10-14 (his words quoted), and the one settled from the code. The numbers are the first draft's.
+The first draft's open questions, as Ransom answered them on 2026-10-14 (his words quoted), and the one settled from the code. Items 1 to 8 keep the first draft's numbers; item 9 was the second draft's only open question.
 
 1. **M1's final answer is `first` plus the per-member record.** The brief's "final-answer modes, the result contract" is read as the current M1 ([swarm-scoring.md Part 1](swarm-scoring.md#part-1-m1)). Ransom: "OQ1 - yes". With item 8, the result contract is future work rather than M2.
 2. **M2 has the bus without direct messages.** M2 has the bus core, binding, notices, exposure and the shared-memory channel; the `messages` channel and bridged members' bus tools are future work, and a swarm that gives a bridged member a bus channel is refused at construction (M2-6). Ransom: "OQ2 agree with the recommendation".
@@ -476,11 +476,13 @@ The first draft's open questions, as Ransom answered them on 2026-10-14 (his wor
 7. **D-1 decides whether a member's descendants reach the board.** The bus's binding rule ([Members and identity](swarm-communication.md#members-and-identity)) gives swarm tools only to a member's first agent loop, but Epoch's members pass their `memory()` to deepagent's `general()` children (`src/inspect_ai/agent/_deepagent/deepagent.py:328-335`, at `81c1668d3`), so up to 64 background children per member read and write the board today ([Lean, Their swarm](swarm-lean-open-problems.md#their-swarm)). D-1 decides descendant access for the memory channel, with how writes are attributed to the member and its loop and what read and exposure evidence mean with several readers, and M2-7's binding follows D-1 for this channel. Ransom: "a".
 8. **The result contract and the scoring built on it leave M2.** The first draft's M2-11 to M2-14 (the result contract and record additions; `member_scores`, `best_at(k)` and `baseline()`; per-member sandboxes in the scoring contract; the analysis helper) and its design D-3 (artifact scoring under per-member sandboxes) are [future work](#future-work). Epoch's port needs only Recommendations 1 to 3 to run with its scorer unchanged, the Lean analysis lists per-member scores, `baseline()` and `best_at(k)` as optional gains after M2, and M2's "Done means" does not mention scoring. Ransom: "Agree that this should be moved out of M2." The first draft's open question 8 (no owner for artifact scoring under per-member sandboxes) goes with it, as the future-work item that needs a design first; M2-1 documents what a scorer sees meanwhile.
 
+9. **M1-10 reports "members stuck in loops" as a signal, not a verdict.** swarm.md lists the check among the harness-validity checks ([Observer, Analysis](swarm.md#observer-evidence-accounting-and-metrics)) but gives no rule. Per member, the longest run of consecutive identical tool calls (same function and arguments) is reported as a metric, with no threshold fixed until there is data. Ransom: "OQ1 agree with recommendation" (on this plan's second draft, where it was open question 1).
+
 Two more decisions shape this plan: the result record's store key is documented as owned by the runtime and readable by member code (Ransom: "yes, add the docs line"; M1-13, M2-11 and [swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records)), and the deep-dive wording follow-ups are a separate loop after this plan is reviewed (Ransom: "Follow-up - we'll do a separate loop after this is reviewed").
 
 ## Open questions
 
-1. **How M1-10 detects "members stuck in loops".** swarm.md lists it among the harness-validity checks ([Observer, Analysis](swarm.md#observer-evidence-accounting-and-metrics)) but gives no rule or threshold, and the first draft's open question 3 noted it without an answer. Recommendation: M1-10 reports the signal, not a verdict: per member, the longest run of consecutive identical tool calls (same function and arguments), as a metric, and leaves the threshold to analysis, so no threshold is fixed before there is data. A threshold can be added to the check later without changing the metric.
+None. Every question this plan raised is decided above.
 
 ## Follow-ups: milestone wording in the deep dives
 
@@ -502,6 +504,7 @@ Text that puts the result contract, verification, per-member scores, `baseline()
 - `:428` (Delivery): "in M2 wake means ending a member's wait in `read_messages`" → with the later messages channel.
 - `:456-457` (Sandbox topology): "Other topologies are optional and deferred to later work" → a sandbox per member is an M2 opt-in.
 - `:563` (Observer, Metrics): "for example the longest chain of member steps linked by reads of another member's writes. Settling it is part of M1's metrics work, and latency curves are not interpreted before then" → M1 settles the simple definition (steps to the answer, longest member); the linked definition is later, over the bus's evidence, and latency curves are not interpreted before it.
+- `:573` (Observer, Analysis): "members stuck in loops" → reported as a signal, the longest run of identical consecutive tool calls per member, with no threshold (M1-10).
 - `:643` (Where each part lives): "Notifying members and delivering peer messages | inspect_swarm (M2)" → notices M2; peer messages later.
 - `:646` (Where each part lives): scoped owner "when background deepagent members are needed" → M2.
 - `:825` (Compatibility): "M2 needs no inspect_ai change" → except AI-5.
