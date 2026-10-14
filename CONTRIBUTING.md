@@ -6,11 +6,10 @@ Thanks for your interest in contributing. Bug reports, doc fixes, and core chang
 
 Inspect Swarm uses [uv](https://docs.astral.sh/uv/) for environment and dependency management, and requires Python 3.11+.
 
-The development environment pins 3.13 (`.python-version`). CI covers both ends of the supported range: 3.11 proves the floor still works, and 3.15 exercises the newest interpreter. `make check` only ever sees the 3.13 environment, so a construct that is new in 3.12 or later passes locally and fails in CI on 3.11. To reproduce the floor locally:
+The development environment pins 3.11 (`.python-version`), the supported floor, so `make check` and `make test` run on it. CI runs pyright, the tests and the build on 3.11 and on 3.15, the newest supported version. To run the tests on 3.15 locally without touching `.venv`:
 
 ```bash
-uv venv --python 3.11 /tmp/py311 && uv pip install --python /tmp/py311/bin/python -e . --group dev
-.venv/bin/pyright --pythonpath /tmp/py311/bin/python
+uv run --isolated --python 3.15 --group dev pytest
 ```
 
 ```bash
