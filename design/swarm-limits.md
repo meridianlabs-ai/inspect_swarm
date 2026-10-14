@@ -1,6 +1,6 @@
 # Inspect Swarm: limits and budgets
 
-Status: proposed, 2026-10-08; reconciled with the merged API, scoring and communication designs 2026-10-09. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
+Status: proposed, 2026-10-08. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
 
 ## Overview
 
@@ -12,7 +12,7 @@ After the members stop, the swarm writes a ledger of what was actually spent, pe
 
 ## Introduction
 
-This is a deeper-dive design on one topic of [swarm.md](swarm.md), the high-level design: how Inspect's limits apply to a swarm and its members, how the swarm stops when its budget runs out, and how it records what was actually spent. It replaces the sketches in swarm.md's [Limits and cost](swarm.md#limits-and-cost) and [Observer: accounting](swarm.md#observer-evidence-accounting-and-metrics) where the two differ, and swarm.md links here.
+This is a deeper-dive design on one topic of [swarm.md](swarm.md), the high-level design: how Inspect's limits apply to a swarm and its members, how the swarm stops when its budget runs out, and how it records what was actually spent. It details swarm.md's [Limits and cost](swarm.md#limits-and-cost) and [Observer: accounting](swarm.md#observer-evidence-accounting-and-metrics), which link here.
 
 It respects the decisions Ransom took on swarm.md (2026-10-07). Those that bear on this topic:
 - inspect_ai limits stay soft, and nothing here depends on making them hard;
@@ -22,7 +22,7 @@ It respects the decisions Ransom took on swarm.md (2026-10-07). Those that bear 
 - members share the sample's sandbox by default.
 
 It builds on the merged sibling designs and uses their terms:
-- [swarm-api.md](swarm-api.md), the `swarm()` API: `Budget` is a field of `swarm()`, member limits and `bridged` are fields of the `Member` record, and every argument must log faithfully. A **controller** (a `@swarm_controller` object) decides who starts and when the swarm is done. The **runtime**, inspect_swarm's fixed code, owns member tasks, limits, stopping, finalisation and the ledger. Where this document says "the runtime", swarm.md's older text says "the controller".
+- [swarm-api.md](swarm-api.md), the `swarm()` API: `Budget` is a field of `swarm()`, member limits and `bridged` are fields of the `Member` record, and every argument must log faithfully. A **controller** (a `@swarm_controller` object) decides who starts and when the swarm is done. The **runtime**, inspect_swarm's fixed code, owns member tasks, limits, stopping, finalisation and the ledger. Where swarm.md says "the controller" for these, it means the runtime.
 - [swarm-scoring.md](swarm-scoring.md): M1's final answer is `first`, which makes no model call. Verification, voting and `synthesize` come after M2 (decision: Ransom, 2026-10-08), and the sample's usage includes the task's scorer calls.
 - [swarm-communication.md](swarm-communication.md): the bus and its storm controls are not Inspect limits, and a stop closes the bus first.
 
@@ -38,7 +38,7 @@ swarm.md settled the principles: a swarm-wide cap set the same way as a single a
 - **A limit hit inside a bridged agent ends the whole sample**, whichever node it came from. A member limit or a swarm cap on a Claude Code member would end its siblings too.
 - **A limit hit inside a tool does not stop the member.** It becomes a tool error, and the member stops at its next model call.
 - **Cancelling members to stop them loses their in-flight usage.** A cancelled call records nothing, so the ledger can only mark it unknown.
-- **Per-member attribution from model events misses native compaction**, which swarm.md had to leave unattributed.
+- **Per-member attribution from model events misses native compaction.**
 - **An Inspect cost node can miss spend repeatedly**, not just for calls in flight: every call that trips any token node below it is never charged to it.
 
 Each of these changes what the swarm's budget code must do. The users who need it are the capability-scaling experiments (swarm.md's first user group): their comparisons rest on the cap being set the same way in every arm and on the ledger being right.
@@ -181,7 +181,7 @@ class Budget(BaseModel, frozen=True):
     """Seconds members are given to finish in-flight work after a stop."""
 ```
 
-`swarm(..., budget=Budget())` is the default. `Budget` is a frozen pydantic model, not a dataclass, because swarm-api.md requires every `swarm()` argument to reach the log faithfully: a pydantic model is logged as its fields, so two eval-set arms that differ only in their budget get different task identifiers, while a frozen dataclass is logged as its type name and they would be refused as "not distinct" ([swarm-api.md](swarm-api.md#logging-and-replay)). For the same reason the token cap is an `int` or a metering string, never a `TokenLimit` object, which inspect_ai logs as its class name. Replay hands `swarm()` the logged dict, which it validates with `Budget.model_validate()`, as it does for `Member`. Every field is a plain value, so a task can take each as a task parameter and sweep it with `-T`. swarm.md's original sketch `budget=cost_limit(40.0)` becomes `budget=Budget(cost=40.0)`.
+`swarm(..., budget=Budget())` is the default. `Budget` is a frozen pydantic model, not a dataclass, because swarm-api.md requires every `swarm()` argument to reach the log faithfully: a pydantic model is logged as its fields, so two eval-set arms that differ only in their budget get different task identifiers, while a frozen dataclass is logged as its type name and they would be refused as "not distinct" ([swarm-api.md](swarm-api.md#logging-and-replay)). For the same reason the token cap is an `int` or a metering string, never a `TokenLimit` object, which inspect_ai logs as its class name. Replay hands `swarm()` the logged dict, which it validates with `Budget.model_validate()`, as it does for `Member`. Every field is a plain value, so a task can take each as a task parameter and sweep it with `-T`.
 
 **Validation.** A `model_validator` raises `ValueError` (pydantic reports it as a `ValidationError`, a `ValueError` subclass), naming the field, unless:
 - `cost` and `time` are `None` or finite and greater than zero;
@@ -442,7 +442,7 @@ Sources and coverage:
   - bridged generations;
   - background children once they are supported, since they inherit the member's context.
 
-  Its cost-tree node adds the cost of approval and review calls, which are suspended from token metering. The lever excludes cache replays (they record nothing) and calls with no usage (nothing to record). This attributes native compaction, which swarm.md had to report as unattributed, and avoids the token-node/cost-node disagreement.
+  Its cost-tree node adds the cost of approval and review calls, which are suspended from token metering. The lever excludes cache replays (they record nothing) and calls with no usage (nothing to record). This attributes native compaction, and avoids the token-node/cost-node disagreement.
 - **Call counts come from events across the whole interval.** The ledger scans every `ModelEvent` whose span ancestry includes the swarm's agent span: member spans, the final step, the runtime meter's calls, and any other call in the swarm's span. Per-member counts use the member's spans.
   - **Pricing is per call.** `record_and_check_model_usage()` sets the cost on the same `ModelUsage` object the call's event holds (`_model.py:3064-3066`), so every completed non-cache event shows whether that call was priced. *Spike:* the live event and the logged event both read \$0.05 for a priced call. This covers calls no token node sees: approval and review calls, and generations on any auxiliary path. It also covers a router or fallback that prices one serving model and not another, which aggregates cannot show because `ModelUsage.__add__` keeps the known cost.
   - The token-tree node's own per-call count (`unpriced_calls_recorded`, taken in `record()` before aggregation) and `unpriced_models` (models whose sample delta has tokens but no cost) are kept as cross-checks.
@@ -533,25 +533,14 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
 
 **Sample limit overrides.** An operator can retune the sample's time, token and message limits while it runs (`src/inspect_ai/util/_limit_overrides.py`). The swarm's derived caps are fixed at start, so a retune moves the reserve, not the cap. A cut below the swarm's cap means the sample limit ends the swarm first.
 
-## Changes to swarm.md
-
-This branch makes small edits to swarm.md, all on this topic. They were reconciled on 2026-10-09 with the API, scoring and communication designs merged before it, whose own edits to swarm.md (the `controller=` and `channels=` sketch, the runtime, `first` in M1, scorer usage in arm totals) are kept as they landed:
-
-- [Limits and cost](swarm.md#limits-and-cost): two caveats added (working limits; bridged members) and a link here.
-- [Entry point](swarm.md#entry-point): `Budget` added to the sketch's import; the sketch already uses `budget=Budget()` from swarm-api.md.
-- [Accounting](swarm.md#observer-evidence-accounting-and-metrics): the cost cap is held in the token tree, because Inspect's cost nodes can miss calls; the ledger's per-member figures come from token meter nodes rather than cap nodes; per-member attribution from the member's meter node, so native compaction is attributed and no longer the unattributed remainder; the reserve bullet says what the reserve covers in M1 and after M2; the reserve and exhaustion bullets refined (derived caps, soft stop, the connection-slot bound, own errors removed from mixed groups); the claims bullet aligned with this document's completeness rules; a link here.
-- [Testing](swarm.md#testing) and [Implementation plan](swarm.md#implementation-plan): the bullets that named the unattributed remainder updated.
-
-The overview is unchanged: no main decision moves. Its parenthetical listing native compaction among the calls the ledger cannot see is now conservative rather than wrong.
-
 ## Alternatives considered
 
-**Ledger from model events (swarm.md's M1 plan).** Sum each member's `ModelEvent` usage, charging cache replays zero.
+**Ledger from model events.** Sum each member's `ModelEvent` usage, charging cache replays zero.
 - No private fields.
 - It misses native compaction, which then needs an inspect_ai change (usage on `CompactionEvent`) to attribute, and it needs every call to have an event in the right span.
 - The lever is a node the swarm needs anyway for stopping, so its meter comes free. Events remain the source for counts.
 
-**Inspect's `cost_limit()` as the swarm's cost cap** (swarm.md's sketch).
+**Inspect's `cost_limit()` as the swarm's cost cap.**
 - No subclassing.
 - It never sees a call that trips a token node below it, and with child token limits that happens on every call ([Each limit kind](#each-limit-kind)). A cost cap that can be bypassed indefinitely cannot be a stopping rule, so the cap is metered in the token tree.
 

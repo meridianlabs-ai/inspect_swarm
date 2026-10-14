@@ -39,7 +39,7 @@ Non-goals:
 - **A sandbox per member**, or private sandboxes with a shared volume. Those are the alternatives this design is compared with; per-member sandboxes are designed in [swarm-lean-open-problems.md](swarm-lean-open-problems.md#1-m2-per-member-sandboxes-as-an-opt-in-member-field) and the two are not combined here.
 - **Per-member isolation in the `local` sandbox**, which runs as the host user and cannot switch users.
 - **Coordinator-only read access.** Coordinator topologies are later work in swarm.md; how they would get read access is stated, not built ([Peers' access](#peers-access-to-private-directories)).
-- **Changing the existing designs.** This branch adds only this document. [Changes to other designs](#changes-to-other-designs) lists the edits it would need, for Ransom to approve.
+- **Changing the existing designs.** [Changes to other designs](#changes-to-other-designs) lists the edits it would need, for Ransom to approve.
 
 ## Current behaviour
 
@@ -533,7 +533,7 @@ Later rungs ([table](#later-rungs-surveyed-not-designed)) are separate designs, 
 
 ## Changes to other designs
 
-Not made on this branch; each for Ransom to approve:
+Each for Ransom to approve:
 
 - **swarm.md, [Sandbox topology](swarm.md#sandbox-topology):** link "one shared sandbox with a Linux user and write scope per member" to this document, and state the ladder (shared, users, later rungs, per-member sandboxes) with when each fits. **[Members](swarm.md#members), "Sandbox processes":** under users isolation, processes a member leaves running are reaped when it ends. **[Where each part lives](swarm.md#where-each-part-lives):** a row for the sandbox identity scope (inspect_ai) and the bridge token (inspect_ai and inspect_swe), both "when users isolation is built".
 - **swarm-api.md, [The shape of the call](swarm-api.md#the-shape-of-the-call) and [Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct):** `isolation=` as a non-component argument like `budget=`, logged as a pydantic model; a row in the identity table. **[Members](swarm-api.md#members):** the contract gains "custom tools that call `sandbox().exec()` run as the default user unless they resolve their user with `sandbox_identity_user()`".
