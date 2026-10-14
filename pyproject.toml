@@ -27,6 +27,10 @@ dependencies = [
 "Source Code" = "https://github.com/meridianlabs-ai/inspect_swarm"
 "Issue Tracker" = "https://github.com/meridianlabs-ai/inspect_swarm/issues"
 
+# lets inspect_ai resolve `inspect_swarm/<name>` without importing the package first
+[project.entry-points.inspect_ai]
+inspect_swarm = "inspect_swarm._entrypoint"
+
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
