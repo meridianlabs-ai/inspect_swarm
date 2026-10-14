@@ -230,6 +230,14 @@ class SwarmNode(Limit):
     owner: str | None
     role: NodeRole
 
+    def detect_bridge(self) -> None:
+        # every check, met or not, so a member found bridged by the bridge's mark stays
+        # bridged for later checks that run before the mark (compaction, filters)
+        member = current_member.get()
+        if member is not None and not member.bridged and in_bridge_model_generate():
+            member.bridged = True
+            member.bridged_late = True
+
     def exceeded(
         self,
         type: _LimitType,
@@ -239,12 +247,10 @@ class SwarmNode(Limit):
         values: str,
         reason: str | None = None,
     ) -> None:
+        self.detect_bridge()
         member = current_member.get()
-        if member is not None and (member.bridged or in_bridge_model_generate()):
+        if member is not None and member.bridged:
             # a raise here would reach the sandbox service and end the sample
-            if not member.bridged:
-                member.bridged = True
-                member.bridged_late = True
             if member.stop_cause is None:
                 member.stop_cause = self._stop_cause(type)
             member.scope.cancel()
@@ -311,6 +317,7 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
             self.pair.cost += usage.total_cost
 
     def _check_self(self, raise_for_equal: bool = False) -> None:
+        self.detect_bridge()
         limit = self.limit
         if limit is not None:
             total = self._metering.value(self._usage)
@@ -356,6 +363,7 @@ class SwarmCostNode(SwarmNode, _CostLimit):
             self.pair.suspended_cost += cost
 
     def _check_self(self, raise_for_equal: bool = False) -> None:
+        self.detect_bridge()
         if self.pair.reason is not None:
             # the stop gate: refuses every call, including suspended ones
             cost = self.pair.cost
@@ -412,6 +420,7 @@ class SwarmTurnNode(SwarmNode, _TurnLimit):
         self.role = "limit"
 
     def _check_self(self) -> None:
+        self.detect_bridge()
         limit = self.limit
         if limit is not None and self._turns > limit:
             self.exceeded(
@@ -431,6 +440,7 @@ class SwarmMessageNode(SwarmNode, _MessageLimit):
 
     def check(self, count: int, raise_for_equal: bool) -> None:
         # a message node has no ancestors to check
+        self.detect_bridge()
         limit = self.limit
         if limit is not None and (
             count > limit or (raise_for_equal and count == limit)

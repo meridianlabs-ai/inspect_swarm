@@ -858,6 +858,68 @@ async def test_bridge_compaction_reaching_a_cap(bridged: bool) -> None:
     assert member.stop_cause == ("swarm_cap" if bridged else None)
 
 
+@dataclass
+class _BridgeCase:
+    id: str
+    # builds the nodes to enter and the cap, if any, a second request trips
+    nodes: Callable[[], tuple[list[Limit], Limit | None]]
+    cost_per_call: float | None
+    suspended: bool
+
+
+def _lever_only() -> tuple[list[Limit], Limit | None]:
+    return Lever(owner="a").nodes, None
+
+
+def _token_cap_100() -> tuple[list[Limit], Limit | None]:
+    lever, cap = Lever(owner="a"), SwarmTokenNode(100, owner=None, role="cap")
+    return [cap, *lever.nodes], cap
+
+
+def _cost_cap_2() -> tuple[list[Limit], Limit | None]:
+    lever, cap = Lever(owner="a"), CostPair(2.0, owner=None, role="cap")
+    return [*cap.nodes, *lever.nodes], cap.token_node
+
+
+BRIDGE_CASES = [
+    _BridgeCase("uncapped lever", _lever_only, None, False),
+    _BridgeCase("uncapped lever, suspended", _lever_only, 1.0, True),
+    _BridgeCase("token cap", _token_cap_100, None, False),
+    _BridgeCase("cost cap", _cost_cap_2, 1.0, False),
+    _BridgeCase("cost cap, suspended", _cost_cap_2, 1.0, True),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("case", BRIDGE_CASES, ids=lambda c: c.id)
+async def test_member_found_bridged_by_a_successful_marked_request(
+    case: _BridgeCase,
+) -> None:
+    # the first request (compaction, then the marked generation) stays within the caps
+    # and marks the member bridged; the next request's compaction, before the mark,
+    # reaches the cap and must cancel the member rather than raise
+    stops: list[str] = []
+    member = MemberContext("a", bridged=False, stop_swarm=stops.append)
+    model = _model(cost_per_call=case.cost_per_call)
+    nodes, cap = case.nodes()
+    token = current_member.set(member)
+    try:
+        with member.scope, _entered(nodes):
+            with ExitStack() as stack:
+                if case.suspended:
+                    stack.enter_context(suspend_token_limit())
+                await _bridge_generate(model, _GenerateCompaction(model, []))
+            assert (member.bridged, member.bridged_late) == (True, True)
+            assert not member.scope.cancel_called
+            if cap is not None:
+                await _bridge_generate(model, _GenerateCompaction(model, []))
+    finally:
+        current_member.reset(token)
+    assert member.scope.cancelled_caught is (cap is not None)
+    assert set(stops) == ({"swarm_cap"} if cap is not None else set())
+    assert member.stop_cause == ("swarm_cap" if cap is not None else None)
+
+
 @pytest.mark.anyio
 async def test_cost_pair_stops_sequential_child_token_exhaustion() -> None:
     outputs = _Outputs()
