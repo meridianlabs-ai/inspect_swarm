@@ -333,7 +333,7 @@ For the recommendations below, the main alternatives:
 
 **Count attempts outside the swarm, in analysis over `ScoreEvent`s.** Possible from the log alone, since intermediate `ScoreEvent`s sit in member spans. But every user with gated members would rebuild it, and harness-validity checks and the result record would still say "submitted once". Recommendation 5 makes it a metric.
 
-**A notes channel instead of a shared-memory channel** (the existing plan's order). Notes are append-only typed entries, which avoid the board's overwrite and delete hazards. But the only external swarm we have seen chose a mutable file board, and memory's command set is what models already use. Recommendation 7 keeps notes and proposes memory's shape first; [Open question 2](#open-questions) asks.
+**A notes channel instead of a shared-memory channel.** Notes are append-only typed entries, which avoid the board's overwrite and delete hazards. But the only external swarm we have seen chose a mutable file board, and memory's command set is what models already use. Recommendation 7 keeps notes for later and builds memory's shape first ([Open questions](#open-questions), item 2).
 
 ## Compatibility and migration
 
@@ -380,7 +380,7 @@ In priority order. Each names the section it would change and the milestone. The
 
 **Why.** The first external swarm we have seen needed it from its second commit. It is also the isolation the k-epochs arm has, which swarm.md already names as a reason. The routing is small; building the compose file stays the task's job, as theirs already does.
 
-**Milestone.** M2, as an opt-in (M2-1 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m2-pull-requests)). First internal use runs on the shared default ([Open question 1](#open-questions)).
+**Milestone.** M2, as an opt-in (M2-1 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m2-pull-requests)). First internal use runs on the shared default ([Open questions](#open-questions), item 1).
 
 ### 2. M2: an agent-raised custom limit ends only the member
 
@@ -447,7 +447,7 @@ In M1, document in `member()` and the sample-store section that a board shared o
 
 **Why.** A shared memory is the channel the only external swarm we know chose, and models already know the tool. Today it is our least-observed channel: no sender, no fence, no evidence, last writer wins. Routing it through the bus gives it the same treatment as messages, and the notices address the reported reluctance of agents to read boards ([swarm-communication.md Why](swarm-communication.md#why)).
 
-**Milestone.** M2, with the bus it needs: its design (D-1, started during M1), then the bus, binding and the channel (M2-6 to M2-8). The documentation part is M1 (M1-3, M1-13) ([Open question 2](#open-questions)).
+**Milestone.** M2, with the bus it needs: its design (D-1, started during M1), then the bus, binding and the channel (M2-6 to M2-8). The documentation part is M1 (M1-3, M1-13) ([Open questions](#open-questions), item 2).
 
 ### 8. After M2: per-member sandboxes in the scoring contract
 
@@ -467,21 +467,10 @@ They coincide only when every member whose final sandbox passes also had a passi
 
 ## Open questions
 
-1. **Per-member sandboxes in M1?** Their swarm needs a sandbox per member.
-   - (a) Add the opt-in `member(sandbox=..., visible_sandboxes=...)` routing to M1, keeping the shared default (Recommendation 1). Costs a small runtime change, record fields and a slow Docker test.
-   - (b) Keep it later. A port enters `sandbox_default()` in its member builder, and the swarm records nothing about the topology.
+None. The two this analysis raised are decided:
 
-   Recommendation: (a). The shared-sandbox default (decision: Ransom, 2026-10-07) stays; only the opt-in moves earlier, because the first concrete external user needs it.
-
-   Decided: the opt-in of (a), in M2 rather than M1; the shared default stays (decision: Ransom, 2026-10-13, with the milestones; [swarm-implementation-plan.md](swarm-implementation-plan.md#where-the-deep-dives-milestone-items-land)).
-
-2. **Should the first structured channel after M2 be a shared memory routed through the bus?**
-   - (a) Make a memory-shaped channel first, with sender binding, fencing, notices and evidence (Recommendation 7).
-   - (b) Keep shared memory an observed channel; build notes first as designed.
-
-   Recommendation: (a), with the M1 documentation either way. The tool-state scope decision (Ransom, 2026-10-09) is unchanged; this changes only what comes first after M2.
-
-   Decided: (a), in M2 rather than after it, as M2's only bus channel (decision: Ransom, 2026-10-14; [swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 2).
+1. **Per-member sandboxes are an M2 opt-in.** `member(sandbox=..., visible_sandboxes=...)` routes a member to its own sandbox (Recommendation 1), and the shared sandbox stays the default (decisions: Ransom, 2026-10-07 and 2026-10-13; [swarm-implementation-plan.md](swarm-implementation-plan.md#where-the-deep-dives-milestone-items-land)).
+2. **A shared memory routed through the bus is M2's bus channel**, with sender binding, fencing, notices and evidence (Recommendation 7); notes, a task list and a board are later work. The tool-state scope is unchanged: the default `memory()` instance stays private to each member (decision: Ransom, 2026-10-09). (Decision: Ransom, 2026-10-14; [swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 2.)
 
 ## Not this design
 

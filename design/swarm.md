@@ -18,7 +18,7 @@ Ransom's decisions of 2026-10-07 are marked inline as "(decision: Ransom, 2026-1
 - monitoring through inspect_sentinel;
 - the default final answer.
 
-It synthesises the team's earlier design notes on swarms. One was a layered runtime RFC: a `swarm()` agent on `deepagent()` with messaging, a task list, a fact log, a board and a monitor hook. The other argued for cheap experiments first, using leaderless swarms that communicate through the filesystem. It also draws on published work, cited inline. Figures quoted from secondary sources, or that could not be checked against a primary source, are marked *unverified*.
+It draws on published work, cited inline. Figures quoted from secondary sources, or that could not be checked against a primary source, are marked *unverified*.
 
 Code references are to inspect_ai `main` at `aa20052a` (2026-10-06), inspect_swe at `a54461e7` (2026-10-05), inspect_sentinel at `0f9b5c71` (2026-10-06), inspect_evals at `cef701f5` and ORBIT at `588b3035`. Paths are relative to each repository's root.
 
@@ -742,7 +742,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 
 ## Alternatives considered
 
-**Build `swarm()` inside inspect_ai.** This is the earlier RFC's placement.
+**Build `swarm()` inside inspect_ai.**
 
 - It would make channel items and persistent members easy, but couple an experimental, opinionated runtime to inspect_ai's release and compatibility bar.
 - The co-development setup (inspect_swarm tracks inspect_ai `main`) lets us move only the extension points into inspect_ai, as they prove necessary.
