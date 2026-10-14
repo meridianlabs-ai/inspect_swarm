@@ -14,12 +14,12 @@ It is an eval library, not a production orchestration framework. The runtime liv
 
 | Component | What it is |
 |---|---|
-| **Members** | The agents: each a name, role, the `@agent` factory and arguments its agent is built from, limits and conversation. The runtime builds every member its own agent in each sample. Any agent that keeps its work inside its invocation: `react()`, synchronous `deepagent()`, or a bridged Claude Code or Codex. ([Members](swarm.md#members)) |
+| **Members** | The agents: each a name, role, built agent or `@agent` factory and arguments, limits and conversation. No agent object runs twice at once in a sample: copies (`count`) are built from a factory per member per sample. Any agent that keeps its work inside its invocation: `react()`, synchronous `deepagent()`, or a bridged Claude Code or Codex. ([Members](swarm.md#members)) |
 | **Channels** | How members share information: the shared sandbox filesystem from M1; a shared memory routed through the bus from M2; later, optionally, direct messages, a notes/fact log, a task list with claims, and a board. Each is a `@swarm_channel` registry object. ([Channels](swarm.md#channels)) |
 | **Controller** | How the swarm runs: topology (leaderless first; coordinator tree and lead-with-teammates later), start and wake, termination, and the final-answer chain. Each topology is a `@swarm_controller` registry object; the swarm's fixed runtime does the drain and finalisation. ([Controller](swarm.md#controller-topology-termination-final-answer)) |
 | **Observer** | What is recorded and where monitors attach: one bus for every sanctioned message, evidence events, a realized-cost ledger, and swarm metrics. ([Observer](swarm.md#observer-evidence-accounting-and-metrics)) |
 
-`swarm()`'s arguments mirror the components ([API](swarm-api.md)). The common case is `swarm(members=member(deepagent, args={...}, count=4))`: a member names an `@agent` factory and its arguments, not a built agent, so that no agent object is shared between members or samples ([API](swarm-api.md#the-member-contract)). Written out:
+`swarm()`'s arguments mirror the components ([API](swarm-api.md)). Members are built agents, `swarm(members=[react(...), deepagent(...)])`, or `member()` records; several copies of one configuration take a factory and its arguments, so that each copy gets its own agent: the common case is `swarm(members=member(deepagent, args={...}, count=4))` ([API](swarm-api.md#the-member-contract)). Written out:
 
 ```python
 swarm(
@@ -61,7 +61,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 - Concurrent edits, git index locks and resource contention in a shared sandbox are handled by the task's layout: per-member worktrees or scratch directories, and a sandbox sized for the members.
 ([Sandbox topology](swarm.md#sandbox-topology))
 
-**Each member gets its own agent.** A member names an `@agent` factory and its arguments, and the runtime calls the factory in the member's task in each sample, so state the factory creates (hooks, caches, a CLI session id) is never shared between members or samples (decision: Ransom, 2026-10-14). Objects passed as arguments are still shared, and built-in tools keep their state in the store, which is why the tool-state scope below is still needed. ([API](swarm-api.md#the-member-contract))
+**No agent object runs twice at once in a sample.** A member is a built agent, shared across samples as any Inspect solver is, or an `@agent` factory and its arguments, which the runtime calls in the member's task in each sample; `count > 1` needs the factory, and one object cannot be two members (decision: Ransom, 2026-10-14). The factory form keeps state the factory creates (hooks, caches, a CLI session id) private to each copy. Objects passed as arguments are still shared, and built-in tools keep their state in the store, which is why the tool-state scope below is still needed. ([API](swarm-api.md#the-member-contract))
 
 **Each member's tool state is its own; the sample store is still shared.** Built-in tools such as `memory()` and `bash_session()` keep state in the sample store, and agents in one sample share it unless each tool has its own `instance`; `deepagent()` adds a shared `memory()` by default. Each member runs in a tool-state scope (a small inspect_ai change before M1) so that the default instance is per member (decision: Ransom, 2026-10-09). A shared instance named on purpose is a channel, observed like the filesystem. The alternatives, refusing such members at construction or only warning, were rejected. ([Members](swarm.md#members), [Security](swarm.md#security))
 

@@ -170,7 +170,7 @@ class SwarmResultRecord(BaseModel):
   - A single agent at the full budget.
   - Epochs, through Inspect's own reducers on the task's scorer: `mean`, `pass_at(k)`, `max`.
   - `pass_at(k)` and `max` select with knowledge of the target and final@k does not, so they are upper references, not like-for-like comparisons. Part 2's [Comparison quantities](#comparison-quantities) defines the fair pairs.
-- **A single-agent arm with the swarm's rules is a swarm of one.** M1's API already expresses it as `swarm(members=member(factory, args={...}), channels=[])`.
+- **A single-agent arm with the swarm's rules is a swarm of one.** M1's API already expresses it as `swarm(members=agent, channels=[])`.
   - It records the same evidence and returns an empty output when its member does not submit, where a plain agent is scored on its last output.
   - Part 2's `baseline()` only names this configuration; M1 needs no helper.
 - **Cost** is the ledger's realized cost (the limits deep dive), taken from sample usage, which includes grading ([above](#why-m1-needs-little-from-scoring)).
@@ -427,7 +427,7 @@ def frontier_math(arm: str = "swarm", k: int = 4, budget: float = 40.0) -> Task:
 - **The headline.** The task's own scorer stays first and unchanged, so the headline score is the same scorer in every arm.
 - **Defaults and arm identity.** The swarm arm uses swarm-api.md's defaults: `controller="leaderless"`, whose `final=None` gives this design's default chain, and `channels=("filesystem",)`. The arms differ in the task argument `arm`, so they are distinct in an eval set even though scorers and epochs are not hashed ([Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
 - **Replay from a solver spec.** A task that wants the swarm replayable from a solver spec (`--solver`, inspect_flow solver specs) wraps it in a registered swarm builder, swarm-api.md's `math_swarm`, which builds the same `result=` inside.
-- **Baselines run as a swarm of one.** `baseline(member, result)` is `swarm(members=member, controller=leaderless(final="first"), channels=[], result=result)`, where `member` is a `member()` record, as `members=` requires ([swarm-api.md](swarm-api.md#records-logging-and-names)), as swarm-api.md's [parameter table](swarm-api.md#where-the-sibling-designs-parameters-go) has it. It is swarm.md's natural baseline, and the result-contract form of M1's swarm of one ([Comparisons in M1](#comparisons-in-m1)).
+- **Baselines run as a swarm of one.** `baseline(member, result)` is `swarm(members=member, controller=leaderless(final="first"), channels=[], result=result)`, where `member` is a built agent or a `member()` record, as `members=` takes ([swarm-api.md](swarm-api.md#members)), as swarm-api.md's [parameter table](swarm-api.md#where-the-sibling-designs-parameters-go) has it. It is swarm.md's natural baseline, and the result-contract form of M1's swarm of one ([Comparisons in M1](#comparisons-in-m1)).
   - Every arm then writes the same record, with the same clock, eligibility rule and run-time verdicts, which select@k needs.
   - A plain agent without `baseline()` still gets `member_scores` values (its output is scored as one member), but no run-time evidence. The analysis leaves it out of select@k and says so.
 - **The reserve.** In practice the swarm's cap sits below the sample limit by the final-answer reserve (the limits deep dive); the example leaves that out.
