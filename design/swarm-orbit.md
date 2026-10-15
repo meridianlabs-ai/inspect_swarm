@@ -388,7 +388,7 @@ M2 computes `exposed` after the drain, in its walk over the member spans ([Evide
   - When the read registered fragments ([P2](#p2-bus-extensions)), the walk first checks each fragment against the read's completed `ToolEvent` result, with the newline-block rule. A fragment that is not in the result (the channel broke the contract, or Inspect truncated the result through it) gets `in_result: false` in an evidence event for that read, and is never exposed.
   - Each record whose fragment is in the result is then checked separately. A record is exposed in the first successful `ModelEvent` of the reader's loop, at or after the read, whose logged input holds the read's own result message (by `message_id`) with that record's fragment intact under the newline-block rule. It is `exact` when the message has no `error` there and `inferred`, with `reason: "result_error"`, when it has one, as in M2. The fragment check replaces M2's whole-content check, so an edit that keeps the message's id exposes the fragments it leaves intact.
   - A read whose result an intervention edited, or a filter truncated, so that only some fragments survive, exposes only those.
-  - Without fragments, M2's rule applies unchanged.
+  - Without fragments, M2's rule applies unchanged, including its truncation rule: a truncated result exposes every record of the read as `inferred` with `reason: "truncated"`. With fragments, truncation is handled per fragment as above, and the read is not labelled truncated.
 - **Notices.**
   - The swarm keeps each notice's text in memory, and its SHA-256 in the `notified` event.
   - A notice is exposed in the member's top loop's first successful own generation whose logged input holds a `ChatMessageUser` with the notice's metadata id and exactly the notice's text. ORBIT makes the same check (`message.text == receipt.content`, `ORBIT: orbit/communication/delivery.py:370-380`). An edit or a filter that keeps the id but changes the text is not exposure.
@@ -849,6 +849,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
   - a two-record read whose result reaches the model with only one fragment intact exposes only that record;
   - a tool message other than the read's own result message (another message id, including an earlier result in the loop under the same call id) exposes nothing;
   - a read whose result has an error set before the generation is exposed as `inferred` with `reason: "result_error"`, with and without fragments;
+  - a read without fragments whose result `max_tool_output` truncates is exposed as `inferred` with `reason: "truncated"` for every record, while the same read with fragments exposes only the records whose fragments survived;
   - a failed generation does not count, and the next successful one does;
   - a cache replay is marked;
   - a notice is exposed only after a successful generation that included its original text, and not when an edit or a filter kept its id but changed its text, in both the walk and the `record_exposure()` path;
