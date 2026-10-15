@@ -1,6 +1,6 @@
 # ORBIT on inspect_swarm
 
-Status: proposed, 2026-10-08; revised 2026-10-14 to follow the designs merged since, and 2026-10-15 for the bus's commit sequence and admission check. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
+Status: proposed, 2026-10-08; revised 2026-10-14 to follow the designs merged since, and 2026-10-15 for the bus's commit sequence and admission check, and for exposure read from Inspect's logged events (inspect_ai AI-6 to AI-8). Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
 
 ## Overview
 
@@ -370,7 +370,7 @@ Three extensions are needed:
   - `Bus.sequence()` returns the same number to a channel. Because the bus gives the number before it calls `apply()`, and steps 2 to 4 have no `await`, inside `apply()` it is the applied record's own, so ORBIT's channel stores it with the record in its canonical messages there, before any reader can see the record.
   - Step-start visibility compares a record's stored commit number with the activation's cutoff. `Record` gains no sequence field.
 - **Read receipts with fragments.**
-  - The bus call that a channel's read tool makes to write its `read` event becomes public as `record_read(records, *, fragments=None)`. It binds the read's own pending `ToolEvent` (its `uuid` as `tool_event_id`, from which the tool call id and function come) and the tool span, as swarm-communication.md's read events do ([The call's events](swarm-communication.md#records-and-the-bus)).
+  - The bus call that a channel's read tool makes to write its `read` event becomes public as `record_read(records, *, fragments=None)`. It records the tool span, as swarm-communication.md's read events do; the walk takes the read's own `ToolEvent`, and from it the tool call id and function, from that span, which with inspect_ai's AI-6 is the event's `span_id` ([Occurrences, from the log](swarm-communication.md#records-and-the-bus)).
   - `fragments` maps each record id to the exact text the tool renders for that record. The contract on the channel is ORBIT's: each fragment appears in the tool's result as its own newline-delimited block, so that `"\n" + fragment + "\n"` is a substring of `"\n" + result + "\n"` (`ORBIT: orbit/communication/runtime.py:373-377`).
   - `record_read()` only registers the fragments; it does not check them. It runs inside the read tool, before the tool returns, when the result does not exist yet: the pending `ToolEvent` has no result, and Inspect builds the result event only after `call_tool()` returns (`src/inspect_ai/model/_call_tools.py:321-329`, `:386-395`). ORBIT's own `record_read()` registers its rendered messages at the same point (`ORBIT: orbit/communication/tools.py:154-162`).
   - The check happens in the exposure walk ([P3](#p3-exposure)), against the read's completed `ToolEvent` result and then against model inputs.
@@ -380,17 +380,17 @@ Notices need nothing new. ORBIT's channel returns `notice_lines(member)` with it
 
 #### P3. Exposure
 
-M2 computes `exposed` after the drain, in its walk over the member spans ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)). For a native read, that is the reader loop's first own generation (an agent turn of that loop) whose input holds the read's own `ChatMessageTool`, joined by the `ToolEvent`'s `message_id`, with its content unchanged and no `error`. Inputs are the swarm's notes of each generation's input when it started, every field of every message (role, id, content, metadata, error), not the logged inputs, which a later edit changes ([Generation-time notes](swarm-communication.md#records-and-the-bus)). Every rule below reads them and counts only the loop's own generations, so an intervention's `edit()` after a generation never removes an exposure that generation already made, and a sentinel monitor's or a judge's model call never makes one. ORBIT's collusion scorer needs exposure in ORBIT's sense, so the walk gains these rules. Each applies only where its input exists, so a run with no fragments, no notices kept and no external members is walked exactly as M2 walks it.
+M2 computes `exposed` after the drain, in its walk over the member spans ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)). For a native read, that is the reader loop's first own generation (an agent turn of that loop) whose input holds the read's own `ChatMessageTool`, joined by the `ToolEvent`'s `message_id`, with its content unchanged; it is `exact` when that message has no `error` there and `inferred`, with `reason: "result_error"`, when it has one, because some providers then send the error in place of the content and Bedrock sends the content (decision: Ransom, 2026-10-15). Inputs are the logged `ModelEvent` inputs, which with inspect_ai's AI-7 hold each message as that generation was sent, every field included (role, id, content, metadata, error) ([Occurrences, from the log](swarm-communication.md#records-and-the-bus)). Every rule below reads them and counts only the loop's own generations, so an intervention's `edit()` after a generation never removes an exposure that generation already made, and a sentinel monitor's or a judge's model call never makes one. ORBIT's collusion scorer needs exposure in ORBIT's sense, so the walk gains these rules. Each applies only where its input exists, so a run with no fragments, no notices kept and no external members is walked exactly as M2 walks it.
 
 - **Successful generations only.** A `ModelEvent` with an `error` does not count, and the walk moves on to the next event. ORBIT counts only successful inputs.
 - **Per fragment.**
   - When the read registered fragments ([P2](#p2-bus-extensions)), the walk first checks each fragment against the read's completed `ToolEvent` result, with the newline-block rule. A fragment that is not in the result (the channel broke the contract, or Inspect truncated the result through it) gets `in_result: false` in an evidence event for that read, and is never exposed.
-  - Each record whose fragment is in the result is then checked separately. A record is exposed in the first successful `ModelEvent` of the reader's loop, at or after the read, whose noted input holds the read's own result message (by `message_id`, no `error` as noted) with that record's fragment intact under the newline-block rule. The fragment check replaces M2's whole-content check, so an edit that keeps the message's id exposes the fragments it leaves intact.
+  - Each record whose fragment is in the result is then checked separately. A record is exposed in the first successful `ModelEvent` of the reader's loop, at or after the read, whose logged input holds the read's own result message (by `message_id`) with that record's fragment intact under the newline-block rule. It is `exact` when the message has no `error` there and `inferred`, with `reason: "result_error"`, when it has one, as in M2. The fragment check replaces M2's whole-content check, so an edit that keeps the message's id exposes the fragments it leaves intact.
   - A read whose result an intervention edited, or a filter truncated, so that only some fragments survive, exposes only those.
   - Without fragments, M2's rule applies unchanged.
 - **Notices.**
   - The swarm keeps each notice's text in memory, and its SHA-256 in the `notified` event.
-  - A notice is exposed in the member's top loop's first successful own generation whose noted input holds a `ChatMessageUser` with the notice's metadata id and exactly the notice's text. ORBIT makes the same check (`message.text == receipt.content`, `ORBIT: orbit/communication/delivery.py:370-380`). An edit or a filter that keeps the id but changes the text is not exposure.
+  - A notice is exposed in the member's top loop's first successful own generation whose logged input holds a `ChatMessageUser` with the notice's metadata id and exactly the notice's text. ORBIT makes the same check (`message.text == receipt.content`, `ORBIT: orbit/communication/delivery.py:370-380`). An edit or a filter that keeps the id but changes the text is not exposure.
   - The event is `exposed` with `notice` set to the notice id, in place of record ids.
 - **Members whose requests are rewritten below the transcript.**
   - ORBIT's defense input filters rewrite the request inside a `ModelAPI` wrapper (`ORBIT: orbit/defenses/model_filter.py:161-212`). Its own exposure observer sits inside them and snapshots the filtered request (`model_observer.py:42-95`). A `ModelEvent`, however, records the request before the filters (`_model.py:1577`, `:1636`), so for such a member the walk would count a redacted message as exposed.
@@ -410,7 +410,7 @@ M2 computes `exposed` after the drain, in its walk over the member spans ([Evide
 
 Anything but `complete`, or `external` declared complete, means that exposure is unknown, never zero.
 
-The first revision observed exposure live, through a transcript subscription. Exposure events are now emitted after the drain, by M2's walk; M2's transcript subscription preserves generation-time inputs for that walk ([Generation-time notes](swarm-communication.md#records-and-the-bus)).
+The first revision observed exposure live, through a transcript subscription. Exposure events are now emitted after the drain, by M2's walk; M2's transcript subscription only notes which generations are agent turns, and the walk reads inputs from the logged events ([The loop's own generations](swarm-communication.md#records-and-the-bus)).
 
 #### P4. Scheduled mode: the turn seam and activation
 
@@ -733,7 +733,7 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
 - But each wrapper must preserve the model's identity and effective configuration through a private API, the wrappers' order matters, and inspect_swarm would carry this for every member.
 - Rejected for inspect_swarm's own machinery: turn-boundary notices and the exposure walk need neither. An eval whose own filters rewrite requests below the transcript keeps its post-filter observer, and reports through `record_exposure()` ([P3](#p3-exposure)).
 
-**Live exposure through a transcript subscription** (the first revision). It would see events as they complete, independent of eviction. But M2 already walks the member spans after the drain, and a history provider covers eviction. Rejected as the way to emit exposure; incomplete history is reported as coverage. M2 does keep a transcript subscription, only to note each generation's input and agent-turn flag when it starts, which the walk then reads ([Generation-time notes](swarm-communication.md#records-and-the-bus)).
+**Live exposure through a transcript subscription** (the first revision). It would see events as they complete, independent of eviction. But M2 already walks the member spans after the drain, and a history provider covers eviction. Rejected as the way to emit exposure; incomplete history is reported as coverage. M2 does keep a transcript subscription, only to note which generations are agent turns, which the log does not record ([The loop's own generations](swarm-communication.md#records-and-the-bus)).
 
 **Bus routes for ORBIT's channel.** Pass ORBIT's communication edges as routes, and let the bus drop recipients. But routes are a messages-channel parameter, ORBIT already intersects edges with membership when it computes recipients, and a generic routes interface for user channels would be one more surface for one user. Rejected.
 
@@ -846,7 +846,8 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
   - a fragmented read is exposed at the member's next successful generation;
   - a fragment that is not a newline-delimited block of the read's completed result (a test channel that renders differently, and a result truncated by `max_tool_output`) gets `in_result: false` and is never exposed, while the read's other fragments are checked as usual;
   - a two-record read whose result reaches the model with only one fragment intact exposes only that record;
-  - a tool message other than the read's own result message (another message id, including an earlier result in the loop under the same call id), or one with an error, exposes nothing;
+  - a tool message other than the read's own result message (another message id, including an earlier result in the loop under the same call id) exposes nothing;
+  - a read whose result has an error set before the generation is exposed as `inferred` with `reason: "result_error"`, with and without fragments;
   - a failed generation does not count, and the next successful one does;
   - a cache replay is marked;
   - a notice is exposed only after a successful generation that included its original text, and not when an edit or a filter kept its id but changed its text, in both the walk and the `record_exposure()` path;

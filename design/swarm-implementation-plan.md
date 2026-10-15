@@ -281,6 +281,9 @@ flowchart LR
   M2_7 --> M2_8[M2-8 memory channel]
   M2_8 --> M2_9[M2-9 notices]
   M2_8 --> M2_10[M2-10 exposure and comm metrics]
+  AI6[AI-6 ToolEvent span] --> M2_10
+  AI7[AI-7 ModelEvent input snapshot] --> M2_10
+  AI8[AI-8 Groq and Mistral tool errors] --> M2_10
   M2_1 & M2_2 & M2_3 & M2_4 & M2_5 & M2_9 & M2_10 --> M2_11[M2-11 docs and examples]
   M2_11 --> M2_12[M2-12 API statement, packaging, first release]
 ```
@@ -289,7 +292,7 @@ flowchart LR
 
 - **Isolation and limits:** M2-1, M2-2, M2-3 and M2-4, each alone.
 - **Background members:** D-2 → AI-5 → M2-5. D-2 starts during M1 (decision: Ransom, 2026-10-14).
-- **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8. D-1 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-memory-channel.md](swarm-memory-channel.md), #22).
+- **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8, and AI-6, AI-7 and AI-8 before M2-10. The three inspect_ai changes are independent of each other and of every M2 pull request, so they can start at once. D-1 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-memory-channel.md](swarm-memory-channel.md), #22).
 - **Release:** M2-11 and M2-12, after the three strands above.
 
 ### Designs
@@ -306,9 +309,23 @@ flowchart LR
 
 ### inspect_ai
 
-**AI-5. A scoped owner for `background()`.** As D-2 specifies. The only inspect_ai change in M2.
+**AI-5. A scoped owner for `background()`.** As D-2 specifies.
 - Files and tests: as D-2 specifies (inspect_ai's `background()` utility and deepagent's background dispatch, with tests in its own suite).
 - Depends on: D-2.
+
+AI-6 to AI-8 are what M2-10's exposure and provenance rest on ([swarm-communication.md Records and the bus](swarm-communication.md#records-and-the-bus), "Occurrences, from the log"; decision: Ransom, 2026-10-15). Each is made in its own implement loop and opened as a draft pull request on `UKGovernmentBEIS/inspect_ai` from a branch of the Meridian fork; none was open on 2026-10-15, so each is named by its branch. They must be merged on inspect_ai `main` before M2-10 is built, and M2-10 bumps the swarm's locked inspect-ai commit to include them: `pyproject.toml`'s git reference tracks inspect_ai `main`, so the bump is `uv lock --upgrade-package inspect-ai` in `uv.lock`, as for every inspect_ai prerequisite.
+
+**AI-6. A `ToolEvent`'s span is its tool span.** Branch `fix-tool-event-span`. Today the pending event is built before `call_tool` opens the tool span, and an event takes its `span_id` when built, so the logged `ToolEvent`'s `span_id` is the enclosing agent span although the event is recorded inside the tool span (`src/inspect_ai/model/_call_tools.py:505`, `:967`; `src/inspect_ai/event/_base.py:48`). After it, the event's `span_id` is the tool span it is recorded in, so the swarm joins a read or a write to its own `ToolEvent` by its tool span.
+- Files and tests: `src/inspect_ai/model/_call_tools.py`, with tests in inspect_ai's suite, as its pull request scopes them.
+- Depends on: nothing.
+
+**AI-7. A `ModelEvent`'s input is a snapshot.** Branch `fix-model-event-input-snapshot`. Today `ModelEvent.input` holds the conversation's own message objects (`src/inspect_ai/model/_model.py:1993-1997`), so an in-place edit after a generation, such as an `on_continue` rewriting an old tool result's content, metadata or error, changes every earlier event's logged input. After it, the input is a per-message copy taken when the event is created, so the swarm reads what each generation was sent from the log.
+- Files and tests: `src/inspect_ai/model/_model.py`, with tests in inspect_ai's suite, as its pull request scopes them.
+- Depends on: nothing.
+
+**AI-8. Groq and Mistral send a tool result's error.** Branch `fix-groq-mistral-tool-error`. Like OpenAI Chat, they send `Error: <message>` in place of the content when a tool message has an error; today Groq sends the content (`src/inspect_ai/model/_providers/groq.py:759-764`), as does Mistral's conversation path (`mistral_conversation.py:276-281`). Bedrock is unchanged, sending the content with `status="error"`. Exposure through an errored result is `inferred` either way; AI-8 makes the providers agree with OpenAI's and Anthropic's.
+- Files and tests: the two providers' request conversion, with tests in inspect_ai's suite, as its pull request scopes them.
+- Depends on: nothing.
 
 ### inspect_swe and inspect_sentinel
 
@@ -375,10 +392,10 @@ None in M2, and none in M1.
 - Depends on: M2-8.
 - Implements: swarm-communication.md step 4; [Notices](swarm-communication.md#notices); [swarm-memory-channel.md Notices and the status line](swarm-memory-channel.md#notices-and-the-status-line).
 
-**M2-10. Exposure and communication metrics.** Post-hoc `exposed` events in the finalisation walk, exact for native reads by the read's own result message (`ToolEvent.message_id`, with its content unchanged and no `error`, as noted at the generation), not by tool call id, which repeats within a loop as well as across loops; the bus binds each native record's and read's `tool_event_id` (its own `ToolEvent`) and `proposal_event_id` (the loop's latest own generation, an agent turn by Inspect's sentinel agent scope), from which the walk takes result messages and writers' steps; a transcript subscription notes each generation's agent-turn flag and full input when it starts, which the walk matches instead of the logged inputs, counting only the reading loop's own generations ([swarm-communication.md Records and the bus](swarm-communication.md#records-and-the-bus)): the walk finds the loop a `read` names in the member's span subtree and matches only that loop's `ModelEvent`s after the read, and writes `loop` and `nested` ([swarm-memory-channel.md Descendants](swarm-memory-channel.md#descendants)); record counts and sizes per member, rejections per control.
-- Files: `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/_bus/_record.py` and `_bus/_bus.py` (the two event ids, and the transcript subscription for the run).
-- Tests: `tests/test_comm_evidence.py`, with the cases of [swarm-memory-channel.md Testing](swarm-memory-channel.md#testing) ("Evidence"), on the events Inspect actually emits: two concurrent reads under one tool call id each bound to their own `ToolEvent`, a write after a serial helper tool whose auxiliary model proposed a call under the write's id and function, and a write with an `AfterGenerate` monitor after every generation (plain text, and a proposal under the write's id and function), each bound to the loop's generation; a result rewritten in place by `on_continue` (content, metadata or error) after a generation consumed it stays exposed, and one whose content is rewritten, or on which an error is set, before is not; a result that only a `BeforeGenerate` monitor receives before ending the sample is not exposed; a tool call id reused by a parent and its child and by two sibling children, and reused within one loop by two reads whose second result is dropped before the next generation, which leaves the second read unexposed.
-- Depends on: M2-8, M1-10.
+**M2-10. Exposure and communication metrics.** Post-hoc `exposed` and `proposed` events in the finalisation walk, read from Inspect's logged events ([swarm-communication.md Records and the bus](swarm-communication.md#records-and-the-bus)). A native read is joined to its own result message by the `message_id` of the `ToolEvent` in its tool span (AI-6), not by tool call id, which repeats within a loop as well as across loops; it is exposed at the reading loop's first own generation whose logged input (AI-7) holds that message with its content unchanged, `exact` when the message has no `error` there and `inferred` (`reason: "result_error"`) when it has one. Each delivered native record's `proposed` event names the writing loop's latest own generation before its `ToolEvent`, kept if it completed and proposes the call's id and function. A loop's own generations are its agent turns by Inspect's sentinel agent scope, which a transcript subscription notes for each `ModelEvent` as it is recorded, since the log does not keep it. The walk finds the loop a `read` names in the member's span subtree, matches only that loop's generations after the read, and writes `loop` and `nested` ([swarm-memory-channel.md Descendants](swarm-memory-channel.md#descendants)); record counts and sizes per member, rejections per control.
+- Files: `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/_bus/_bus.py` (the agent-turn subscription for the run); `uv.lock` for the inspect-ai commit.
+- Tests: `tests/test_comm_evidence.py`, with the cases of [swarm-memory-channel.md Testing](swarm-memory-channel.md#testing) ("Evidence"), on the events Inspect actually emits: two concurrent reads under one tool call id each joined to their own `ToolEvent` by tool span; a write after a serial helper tool whose auxiliary model proposed a call under the write's id and function, and a write with an `AfterGenerate` monitor after every generation (plain text, and a proposal under the write's id and function), each given the loop's generation as its proposing step; a result rewritten in place by `on_continue` (content, metadata or error) after a generation consumed it stays exposed, and one whose content is rewritten before is not; an error set before the generation gives `inferred`, with the member's generations naming a content-sending provider (Bedrock) and an error-sending one (OpenAI); a result that only a `BeforeGenerate` monitor receives before ending the sample is not exposed; a tool call id reused by a parent and its child and by two sibling children, and reused within one loop by two reads whose second result is dropped before the next generation, which leaves the second read unexposed.
+- Depends on: M2-8, M1-10, and AI-6, AI-7 and AI-8 merged on inspect_ai `main`, with this pull request bumping the locked inspect-ai commit to one that has all three.
 - Implements: swarm-communication.md step 5; [Evidence and provenance](swarm-communication.md#evidence-and-provenance); [swarm-memory-channel.md Evidence](swarm-memory-channel.md#evidence).
 
 **M2-11. User docs and examples.** A Quarto site in `docs/`, as inspect_sentinel and inspect_flow keep, and runnable `examples/`: getting started; members, controllers and channels; budgets, splits and the ledger; sandbox topologies (shared, per member) with sizing guidance; the shared-memory channel, the `policy=` hook and the filesystem observation limit (swarm-communication.md step 7's content for what M2 builds), and that bridged members cannot use it yet; scoring: the task's own scorers, the result record, and with per-member sandboxes a scorer that names each member's sandbox; the result record's store key `inspect_swarm.result` is owned by the runtime, task code must not write it, and a tool reading it gives members a view of each other's results, a channel outside the bus (decision: Ransom, 2026-10-14); comparisons with epochs through Inspect's own reducers ([swarm-scoring.md Comparisons in M1](swarm-scoring.md#comparisons-in-m1)); writing a controller, including `until_proved` with its precondition ([Lean Rec. 6](swarm-lean-open-problems.md#6-m1-tighten-submitted-m2-document-stopping-on-the-first-proof), second part); and an example shaped like Epoch's port, which uses the shared-memory channel ([Lean, A port, sketch](swarm-lean-open-problems.md#a-port-sketch)). The shared-memory pages cover migration from `memory(instance=...)`, the seen rule and descendants ([swarm-memory-channel.md Relation to `memory(instance="...")`](swarm-memory-channel.md#relation-to-memoryinstance)).
@@ -389,7 +406,7 @@ None in M2, and none in M1.
 
 **M2-12. API statement, packaging and the first release.** The README and the package docstring state which API is supported and which is experimental, as decided ([Decisions](#decisions), item 6); classifiers move from "Development Status :: 1 - Planning"; `requires-python` stays at M1-0's 3.11; the `push` trigger is restored in `release.yaml`, so Release Please opens the 0.1.0 release pull request, whose `release-pin-deps.yml` step pins inspect_ai to its latest release.
 - Files: `README.md`, `src/inspect_swarm/__init__.py`, `pyproject.toml`, `.github/workflows/release.yaml`.
-- Depends on: M2-11, and an inspect_ai PyPI release containing AI-1, AI-2 and AI-5 (the release pull request's build fails until there is one, which is the guard `release-pin-deps.yml` describes). Epoch's configs pin inspect_ai 0.3.273 ([Lean, What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)); the port moves them to that release.
+- Depends on: M2-11, and an inspect_ai PyPI release containing AI-1, AI-2 and AI-5 to AI-8 (the release pull request's build fails until there is one, which is the guard `release-pin-deps.yml` describes). Epoch's configs pin inspect_ai 0.3.273 ([Lean, What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)); the port moves them to that release.
 - Implements: what an external release needs.
 
 ## Future work
@@ -445,7 +462,7 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 
 - **inspect_swarm** has no released API until M2-12; nothing in M1 or M2 before it is a compatibility concern. From M2-12, the API statement says what later releases keep.
 - **Eval logs.** M1 and M2 write only existing event types, store entries and message metadata, each payload carrying `version: 1`, as the deep dives specify. No log schema, generated TypeScript type or ts-mono change is in either milestone.
-- **inspect_ai.** AI-1 adds two literal values outside the log schema; AI-2 changes nothing outside a scope; AI-5 changes nothing outside an owner scope, as D-2 must confirm. The optional AI-3 and AI-4 add observability without changing behaviour.
+- **inspect_ai.** AI-1 adds two literal values outside the log schema; AI-2 changes nothing outside a scope; AI-5 changes nothing outside an owner scope, as D-2 must confirm. AI-6 to AI-8 change no schema: a `ToolEvent`'s `span_id` becomes its tool span, a `ModelEvent`'s logged input stops following later edits, and Groq and Mistral requests carry an errored tool result's error instead of its content. The optional AI-3 and AI-4 add observability without changing behaviour.
 - **External users' inspect_ai versions.** A release of inspect_swarm requires an inspect_ai release with its prerequisites, so users pinned to older inspect_ai (Epoch: 0.3.273) must move.
 
 ## Security
@@ -476,6 +493,8 @@ Ransom's answers to this plan's questions, on 2026-10-14 (his words quoted), and
 8. **The result contract and the scoring built on it are not in M2.** The result contract and record additions; `member_scores`, `best_at(k)` and `baseline()`; per-member sandboxes in the scoring contract, with the design artifact scoring under them needs; and the analysis helper are [future work](#future-work). Epoch's port needs only Recommendations 1 to 3 to run with its scorer unchanged, the Lean analysis lists per-member scores, `baseline()` and `best_at(k)` as optional gains after M2, and M2's "Done means" does not mention scoring. Ransom: "Agree that this should be moved out of M2." M2-1 documents what a scorer sees meanwhile.
 
 9. **M1-10 reports "members stuck in loops" as a signal, not a verdict.** swarm.md lists the check among the harness-validity checks ([Observer, Analysis](swarm.md#observer-evidence-accounting-and-metrics)). Per member, the longest run of consecutive identical tool calls (same function and arguments) is reported as a metric, with no threshold fixed until there is data. Ransom: "OQ1 agree with recommendation".
+
+10. **M2-10 rests on three inspect_ai fixes, and an errored result is inferred exposure** (2026-10-15). Exposure and provenance read Inspect's logged events, assuming AI-6, AI-7 and AI-8 land first, rather than working around today's `ToolEvent` span and live `ModelEvent` inputs. A read whose result carries an error in the consuming generation's input is exposed as `inferred`, since Bedrock still sends the content. Ransom: "do your recommendation - 1 and 2 plus the 3 groq and mistral. Rewrite this design to cite them and assume they land before the design is implemented", and "Ok with inferred for the error."
 
 One more decision shapes this plan: the result record's store key is documented as owned by the runtime and readable by member code (Ransom: "yes, add the docs line"; M1-13, M2-11 and [swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records)).
 
