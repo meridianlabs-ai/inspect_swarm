@@ -311,8 +311,11 @@ flowchart LR
 - Files and tests: as D-2 specifies (inspect_ai's `background()` utility and deepagent's background dispatch, with tests in its own suite).
 - Depends on: D-2.
 
-**AI-6. A tool can set its result message's metadata.** Today `execute_tools` builds a call's `ChatMessageTool` from the content, the tool call id, the function and the error only (`src/inspect_ai/model/_call_tools.py:412-418`), and a tool's return type has no place for metadata (`src/inspect_ai/tool/_tool.py:36-47`). AI-6 adds a function a running tool calls, `tool_result_metadata(metadata)`, which records the mapping in a cell `call_tool` creates for each call, and which `execute_tools` copies into that call's `ChatMessageTool.metadata`; it raises outside a tool. No schema change: `ChatMessage.metadata` exists. The swarm's read tools use it to name the records they return ([swarm-communication.md Records and the bus](swarm-communication.md#records-and-the-bus), "Records in model input").
-- Files and tests: `src/inspect_ai/model/_call_tools.py` and an export from `inspect_ai.tool`, with tests in inspect_ai's suite: two concurrent calls in one batch each get their own metadata, a call that does not set it gets none, and the metadata is in the next `ModelEvent`'s input.
+**AI-6. Message metadata the swarm's ids rely on.** Two small parts, one pull request ([swarm-communication.md Records and the bus](swarm-communication.md#records-and-the-bus), "Records in model input"):
+- **A tool can set its result message's metadata.** Today `execute_tools` builds a call's `ChatMessageTool` from the content, the tool call id, the function and the error only (`src/inspect_ai/model/_call_tools.py:412-418`), and a tool's return type has no place for metadata (`src/inspect_ai/tool/_tool.py:36-47`). AI-6 adds a function a running tool calls, `tool_result_metadata(metadata)`, which records the mapping in a cell `call_tool` creates for each call, and which `execute_tools` copies into that call's `ChatMessageTool.metadata`; it raises outside a tool. The swarm's read tools use it to name the records they return.
+- **Combined user messages keep their full lineage.** Today each pairwise merge sets `combined_from` to the two ids it merged (`src/inspect_ai/model/_model.py:2829-2837`), so a third message's merge replaces the first two originals with the intermediate message's new id. AI-6 makes it the concatenation of each side's `combined_from`, or its id when it has none, so the list names every original message in order. Observers join notices and injections inside a combined message through it.
+- No schema change: `ChatMessage.metadata` exists, and `combined_from` keeps its key and type.
+- Files and tests: `src/inspect_ai/model/_call_tools.py`, `src/inspect_ai/model/_model.py` and an export from `inspect_ai.tool`, with tests in inspect_ai's suite: two concurrent calls in one batch each get their own metadata, a call that does not set it gets none, the metadata is in the next `ModelEvent`'s input, and three and four adjacent user messages combine with every original id in `combined_from`.
 - Depends on: nothing. M2-8 needs it merged on inspect_ai `main`, and bumps the swarm's locked inspect-ai commit with `uv lock --upgrade-package inspect-ai`.
 
 Three inspect_ai fixes opened while this plan was revised, inspect_ai#5884 (a `ToolEvent`'s span is its tool span), #5883 (a `ModelEvent`'s input is a snapshot) and #5882 (Groq and Mistral send a tool result's error), are standalone Inspect fixes and not swarm prerequisites, now that the swarm computes no exposure (decision: Ransom, 2026-10-15). #5883 helps any log-based analysis of what a generation was sent.
@@ -471,7 +474,7 @@ Each pull request carries the tests listed with it, from its design's Testing se
 
 ## Decisions
 
-Ransom's answers to this plan's questions, on 2026-10-14 (his words quoted), and one point settled from the code.
+Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his words quoted), and one point settled from the code. [Open questions](#open-questions) holds the one still open.
 
 1. **M1's final answer is `first` plus the per-member record.** The brief's "final-answer modes, the result contract" is read as M1 ([swarm-scoring.md Part 1](swarm-scoring.md#part-1-m1)). Ransom: "OQ1 - yes". With item 8, the result contract is future work rather than M2.
 2. **M2 has the bus without direct messages.** M2 has the bus core, binding, notices, communication evidence and the shared-memory channel; the `messages` channel and bridged members' bus tools are future work, and a swarm that gives a bridged member a bus channel is refused at construction (M2-6). Ransom: "OQ2 agree with the recommendation".
@@ -490,7 +493,7 @@ One more decision shapes this plan: the result record's store key is documented 
 
 ## Open questions
 
-None. Every question this plan raised is decided above.
+1. **Approve AI-6, a new public inspect_ai helper.** Follow-up 4's metadata contract needs a tool to set its result message's metadata, which Inspect cannot do today, and needs combined user messages to keep their lineage. Options: (a) AI-6 as specified, `tool_result_metadata()` plus full `combined_from` lineage, before M2-8; (b) no inspect_ai change, with observers parsing the bus-stamped fence attributes from result text and losing notices merged three deep. Recommendation: (a).
 
 ## Not this design
 
