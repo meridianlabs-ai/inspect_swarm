@@ -1,5 +1,6 @@
-from collections import UserDict, UserList
+from collections import UserDict, UserList, UserString
 from collections.abc import Callable, Sequence
+from decimal import Decimal
 from fractions import Fraction
 from typing import Any
 
@@ -12,10 +13,13 @@ from inspect_ai._util.registry import (
 from inspect_ai.agent import Agent, AgentState, agent, deepagent, react
 from inspect_ai.tool import bash, python
 from inspect_ai.util import (
+    Limit,
     TokenLimit,
     cost_limit,
+    message_limit,
     time_limit,
     token_limit,
+    turn_limit,
     working_limit,
 )
 
@@ -262,17 +266,6 @@ def test_member_unknown_factory_name_raises() -> None:
     "kwargs,error,match",
     [
         ({"members": []}, ValueError, "at least one member"),
-        # Inspect logs other containers as their type name, losing their contents
-        (
-            {"members": UserList([react(prompt="a")])},
-            TypeError,
-            "members= takes a list or tuple",
-        ),
-        (
-            {"channels": UserList([member_test_channel()])},
-            TypeError,
-            "channels= takes a list or tuple",
-        ),
         ({"members": ["react"]}, TypeError, "got a str"),
         (
             {"channels": [member_test_channel(), "member_test_channel"]},
@@ -315,66 +308,90 @@ def test_swarm_accepts_budget_dict() -> None:
 
 _FACTORY_DICT: dict[str, Any] = {"factory": "react", "args": {"prompt": "a"}}
 
+_LIMITS: list[Callable[[Any], Limit]] = [
+    token_limit,
+    cost_limit,
+    turn_limit,
+    message_limit,
+    time_limit,
+]
+
+
+def _edited_cap() -> Member:
+    limit = cost_limit(1.0)
+    record = member(react, limits=[limit])
+    limit.limit = Fraction(1, 2)  # pyright: ignore[reportAttributeAccessIssue]
+    return record
+
 
 @pytest.mark.parametrize(
-    "kwargs,match",
+    "kwargs,path",
     [
-        ({"members": UserDict(_FACTORY_DICT)}, "logged form as a dict"),
-        ({"members": [UserDict(_FACTORY_DICT)]}, "logged form as a dict"),
-        ({"members": (UserDict(_FACTORY_DICT),)}, "logged form as a dict"),
+        ({"members": UserList([react(prompt="a")])}, "members"),
+        ({"members": UserDict(_FACTORY_DICT)}, "members"),
+        ({"members": [UserDict(_FACTORY_DICT)]}, r"members\[0\]"),
+        ({"members": (UserDict(_FACTORY_DICT),)}, r"members\[0\]"),
+        ({"members": {**_FACTORY_DICT, "factory": deepagent}}, "members.factory"),
+        ({"members": {**_FACTORY_DICT, "args": UserDict(prompt="a")}}, "members.args"),
         (
-            {"members": {**_FACTORY_DICT, "factory": deepagent}},
-            "factory must be a registry name",
+            {"members": {**_FACTORY_DICT, "args": {1: "a"}}},
+            "members.args has the int key",
         ),
         (
-            {"members": {**_FACTORY_DICT, "args": UserDict(prompt="a")}},
-            "args must be a dict",
-        ),
-        (
-            {
-                "members": {
-                    **_FACTORY_DICT,
-                    "limits": [UserDict(limit="cost", value=1.0)],
-                }
-            },
-            "limits must be a list of limit dicts",
+            {"members": {**_FACTORY_DICT, "limits": [UserDict(limit="cost", value=1)]}},
+            r"members.limits\[0\]",
         ),
         (
             {"members": {**_FACTORY_DICT, "limits": [cost_limit(1.0)]}},
-            "limits must be a list of limit dicts",
+            r"members.limits\[0\]",
         ),
-        ({"budget": UserDict(cost=1.0)}, "Budget or its logged dict"),
         (
             {
                 "members": {
                     **_FACTORY_DICT,
-                    "limits": [
-                        {
-                            "limit": "token",
-                            "value": TokenLimit(tokens=100, type="output"),
-                        }
-                    ],
+                    "limits": [{"limit": "token", "value": TokenLimit(tokens=100)}],
                 }
             },
-            "limits must be a list of limit dicts",
+            r"members.limits\[0\].value",
         ),
-        ({"members": {**_FACTORY_DICT, "count": Fraction(2)}}, "count must be plain"),
-        ({"budget": {"split": UserList([1.0])}}, "split must be plain"),
-        ({"budget": {"split": [Fraction(1, 2)]}}, "split must be plain"),
-        ({"budget": {"cost": Fraction(1, 2)}}, "cost must be plain"),
-        ({"budget": {"tokens": Fraction(100)}}, "tokens must be plain"),
-        ({"budget": {"time": Fraction(1, 2)}}, "time must be plain"),
-        ({"budget": {"reserve": Fraction(1, 10)}}, "reserve must be plain"),
-        ({"budget": {"grace": Fraction(1, 2)}}, "grace must be plain"),
+        ({"members": {**_FACTORY_DICT, "count": Fraction(2)}}, "members.count"),
+        (
+            {"members": member(member_worker, args={"prompt": UserString("a")})},
+            "members.args.prompt",
+        ),
+        *[
+            (
+                {"members": [react(prompt="a"), member(form, limits=[limit(cap)])]},
+                r"members\[1\].limits\[0\].value",
+            )
+            for limit in _LIMITS
+            for form in (react, react(prompt="b"))
+            for cap in (Fraction(3, 2), Decimal("1.5"))
+        ],
+        ({"members": _edited_cap()}, r"members.limits\[0\].value"),
+        ({"channels": UserList([member_test_channel()])}, "channels"),
+        ({"budget": UserDict(cost=1.0)}, "budget"),
+        ({"budget": {"split": UserList([1.0])}}, "budget.split"),
+        ({"budget": {"split": [Fraction(1, 2)]}}, r"budget.split\[0\]"),
+        *[
+            ({"budget": {field: Fraction(1, 2)}}, f"budget.{field}")
+            for field in ("cost", "tokens", "time", "reserve", "grace")
+        ],
     ],
 )
-def test_swarm_refuses_logged_forms_inspect_cannot_log(
-    kwargs: dict[str, Any], match: str
+def test_swarm_refuses_values_inspect_cannot_log(
+    kwargs: dict[str, Any], path: str
 ) -> None:
-    # Inspect logs swarm()'s arguments as passed, and these shapes without their contents
+    # Inspect logs swarm()'s arguments as passed, and other values without their contents
     kwargs.setdefault("members", react(prompt="a"))
-    with pytest.raises(TypeError, match=match):
+    with pytest.raises(TypeError, match=rf"^{path} .*cannot log faithfully"):
         _swarm(**kwargs)
+
+
+def test_member_serializer_refuses_values_inspect_cannot_log() -> None:
+    record = member(react, limits=[cost_limit(Fraction(1, 2))])  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ValueError, match=r"member.limits\[0\].value is a Fraction"):
+        record.model_dump()
 
 
 @agent(name="member_test_replaced")

@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import cast
 
 from inspect_ai._util.registry import registry_info, registry_unqualified_name
@@ -7,7 +7,14 @@ from inspect_ai.agent import Agent, AgentState, agent
 from ._budget import Budget
 from ._channel._channel import Channel
 from ._controller._controller import Controller, MemberInfo
-from ._member import Member, is_factory, member, member_names
+from ._member import (
+    Member,
+    check_loggable,
+    check_member,
+    is_factory,
+    member,
+    member_names,
+)
 from ._registry import resolve
 
 
@@ -56,36 +63,39 @@ def swarm(
     return execute
 
 
+# Inspect logs swarm()'s arguments as given, so each is checked as given, before
+# it is converted: see check_loggable().
 def _members(members: object) -> list[Member]:
-    # a single member, or a list or tuple; a mapping is a member's logged form
-    items: list[object]
-    if isinstance(members, list | tuple):
+    # a single member, or a list or tuple; a dict is a member's logged form
+    if type(members) in (list, tuple):
         items = list(cast(Sequence[object], members))
-    elif isinstance(members, str) or not isinstance(members, Sequence):
-        items = [members]
-    else:
-        raise _container_error("members", cast(object, members))
-    if not items:
-        raise ValueError("members= must name at least one member.")
-    return [_member(item) for item in items]
+        if not items:
+            raise ValueError("members= must name at least one member.")
+        return [_member(item, f"members[{i}]") for i, item in enumerate(items)]
+    return [_member(members, "members")]
 
 
-def _member(item: object) -> Member:
+def _member(item: object, path: str) -> Member:
     if isinstance(item, Member):
         # rerun the record's checks: its args or the registry may have changed since
-        return Member.model_validate(item)
-    if isinstance(item, Mapping):
-        return Member.model_validate(_logged_member(cast(Mapping[str, object], item)))
-    if is_factory(item):
+        record = Member.model_validate(item)
+    elif type(item) is dict:
+        check_loggable(cast(object, item), path)
+        record = Member.model_validate(item)
+    elif is_factory(item):
         name = registry_unqualified_name(item)
         raise TypeError(
             f"members= takes agents or member() records: write member({name}, args={{...}})."
         )
-    if callable(item):
-        return member(item)  # pyright: ignore[reportArgumentType]
-    raise TypeError(
-        f"members= takes agents or member() records, got a {type(item).__name__}."
-    )
+    elif callable(item):
+        record = member(item)  # pyright: ignore[reportArgumentType]
+    else:
+        check_loggable(item, path)
+        raise TypeError(
+            f"members= takes agents or member() records, got a {type(item).__name__}."
+        )
+    check_member(record, path)
+    return record
 
 
 def _check_distinct_agents(
@@ -105,12 +115,12 @@ def _check_distinct_agents(
 
 
 def _channels(channels: str | Channel | Sequence[str | Channel]) -> list[Channel]:
-    if isinstance(channels, str | Channel):
-        items = [channels]
-    elif isinstance(channels, list | tuple):
-        items = list(channels)
-    else:
-        raise _container_error("channels", channels)
+    check_loggable(channels, "channels")
+    # check_loggable() has refused list and tuple subclasses; resolve() refuses other items
+    items = cast(
+        Sequence[str | Channel],
+        channels if isinstance(channels, list | tuple) else [channels],
+    )
     resolved = [resolve("swarm_channel", item) for item in items]
     names = [registry_info(channel).name for channel in resolved]
     duplicates = sorted({name for name in names if names.count(name) > 1})
@@ -121,71 +131,13 @@ def _channels(channels: str | Channel | Sequence[str | Channel]) -> list[Channel
     return resolved
 
 
-def _container_error(argument: str, value: object) -> TypeError:
-    # Inspect logs other containers as their type name, which replay and eval-set identity cannot use
-    return TypeError(
-        f"{argument}= takes a list or tuple, got a {type(value).__name__}. Pass list(...)."
-    )
-
-
 def _budget(budget: object) -> Budget:
     # replay passes a pydantic argument back as its logged dict
     if isinstance(budget, Budget):
         return budget
-    if _is_dict(budget):
-        for field, value in cast(dict[str, object], budget).items():
-            if not _is_plain(value):
-                raise _logged_form_error("budget", field, _PLAIN)
+    check_loggable(budget, "budget")
+    if type(budget) is dict:
         return Budget.model_validate(budget)
     raise TypeError(
         f"budget= must be a Budget or its logged dict, got a {type(budget).__name__}."
-    )
-
-
-# A member's logged form, as replay passes it back. Inspect logs the caller's
-# arguments as given, so only the shapes it logs faithfully are accepted; others
-# would lose their contents in the log.
-def _logged_member(item: Mapping[str, object]) -> object:
-    if not _is_dict(item):
-        raise TypeError(
-            f"members= takes a member's logged form as a dict, got a {type(item).__name__}. Pass member(...) or a dict."
-        )
-    factory = item.get("factory")
-    if factory is not None and not isinstance(factory, str):
-        raise _logged_form_error("members", "factory", "a registry name")
-    if not _is_dict(item.get("args", {})):
-        raise _logged_form_error("members", "args", "a dict")
-    for field in ("name", "role", "count"):
-        if not _is_plain(item.get(field)):
-            raise _logged_form_error("members", field, _PLAIN)
-    limits = item.get("limits", [])
-    if not isinstance(limits, list | tuple) or not all(
-        _is_dict(limit)
-        and all(_is_plain(v) for v in cast(dict[str, object], limit).values())
-        for limit in cast(Sequence[object], limits)
-    ):
-        raise _logged_form_error(
-            "members", "limits", f"a list of limit dicts holding {_PLAIN}"
-        )
-    return item
-
-
-_PLAIN = "plain values (strings, numbers, booleans, None, or lists of them)"
-
-
-def _is_plain(value: object) -> bool:
-    # what Inspect logs as itself; other objects are logged as a name or null
-    if isinstance(value, list | tuple):
-        return all(_is_plain(v) for v in cast(Sequence[object], value))
-    return isinstance(value, str | int | float | bool) or value is None
-
-
-def _is_dict(value: object) -> bool:
-    # Inspect logs a dict's contents, but another mapping as its type name
-    return isinstance(value, dict)
-
-
-def _logged_form_error(argument: str, field: str, expected: str) -> TypeError:
-    return TypeError(
-        f"{argument}=: in a logged dict, {field} must be {expected}, since Inspect logs other values without their contents. Pass {'member(...)' if argument == 'members' else 'Budget(...)'} instead."
     )

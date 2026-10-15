@@ -136,6 +136,7 @@ class Member(BaseModel):
 
     @model_serializer
     def _serialize(self) -> dict[str, Any]:
+        check_member(self, "member")
         data: dict[str, Any] = {}
         if self.agent is not None:
             data["agent"] = registry_value(self.agent)
@@ -144,10 +145,7 @@ class Member(BaseModel):
             data["factory"] = registry_log_name(self.factory)
             # as @agent logs a built agent's params
             data["args"] = extract_named_params(self.factory, False, **self.args)
-        data["name"] = self.name
-        data["role"] = self.role
-        data["count"] = self.count
-        data["limits"] = [_limit_dict(limit) for limit in self.limits]
+        data.update(_logged_fields(self))
         return data
 
 
@@ -229,6 +227,46 @@ def member_names(members: Sequence[Member]) -> list[list[str]]:
             f"members=: member names must be unique; {', '.join(repr(d) for d in duplicates)} is used more than once. Give the members distinct names with member(..., name=...)."
         )
     return names
+
+
+# Inspect's @agent logs these as themselves, compared by exact type. It logs other
+# objects by their type name or as null, so different arguments would log alike
+# and replay could not rebuild them.
+_PLAIN_TYPES: tuple[type, ...] = (str, int, float, bool, type(None))
+
+
+def check_loggable(value: object, path: str) -> None:
+    if type(value) in (list, tuple):
+        for i, item in enumerate(cast(Sequence[object], value)):
+            check_loggable(item, f"{path}[{i}]")
+    elif type(value) is dict:
+        for key, item in cast(dict[object, object], value).items():
+            if type(key) is not str:
+                raise TypeError(
+                    f"{path} has the {type(key).__name__} key {key!r}, which Inspect cannot log faithfully. Use string keys."
+                )
+            check_loggable(item, f"{path}.{key}")
+    elif type(value) not in _PLAIN_TYPES and not has_registry_params(value):
+        # an object made by a registered factory is logged as its name and arguments
+        raise TypeError(
+            f"{path} is a {type(value).__name__}, which Inspect cannot log faithfully. Use a dict, list, tuple, str, int, float, bool or None, or an object made by a registered factory, such as an agent or a tool."
+        )
+
+
+# Checks the values a member logs as they are now: a limit's cap can be changed
+# through its setter after member() checked it.
+def check_member(record: Member, path: str) -> None:
+    check_loggable(record.args, f"{path}.args")
+    check_loggable(_logged_fields(record), path)
+
+
+def _logged_fields(record: Member) -> dict[str, Any]:
+    return {
+        "name": record.name,
+        "role": record.role,
+        "count": record.count,
+        "limits": [_limit_dict(limit) for limit in record.limits],
+    }
 
 
 def is_factory(value: object) -> bool:

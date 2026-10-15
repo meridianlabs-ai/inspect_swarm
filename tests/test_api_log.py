@@ -16,6 +16,13 @@ from inspect_ai.dataset import Sample
 from inspect_ai.model import GenerateConfig, get_model
 from inspect_ai.solver import Plan
 from inspect_ai.tool import bash, python
+from inspect_ai.util import (
+    cost_limit,
+    message_limit,
+    time_limit,
+    token_limit,
+    turn_limit,
+)
 
 from inspect_swarm import (
     Controller,
@@ -151,6 +158,20 @@ def test_factory_args_log_as_the_built_agents_params() -> None:
             ],
             id="mixed-list",
         ),
+        pytest.param(
+            lambda: [
+                member(react(prompt="a"), limits=[cost_limit(0.5), time_limit(60)]),
+                member(
+                    never_built,
+                    limits=[
+                        token_limit(100, type="output"),
+                        turn_limit(3),
+                        message_limit(20),
+                    ],
+                ),
+            ],
+            id="limits",
+        ),
     ],
 )
 def test_replay_rebuilds_the_swarm(members: Callable[[], Any]) -> None:
@@ -180,21 +201,26 @@ def _identifier(members: Any) -> str:
     )
 
 
-def _built_arm(prompt: str) -> Any:
+def _built_arm(prompt: Any) -> Any:
     return react(prompt=prompt)
 
 
-def _factory_arm(prompt: str) -> Any:
+def _factory_arm(prompt: Any) -> Any:
     return member(react, args={"prompt": prompt}, count=2)
 
 
+def _cap_arm(cap: Any) -> Any:
+    return member(react(prompt="a"), limits=[cost_limit(cap)])
+
+
 @pytest.mark.parametrize(
-    "arm",
+    "arm,a,b",
     [
-        pytest.param(_built_arm, id="built-agent-params"),
-        pytest.param(_factory_arm, id="factory-args"),
+        pytest.param(_built_arm, "a", "b", id="built-agent-params"),
+        pytest.param(_factory_arm, "a", "b", id="factory-args"),
+        pytest.param(_cap_arm, 0.5, 1.5, id="limit-cap"),
     ],
 )
-def test_eval_set_arms_are_distinct(arm: Callable[[str], Any]) -> None:
-    assert _identifier(arm("a")) == _identifier(arm("a"))
-    assert _identifier(arm("a")) != _identifier(arm("b"))
+def test_eval_set_arms_are_distinct(arm: Callable[[Any], Any], a: Any, b: Any) -> None:
+    assert _identifier(arm(a)) == _identifier(arm(a))
+    assert _identifier(arm(a)) != _identifier(arm(b))
