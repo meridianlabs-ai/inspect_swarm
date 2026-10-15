@@ -668,7 +668,7 @@ Two things the merged designs add to what these quantities mean:
   - With `leaderless`, every member starts, so these coincide.
 - **Communication (M2).** With a bus channel (M2's shared memory, or the later messages channel), a member's submission may repeat what a peer wrote.
   - Per-member scores measure what each member submitted, which is team@k's meaning ("any of the k agents"), not what it derived alone. `vote` counts a copied answer as that member's vote.
-  - The communication evidence (`read` and `exposed`, [Evidence and provenance](swarm-communication.md#evidence-and-provenance)) lets analysis tell the cases apart. The record and the scorers need no change for it.
+  - The communication evidence (`read`, and the record ids on read results in model input, [Evidence and provenance](swarm-communication.md#evidence-and-provenance)) lets analysis tell the cases apart. The record and the scorers need no change for it.
 
 ### `best_at(k)`: best of k from n epochs
 

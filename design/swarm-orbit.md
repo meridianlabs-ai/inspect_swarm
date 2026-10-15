@@ -1,6 +1,6 @@
 # ORBIT on inspect_swarm
 
-Status: proposed, 2026-10-08; revised 2026-10-14 to follow the designs merged since, and 2026-10-15 for the bus's commit sequence and admission check, and for exposure read from Inspect's logged events (inspect_ai AI-6 to AI-8). Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
+Status: proposed, 2026-10-08; revised 2026-10-14 to follow the designs merged since, and 2026-10-15 for the bus's commit sequence and admission check, and for exposure left to ORBIT's own observer, joined to swarm records by metadata ids. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
 
 ## Overview
 
@@ -22,11 +22,8 @@ What inspect_swarm would add is all future work in [the implementation plan](swa
 - **Three small bus extensions** ([P2](#p2-bus-extensions)):
   - a channel whose records also reach members that are not running;
   - the bus's commit sequence, exposed to channels and controllers;
-  - per-message read fragments.
-- **Exposure evidence in ORBIT's sense** ([P3](#p3-exposure)). M2's post-hoc exposure walk gains three things:
-  - a check per message fragment;
-  - exposure of notices;
-  - a route for members whose defenses rewrite requests below the transcript.
+  - a public `record_read()` that returns the read id it puts in the result's metadata.
+- **Exposure stays ORBIT's** ([P3](#p3-exposure)). The swarm computes no exposure. Every swarm message in a model's input names its records and notices by metadata ids, so ORBIT's own post-filter observer joins its input to swarm records with no text matching and reports what it finds through `record_exposure()`.
 
 A port changes some behaviour, listed under [Behaviour a port changes](#behaviour-a-port-changes):
 
@@ -51,7 +48,7 @@ This is a deep dive on one topic of [swarm.md](swarm.md): how ORBIT, the multi-a
 Its first revision (2026-10-08) was written alongside the sibling deep dives. This revision follows the designs merged since, which decide much of what that revision proposed:
 
 - [swarm-api.md](swarm-api.md) for controllers, member handles and stopping;
-- [swarm-communication.md](swarm-communication.md) for the bus, channels, `swarm_on_continue()`, notices and exposure;
+- [swarm-communication.md](swarm-communication.md) for the bus, channels, `swarm_on_continue()`, notices, evidence and the metadata ids on swarm messages;
 - [swarm-limits.md](swarm-limits.md) for statuses, member limits and the stop procedure;
 - [swarm-scoring.md](swarm-scoring.md) for the final answer and the result record;
 - [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md) for sandbox topology;
@@ -79,7 +76,7 @@ Paths are relative to each repository's root.
 swarm.md recommends that inspect_swarm "align with ORBIT and aim to be a substrate it could run on, not to absorb it". It lists what inspect_swarm should provide for that:
 
 - turn boundaries and an activation-policy interface;
-- notices and exposure evidence without `Model` wrappers;
+- notices without `Model` wrappers, and messages that name their records by metadata ids, so an exposure observer joins model input to records with no text matching;
 - an extension point on the bus for channel kinds.
 
 That list is a claim, not a design. This document checks it against ORBIT's code and the merged designs, and makes it concrete.
@@ -258,10 +255,9 @@ Each is an `InfoEvent` with source `orbit.communication` (`runtime.py:190-227`).
   - Unless that result is `False`, it appends a metadata-only notice: a `ChatMessageUser` with `metadata.inspect_swarm.type == "notice"`.
   - It acts only in the member's bound loop.
   - The swarm never posts to agent channels. Ordinary notices stay on this hook (decision: Ransom, 2026-10-13).
-- **Evidence and exposure** ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)).
-  - The kinds are `sent`, `delivered`, `notified`, `read` and `exposed`, as `InfoEvent`s with `source="inspect_swarm"`, `version: 1` and `type: "comm"`.
-  - `exposed` is computed after the drain, in a walk over the member spans. For a native read, it is the first `ModelEvent` of the reader's loop whose input holds the read's own `ChatMessageTool`, joined by the `ToolEvent`'s `message_id`.
-  - For the later `inject` mode, it is matched by message metadata id.
+- **Evidence** ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)).
+  - The kinds are `sent`, `delivered`, `notified` and `read`, as `InfoEvent`s with `source="inspect_swarm"`, `version: 1` and `type: "comm"`. M2 computes no exposure.
+  - Each read tool's result message, notice and injection carries the swarm's ids in its metadata ([Records in model input](swarm-communication.md#records-and-the-bus)), through a small inspect_ai change for tool results (AI-6).
 - **Limits and stopping** ([swarm-limits.md](swarm-limits.md#stopping)).
   - Every stop goes through `stop(reason)`: close synchronously, soft stop, grace, hard stop, finalise.
   - Member statuses are a closed set. A normal return is `submitted`, unless the output's `stop_reason` is `content_filter` or `model_length`.
@@ -281,7 +277,7 @@ Throwaway solvers were run on the worktree's inspect_ai (`fccfb298e`, whose `rea
 - A round-robin loop opened one member at a time. Tool calls ran in the order `a1 b1 c1 a2 b2 c2`. Each member's final conversation had one system message, one user message and no continue prompts.
 - Opening all three gates and waiting for all three to yield (a concurrent step with a barrier) also worked.
 - Cancelling the task group while members were parked ended the sample cleanly, with status `success`.
-- A transcript subscriber saw each tool result in the member's next completed `ModelEvent` input. That is ORBIT's exposure evidence, obtained with no `Model` wrapper.
+- A transcript subscriber saw each tool result in the member's next completed `ModelEvent` input, with no `Model` wrapper. (The port no longer uses this: ORBIT's exposure is observed below its filters, [P3](#p3-exposure).)
 - A `submit=False` `react()` member whose `on_continue` parked at a tool-free reply, and resumed by returning its own `AgentState`, gave two activations with two replies. The second generation's input was the system message, the user input and the first reply, with no continue prompt added.
 - Releasing a parked member by returning `False` (2026-10-14):
   - A submitting member parked after a tool-call turn returned at once, with its conversation ending in the tool result and `output.stop_reason == "tool_calls"`.
@@ -312,15 +308,15 @@ So ORBIT's `model_step` scheduling, and its repeatable conversational `completio
 | Scheduler modes, plans, quanta | ORBIT's `@swarm_controller` driving `activate()` ([P4](#p4-scheduled-mode-the-turn-seam-and-activation)) | `model_step` and `completion` only. |
 | `visibility="step_start"` | `activate(read_cutoff=)` checked against the bus's commit sequence (`delivered.seq`) ([P2](#p2-bus-extensions), [P4](#p4-scheduled-mode-the-turn-seam-and-activation)) | |
 | `max_turns`, halt conditions, hooks | The controller's `run`; its reasons are recorded as `controller:<reason>` | |
-| `sent`, `read`, `model_exposure` | `sent`, `read`, `exposed` for a message ([P3](#p3-exposure)) | |
-| ORBIT `notified` (a notice reached a successful input) | `exposed` for a notice ([P3](#p3-exposure)) | The swarm's own `notified` means a notice was added to the conversation. |
+| `sent`, `read`, `model_exposure` | `sent`, `read`, and ORBIT's own `model_exposure` written through `record_exposure()` ([P3](#p3-exposure)) | |
+| ORBIT `notified` (a notice reached a successful input) | `model_exposure` with `notice` set, through `record_exposure()` ([P3](#p3-exposure)) | The swarm's own `notified` means a notice was added to the conversation. |
 | ORBIT `delivered` (content inserted into a conversation) | None on the swarm runtime | Only `auto` and dialogue projections produce it. The swarm's `delivered` means a record reached channel state. |
 | `output_agent` (latest output, submitted or not) | ORBIT's solver wrapper around the swarm, reading the result record in a synchronous `finally`; later, `reporter(member)` | `reporter` selects only a submission ([P1](#p1-members-input-and-output-no-new-api)). |
 | `history_projection` | ORBIT's member wrapper saves each final conversation, and ORBIT's solver wrapper projects them in its `finally` | The swarm returns no member conversations ([P1](#p1-members-input-and-output-no-new-api)). |
 | Tool gates (`on_tool_call`) | Per-member `react(approval=...)` policies, or sentinel `BeforeToolCall` protocols (the dispatcher is on inspect_ai `main`) | Judge usage moves out of member token and turn limits ([Behaviour a port changes](#behaviour-a-port-changes)). |
 | Input filters with redaction, output checks, resampling | None yet. Sentinel's generate stages only observe or terminate | ORBIT keeps its filter wrapper and reports exposure after its filters ([P3](#p3-exposure)). |
 | Notice `Model` wrapper | `swarm_on_continue()` notices | Removed for ported runs. |
-| Exposure `Model`/`ModelAPI` wrapper | M2's exposure walk, or ORBIT's own observer reporting through `record_exposure()` where defense filters remain ([P3](#p3-exposure)) | |
+| Exposure `Model`/`ModelAPI` wrapper | ORBIT's own observer, reporting through `record_exposure()` and joining input to records by the swarm's metadata ids ([P3](#p3-exposure)) | Kept on every member whose exposure ORBIT measures. |
 | Shared sandbox ("Neither channels nor agent groups isolate shared files or sandboxes") | The shared-sandbox default. Per-member sandboxes are an M2 opt-in | Same default. |
 
 ### What inspect_swarm provides
@@ -369,49 +365,20 @@ Three extensions are needed:
   - `Delivery.seq` returns the number to the sender's tool, and `SwarmControl.sequence()` returns the latest one committed, 0 before any ([P4](#p4-scheduled-mode-the-turn-seam-and-activation)).
   - `Bus.sequence()` returns the same number to a channel. Because the bus gives the number before it calls `apply()`, and steps 2 to 4 have no `await`, inside `apply()` it is the applied record's own, so ORBIT's channel stores it with the record in its canonical messages there, before any reader can see the record.
   - Step-start visibility compares a record's stored commit number with the activation's cutoff. `Record` gains no sequence field.
-- **Read receipts with fragments.**
-  - The bus call that a channel's read tool makes to write its `read` event becomes public as `record_read(records, *, fragments=None)`. It records the tool span, as swarm-communication.md's read events do; the walk takes the read's own `ToolEvent`, and from it the tool call id and function, from that span, which with inspect_ai's AI-6 is the event's `span_id` ([Occurrences, from the log](swarm-communication.md#records-and-the-bus)).
-  - ORBIT's read tool returns its rendered text as a `str`, as every channel tool must: `swarm_tools()` refuses any other result, so the completed `ToolEvent`'s `result`, which the fragment check and the whole-result comparison read, stays what the tool returned whatever later edits do to the message ([Channel tools return text](swarm-communication.md#how-channels-plug-into-the-bus)).
-  - `fragments` maps each record id to the exact text the tool renders for that record. The contract on the channel is ORBIT's: each fragment appears in the tool's result as its own newline-delimited block, so that `"\n" + fragment + "\n"` is a substring of `"\n" + result + "\n"` (`ORBIT: orbit/communication/runtime.py:373-377`).
-  - `record_read()` only registers the fragments; it does not check them. It runs inside the read tool, before the tool returns, when the result does not exist yet: the pending `ToolEvent` has no result, and Inspect builds the result event only after `call_tool()` returns (`src/inspect_ai/model/_call_tools.py:321-329`, `:386-395`). ORBIT's own `record_read()` registers its rendered messages at the same point (`ORBIT: orbit/communication/tools.py:154-162`).
-  - The check happens in the exposure walk ([P3](#p3-exposure)), against the read's completed `ToolEvent` result and then against model inputs.
-  - The `read` event stores each fragment's SHA-256 and length. The fragment texts stay in the bus's memory for the rest of the sample, for the walk, and are never written to the store.
+- **Read receipts.**
+  - The bus call that a channel's read tool makes to write its `read` event becomes public as `record_read(records) -> str`. Inside the read tool it writes the `read` event in the tool span and sets the swarm's read metadata on the tool's result message through inspect_ai's AI-6 (the read id, the channel and the record ids; [swarm-communication.md Records in model input](swarm-communication.md#records-and-the-bus)), and it returns the read id, under which ORBIT's channel keeps the fragments it rendered for its observer ([P3](#p3-exposure)).
+  - It runs before the tool returns, at the point where ORBIT's own `record_read()` registers its rendered messages (`ORBIT: orbit/communication/tools.py:154-162`).
 
 Notices need nothing new. ORBIT's channel returns `notice_lines(member)` with its configured channel ids and unread counts. These ids are chosen by the eval author, or by trusted attack code that registers a channel, never by a member, so swarm.md's notice rule allows them.
 
 #### P3. Exposure
 
-M2 computes `exposed` after the drain, in its walk over the member spans ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)). For a native read, that is the reader loop's first own generation (an agent turn of that loop) whose input holds the read's own `ChatMessageTool`, joined by the `ToolEvent`'s `message_id`, with its content unchanged; it is `exact` when that message has no `error` there and `inferred`, with `reason: "result_error"`, when it has one, because some providers then send the error in place of the content and Bedrock sends the content (decision: Ransom, 2026-10-15). Inputs are the logged `ModelEvent` inputs, which with inspect_ai's AI-7 hold each message as that generation was sent, every field included (role, id, content, metadata, error) ([Occurrences, from the log](swarm-communication.md#records-and-the-bus)). Every rule below reads them and counts only the loop's own generations, so an intervention's `edit()` after a generation never removes an exposure that generation already made, and a sentinel monitor's or a judge's model call never makes one. ORBIT's collusion scorer needs exposure in ORBIT's sense, so the walk gains these rules. Each applies only where its input exists, so a run with no fragments, no notices kept and no external members is walked exactly as M2 walks it.
+Exposure in ORBIT's sense, whether a record's or a notice's original content reached a successful generation's input after ORBIT's defenses, is ORBIT's own observer's job. The swarm computes no exposure and writes no exposure event of its own ([swarm-communication.md Alternatives considered](swarm-communication.md#alternatives-considered); decision: Ransom, 2026-10-15). ORBIT already observes it at the only place a redaction is visible: its observer sits inside its defense input filters and sees the filtered request (`ORBIT: orbit/defenses/model_filter.py:161-212`, `model_observer.py:42-95`), while a `ModelEvent` records the request before them (`src/inspect_ai/model/_model.py:1577`, `:1636`). So the port keeps that observer on every member whose exposure ORBIT measures, filtered or not.
 
-- **Successful generations only.** A `ModelEvent` with an `error` does not count, and the walk moves on to the next event. ORBIT counts only successful inputs.
-- **Per fragment.**
-  - When the read registered fragments ([P2](#p2-bus-extensions)), the walk first checks each fragment against the read's completed `ToolEvent` result, with the newline-block rule. A fragment that is not in the result (the channel broke the contract, or Inspect truncated the result through it) gets `in_result: false` in an evidence event for that read, and is never exposed.
-  - Each record whose fragment is in the result is then checked separately. A record is exposed in the first successful `ModelEvent` of the reader's loop, at or after the read, whose logged input holds the read's own result message (by `message_id`) with that record's fragment intact under the newline-block rule. It is `exact` when the message has no `error` there and `inferred`, with `reason: "result_error"`, when it has one, as in M2. The fragment check replaces M2's whole-content check, so an edit that keeps the message's id exposes the fragments it leaves intact.
-  - A read whose result an intervention edited, or a filter truncated, so that only some fragments survive, exposes only those.
-  - Without fragments, M2's rule applies unchanged, including its truncation rule: a truncated result exposes every record of the read as `inferred` with `reason: "truncated"`. With fragments, truncation is handled per fragment as above, and the read is not labelled truncated.
-- **Notices.**
-  - The swarm keeps each notice's text in memory, and its SHA-256 in the `notified` event.
-  - A notice is exposed in the member's top loop's first successful own generation whose logged input holds a `ChatMessageUser` with the notice's metadata id and exactly the notice's text. ORBIT makes the same check (`message.text == receipt.content`, `ORBIT: orbit/communication/delivery.py:370-380`). An edit or a filter that keeps the id but changes the text is not exposure.
-  - The event is `exposed` with `notice` set to the notice id, in place of record ids.
-- **Members whose requests are rewritten below the transcript.**
-  - ORBIT's defense input filters rewrite the request inside a `ModelAPI` wrapper (`ORBIT: orbit/defenses/model_filter.py:161-212`). Its own exposure observer sits inside them and snapshots the filtered request (`model_observer.py:42-95`). A `ModelEvent`, however, records the request before the filters (`_model.py:1577`, `:1636`), so for such a member the walk would count a redacted message as exposed.
-  - Such a member is declared with `member(..., exposure="external")`. The eval's own post-filter observer then calls `record_exposure(model_event_id, input)` after each successful generation, with the input it saw.
-  - The swarm keeps those inputs in memory. The walk uses them in place of that member's `ModelEvent` inputs, with the same rules.
-  - ORBIT keeps its `CommunicationModelAPI` for exactly as long as it keeps its defense filters.
-- **Fields.**
-  - Each `exposed` event also carries the activation id (under a scheduled controller), and `cached: true` when the event has `cache == "read"`, as ORBIT marks `source="inspect_cache"`.
-  - It also carries the id of the `read` or `notified` event it confirms, as ORBIT's `parent_event_id` does.
-
-**Coverage.** A missing `exposed` event means "not exposed" only when the walk saw everything, so the walk writes a coverage value per member:
-
-- `complete`: a native member whose events the walk could read in full (`transcript().history.full_history_available`).
-- `external`: the member's inputs came from `record_exposure()`. It counts as complete only if the external observer declared, through `record_exposure_coverage(complete=True)`, that it was installed for the whole run.
-- `incomplete`: evicted events could not be read, or an external observer did not declare itself complete.
-- `none`: a bridged member. Bridged members cannot use bus channels before swarm-communication.md's step 6, but a scheduled swarm without channels may contain one.
-
-Anything but `complete`, or `external` declared complete, means that exposure is unknown, never zero.
-
-The first revision observed exposure live, through a transcript subscription. Exposure events are now emitted after the drain, by M2's walk; M2's transcript subscription only notes which generations are agent turns, and the walk reads inputs from the logged events ([The loop's own generations](swarm-communication.md#records-and-the-bus)).
+- **What the swarm gives the observer: ids in the input.** Every swarm message in a generation's input names its records by metadata ([swarm-communication.md Records in model input](swarm-communication.md#records-and-the-bus)). A read tool's result carries the read id and record ids, which `record_read()` sets ([P2](#p2-bus-extensions)); a notice carries its notice id. The observer joins input messages to reads and notices by those ids, never by text, and then applies ORBIT's own rules to the content: each record's rendered fragment as a newline-delimited block of the filtered result (`ORBIT: orbit/communication/runtime.py:373-377`), and a notice's exact text (`delivery.py:370-380`). ORBIT's channel keeps its rendered fragments per read id in its own state, as ORBIT's `record_read()` registers them today at the same point (`tools.py:154-162`).
+- **Combined user messages.** For some providers Inspect combines adjacent user messages before the request, merging their metadata with the later message's winning and listing the original messages' ids in `metadata["combined_from"]` (`src/inspect_ai/model/_model.py:1387`, `:2736-2756`, `:2812-2856`), and a notice is often followed by a continuation. The `notified` event records the notice message's own id, so the observer joins a combined message to its notices through `combined_from`, and looks for each notice's text within it. Tool results are never combined.
+- **Reporting.** After each successful generation the observer calls `record_exposure(model_event_id, *, read=None, records=(), notice=None)` for what it found intact. The bus checks that the ids belong to this run and to the calling member, and writes ORBIT's own event, `model_exposure` with `type: "orbit"`, carrying the ids, the `ModelEvent` id, the activation id under a scheduled controller, and `cached: true` when the generation was a cache read. It records the observer's finding; it does not check it against the input.
+- **Coverage.** `record_exposure_coverage(complete=True)` declares the observer installed for the member's whole run. A member without that declaration has unknown exposure, never zero, and the projection treats it as ORBIT treats a member without observation.
 
 #### P4. Scheduled mode: the turn seam and activation
 
@@ -612,10 +579,10 @@ An operation cancelled before it completes changes nothing and writes nothing. I
 |---|---|
 | [swarm-api.md](swarm-api.md#controllers) controllers and handles | **Uses.** Scheduled mode is a `@swarm_controller` driving `activate()`. It **extends** `MemberHandle` with `parked`, `snapshot()`, `activate()`, `append()` and `edit()`, and `SwarmControl` with `sequence()`, as swarm-api.md anticipated. `MemberState` is unchanged: parked members are `running`. The first revision's `ActivationPolicy`, `set_output()` and `policy:<name>` reasons are dropped, in favour of the controller's `run`, swarm-scoring.md's answer rule and `controller:<reason>`. |
 | swarm-api.md, "No member text" | **Extends**, for controllers that activate members: `snapshot()` and `edit()` carry text ([P4](#member-handles-and-snapshots); [open question 1](#open-questions)). |
-| swarm-api.md, the sibling-parameters table | Of `member(input=, role=, exposure=)`, only `exposure=` remains. `role` is M1's, and input goes through `start()` or `activate()`. The ORBIT row for `routes` is not needed, because ORBIT's channel computes its own recipients. `round_robin` is a `@swarm_controller`, as that table says. |
+| swarm-api.md, the sibling-parameters table | Of `member(input=, role=, exposure=)`, none remains: `role` is M1's, input goes through `start()` or `activate()`, and exposure is ORBIT's observer's, with no member parameter. The ORBIT row for `routes` is not needed, because ORBIT's channel computes its own recipients. `round_robin` is a `@swarm_controller`, as that table says. |
 | [swarm-communication.md](swarm-communication.md#notices) `swarm_on_continue()` and notices | **Uses** as the turn seam, which settles the first revision's question of where the seam lives. **Extends** it with the scheduled path. Notices are unchanged (user role, metadata, kept in the conversation), except that a parked member's notice is computed when it resumes. |
-| swarm-communication.md bus and channels | **Uses** for ORBIT's channel, as a user `@swarm_channel`. **Extends** with `Channel.recipients`, the commit sequence in `Delivery` and `Bus.sequence()`, and a public `record_read(..., fragments=)`; ORBIT's capacity checks use its `admit()` ([P2](#p2-bus-extensions)). Does not use `messages(routes=)`. |
-| swarm-communication.md evidence and exposure | **Uses** the kinds and the post-hoc walk. **Extends** the walk with successful-only events, per-fragment checks, notice exposure, external inputs and coverage ([P3](#p3-exposure)). Adds the `schedule` evidence type. ORBIT's `delivered` and `notified` mean something else, and the [projection](#compatibility-and-migration) maps them. |
+| swarm-communication.md bus and channels | **Uses** for ORBIT's channel, as a user `@swarm_channel`. **Extends** with `Channel.recipients`, the commit sequence in `Delivery` and `Bus.sequence()`, and a public `record_read()`; ORBIT's capacity checks use its `admit()` ([P2](#p2-bus-extensions)). Does not use `messages(routes=)`. |
+| swarm-communication.md evidence | **Uses** the kinds and the metadata ids on swarm messages. Adds `record_exposure()`, which writes ORBIT's `model_exposure` events from its observer, and the `schedule` evidence type ([P3](#p3-exposure)). ORBIT's `delivered` and `notified` mean something else, and the [projection](#compatibility-and-migration) maps them. |
 | swarm-communication.md `inject` (later) | Not used for ORBIT's channel. ORBIT's `auto` stays ORBIT-specific. |
 | [swarm-limits.md](swarm-limits.md#stopping) stopping and statuses | **Uses** the stop procedure and the closed status set. **Extends** step 0 to release parked members, and the member wrapper to give `stopped` to a member the hook released mid-work ([Stopping a scheduled swarm](#stopping-a-scheduled-swarm)). |
 | swarm-limits.md member limits and approvals | **Uses** as decided. Parked time inside member time limits, and judges outside token and turn limits, are [behaviour changes](#behaviour-a-port-changes). |
@@ -636,12 +603,12 @@ These are the changes for the `common/v1` configurations that can move, in the o
   - asyncio tasks and semaphores become anyio task groups and limiters, or disappear, because inspect_swarm owns member tasks.
 - **Outer loop.** `ExperimentScheduler.run_loop` runs inside the controller's `run`. Halt conditions and hooks run between steps. At each boundary, runtime attacks and pending injections go in through `append`, then pre-turn defenses through `edit`, then `activate()`.
 - **Channels.** ORBIT's channel tools become an ORBIT `@swarm_channel` with `recipients="roster"`.
-  - It sends with `deliver()` and records reads with `record_read(..., fragments=)`.
+  - It sends with `deliver()` and records reads with `record_read()`, keeping its rendered fragments under the read id it returns.
   - It honours `activation_read_cutoff()`.
   - It keeps its channel registry, canonical messages and receipts, with the record ids and commit sequences the bus assigns.
 - **Delivery and observation.**
   - `CommunicationDeliveryModel` is removed: `notify` uses the swarm's notice.
-  - `CommunicationModel` stays, reporting through `record_exposure()`, on members with defense filters, and is removed elsewhere.
+  - `CommunicationModel` stays as the exposure observer, joining input to records by metadata ids and reporting through `record_exposure()`.
   - `CommunicationState` is completed at finalisation from the swarm's evidence ([Compatibility](#compatibility-and-migration)).
 - **Defenses.**
   - Tool gates become per-member approval policies or sentinel `BeforeToolCall` protocols.
@@ -693,12 +660,12 @@ Each step names the configurations it moves. Everything else keeps running on OR
    - They gain the drain, the realized-cost ledger and per-member records.
    - User controllers are experimental in the first release, but M1 runs them.
 2. **After M2 and the bus extensions (F-1, F-2): the same runs, with channels.**
-   - ORBIT's channels become its `@swarm_channel`, with M2's notices and the extended exposure walk. This works because these runs execute inside a swarm, where the member ContextVar exists.
+   - ORBIT's channels become its `@swarm_channel`, with M2's notices, and ORBIT's observer reports exposure through `record_exposure()`. This works because these runs execute inside a swarm, where the member ContextVar exists.
    - Scheduled runs do not move in this step. Their executor calls `run()` per activation outside any swarm, so the bus could not bind a sender.
 3. **After scheduled mode (F-3, F-4): ORBIT's scheduler as a controller.**
    - Scheduled `common/v1` runs move, except the combinations in [What stays ORBIT-specific](#what-stays-orbit-specific).
    - `turn_react` and the notice wrapper are no longer used for them, and tool gates move to approval policies or sentinel protocols.
-   - Members with defense filters keep ORBIT's filter wrapper and its observer, reporting through `record_exposure()`.
+   - Members with defense filters keep ORBIT's filter wrapper, with its observer below it.
 4. **When sentinel's generate stages can rewrite and resample: defenses as protocols.**
    - Input and output filters become sentinel protocols.
    - Once it is confirmed that the transcript then records the rewritten request, the filter wrapper and the external observer go away. `BeforeGenerate` already runs before the cache lookup, so caching would no longer need to be refused.
@@ -732,9 +699,9 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
 
 - Works today. It handles caching correctly when done with ORBIT's care, and a `ModelAPI`-level observer sees the request after any filter below it.
 - But each wrapper must preserve the model's identity and effective configuration through a private API, the wrappers' order matters, and inspect_swarm would carry this for every member.
-- Rejected for inspect_swarm's own machinery: turn-boundary notices and the exposure walk need neither. An eval whose own filters rewrite requests below the transcript keeps its post-filter observer, and reports through `record_exposure()` ([P3](#p3-exposure)).
+- Rejected for inspect_swarm's own machinery: turn-boundary notices need none, and the swarm computes no exposure. ORBIT keeps its observer, which reports through `record_exposure()` ([P3](#p3-exposure)).
 
-**Live exposure through a transcript subscription** (the first revision). It would see events as they complete, independent of eviction. But M2 already walks the member spans after the drain, and a history provider covers eviction. Rejected as the way to emit exposure; incomplete history is reported as coverage. M2 does keep a transcript subscription, only to note which generations are agent turns, which the log does not record ([The loop's own generations](swarm-communication.md#records-and-the-bus)).
+**Exposure computed by the swarm**, live through a transcript subscription (the first revision) or after the drain by a walk over member spans (later revisions). Either duplicates what ORBIT's observer already sees, and only the observer sees the request after ORBIT's filters. Rejected with M2's own exposure event ([swarm-communication.md Alternatives considered](swarm-communication.md#alternatives-considered); decision: Ransom, 2026-10-15).
 
 **Bus routes for ORBIT's channel.** Pass ORBIT's communication edges as routes, and let the bus drop recipients. But routes are a messages-channel parameter, ORBIT already intersects edges with membership when it computes recipients, and a generic routes interface for user channels would be one more surface for one user. Rejected.
 
@@ -761,16 +728,15 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
 ## Compatibility and migration
 
 - **inspect_swarm** has no released API, and everything here comes after its first release. The additions are:
-  - `member(exposure=)`;
-  - on the bus: `Channel.recipients`, `Delivery.seq`, `Bus.sequence()`, `record_read(..., fragments=)`, `record_exposure()` and `record_exposure_coverage()`;
-  - in evidence: the extended exposure walk, per-member coverage, the `notice` subject on `exposed`, and the `schedule` type with its kinds `activation_started`, `activation_ended` and `intervened`, all inside the versioned `InfoEvent` payloads;
+  - on the bus: `Channel.recipients`, `Delivery.seq`, `Bus.sequence()`, `record_read()`, `record_exposure()` and `record_exposure_coverage()`;
+  - in evidence: ORBIT's `model_exposure` events written through `record_exposure()`, per-member coverage declarations, and the `schedule` type with its kinds `activation_started`, `activation_ended` and `intervened`, all inside the versioned `InfoEvent` payloads;
   - in scheduled mode: the scheduled path of `swarm_on_continue()`, the handle methods, `SwarmControl.sequence()`, `activation_read_cutoff()`, `ActivationResult`, `MemberSnapshot` and `round_robin`;
   - the limits deep dive's member wrapper reading the stop cause on a normal return.
 
-  Every default keeps the behaviour of a swarm that uses none of them. An `exposed` event gains optional fields, so readers of M2's events are unaffected.
-- **inspect_ai**: none required. The seam uses `on_continue`, and exposure uses M2's walk and the transcript's public history accessor.
+  Every default keeps the behaviour of a swarm that uses none of them.
+- **inspect_ai**: nothing beyond M2's own prerequisites, which include AI-6 for the metadata ids on read results. The seam uses `on_continue`.
 - **ORBIT logs.** Logs ORBIT has already written are unaffected, and keep their own readers. A ported run writes inspect_swarm's evidence (`source="inspect_swarm"`). It should also record which runtime produced it, because of the [behaviour changes](#behaviour-a-port-changes).
-- **ORBIT's `CommunicationState`.** Its consumers, the collusion scorer and the viewer overview, read it from the store. A port keeps writing it at finalisation, after the swarm's walk, with each field from one source:
+- **ORBIT's `CommunicationState`.** Its consumers, the collusion scorer and the viewer overview, read it from the store. A port keeps writing it at finalisation, with each field from one source:
 
   | Field | Source on the swarm runtime |
   |---|---|
@@ -779,11 +745,11 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
   | `messages` | ORBIT's channel at send time, with the record id, the commit sequence (`seq`) and the recipients that `deliver()` returns. `session_id` is the member's agent span (sentinel's `conversation`), `invocation_id` the activation id, and `turn` the controller's outer turn |
   | `receipts` (per-message `rendered_messages`) | ORBIT's channel, which already holds the fragments it passes to `record_read()`. The tool-call and event ids come from the swarm's `read` event |
   | `events`: `sent`, `read` | The swarm's `sent` and `read` events, with the same record ids and native ids |
-  | `events`: `model_exposure` | The swarm's `exposed` events for records |
-  | `events`: `notified` | The swarm's `exposed` events for notices. These match ORBIT's meaning: the notice's original text reached a successful input (`delivery.py:370-380`). The swarm's own `notified` events are not projected |
+  | `events`: `model_exposure` | The `model_exposure` events ORBIT's observer wrote through `record_exposure()` for records |
+  | `events`: `notified` | The `model_exposure` events with `notice` set. These match ORBIT's meaning: the notice's original text reached a successful input (`delivery.py:370-380`). The swarm's own `notified` events are not projected |
   | `events`: `delivered` | None: `auto` and dialogue projections do not run on the swarm runtime. The swarm's `delivered` events are not projected |
-  | `observation_enabled_sessions` | Members whose coverage is `complete`, or `external` and declared complete. An `incomplete` or `none` member is left out, so the scorer reports its reads as uncovered (`collusion_scorer.py:108-111`) instead of counting zero exposures |
-  | `successful_input_sessions`, `observed_sessions`, `observed_invocations` | Members with at least one successful generation in the walk; member spans; activation ids |
+  | `observation_enabled_sessions` | Members whose observer declared complete coverage through `record_exposure_coverage()`. Any other member is left out, so the scorer reports its reads as uncovered (`collusion_scorer.py:108-111`) instead of counting zero exposures |
+  | `successful_input_sessions`, `observed_sessions`, `observed_invocations` | Members whose observer reported at least one successful generation; member spans; activation ids |
 
   Native links (span, tool-call, message and model-event ids) are copied from the swarm's events. On the ORBIT side, the viewer's event list is changed to accept `source="inspect_swarm"` evidence as well as `orbit.communication` (`_render.py:143`), rather than duplicating events.
 - **Dependency ranges.** ORBIT accepts `inspect-ai>=0.3.263,<0.4` and tests one locked version (`ORBIT: pyproject.toml`). inspect_swarm requires the inspect_ai release that carries its prerequisites, so a port inherits inspect_swarm's floor, which is narrower.
@@ -800,13 +766,9 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
   - That a transformation carries no peer output is a contract on eval code, which inspect_swarm cannot check. The event makes a breach visible.
 - **Member text to controllers.** Only controllers that activate members get it, through `snapshot()` and `edit()`. That widens what swarm-api.md lets a controller see ([open question 1](#open-questions)). A controller cannot write to a member except through `append()` and `edit()`, both recorded.
 - **Defenses before the next generation.** At a boundary, defenses run after attack input is appended, so a sanitising defense sees an injection before the member's next generation, as in ORBIT today.
-- **Exposure is never overstated.**
-  - Members whose requests are rewritten below the transcript use their own post-filter observer.
-  - Only successful generations count.
-  - A notice counts only with its original text.
-  - Incomplete coverage is reported as unknown.
+- **Exposure is ORBIT's observer's claim.** The bus checks that reported ids belong to the run and the calling member, and records the report; it joins nothing by text, and a member without a complete observer has unknown exposure, never zero.
 - **Notices** list only channel ids configured by the task or registered by trusted code, never ids or names a member created. This keeps swarm.md's notice rule.
-- **The exposure walk** keeps read fragments and notice texts in memory, and stores only ids, hashes and lengths.
+- **Metadata ids** on swarm messages come from bus state, never from a payload, so a reproduced fence cannot pass for a read in the observer's join.
 - **Controller decisions are never read from model output.** ORBIT installs no model-facing schedule editor (`plans.py:1-6`), and a port must keep it that way.
 
 ## Testing
@@ -842,20 +804,11 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
   - the commit sequence increases monotonically across channels in commit order, and `Delivery.seq`, `delivered.seq` and `Bus.sequence()` read inside `apply()` agree; `SwarmControl.sequence()` returns the latest committed;
   - a record held by a test policy while a later record commits gets the higher commit number, and a read cutoff taken from `SwarmControl.sequence()` between the two commits hides it, although its record id is the lower;
   - a read tool honouring `activation_read_cutoff()` hides later records;
-  - `record_read()` registers fragments inside the read tool, before any result exists, and its `read` event stores hashes and lengths only.
-- **Exposure** (`tests/test_comm_evidence.py`):
-  - a fragmented read is exposed at the member's next successful generation;
-  - a fragment that is not a newline-delimited block of the read's completed result (a test channel that renders differently, and a result truncated by `max_tool_output`) gets `in_result: false` and is never exposed, while the read's other fragments are checked as usual;
-  - a two-record read whose result reaches the model with only one fragment intact exposes only that record;
-  - a tool message other than the read's own result message (another message id, including an earlier result in the loop under the same call id) exposes nothing;
-  - a read whose result has an error set before the generation is exposed as `inferred` with `reason: "result_error"`, with and without fragments;
-  - a read without fragments whose result `max_tool_output` truncates is exposed as `inferred` with `reason: "truncated"` for every record, while the same read with fragments exposes only the records whose fragments survived;
-  - a failed generation does not count, and the next successful one does;
-  - a cache replay is marked;
-  - a notice is exposed only after a successful generation that included its original text, and not when an edit or a filter kept its id but changed its text, in both the walk and the `record_exposure()` path;
-  - a member declared `exposure="external"`, with a test `ModelAPI` wrapper that redacts a peer message and reports through `record_exposure()`, does not expose the redacted message, although its `ModelEvent` input contains it;
-  - coverage is `incomplete` under a bounded transcript with no history provider, and for an external observer that did not declare itself complete;
-  - reads without fragments give exactly M2's events.
+  - `record_read()` called inside a test channel's read tool writes the `read` event in the tool span, returns the read id, and that id, the channel and the record ids are in the result message's `inspect_swarm` metadata and in the next `ModelEvent`'s input.
+- **Exposure reporting** (`tests/test_comm_evidence.py`):
+  - `record_exposure()` from a test `ModelAPI` observer writes `model_exposure` with the read, record and `ModelEvent` ids and the activation id, and `cached: true` for a cache replay; it refuses a read id, record id or notice id from another run or another member;
+  - a member whose observer declared complete coverage is in `observation_enabled_sessions`, and one that did not is left out;
+  - a notice followed by a continuation string, on a mock `ModelAPI` that combines user messages, reaches the observer as one message whose `combined_from` contains the notice message id that the `notified` event records.
 - **Interventions** (`tests/test_scheduled.py`):
   - `append` and `edit` raise while the member runs, and after it ends;
   - an `edit` that deletes a message, replaces one with the same id and new content, and appends one writes one `intervened` event listing each;
@@ -871,15 +824,15 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
 Future work, after M1 and M2, in the plan's "Later, any order" menu. Each step is one pull request, named `F-n` here, with the M1 and M2 pull requests it needs ([swarm-implementation-plan.md](swarm-implementation-plan.md)):
 
 1. **F-1. Bus extensions.**
-   - Scope: `Channel.recipients` with the step-0 and commit-check rules; the commit sequence as `Delivery.seq` and `Bus.sequence()`; public `record_read(records, *, fragments=None)`, registering fragments with their hashes.
+   - Scope: `Channel.recipients` with the step-0 and commit-check rules; the commit sequence as `Delivery.seq` and `Bus.sequence()`; public `record_read(records) -> str`, with the read metadata on the result.
    - Files: `src/inspect_swarm/_bus/_record.py`, `_bus/_bus.py`, `src/inspect_swarm/_channel/_channel.py`, `src/inspect_swarm/_evidence.py`.
    - Tests: the bus-extension cases in `tests/test_bus.py`.
    - Depends on: M2-6 (bus core), and M2-8 (the first channel's read events).
-2. **F-2. Exposure extensions.**
-   - Scope: successful-only events, the fragment check against the read's completed result, per-fragment exposure checks, notice exposure (notice texts kept, hashes in `notified`), `member(exposure="external")`, `record_exposure()` and `record_exposure_coverage()`, coverage, and the activation id and `cached` fields.
-   - Files: `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_member.py`, `src/inspect_swarm/_bus/_notice.py`.
-   - Tests: the exposure cases in `tests/test_comm_evidence.py`.
-   - Depends on: M2-9 (notices), M2-10 (the walk), F-1.
+2. **F-2. Exposure reporting.**
+   - Scope: `record_exposure()` and `record_exposure_coverage()`, writing ORBIT's `model_exposure` events with the activation id and `cached` fields after checking the ids against the run and the member; the notice message id in `notified`.
+   - Files: `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_bus/_bus.py`, `src/inspect_swarm/_bus/_notice.py`.
+   - Tests: the exposure-reporting cases in `tests/test_comm_evidence.py`.
+   - Depends on: M2-9 (notices), F-1.
 3. **F-3. Scheduled mode.**
    - Scope:
      - the scheduled path of `swarm_on_continue()`;
@@ -932,10 +885,9 @@ Settled since the first revision: where the turn seam lives. It is `swarm_on_con
 - **`tool_step` on `react()`.** Rejecting a multi-call batch before any tool runs needs a `react()` change, or a `parallel_tool_calls=False` approximation that providers honour unevenly.
 - **Replacing a member's agent mid-sample**, which timed `replace_agent` compromise would need.
 - **Scheduling a member's background descendants.** A scheduled member parks only its top-level loop, so background children would keep running between activations. This design refuses such members ([Supported members](#supported-members)); a turn gate over a member's descendants would be its own design, on top of D-2's scoped owner.
-- **Conversation identity for descendants.** Exposure inside a member's nested agents is attributed to the member whose span contains the generation. Per-descendant conversation identity, which ORBIT's persistent delegation tracks, is not designed here. D-1 decided that descendants use the shared-memory channel as their member, each call attributed to its own loop ([swarm-memory-channel.md Descendants](swarm-memory-channel.md#descendants)).
+- **Conversation identity for descendants.** ORBIT's observer sees each generation with the member ContextVar of the member it belongs to, so its reports are attributed to that member, nested agents included. Per-descendant conversation identity, which ORBIT's persistent delegation tracks, is not designed here. D-1 decided that descendants use the shared-memory channel as their member, each call attributed to its own loop ([swarm-memory-channel.md Descendants](swarm-memory-channel.md#descendants)).
 - **More built-in controllers** beyond `round_robin`: superstep, explicit plans, Concordia-style engines, AgentsNet's synchronous rounds.
 - **Board channels with readers and writers.** The board is later work in swarm.md. When it is built, it should take ORBIT's `readers` and `writers` names and `recipients="roster"`, so that ORBIT's channel could become configuration.
 - **Sentinel generate stages that rewrite and resample.** The stages on inspect_ai `main` only observe or terminate. ORBIT's model-boundary defenses wait for protocols that can rewrite a request or resample an output.
-- **Successful-only exposure for M2's own walk.** swarm-communication.md's rule names the first `ModelEvent` of the reader's loop that holds the read, and says nothing about a generation that failed. F-2 adds the successful-only rule for every channel. It could move into M2-10 if wanted.
-- **Exposure and the ledger under a bounded transcript.** M2's exposure walk and the ledger's call counts read member spans after the drain. With `INSPECT_TRANSCRIPT_BOUNDED` set and no history provider, both see a truncated history. This design reports exposure coverage as `incomplete`; the ledger's claims should say the same.
+- **The ledger under a bounded transcript.** The ledger's call counts read member spans after the drain. With `INSPECT_TRANSCRIPT_BOUNDED` set and no history provider, it sees a truncated history, and its claims should say so.
 - **The read cutoff for the built-in channels.** Only ORBIT's channel honours `activation_read_cutoff()`. The shared-memory and messages channels could adopt it if another scheduled harness asks.

@@ -75,7 +75,7 @@ The API's shape matches the components, with a controller registry object in pla
 - **The component boundaries in the call.** The final-answer default and the valid modes depend on the topology (`reporter` for coordinators, the verify/vote/first chain for leaderless swarms; swarm.md, [Final answer](swarm.md#controller-topology-termination-final-answer)). Passed as two separate settings, they must be validated against each other; held by one controller object, they cannot disagree.
 - **Arguments that reach the log faithfully.** Inspect logs an agent's arguments by its own rules ([How arguments reach the log](#how-arguments-reach-the-log)). Against the installed inspect_ai, an argument `cost_limit(40.0)` is logged as the string `"_CostLimit"`, and inside a list as `null`; a frozen dataclass is logged as its type name. Two `eval_set` arms that differ only in such an argument get the same task identifier, and `eval_set` refuses them: "The task 'arm' is not distinct." (spike below). Sweepability is a goal of swarm.md ("agent count, topology, communication channels and budget split ordinary, sweepable task parameters"), so this matters.
 - **Members that do not share an agent.** Inspect builds a task's agent once and runs it for every sample, so an agent must keep per-sample state in its invocation ([Current behaviour](#registry-objects-are-shared-by-concurrent-samples)). A swarm asks more: `count=4` runs one record four times at once in the same sample, sandbox and store. State an agent's factory keeps in its closure (hooks, caches, tool objects, a session id) is then shared by the copies, silently. inspect_swe's `claude_code()` is a real case: it allocates its Claude Code session id once per agent object, so four copies of one object would run `claude --session-id` with the same id in one sandbox. Sharing a built agent across samples is how Inspect runs every solver, since samples have their own sandboxes and stores; running one object twice at once in a sample is the new hazard. This amendment closes it in the API instead of documenting it: copies come from a factory, and the same object cannot be two members (raised by a Meridian colleague; decision: Ransom, 2026-10-14).
-- **One place for the sibling deep dives' parameters.** Each adds parameters to `swarm()`: `budget=Budget(...)`, `result=`, a `final=` chain, `messages(...)` in `channels=`, `policy=`, `routes=`, `member(delivery=, bridged=, input=, exposure=)`, and an activation-policy protocol. Without one shape for the call, those land as a flat list of keyword arguments with no rule for which component each belongs to or how it is logged.
+- **One place for the sibling deep dives' parameters.** Each adds parameters to `swarm()`: `budget=Budget(...)`, `result=`, a `final=` chain, `messages(...)` in `channels=`, `policy=`, `routes=`, `member(delivery=, bridged=, input=)`, and an activation-policy protocol. Without one shape for the call, those land as a flat list of keyword arguments with no rule for which component each belongs to or how it is logged.
 
 ## Goals and non-goals
 
@@ -243,7 +243,7 @@ class Member(BaseModel):
     count: int = 1                        # members from this record: name-1 ... name-k when count > 1 (factory form only)
     limits: list[Limit] = []              # the member's own limits (limits deep dive); serialised by kind and value
     # fields the sibling deep dives add: delivery and, after M2, remind (communication), bridged (limits),
-    # input and exposure (ORBIT)
+    # input (ORBIT)
 
     def build(self) -> Agent:             # the agent, or self.factory(**self.args); called by the runtime
         ...
@@ -569,7 +569,7 @@ The rule a task author follows is the one `eval_set()`'s error message gives: di
 | Communication | `swarm(policy=)` | `swarm(policy=)` from M2, the setting of the observer's interception point; a callable, so it is logged by name and varied across arms through a task argument or a registered swarm builder ([Task identity](#task-identity-what-makes-two-arms-distinct)) |
 | Communication | the `Channel` protocol | M2's operations on `Channel`, with per-sample state on a per-run `ChannelState` |
 | Communication | `swarm_tools()`, `swarm_on_continue()`, `swarm_bridged_tools()` | member-side helpers, not `swarm()` arguments; a member using them is a registered member builder, which builds them per member and which the log can name |
-| ORBIT (#4) | `member(input=, role=, exposure=)` | `member()` fields; `input` is the default for `SwarmControl.start(input=None)` |
+| ORBIT (#4) | `member(input=, role=)` | `member()` fields; `input` is the default for `SwarmControl.start(input=None)`. ORBIT's `exposure=` is gone: exposure is ORBIT's own observer's ([swarm-orbit.md P3](swarm-orbit.md#p3-exposure)) |
 | ORBIT (#4) | `ActivationPolicy`, `SwarmControl`, `MemberHandle` | a controller's `run`, and methods added to these handles |
 | ORBIT (#4) | `round_robin(max_rounds=)` | a `@swarm_controller` |
 | ORBIT (#4) | `final="reporter"` by member name | `final=reporter("<member>")`, the scoring deep dive's mode with a member name |
