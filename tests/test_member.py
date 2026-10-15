@@ -1,3 +1,4 @@
+import math
 from collections import UserDict, UserList, UserString
 from collections.abc import Callable, Sequence
 from decimal import Decimal
@@ -392,6 +393,61 @@ def test_member_serializer_refuses_values_inspect_cannot_log() -> None:
     record = member(react, limits=[cost_limit(Fraction(1, 2))])  # pyright: ignore[reportArgumentType]
     with pytest.raises(ValueError, match=r"member.limits\[0\].value is a Fraction"):
         record.model_dump()
+
+
+_TOOL_MARKER: dict[str, Any] = {"type": "tool", "name": "bash", "params": {}}
+_AGENT_MARKER: dict[str, Any] = {"type": "agent", "name": "react", "params": {}}
+_MODEL_MARKER: dict[str, Any] = {
+    "model": "mockllm/model",
+    "config": {},
+    "base_url": None,
+    "model_args": {},
+}
+
+
+@pytest.mark.parametrize(
+    "kwargs,path",
+    [
+        *[
+            (
+                {"members": member(member_worker, args={"prompt": v})},
+                "members.args.prompt",
+            )
+            for v in (math.inf, -math.inf, math.nan)
+        ],
+        (
+            {"members": {**_FACTORY_DICT, "args": {"prompt": math.inf}}},
+            "members.args.prompt",
+        ),
+        *[
+            (
+                {"members": [react(prompt="a"), member(form, limits=[limit(cap)])]},
+                r"members\[1\].limits\[0\].value",
+            )
+            for limit in _LIMITS
+            for form in (react, react(prompt="b"))
+            for cap in (math.inf, math.nan)
+        ],
+        *[
+            (
+                {"members": member(member_worker, args={"prompt": m})},
+                "members.args.prompt",
+            )
+            for m in (_TOOL_MARKER, _AGENT_MARKER, _MODEL_MARKER)
+        ],
+        (
+            {"members": {**_FACTORY_DICT, "args": {"prompt": [_TOOL_MARKER]}}},
+            r"members.args.prompt\[0\]",
+        ),
+    ],
+)
+def test_swarm_refuses_values_inspect_logs_as_something_else(
+    kwargs: dict[str, Any], path: str
+) -> None:
+    # a non-finite float logs as null; a dict in a logged object's form replays as that object
+    kwargs.setdefault("members", react(prompt="a"))
+    with pytest.raises(ValueError, match=rf"^{path} is "):
+        _swarm(**kwargs)
 
 
 @agent(name="member_test_replaced")

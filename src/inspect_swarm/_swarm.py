@@ -39,7 +39,7 @@ def swarm(
 
     Raises:
         TypeError: If `members` holds a bare `@agent` factory or anything other than agents and `member()` records, or an argument has the wrong type.
-        ValueError: If member names collide, the same agent object is in two members, a channel is given twice, a name does not resolve, or the controller refuses the roster.
+        ValueError: If member names collide, the same agent object is in two members, a channel is given twice, a name does not resolve, the controller refuses the roster, or an argument holds a float that is not finite or a dict in the form Inspect logs an object in.
     """
     records = _members(members)
     names = member_names(records)

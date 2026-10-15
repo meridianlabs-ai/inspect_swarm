@@ -9,13 +9,14 @@ from inspect_ai._eval.task.log import plan_to_eval_plan
 from inspect_ai._util.registry import (
     create_registry_object,
     registry_info,
+    registry_kwargs,
     registry_params,
 )
 from inspect_ai.agent import Agent, agent, as_solver, deepagent, react
 from inspect_ai.dataset import Sample
 from inspect_ai.model import GenerateConfig, get_model
 from inspect_ai.solver import Plan
-from inspect_ai.tool import bash, python
+from inspect_ai.tool import Tool, bash, python
 from inspect_ai.util import (
     cost_limit,
     message_limit,
@@ -26,6 +27,7 @@ from inspect_ai.util import (
 
 from inspect_swarm import (
     Controller,
+    Member,
     StopReason,
     SwarmControl,
     member,
@@ -180,6 +182,35 @@ def test_replay_rebuilds_the_swarm(members: Callable[[], Any]) -> None:
     # never_built raises if replay builds a factory-form member
     replayed = create_registry_object("agent", registry_info(original).name, params)
     assert registry_params(replayed) == params
+
+
+_received: list[dict[str, Any]] = []
+
+
+@agent(name="log_test_recording")
+def recording(
+    tools: list[Tool] | None = None,
+    temperature: float = 0.0,
+    config: dict[str, Any] | None = None,
+) -> Agent:
+    _received.append({"tools": tools, "temperature": temperature, "config": config})
+    return react()
+
+
+def test_replay_builds_members_with_the_same_inputs() -> None:
+    _received.clear()
+    record = member(
+        recording, args={"tools": [bash()], "temperature": 0.5, "config": {"depth": 2}}
+    )
+    logged = registry_params(_swarm(record))["members"]
+    replayed = Member.model_validate(registry_kwargs(member=logged)["member"])
+    record.build()
+    replayed.build()
+    original, rebuilt = _received
+    # a tool comes back as a tool, and data as the same data
+    assert [registry_info(t).name for t in rebuilt["tools"]] == ["inspect_ai/bash"]
+    assert rebuilt["temperature"] == original["temperature"] == 0.5
+    assert rebuilt["config"] == original["config"] == {"depth": 2}
 
 
 def _plan_step(solver: Agent) -> Any:

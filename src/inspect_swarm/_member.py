@@ -1,4 +1,5 @@
 import inspect
+import math
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
@@ -6,6 +7,8 @@ from typing import Any, cast
 from inspect_ai._util.registry import (
     extract_named_params,
     has_registry_params,
+    is_model_dict,
+    is_registry_dict,
     is_registry_object,
     registry_info,
     registry_log_name,
@@ -240,12 +243,23 @@ def check_loggable(value: object, path: str) -> None:
         for i, item in enumerate(cast(Sequence[object], value)):
             check_loggable(item, f"{path}[{i}]")
     elif type(value) is dict:
-        for key, item in cast(dict[object, object], value).items():
+        data = cast(dict[object, object], value)
+        if is_registry_dict(data) or is_model_dict(data):
+            # replay would rebuild it as the object it describes
+            raise ValueError(
+                f"{path} is a dict in the form Inspect uses for a logged {'model' if is_model_dict(data) else 'registry object'}, which replay would rebuild as that object. Pass the object, or use other keys."
+            )
+        for key, item in data.items():
             if type(key) is not str:
                 raise TypeError(
                     f"{path} has the {type(key).__name__} key {key!r}, which Inspect cannot log faithfully. Use string keys."
                 )
             check_loggable(item, f"{path}.{key}")
+    elif type(value) is float and not math.isfinite(value):
+        # the log writes it as null
+        raise ValueError(
+            f"{path} is {value}, which Inspect logs as null. Use a finite number, or None."
+        )
     elif type(value) not in _PLAIN_TYPES and not has_registry_params(value):
         # an object made by a registered factory is logged as its name and arguments
         raise TypeError(
