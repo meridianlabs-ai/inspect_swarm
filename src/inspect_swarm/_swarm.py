@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import cast
 
 from inspect_ai._util.registry import registry_info, registry_unqualified_name
@@ -7,14 +7,7 @@ from inspect_ai.agent import Agent, AgentState, agent
 from ._budget import Budget
 from ._channel._channel import Channel
 from ._controller._controller import Controller, MemberInfo
-from ._member import (
-    Member,
-    check_loggable,
-    check_member,
-    is_factory,
-    member,
-    member_names,
-)
+from ._member import Member, is_factory, member, member_names
 from ._registry import resolve
 
 
@@ -39,7 +32,7 @@ def swarm(
 
     Raises:
         TypeError: If `members` holds a bare `@agent` factory or anything other than agents and `member()` records, or an argument has the wrong type.
-        ValueError: If member names collide, the same agent object is in two members, a channel is given twice, a name does not resolve, the controller refuses the roster, or an argument holds a float that is not finite or a dict in the form Inspect logs an object in.
+        ValueError: If member names collide, the same agent object is in two members, a channel is given twice, a name does not resolve, or the controller refuses the roster.
     """
     records = _members(members)
     names = member_names(records)
@@ -63,39 +56,34 @@ def swarm(
     return execute
 
 
-# Inspect logs swarm()'s arguments as given, so each is checked as given, before
-# it is converted: see check_loggable().
 def _members(members: object) -> list[Member]:
-    # a single member, or a list or tuple; a dict is a member's logged form
-    if type(members) in (list, tuple):
-        items = list(cast(Sequence[object], members))
-        if not items:
-            raise ValueError("members= must name at least one member.")
-        return [_member(item, f"members[{i}]") for i, item in enumerate(items)]
-    return [_member(members, "members")]
+    # a single member, or a sequence; a mapping is a member given as data
+    items: list[object] = (
+        list(cast(Sequence[object], members))
+        if isinstance(members, Sequence) and not isinstance(members, str)
+        else [members]
+    )
+    if not items:
+        raise ValueError("members= must name at least one member.")
+    return [_member(item) for item in items]
 
 
-def _member(item: object, path: str) -> Member:
+def _member(item: object) -> Member:
     if isinstance(item, Member):
         # rerun the record's checks: its args or the registry may have changed since
-        record = Member.model_validate(item)
-    elif type(item) is dict:
-        check_loggable(cast(object, item), path)
-        record = Member.model_validate(item)
-    elif is_factory(item):
+        return Member.model_validate(item)
+    if isinstance(item, Mapping):
+        return Member.model_validate(dict(cast(Mapping[str, object], item)))
+    if is_factory(item):
         name = registry_unqualified_name(item)
         raise TypeError(
             f"members= takes agents or member() records: write member({name}, args={{...}})."
         )
-    elif callable(item):
-        record = member(item)  # pyright: ignore[reportArgumentType]
-    else:
-        check_loggable(item, path)
-        raise TypeError(
-            f"members= takes agents or member() records, got a {type(item).__name__}."
-        )
-    check_member(record, path)
-    return record
+    if callable(item):
+        return member(item)  # pyright: ignore[reportArgumentType]
+    raise TypeError(
+        f"members= takes agents or member() records, got a {type(item).__name__}."
+    )
 
 
 def _check_distinct_agents(
@@ -115,12 +103,7 @@ def _check_distinct_agents(
 
 
 def _channels(channels: str | Channel | Sequence[str | Channel]) -> list[Channel]:
-    check_loggable(channels, "channels")
-    # check_loggable() has refused list and tuple subclasses; resolve() refuses other items
-    items = cast(
-        Sequence[str | Channel],
-        channels if isinstance(channels, list | tuple) else [channels],
-    )
+    items = [channels] if isinstance(channels, str | Channel) else list(channels)
     resolved = [resolve("swarm_channel", item) for item in items]
     names = [registry_info(channel).name for channel in resolved]
     duplicates = sorted({name for name in names if names.count(name) > 1})
@@ -132,12 +115,11 @@ def _channels(channels: str | Channel | Sequence[str | Channel]) -> list[Channel
 
 
 def _budget(budget: object) -> Budget:
-    # replay passes a pydantic argument back as its logged dict
+    # a budget given as data (CLI -S, a flow spec, or a log on retry) is its fields
     if isinstance(budget, Budget):
         return budget
-    check_loggable(budget, "budget")
-    if type(budget) is dict:
-        return Budget.model_validate(budget)
+    if isinstance(budget, Mapping):
+        return Budget.model_validate(dict(cast(Mapping[str, object], budget)))
     raise TypeError(
-        f"budget= must be a Budget or its logged dict, got a {type(budget).__name__}."
+        f"budget= must be a Budget or a dict of its fields, got a {type(budget).__name__}."
     )

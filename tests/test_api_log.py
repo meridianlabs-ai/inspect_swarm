@@ -34,6 +34,7 @@ from inspect_swarm import (
     swarm,
     swarm_controller,
 )
+from inspect_swarm._member import build_member
 
 
 async def _run(control: SwarmControl) -> StopReason:
@@ -204,8 +205,8 @@ def test_replay_builds_members_with_the_same_inputs() -> None:
     )
     logged = registry_params(_swarm(record))["members"]
     replayed = Member.model_validate(registry_kwargs(member=logged)["member"])
-    record.build()
-    replayed.build()
+    build_member(record)
+    build_member(replayed)
     original, rebuilt = _received
     # a tool comes back as a tool, and data as the same data
     assert [registry_info(t).name for t in rebuilt["tools"]] == ["inspect_ai/bash"]

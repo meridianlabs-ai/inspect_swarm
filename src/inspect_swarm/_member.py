@@ -1,5 +1,4 @@
 import inspect
-import math
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
@@ -7,8 +6,6 @@ from typing import Any, cast
 from inspect_ai._util.registry import (
     extract_named_params,
     has_registry_params,
-    is_model_dict,
-    is_registry_dict,
     is_registry_object,
     registry_info,
     registry_log_name,
@@ -45,7 +42,7 @@ from pydantic import (
 AgentFactory = Callable[..., Agent]
 """A registered `@agent` factory, such as `deepagent`."""
 
-# the limit kinds a member takes, by the name they are logged under
+# the limit kinds a member takes, by the name its data gives them
 _LIMIT_KINDS: dict[str, type[Limit]] = {
     "token": _TokenLimit,
     "cost": _CostLimit,
@@ -86,21 +83,11 @@ class Member(BaseModel):
     limits: list[Limit] = []
     """The member's own limits."""
 
-    def build(self) -> Agent:
-        """The member's agent: the built agent, or a new one from the factory.
-
-        Returns:
-            The agent the member runs.
-        """
-        if self.agent is not None:
-            return self.agent
-        assert self.factory is not None
-        return self.factory(**self.args)
-
     @field_validator("factory", mode="before")
     @classmethod
     def _resolve_factory(cls, value: object) -> object:
-        # a logged member names its factory, which loads its package's entry point
+        # a member given as data (CLI -S, a flow spec, or a log on retry) names its
+        # factory by registry name; the lookup also loads its package's entry point
         if isinstance(value, str):
             factory = registry_lookup("agent", value)
             if factory is None:
@@ -139,7 +126,6 @@ class Member(BaseModel):
 
     @model_serializer
     def _serialize(self) -> dict[str, Any]:
-        check_member(self, "member")
         data: dict[str, Any] = {}
         if self.agent is not None:
             data["agent"] = registry_value(self.agent)
@@ -148,7 +134,10 @@ class Member(BaseModel):
             data["factory"] = registry_log_name(self.factory)
             # as @agent logs a built agent's params
             data["args"] = extract_named_params(self.factory, False, **self.args)
-        data.update(_logged_fields(self))
+        data["name"] = self.name
+        data["role"] = self.role
+        data["count"] = self.count
+        data["limits"] = [_limit_dict(limit) for limit in self.limits]
         return data
 
 
@@ -232,55 +221,13 @@ def member_names(members: Sequence[Member]) -> list[list[str]]:
     return names
 
 
-# Inspect's @agent logs these as themselves, compared by exact type. It logs other
-# objects by their type name or as null, so different arguments would log alike
-# and replay could not rebuild them.
-_PLAIN_TYPES: tuple[type, ...] = (str, int, float, bool, type(None))
-
-
-def check_loggable(value: object, path: str) -> None:
-    if type(value) in (list, tuple):
-        for i, item in enumerate(cast(Sequence[object], value)):
-            check_loggable(item, f"{path}[{i}]")
-    elif type(value) is dict:
-        data = cast(dict[object, object], value)
-        if is_registry_dict(data) or is_model_dict(data):
-            # replay would rebuild it as the object it describes
-            raise ValueError(
-                f"{path} is a dict in the form Inspect uses for a logged {'model' if is_model_dict(data) else 'registry object'}, which replay would rebuild as that object. Pass the object, or use other keys."
-            )
-        for key, item in data.items():
-            if type(key) is not str:
-                raise TypeError(
-                    f"{path} has the {type(key).__name__} key {key!r}, which Inspect cannot log faithfully. Use string keys."
-                )
-            check_loggable(item, f"{path}.{key}")
-    elif type(value) is float and not math.isfinite(value):
-        # the log writes it as null
-        raise ValueError(
-            f"{path} is {value}, which Inspect logs as null. Use a finite number, or None."
-        )
-    elif type(value) not in _PLAIN_TYPES and not has_registry_params(value):
-        # an object made by a registered factory is logged as its name and arguments
-        raise TypeError(
-            f"{path} is a {type(value).__name__}, which Inspect cannot log faithfully. Use a dict, list, tuple, str, int, float, bool or None, or an object made by a registered factory, such as an agent or a tool."
-        )
-
-
-# Checks the values a member logs as they are now: a limit's cap can be changed
-# through its setter after member() checked it.
-def check_member(record: Member, path: str) -> None:
-    check_loggable(record.args, f"{path}.args")
-    check_loggable(_logged_fields(record), path)
-
-
-def _logged_fields(record: Member) -> dict[str, Any]:
-    return {
-        "name": record.name,
-        "role": record.role,
-        "count": record.count,
-        "limits": [_limit_dict(limit) for limit in record.limits],
-    }
+# The member's agent: the built agent, or a new one from the factory. Only the
+# runtime calls it, in the sample and the member's tool-state scope.
+def build_member(record: Member) -> Agent:
+    if record.agent is not None:
+        return record.agent
+    assert record.factory is not None
+    return record.factory(**record.args)
 
 
 def is_factory(value: object) -> bool:

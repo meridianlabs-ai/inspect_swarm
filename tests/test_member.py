@@ -1,8 +1,4 @@
-import math
-from collections import UserDict, UserList, UserString
 from collections.abc import Callable, Sequence
-from decimal import Decimal
-from fractions import Fraction
 from typing import Any
 
 import pytest
@@ -14,13 +10,9 @@ from inspect_ai._util.registry import (
 from inspect_ai.agent import Agent, AgentState, agent, deepagent, react
 from inspect_ai.tool import bash, python
 from inspect_ai.util import (
-    Limit,
-    TokenLimit,
     cost_limit,
-    message_limit,
     time_limit,
     token_limit,
-    turn_limit,
     working_limit,
 )
 
@@ -37,6 +29,7 @@ from inspect_swarm import (
     swarm_channel,
     swarm_controller,
 )
+from inspect_swarm._member import build_member
 
 
 async def _run(control: SwarmControl) -> StopReason:
@@ -222,14 +215,14 @@ def test_member_refusals(
 def test_member_does_not_call_factory() -> None:
     record = member(outside_sample, args={"prompt": "x"}, count=2)
     with pytest.raises(RuntimeError, match="only inside a sample"):
-        record.build()
+        build_member(record)
 
 
-def test_build_gives_the_agent_or_a_new_one_per_call() -> None:
+def test_build_member_gives_the_agent_or_a_new_one_per_call() -> None:
     built = react(prompt="a")
-    assert member(built).build() is built
+    assert build_member(member(built)) is built
     record = member(member_worker, args={"prompt": "x"})
-    assert record.build() is not record.build()
+    assert build_member(record) is not build_member(record)
 
 
 @pytest.mark.parametrize(
@@ -305,149 +298,6 @@ def test_swarm_controller_check_refuses_roster() -> None:
 def test_swarm_accepts_budget_dict() -> None:
     # replay passes the budget back as its logged fields
     _swarm(react(prompt="a"), budget=Budget(cost=5.0).model_dump())
-
-
-_FACTORY_DICT: dict[str, Any] = {"factory": "react", "args": {"prompt": "a"}}
-
-_LIMITS: list[Callable[[Any], Limit]] = [
-    token_limit,
-    cost_limit,
-    turn_limit,
-    message_limit,
-    time_limit,
-]
-
-
-def _edited_cap() -> Member:
-    limit = cost_limit(1.0)
-    record = member(react, limits=[limit])
-    limit.limit = Fraction(1, 2)  # pyright: ignore[reportAttributeAccessIssue]
-    return record
-
-
-@pytest.mark.parametrize(
-    "kwargs,path",
-    [
-        ({"members": UserList([react(prompt="a")])}, "members"),
-        ({"members": UserDict(_FACTORY_DICT)}, "members"),
-        ({"members": [UserDict(_FACTORY_DICT)]}, r"members\[0\]"),
-        ({"members": (UserDict(_FACTORY_DICT),)}, r"members\[0\]"),
-        ({"members": {**_FACTORY_DICT, "factory": deepagent}}, "members.factory"),
-        ({"members": {**_FACTORY_DICT, "args": UserDict(prompt="a")}}, "members.args"),
-        (
-            {"members": {**_FACTORY_DICT, "args": {1: "a"}}},
-            "members.args has the int key",
-        ),
-        (
-            {"members": {**_FACTORY_DICT, "limits": [UserDict(limit="cost", value=1)]}},
-            r"members.limits\[0\]",
-        ),
-        (
-            {"members": {**_FACTORY_DICT, "limits": [cost_limit(1.0)]}},
-            r"members.limits\[0\]",
-        ),
-        (
-            {
-                "members": {
-                    **_FACTORY_DICT,
-                    "limits": [{"limit": "token", "value": TokenLimit(tokens=100)}],
-                }
-            },
-            r"members.limits\[0\].value",
-        ),
-        ({"members": {**_FACTORY_DICT, "count": Fraction(2)}}, "members.count"),
-        (
-            {"members": member(member_worker, args={"prompt": UserString("a")})},
-            "members.args.prompt",
-        ),
-        *[
-            (
-                {"members": [react(prompt="a"), member(form, limits=[limit(cap)])]},
-                r"members\[1\].limits\[0\].value",
-            )
-            for limit in _LIMITS
-            for form in (react, react(prompt="b"))
-            for cap in (Fraction(3, 2), Decimal("1.5"))
-        ],
-        ({"members": _edited_cap()}, r"members.limits\[0\].value"),
-        ({"channels": UserList([member_test_channel()])}, "channels"),
-        ({"budget": UserDict(cost=1.0)}, "budget"),
-        ({"budget": {"split": UserList([1.0])}}, "budget.split"),
-        ({"budget": {"split": [Fraction(1, 2)]}}, r"budget.split\[0\]"),
-        *[
-            ({"budget": {field: Fraction(1, 2)}}, f"budget.{field}")
-            for field in ("cost", "tokens", "time", "reserve", "grace")
-        ],
-    ],
-)
-def test_swarm_refuses_values_inspect_cannot_log(
-    kwargs: dict[str, Any], path: str
-) -> None:
-    # Inspect logs swarm()'s arguments as passed, and other values without their contents
-    kwargs.setdefault("members", react(prompt="a"))
-    with pytest.raises(TypeError, match=rf"^{path} .*cannot log faithfully"):
-        _swarm(**kwargs)
-
-
-def test_member_serializer_refuses_values_inspect_cannot_log() -> None:
-    record = member(react, limits=[cost_limit(Fraction(1, 2))])  # pyright: ignore[reportArgumentType]
-    with pytest.raises(ValueError, match=r"member.limits\[0\].value is a Fraction"):
-        record.model_dump()
-
-
-_TOOL_MARKER: dict[str, Any] = {"type": "tool", "name": "bash", "params": {}}
-_AGENT_MARKER: dict[str, Any] = {"type": "agent", "name": "react", "params": {}}
-_MODEL_MARKER: dict[str, Any] = {
-    "model": "mockllm/model",
-    "config": {},
-    "base_url": None,
-    "model_args": {},
-}
-
-
-@pytest.mark.parametrize(
-    "kwargs,path",
-    [
-        *[
-            (
-                {"members": member(member_worker, args={"prompt": v})},
-                "members.args.prompt",
-            )
-            for v in (math.inf, -math.inf, math.nan)
-        ],
-        (
-            {"members": {**_FACTORY_DICT, "args": {"prompt": math.inf}}},
-            "members.args.prompt",
-        ),
-        *[
-            (
-                {"members": [react(prompt="a"), member(form, limits=[limit(cap)])]},
-                r"members\[1\].limits\[0\].value",
-            )
-            for limit in _LIMITS
-            for form in (react, react(prompt="b"))
-            for cap in (math.inf, math.nan)
-        ],
-        *[
-            (
-                {"members": member(member_worker, args={"prompt": m})},
-                "members.args.prompt",
-            )
-            for m in (_TOOL_MARKER, _AGENT_MARKER, _MODEL_MARKER)
-        ],
-        (
-            {"members": {**_FACTORY_DICT, "args": {"prompt": [_TOOL_MARKER]}}},
-            r"members.args.prompt\[0\]",
-        ),
-    ],
-)
-def test_swarm_refuses_values_inspect_logs_as_something_else(
-    kwargs: dict[str, Any], path: str
-) -> None:
-    # a non-finite float logs as null; a dict in a logged object's form replays as that object
-    kwargs.setdefault("members", react(prompt="a"))
-    with pytest.raises(ValueError, match=rf"^{path} is "):
-        _swarm(**kwargs)
 
 
 @agent(name="member_test_replaced")

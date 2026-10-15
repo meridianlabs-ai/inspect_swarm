@@ -326,7 +326,7 @@ async def _run_member(m: Member) -> None:
     try:
         # tool_state_scope: swarm.md's per-member tool state; output kept as swarm-scoring.md says
         with tool_state_scope(m.name), anyio.CancelScope() as m.scope:
-            agent = m.build()  # the built agent, or the factory's agent built in this scope (swarm-api.md, the member contract)
+            agent = build_member(m)  # the built agent, or the factory's agent built in this scope (swarm-api.md, the member contract)
             _, err = await run(agent, m.input, limits=nodes, name=m.name)
         if m.scope.cancelled_caught:
             m.status = m.stop_cause or "cancelled"  # hard stop, or the bridged branch
