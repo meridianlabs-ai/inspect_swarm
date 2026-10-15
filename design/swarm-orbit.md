@@ -260,7 +260,7 @@ Each is an `InfoEvent` with source `orbit.communication` (`runtime.py:190-227`).
   - The swarm never posts to agent channels. Ordinary notices stay on this hook (decision: Ransom, 2026-10-13).
 - **Evidence and exposure** ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)).
   - The kinds are `sent`, `delivered`, `notified`, `read` and `exposed`, as `InfoEvent`s with `source="inspect_swarm"`, `version: 1` and `type: "comm"`.
-  - `exposed` is computed after the drain, in a walk over the member spans. For a native read, it is the first `ModelEvent` of the reader's loop whose input holds the read's `ChatMessageTool`, matched by tool call id and function.
+  - `exposed` is computed after the drain, in a walk over the member spans. For a native read, it is the first `ModelEvent` of the reader's loop whose input holds the read's own `ChatMessageTool`, joined by the `ToolEvent`'s `message_id`.
   - For the later `inject` mode, it is matched by message metadata id.
 - **Limits and stopping** ([swarm-limits.md](swarm-limits.md#stopping)).
   - Every stop goes through `stop(reason)`: close synchronously, soft stop, grace, hard stop, finalise.
@@ -380,12 +380,12 @@ Notices need nothing new. ORBIT's channel returns `notice_lines(member)` with it
 
 #### P3. Exposure
 
-M2 computes `exposed` after the drain, in its walk over the member spans ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)). For a native read, that is the first `ModelEvent` of the reader's loop whose input holds the read's `ChatMessageTool`, matched by tool call id and function. ORBIT's collusion scorer needs exposure in ORBIT's sense, so the walk gains these rules. Each applies only where its input exists, so a run with no fragments, no notices kept and no external members is walked exactly as M2 walks it.
+M2 computes `exposed` after the drain, in its walk over the member spans ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)). For a native read, that is the first `ModelEvent` of the reader's loop whose input holds the read's own `ChatMessageTool`, joined by the `ToolEvent`'s `message_id`, with its content unchanged. ORBIT's collusion scorer needs exposure in ORBIT's sense, so the walk gains these rules. Each applies only where its input exists, so a run with no fragments, no notices kept and no external members is walked exactly as M2 walks it.
 
 - **Successful generations only.** A `ModelEvent` with an `error` does not count, and the walk moves on to the next event. ORBIT counts only successful inputs.
 - **Per fragment.**
   - When the read registered fragments ([P2](#p2-bus-extensions)), the walk first checks each fragment against the read's completed `ToolEvent` result, with the newline-block rule. A fragment that is not in the result (the channel broke the contract, or Inspect truncated the result through it) gets `in_result: false` in an evidence event for that read, and is never exposed.
-  - Each record whose fragment is in the result is then checked separately. A record is exposed in the first successful `ModelEvent` of the reader's loop, at or after the read, whose input holds the anchored tool message (same call id and function, no `error`) with that record's fragment intact under the newline-block rule.
+  - Each record whose fragment is in the result is then checked separately. A record is exposed in the first successful `ModelEvent` of the reader's loop, at or after the read, whose input holds the read's own result message (by `message_id`, no `error`) with that record's fragment intact under the newline-block rule. The fragment check replaces M2's whole-content check, so an edit that keeps the message's id exposes the fragments it leaves intact.
   - A read whose result an intervention edited, or a filter truncated, so that only some fragments survive, exposes only those.
   - Without fragments, M2's rule applies unchanged.
 - **Notices.**
@@ -846,7 +846,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
   - a fragmented read is exposed at the member's next successful generation;
   - a fragment that is not a newline-delimited block of the read's completed result (a test channel that renders differently, and a result truncated by `max_tool_output`) gets `in_result: false` and is never exposed, while the read's other fragments are checked as usual;
   - a two-record read whose result reaches the model with only one fragment intact exposes only that record;
-  - a tool message with a different call id or function, or with an error, exposes nothing;
+  - a tool message other than the read's own result message (another message id, including an earlier result in the loop under the same call id), or one with an error, exposes nothing;
   - a failed generation does not count, and the next successful one does;
   - a cache replay is marked;
   - a notice is exposed only after a successful generation that included its original text, and not when an edit or a filter kept its id but changed its text, in both the walk and the `record_exposure()` path;

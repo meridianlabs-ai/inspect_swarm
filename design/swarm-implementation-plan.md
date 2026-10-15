@@ -375,9 +375,9 @@ None in M2, and none in M1.
 - Depends on: M2-8.
 - Implements: swarm-communication.md step 4; [Notices](swarm-communication.md#notices); [swarm-memory-channel.md Notices and the status line](swarm-memory-channel.md#notices-and-the-status-line).
 
-**M2-10. Exposure and communication metrics.** Post-hoc `exposed` events in the finalisation walk, exact for native reads by tool call id: the walk finds the loop a `read` names in the member's span subtree and matches only that loop's `ModelEvent`s after the read, since tool call ids are unique only within one conversation, and writes `loop` and `nested` ([swarm-memory-channel.md Descendants](swarm-memory-channel.md#descendants)); record counts and sizes per member, rejections per control.
+**M2-10. Exposure and communication metrics.** Post-hoc `exposed` events in the finalisation walk, exact for native reads by the read's own result message (`ToolEvent.message_id`, with its content unchanged), not by tool call id, which repeats within a loop as well as across loops: the walk finds the loop a `read` names in the member's span subtree and matches only that loop's `ModelEvent`s after the read, and writes `loop` and `nested` ([swarm-memory-channel.md Descendants](swarm-memory-channel.md#descendants)); record counts and sizes per member, rejections per control.
 - Files: `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_metrics.py`.
-- Tests: `tests/test_comm_evidence.py`, with the cases of [swarm-memory-channel.md Testing](swarm-memory-channel.md#testing) ("Evidence"), including a tool call id reused by a parent and its child and by two sibling children.
+- Tests: `tests/test_comm_evidence.py`, with the cases of [swarm-memory-channel.md Testing](swarm-memory-channel.md#testing) ("Evidence"), including a tool call id reused by a parent and its child and by two sibling children, and reused within one loop by two reads whose second result is dropped before the next generation, which leaves the second read unexposed.
 - Depends on: M2-8, M1-10.
 - Implements: swarm-communication.md step 5; [Evidence and provenance](swarm-communication.md#evidence-and-provenance); [swarm-memory-channel.md Evidence](swarm-memory-channel.md#evidence).
 
