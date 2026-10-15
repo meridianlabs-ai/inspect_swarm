@@ -380,7 +380,7 @@ Notices need nothing new. ORBIT's channel returns `notice_lines(member)` with it
 
 #### P3. Exposure
 
-M2 computes `exposed` after the drain, in its walk over the member spans ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)). For a native read, that is the first `ModelEvent` of the reader's loop whose input holds the read's own `ChatMessageTool`, joined by the `ToolEvent`'s `message_id`, with its content unchanged. ORBIT's collusion scorer needs exposure in ORBIT's sense, so the walk gains these rules. Each applies only where its input exists, so a run with no fragments, no notices kept and no external members is walked exactly as M2 walks it.
+M2 computes `exposed` after the drain, in its walk over the member spans ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)). For a native read, that is the first `ModelEvent` of the reader's loop whose input holds the read's own `ChatMessageTool`, joined by the `ToolEvent`'s `message_id`, with its content unchanged. Inputs are the swarm's notes of each generation's input when it started, not the logged inputs, which a later edit changes ([Generation-time inputs](swarm-communication.md#records-and-the-bus)); every rule below reads them too, so an intervention's `edit()` after a generation never removes an exposure that generation already made. ORBIT's collusion scorer needs exposure in ORBIT's sense, so the walk gains these rules. Each applies only where its input exists, so a run with no fragments, no notices kept and no external members is walked exactly as M2 walks it.
 
 - **Successful generations only.** A `ModelEvent` with an `error` does not count, and the walk moves on to the next event. ORBIT counts only successful inputs.
 - **Per fragment.**
