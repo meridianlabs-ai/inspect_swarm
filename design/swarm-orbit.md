@@ -1,6 +1,6 @@
 # ORBIT on inspect_swarm
 
-Status: proposed, 2026-10-08; revised 2026-10-14 to follow the designs merged since. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
+Status: proposed, 2026-10-08; revised 2026-10-14 to follow the designs merged since, and 2026-10-15 for the bus's commit sequence and admission check. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
 
 ## Overview
 
@@ -21,7 +21,7 @@ What inspect_swarm would add is all future work in [the implementation plan](swa
 - **Trusted interventions** ([P5](#p5-trusted-interventions)). Between activations, eval-author code may append scenario or attack input to a staged copy of a member's conversation, and defenses may rewrite that copy. Every change is recorded.
 - **Three small bus extensions** ([P2](#p2-bus-extensions)):
   - a channel whose records also reach members that are not running;
-  - a numeric sequence on records;
+  - the bus's commit sequence, exposed to channels and controllers;
   - per-message read fragments.
 - **Exposure evidence in ORBIT's sense** ([P3](#p3-exposure)). M2's post-hoc exposure walk gains three things:
   - a check per message fragment;
@@ -310,7 +310,7 @@ So ORBIT's `model_step` scheduling, and its repeatable conversational `completio
 | `auto` | None for ORBIT's channel | The later `messages(delivery="inject")` is the messages channel's own mode. |
 | Dialogue and activity projections, `peer_messages`, `summary` | None | They put peer text in a conversation outside a tool result, and stay on ORBIT's executor. |
 | Scheduler modes, plans, quanta | ORBIT's `@swarm_controller` driving `activate()` ([P4](#p4-scheduled-mode-the-turn-seam-and-activation)) | `model_step` and `completion` only. |
-| `visibility="step_start"` | `activate(read_cutoff=)` checked against `Record.seq` ([P2](#p2-bus-extensions), [P4](#p4-scheduled-mode-the-turn-seam-and-activation)) | |
+| `visibility="step_start"` | `activate(read_cutoff=)` checked against the bus's commit sequence (`delivered.seq`) ([P2](#p2-bus-extensions), [P4](#p4-scheduled-mode-the-turn-seam-and-activation)) | |
 | `max_turns`, halt conditions, hooks | The controller's `run`; its reasons are recorded as `controller:<reason>` | |
 | `sent`, `read`, `model_exposure` | `sent`, `read`, `exposed` for a message ([P3](#p3-exposure)) | |
 | ORBIT `notified` (a notice reached a successful input) | `exposed` for a notice ([P3](#p3-exposure)) | The swarm's own `notified` means a notice was added to the conversation. |
@@ -354,7 +354,7 @@ The swarm's own answer rule, and its record's `final`, are unaffected.
 
 ORBIT's reader and writer channels, the secret coalition channels its attacks register, and its DCOP blackboards are one user channel: an ORBIT `@swarm_channel` whose `ChannelState` implements swarm-communication.md's operations ([How channels plug into the bus](swarm-communication.md#how-channels-plug-into-the-bus)). Its tools call `Bus.deliver()`, so the bus binds the sender from the member ContextVar, as ORBIT's `actor_identity()` does today (`ORBIT: orbit/communication/runtime.py:117-124`).
 
-ORBIT's channel computes each record's recipients itself, from the channel's readers intersected with its communication edges. Its tool refuses a sender who is not a writer, and a send left with no recipient, with a `ToolError`, as ORBIT does now. So the messages channel's `routes` are not needed. ORBIT's capacity checks stay in its `validate()`, as ORBIT's `ChannelCapacityError` does now.
+ORBIT's channel computes each record's recipients itself, from the channel's readers intersected with its communication edges. Its tool refuses a sender who is not a writer, and a send left with no recipient, with a `ToolError`, as ORBIT does now. So the messages channel's `routes` are not needed. ORBIT's capacity checks, which ORBIT raises as `ChannelCapacityError` now, go in its `admit()` at step 2, not in `validate()` at step 0: a capacity depends on channel state, and a check before the policy's `await` would let two concurrent posts both pass against the same free capacity, where `admit()` sees each post's predecessor ([Records and the bus](swarm-communication.md#records-and-the-bus); decision: Ransom, 2026-10-15). `validate()` keeps the checks on the post alone.
 
 Three extensions are needed:
 
@@ -365,7 +365,10 @@ Three extensions are needed:
   - A channel therefore declares `recipients: ClassVar[Literal["running", "roster"]] = "running"`. With `"roster"`, step 0 resolves addresses against the roster alone and step 2 skips the recipients' liveness check (the sender's still applies), so pending and ended readers get the record in the channel's state.
   - The `delivered` event records each recipient's state. A pending reader sees the notice at its first boundary after it starts.
   - The bus still refuses every send once the swarm is stopping. The messages channel keeps `"running"`.
-- **A numeric sequence.** Record ids already carry a per-swarm sequence (`"m-14"`). `Record.seq: int` exposes it, `Delivery` returns it, and `SwarmControl.sequence()` returns the latest one assigned ([P4](#p4-scheduled-mode-the-turn-seam-and-activation)). ORBIT's canonical messages store it, and step-start visibility compares against it.
+- **The commit sequence.** ORBIT's sequence is the bus's commit sequence, the run-wide number step 4 gives each applied record and writes as `delivered.seq` ([swarm-memory-channel.md Changes to the bus](swarm-memory-channel.md#changes-to-the-bus)), not the number in a record id: ids are given before the policy's `await`, so a record held by the policy can commit after a step-start cutoff with a lower id number, and comparing ids would show it to a reader that started before it existed (decision: Ransom, 2026-10-15).
+  - `Delivery.seq` returns the number to the sender's tool, and `SwarmControl.sequence()` returns the latest one committed, 0 before any ([P4](#p4-scheduled-mode-the-turn-seam-and-activation)).
+  - `Bus.sequence()` returns the same number to a channel. Because the bus gives the number before it calls `apply()`, and steps 2 to 4 have no `await`, inside `apply()` it is the applied record's own, so ORBIT's channel stores it with the record in its canonical messages there, before any reader can see the record.
+  - Step-start visibility compares a record's stored commit number with the activation's cutoff. `Record` gains no sequence field.
 - **Read receipts with fragments.**
   - The bus call that a channel's read tool makes to write its `read` event becomes public as `record_read(records, *, fragments=None)`. It resolves the tool call id, the function name and the tool span from the member's pending `ToolEvent`, as swarm-communication.md's read events already do.
   - `fragments` maps each record id to the exact text the tool renders for that record. The contract on the channel is ORBIT's: each fragment appears in the tool's result as its own newline-delimited block, so that `"\n" + fragment + "\n"` is a substring of `"\n" + result + "\n"` (`ORBIT: orbit/communication/runtime.py:373-377`).
@@ -503,7 +506,7 @@ class MemberHandle(Protocol):                    # swarm-api.md's, plus:
 
 
 class SwarmControl(Protocol):                    # swarm-api.md's, plus:
-    def sequence(self) -> int: ...               # the latest Record.seq the bus assigned; 0 before any
+    def sequence(self) -> int: ...               # the latest commit sequence (delivered.seq); 0 before any
 
 
 @dataclass(frozen=True)
@@ -530,7 +533,7 @@ class ActivationResult:
   - It raises `ValueError` for a background-enabled `deepagent()` member ([Supported members](#supported-members)).
   - Each activation's start and end is an `InfoEvent` in the member's span, with `type: "schedule"` and kind `activation_started` or `activation_ended`. The events carry the activation id, the quantum, the read cutoff, the message counts, the duration and the outcome, as ORBIT's schedule events do (`ORBIT: orbit/execution/plans.py:121-132`).
 - **States.** A parked member's state is `running`. So swarm-communication.md's liveness rule, `list_members()` and `events()` treat it as running, which is what it is: it holds an open `react()` call. `MemberEnded` events are queued for scheduled members as for any other.
-- **Read cutoff.** The activation's `read_cutoff` stays on the member's runtime handle until its next activation. A channel's read tool reads it with `activation_read_cutoff() -> int | None`, a member-side helper that reads the member ContextVar. ORBIT's channel hides records whose `seq` is above it. The built-in channels ignore it.
+- **Read cutoff.** The activation's `read_cutoff` stays on the member's runtime handle until its next activation. A channel's read tool reads it with `activation_read_cutoff() -> int | None`, a member-side helper that reads the member ContextVar. ORBIT's channel hides records whose commit sequence is above it, so a record committed after the step started is hidden whenever its policy began. The built-in channels ignore it.
 - **Snapshots.**
   - `MemberSnapshot` holds a deep copy of the member's messages and `output`, its state and status, whether it is parked, and an `interrupted` flag.
   - The runtime keeps a reference to the `AgentState` the member's agent actually runs on, because `run()` works on a copy. swarm-scoring.md's member wrapper already keeps that reference for the member's output.
@@ -610,7 +613,7 @@ An operation cancelled before it completes changes nothing and writes nothing. I
 | swarm-api.md, "No member text" | **Extends**, for controllers that activate members: `snapshot()` and `edit()` carry text ([P4](#member-handles-and-snapshots); [open question 1](#open-questions)). |
 | swarm-api.md, the sibling-parameters table | Of `member(input=, role=, exposure=)`, only `exposure=` remains. `role` is M1's, and input goes through `start()` or `activate()`. The ORBIT row for `routes` is not needed, because ORBIT's channel computes its own recipients. `round_robin` is a `@swarm_controller`, as that table says. |
 | [swarm-communication.md](swarm-communication.md#notices) `swarm_on_continue()` and notices | **Uses** as the turn seam, which settles the first revision's question of where the seam lives. **Extends** it with the scheduled path. Notices are unchanged (user role, metadata, kept in the conversation), except that a parked member's notice is computed when it resumes. |
-| swarm-communication.md bus and channels | **Uses** for ORBIT's channel, as a user `@swarm_channel`. **Extends** with `Channel.recipients`, `Record.seq` and a public `record_read(..., fragments=)` ([P2](#p2-bus-extensions)). Does not use `messages(routes=)`. |
+| swarm-communication.md bus and channels | **Uses** for ORBIT's channel, as a user `@swarm_channel`. **Extends** with `Channel.recipients`, the commit sequence in `Delivery` and `Bus.sequence()`, and a public `record_read(..., fragments=)`; ORBIT's capacity checks use its `admit()` ([P2](#p2-bus-extensions)). Does not use `messages(routes=)`. |
 | swarm-communication.md evidence and exposure | **Uses** the kinds and the post-hoc walk. **Extends** the walk with successful-only events, per-fragment checks, notice exposure, external inputs and coverage ([P3](#p3-exposure)). Adds the `schedule` evidence type. ORBIT's `delivered` and `notified` mean something else, and the [projection](#compatibility-and-migration) maps them. |
 | swarm-communication.md `inject` (later) | Not used for ORBIT's channel. ORBIT's `auto` stays ORBIT-specific. |
 | [swarm-limits.md](swarm-limits.md#stopping) stopping and statuses | **Uses** the stop procedure and the closed status set. **Extends** step 0 to release parked members, and the member wrapper to give `stopped` to a member the hook released mid-work ([Stopping a scheduled swarm](#stopping-a-scheduled-swarm)). |
@@ -634,7 +637,7 @@ These are the changes for the `common/v1` configurations that can move, in the o
 - **Channels.** ORBIT's channel tools become an ORBIT `@swarm_channel` with `recipients="roster"`.
   - It sends with `deliver()` and records reads with `record_read(..., fragments=)`.
   - It honours `activation_read_cutoff()`.
-  - It keeps its channel registry, canonical messages and receipts, with the ids and sequences the bus assigns.
+  - It keeps its channel registry, canonical messages and receipts, with the record ids and commit sequences the bus assigns.
 - **Delivery and observation.**
   - `CommunicationDeliveryModel` is removed: `notify` uses the swarm's notice.
   - `CommunicationModel` stays, reporting through `record_exposure()`, on members with defense filters, and is removed elsewhere.
@@ -758,7 +761,7 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
 
 - **inspect_swarm** has no released API, and everything here comes after its first release. The additions are:
   - `member(exposure=)`;
-  - on the bus: `Channel.recipients`, `Record.seq`, `record_read(..., fragments=)`, `record_exposure()` and `record_exposure_coverage()`;
+  - on the bus: `Channel.recipients`, `Delivery.seq`, `Bus.sequence()`, `record_read(..., fragments=)`, `record_exposure()` and `record_exposure_coverage()`;
   - in evidence: the extended exposure walk, per-member coverage, the `notice` subject on `exposed`, and the `schedule` type with its kinds `activation_started`, `activation_ended` and `intervened`, all inside the versioned `InfoEvent` payloads;
   - in scheduled mode: the scheduled path of `swarm_on_continue()`, the handle methods, `SwarmControl.sequence()`, `activation_read_cutoff()`, `ActivationResult`, `MemberSnapshot` and `round_robin`;
   - the limits deep dive's member wrapper reading the stop cause on a normal return.
@@ -772,7 +775,7 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
   |---|---|
   | `version` | `1` when every member's coverage is known; `None` (evidence unavailable) when the swarm's evidence is missing |
   | `channels` (ids, readers, writers, `private`) | ORBIT's channel, which registers channels as today, including secret channels registered by attacks |
-  | `messages` | ORBIT's channel at send time, with the record id, `seq` and recipients that `deliver()` returns. `session_id` is the member's agent span (sentinel's `conversation`), `invocation_id` the activation id, and `turn` the controller's outer turn |
+  | `messages` | ORBIT's channel at send time, with the record id, the commit sequence (`seq`) and the recipients that `deliver()` returns. `session_id` is the member's agent span (sentinel's `conversation`), `invocation_id` the activation id, and `turn` the controller's outer turn |
   | `receipts` (per-message `rendered_messages`) | ORBIT's channel, which already holds the fragments it passes to `record_read()`. The tool-call and event ids come from the swarm's `read` event |
   | `events`: `sent`, `read` | The swarm's `sent` and `read` events, with the same record ids and native ids |
   | `events`: `model_exposure` | The swarm's `exposed` events for records |
@@ -835,7 +838,8 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
 - **Bus extensions** (`tests/test_bus.py`):
   - a `recipients="roster"` test channel delivers to pending and ended members, and records their states in `delivered`, while the default channel still rejects them;
   - every send is refused once stopping;
-  - `Record.seq` increases monotonically across channels, and `SwarmControl.sequence()` returns the latest;
+  - the commit sequence increases monotonically across channels in commit order, and `Delivery.seq`, `delivered.seq` and `Bus.sequence()` read inside `apply()` agree; `SwarmControl.sequence()` returns the latest committed;
+  - a record held by a test policy while a later record commits gets the higher commit number, and a read cutoff taken from `SwarmControl.sequence()` between the two commits hides it, although its record id is the lower;
   - a read tool honouring `activation_read_cutoff()` hides later records;
   - `record_read()` registers fragments inside the read tool, before any result exists, and its `read` event stores hashes and lengths only.
 - **Exposure** (`tests/test_comm_evidence.py`):
@@ -855,7 +859,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
   - an operation cancelled midway changes nothing, and operations staged at a stop are recorded with `committed: false`;
   - an injection appended with `append` and tagged untrusted is rewritten by a following `edit` before the member's next generation.
 - **ORBIT-shaped conformance tests** (`tests/test_orbit_shape.py`), with no ORBIT dependency:
-  - a controller with sequential and concurrent steps, over members using a reader-and-writer test channel, checks ORBIT's documented rules: messages do not activate members, submitted members are not activated again, step-start cutoffs hide same-step sends, and a concurrent failure cancels and joins siblings;
+  - a controller with sequential and concurrent steps, over members using a reader-and-writer test channel, checks ORBIT's documented rules: messages do not activate members, submitted members are not activated again, step-start cutoffs hide same-step sends, including one whose policy began before the step and committed during it, a channel capacity checked in `admit()` lets exactly one of two concurrent posts held by the policy take the last free place, with the other's refusal in its `sent` event, and a concurrent failure cancels and joins siblings;
   - a test helper builds a `CommunicationState`-shaped index from the swarm's evidence by the projection table above. It checks private-channel messages, per-session exposure pairs, notices with ORBIT's meaning (no `notified` for a same-id redacted notice), and uncovered receipts when coverage is incomplete;
   - a test solver wrapper shaped like ORBIT's sets a never-submitted output member's output and a projected history from the record and saved conversations, after a normal controller stop, after an outer sample message limit, and after cancellation by a sample time limit; in the last two the original error still ends the sample, and the projection is in the logged `TaskState`, where a separate solver step after the swarm would leave the swarm's provisional answer.
 
@@ -864,7 +868,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
 Future work, after M1 and M2, in the plan's "Later, any order" menu. Each step is one pull request, named `F-n` here, with the M1 and M2 pull requests it needs ([swarm-implementation-plan.md](swarm-implementation-plan.md)):
 
 1. **F-1. Bus extensions.**
-   - Scope: `Channel.recipients` with the step-0 and commit-check rules; `Record.seq` in `Delivery`; public `record_read(records, *, fragments=None)`, registering fragments with their hashes.
+   - Scope: `Channel.recipients` with the step-0 and commit-check rules; the commit sequence as `Delivery.seq` and `Bus.sequence()`; public `record_read(records, *, fragments=None)`, registering fragments with their hashes.
    - Files: `src/inspect_swarm/_bus/_record.py`, `_bus/_bus.py`, `src/inspect_swarm/_channel/_channel.py`, `src/inspect_swarm/_evidence.py`.
    - Tests: the bus-extension cases in `tests/test_bus.py`.
    - Depends on: M2-6 (bus core), and M2-8 (the first channel's read events).
@@ -884,7 +888,7 @@ Future work, after M1 and M2, in the plan's "Later, any order" menu. Each step i
      - `round_robin`.
    - Files: `src/inspect_swarm/_bus/_notice.py`, `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_controller/_schedule.py` (new), `src/inspect_swarm/_controller/round_robin.py` (new), `src/inspect_swarm/_member.py`, `src/inspect_swarm/_swarm.py`, `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_entrypoint.py`.
    - Tests: the seam and handle cases of `tests/test_scheduled.py`.
-   - Depends on: M1-4 (handles and `stop()`), M1-5 (the member's `AgentState` reference), M1-9 (the status rule it amends), M2-9 (`swarm_on_continue()`), and F-1 for `seq`.
+   - Depends on: M1-4 (handles and `stop()`), M1-5 (the member's `AgentState` reference), M1-9 (the status rule it amends), M2-9 (`swarm_on_continue()`), and F-1 for the commit sequence.
 4. **F-4. Trusted interventions.**
    - Scope: staged conversations, `append` and `edit`, commit at `activate()`, and `intervened` events.
    - Files: `src/inspect_swarm/_controller/_schedule.py`, `src/inspect_swarm/_evidence.py`.
