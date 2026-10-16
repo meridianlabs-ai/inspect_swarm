@@ -235,7 +235,7 @@ try:
                 await drain(owner, lever, grace())
         finally:
             # after the owner's exit, so its cancellations and their cleanup are counted
-            outcome.started, outcome.cancelled = owner.started, owner.cancelled
+            outcome.background_started, outcome.background_cancelled = owner.started, owner.cancelled
     ...                                               # status if not set: stop_cause / cancelled
 finally:
     current_member.reset(token)
