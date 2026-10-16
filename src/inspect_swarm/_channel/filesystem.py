@@ -1,4 +1,5 @@
 import posixpath
+import string
 
 from .._controller._controller import MemberInfo
 from ._channel import Channel, swarm_channel
@@ -41,9 +42,19 @@ def filesystem(
         ValueError: If `scratch` has a placeholder other than `{member}`.
     """
     try:
-        scratch.format(member="member")
-    except (KeyError, IndexError, ValueError) as ex:
-        raise ValueError(
-            f"filesystem(): scratch may use only the {{member}} placeholder, got {scratch!r}."
-        ) from ex
+        fields = [
+            (field, spec, conversion)
+            for _, field, spec, conversion in string.Formatter().parse(scratch)
+            if field is not None
+        ]
+    except ValueError as ex:
+        raise _bad_scratch(scratch) from ex
+    if any(field != ("member", "", None) for field in fields):
+        raise _bad_scratch(scratch)
     return _Filesystem(shared, notes, scratch)
+
+
+def _bad_scratch(scratch: str) -> ValueError:
+    return ValueError(
+        f"filesystem(): scratch may use only the {{member}} placeholder, got {scratch!r}."
+    )

@@ -117,6 +117,19 @@ class SwarmControl(Protocol):
 _TOPOLOGY_REASONS = frozenset({"all_done", "verified", "quiescence"})
 
 
+# start()'s refusal once a stop has begun. A controller that resumed before the stop's
+# cancellation reached it (an event already queued, an await already complete) gets it
+# from its next start(), and ends as the cancellation would have ended it.
+class _Stopping(RuntimeError):
+    pass
+
+
+def _without_refusals(error: Exception) -> Exception | None:
+    if isinstance(error, ExceptionGroup):
+        return cast(ExceptionGroup[Exception], error).split(_Stopping)[1]
+    return None if isinstance(error, _Stopping) else error
+
+
 # A member in one run of the swarm: what its handle shows, and the nodes its wrapper
 # enters. Its lever and limits are created here, once per run, so that a stop can close
 # the lever of a member that has started but whose task has not yet entered it.
@@ -186,7 +199,7 @@ class SwarmRun:
     ) -> None:
         m = self._lookup(member if isinstance(member, str) else member.name)
         if self.stop_reason is not None:
-            raise RuntimeError(
+            raise _Stopping(
                 f"start({m.name!r}): the swarm is stopping ({self.stop_reason}), so no member can start."
             )
         if m.state != "pending":
@@ -283,8 +296,12 @@ class SwarmRun:
             if self._controller_scope.cancelled_caught:
                 return
         if error is not None:
+            rest = _without_refusals(error)
+            if rest is None:
+                # the stop is under way
+                return
             cap, _, foreign = classify_errors(
-                error, self._caps, self._runtime_lever.nodes
+                rest, self._caps, self._runtime_lever.nodes
             )
             if foreign is not None:
                 raise foreign

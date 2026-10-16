@@ -325,9 +325,13 @@ async def run_member(
             return "swarm_cap"
         assert owned is not None
         return _status_for(owned, lever)
+    if context.stop_cause is not None:
+        # a node that stopped a bridged member, whose cancellation may not have been
+        # delivered when its last call was the one that stopped it
+        return context.stop_cause
     if context.scope.cancelled_caught:
-        # the hard stop, or a node that stopped a bridged member
-        return context.stop_cause or "cancelled"
+        # the hard stop
+        return "cancelled"
     return "submitted"
 
 

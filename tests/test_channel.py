@@ -97,9 +97,23 @@ async def test_each_member_gets_each_channels_instructions(
             assert rest == ""
 
 
-def test_filesystem_refuses_a_scratch_template_with_other_placeholders() -> None:
+@pytest.mark.parametrize(
+    "scratch",
+    [
+        "/scratch/{name}",
+        "/scratch/{member[0]}",
+        "/scratch/{member.upper}",
+        "/scratch/{member!r}",
+        "/scratch/{member:>9}",
+        "/scratch/{}",
+        "/scratch/{member",
+    ],
+)
+def test_filesystem_refuses_a_scratch_template_with_other_placeholders(
+    scratch: str,
+) -> None:
     with pytest.raises(ValueError, match="only the {member} placeholder"):
-        filesystem(scratch="/scratch/{name}")
+        filesystem(scratch=scratch)
 
 
 @agent

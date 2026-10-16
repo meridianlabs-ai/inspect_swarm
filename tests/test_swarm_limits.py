@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import anyio
@@ -31,6 +31,7 @@ from inspect_ai.util._limit import suspend_token_limit
 from inspect_swarm import (
     Budget,
     Controller,
+    MemberHandle,
     StopReason,
     SwarmControl,
     member,
@@ -475,6 +476,46 @@ async def test_the_cost_check_refuses_an_unpriced_model(form: str) -> None:
 
 
 @agent
+def default_model_generator(model: str = "mockllm/unpriced-default") -> Agent:
+    # a factory whose model has a default other than None, which no registered agent has
+    return generator(get_model(model, memoize=False))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("form", ["built", "factory"])
+@pytest.mark.parametrize("model", ["default", "explicit"])
+async def test_the_cost_check_refuses_a_member_using_its_default_model(
+    form: str, model: str
+) -> None:
+    args = {"model": str(scripted_model(cost=1.0))} if model == "explicit" else {}
+    record = (
+        member(default_model_generator(**args))
+        if form == "built"
+        else member(default_model_generator, args=args)
+    )
+    agent_swarm = swarm(record, channels=[], budget=Budget(cost=10.0))
+    if model == "default":
+        with pytest.raises(PrerequisiteError, match="default of its model parameter"):
+            await run_swarm(agent_swarm)
+    else:
+        stop = await run_swarm(agent_swarm)
+        assert statuses(stop) == {"default_model_generator": "submitted"}
+
+
+@pytest.mark.parametrize("split", ["pool", "equal", (1.0, 2.0)])
+def test_shares_are_refused_until_they_are_supported(
+    split: Literal["pool", "equal"] | tuple[float, ...],
+) -> None:
+    members = member(generator, args={"model": scripted_model()}, count=2)
+    budget = Budget(tokens=300, split=split)
+    if split == "pool":
+        swarm(members, channels=[], budget=budget)
+    else:
+        with pytest.raises(NotImplementedError, match="Budget.split"):
+            swarm(members, channels=[], budget=budget)
+
+
+@agent
 def bridged_builder(model: Model, raised: list[str]) -> Agent:
     # a bridged agent outside inspect_swe, whose first request's bridge compaction
     # generates before the bridge's mark
@@ -513,3 +554,46 @@ async def test_a_member_declared_bridged_is_cancelled_at_its_first_compaction(
     # declared, it is cancelled with no error raised in its code; undeclared, it is
     # counted native until the bridge's mark and the cap's error is raised
     assert raised == ([] if bridged else ["raised"])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "limits,budget,expected",
+    [
+        pytest.param([], Budget(tokens=TOKENS_PER_CALL // 2), "swarm_cap", id="cap"),
+        pytest.param(
+            [token_limit(TOKENS_PER_CALL // 2)],
+            Budget(),
+            "member_limit:token",
+            id="member-limit",
+        ),
+        pytest.param([], Budget(), "submitted", id="control"),
+    ],
+)
+async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
+    limits: list[Limit], budget: Budget, expected: str
+) -> None:
+    # the node cancels the member rather than raising, and the member returns before
+    # the cancellation reaches it
+    handles: list[MemberHandle] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        handles.append(control.member("generator"))
+        control.start("generator")
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    stop = await run_swarm(
+        swarm(
+            member(generator(scripted_model()), bridged=True, limits=limits),
+            controller=_controller(
+                run, f"limits_test_last_call_{expected.replace(':', '_')}"
+            ),
+            channels=[],
+            budget=budget,
+        )
+    )
+    assert statuses(stop) == {"generator": expected}
+    [handle] = handles
+    assert (handle.status, handle.submitted) == (expected, expected == "submitted")

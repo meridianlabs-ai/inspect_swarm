@@ -1,9 +1,12 @@
+import inspect
 from collections.abc import Mapping, Sequence
 from typing import cast
 
+from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import (
     is_model_dict,
     registry_info,
+    registry_lookup,
     registry_params,
     registry_unqualified_name,
 )
@@ -41,6 +44,7 @@ def swarm(
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
         ValueError: If member names collide, the same agent object is in two members, a channel is given twice, a name does not resolve, or the controller refuses the roster.
+        NotImplementedError: If `budget` divides the caps into shares (`split` other than `"pool"`).
     """
     records = _members(members)
     names = member_names(records)
@@ -56,6 +60,11 @@ def swarm(
     if resolved_controller.check is not None:
         resolved_controller.check(roster)
     resolved_budget = _budget(budget)
+    if resolved_budget.split != "pool":
+        # shares are milestone M1-8; until then a split would run as one pool
+        raise NotImplementedError(
+            f"swarm(): Budget.split={resolved_budget.split!r} is not supported yet. Use split='pool', where members share the caps."
+        )
     preambles = {
         info.name: _preamble(info, len(roster), resolved_channels) for info in roster
     }
@@ -112,14 +121,31 @@ def _model(record: Member) -> tuple[str | Model, bool]:
     # the member's configured model, else the sample's, and whether it is known only
     # from a built agent's logged params; a model the agent resolves itself at run time
     # cannot be checked. The logged dict's name is the string metering prices it under.
-    model = (
-        registry_params(record.agent).get("model")
-        if record.agent is not None
-        else record.args.get("model")
-    )
+    if record.agent is not None:
+        params = registry_params(record.agent)
+        factory = registry_lookup("agent", registry_info(record.agent).name)
+    else:
+        params, factory = record.args, record.factory
+    if "model" not in params and _default_model(factory) is not None:
+        # the logged params and a factory's args leave defaults out; no registered
+        # agent defaults its model to anything but None
+        name = registry_info(record.agent or factory).name
+        raise PrerequisiteError(
+            f"A swarm cost cap requires cost data for every member's model, and {name} uses the default of its model parameter, which the swarm does not check. Give the member its model explicitly."
+        )
+    model = params.get("model")
     if is_model_dict(model):
         return model["model"], True
     return (model if isinstance(model, str | Model) else get_model()), False
+
+
+def _default_model(factory: object) -> object:
+    if not callable(factory):
+        return None
+    parameter = inspect.signature(factory).parameters.get("model")
+    if parameter is None or parameter.default is inspect.Parameter.empty:
+        return None
+    return parameter.default
 
 
 def _members(members: object) -> list[Member]:

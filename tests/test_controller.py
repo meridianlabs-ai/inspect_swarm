@@ -334,6 +334,49 @@ async def test_a_stop_closes_scheduling_and_cancels_only_the_controller(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("then", ["start", "raise"])
+async def test_a_controller_woken_as_a_stop_begins_ends_with_the_stop(
+    then: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a member's end wakes the controller and a stop begins before it resumes, so it
+    # gets the event before the stop's cancellation; driven by hand so that no
+    # scheduling order decides it
+    end = SwarmRun._end
+
+    def end_then_stop(self: SwarmRun, m: Any, status: str) -> None:
+        end(self, m, status)
+        if m.name == "first":
+            self.stop("swarm_time")
+
+    monkeypatch.setattr(SwarmRun, "_end", end_then_stop)
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("first")
+        async for _ in control.events():
+            if then == "raise":
+                raise ValueError("controller failed")
+            control.start("second")
+        return "all_done"
+
+    agent_swarm = swarm(
+        [
+            member(generator(scripted_model()), name="first"),
+            member(generator(scripted_model()), name="second"),
+        ],
+        controller=_controller(run, f"controller_test_woken_stop_{then}"),
+        channels=[],
+    )
+    if then == "raise":
+        # an error of the controller's own still fails the sample
+        with pytest.raises(ValueError, match="controller failed"):
+            await run_swarm(agent_swarm)
+    else:
+        stop = await run_swarm(agent_swarm)
+        assert stop["reason"] == "swarm_time"
+        assert statuses(stop) == {"first": "submitted", "second": None}
+
+
+@pytest.mark.anyio
 async def test_an_error_in_run_cancels_the_members_and_propagates() -> None:
     handles: list[MemberHandle] = []
 
