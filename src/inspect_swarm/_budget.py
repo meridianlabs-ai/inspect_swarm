@@ -213,7 +213,7 @@ def share_nodes(
 
 
 def _cost_shares(cap: float, fractions: Sequence[Fraction]) -> list[float]:
-    shares = [float(cap * f) for f in fractions]
+    shares = [float(Fraction(cap) * f) for f in fractions]
     if 0 in shares:
         raise ValueError(
             f"Budget.split gives a member a cost share of zero: its weight is too small a fraction of the total to divide the swarm's cost cap of ${cap:,}. Use weights closer together."

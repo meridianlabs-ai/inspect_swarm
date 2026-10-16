@@ -670,6 +670,8 @@ def _shares(
         # large weights: the sum and cap * weight would overflow a float
         ((1e308, 1e308), 10.0, 10, [(5.0, 5), (5.0, 5)]),
         ((1e308, 1e307), 11.0, None, [(10.0, None), (1.0, None)]),
+        # a share far below the cap is kept, not rounded to zero on the way
+        ((1e308, 1e-16), 1e308, None, [(1e308, None), (1e-16, None)]),
     ],
 )
 def test_shares_divide_the_caps_by_weight(
