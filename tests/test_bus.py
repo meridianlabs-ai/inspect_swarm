@@ -10,10 +10,12 @@ from inspect_ai._util.exception import TerminateSampleError
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.event import InfoEvent
 from inspect_ai.log._transcript import Transcript
+from inspect_ai.model import ChatMessageUser
 from inspect_ai.tool import Tool, ToolError
 from pydantic import JsonValue
 
 from inspect_swarm import (
+    Budget,
     Channel,
     ChannelRun,
     ChannelState,
@@ -465,12 +467,34 @@ async def test_the_rate_counts_each_senders_commits_in_a_sliding_window() -> Non
     ]
 
 
-@pytest.mark.parametrize("rate", [(0, 60.0), (5, 0.0)])
-def test_storm_controls_refuse_a_rate_that_admits_nothing(
+@pytest.mark.parametrize(
+    "rate", [(0, 60.0), (5, 0.0), (1, float("nan")), (1, float("inf"))]
+)
+def test_storm_controls_refuse_an_invalid_rate(
     rate: tuple[int, float],
 ) -> None:
     with pytest.raises(ValueError, match="rate must be a positive count"):
         StormControls(rate=rate)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("modified", [False, True])
+async def test_a_payload_that_is_not_valid_text_is_refused_with_evidence(
+    modified: bool,
+) -> None:
+    async def policy(record: Record, view: SwarmView) -> CommDecision | None:
+        return CommDecision("modify", payload="a\ud800") if modified else None
+
+    # a lone surrogate, which a model's JSON tool arguments can carry
+    payload = "fine" if modified else "a\ud800"
+    bus, _ = _bus(policy, channels=[_Board(StormControls(max_bytes=100))])
+    reason = "the note is not valid text: it has an unpaired surrogate at character 1"
+    async with sample() as transcript:
+        with pytest.raises(ToolError, match=reason):
+            await _send(bus, payload=payload)
+    assert _board(bus).applied == []
+    [sent] = _comm(transcript)
+    assert sent["rejected"] == {"control": "payload", "reason": reason}
 
 
 @asynccontextmanager
@@ -751,6 +775,51 @@ async def test_a_stop_refuses_records_whose_policy_was_running_and_later_ones() 
     assert outcomes == ["the swarm is stopping; nothing more is delivered."] * 2
     [bus] = buses
     assert bus.records == ()
+
+
+@pytest.mark.anyio
+async def test_an_attempt_cancelled_during_the_policy_is_evidenced() -> None:
+    entered = anyio.Event()
+
+    async def policy(record: Record, view: SwarmView) -> None:
+        entered.set()
+        await anyio.sleep_forever()
+
+    @swarm_controller(name="bus_test_stop_once_entered")
+    def stop_once_entered() -> Controller:
+        async def run(control: SwarmControl) -> StopReason:
+            control.start("w")
+            await entered.wait()
+            return "all_done"
+
+        return Controller(run)
+
+    buses: list[Bus] = []
+    outcomes: list[str] = []
+    agent = swarm(
+        member(
+            bus_user,
+            args={"buses": buses, "send": True, "outcomes": outcomes},
+            name="w",
+        ),
+        controller=stop_once_entered(),
+        channels=["bus_test_board"],
+        budget=Budget(grace=0),
+        policy=policy,
+    )
+    async with sample() as transcript:
+        await agent(AgentState(messages=[ChatMessageUser(content="task")]))
+    # the hard stop cancelled the member in its policy
+    assert outcomes == []
+    [bus] = buses
+    assert (bus.records, _board(bus).applied) == ((), [])
+    [sent] = _comm(transcript)
+    assert sent["record"]["id"] == "b-1"
+    assert sent["decision"] is None
+    assert sent["rejected"] == {
+        "control": "cancelled",
+        "reason": "the note was cancelled during the policy",
+    }
 
 
 @agent(name="inspect_swe/bus_test_cli")

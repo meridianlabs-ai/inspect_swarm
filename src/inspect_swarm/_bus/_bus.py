@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+import anyio
 from inspect_ai._util.exception import TerminateSampleError
 from inspect_ai.tool import ToolError
 from inspect_ai.util._span import current_agent_span_id, current_span_id
@@ -139,7 +140,18 @@ class Bus:
         decision: CommDecision | None = None
         original: str | None = None
         if self._policy is not None:
-            decision = await self._policy(record, self)
+            try:
+                decision = await self._policy(record, self)
+            except anyio.get_cancelled_exc_class():
+                # a stop's hard cancellation, or the sender's own: the attempt reached
+                # the bus, so it is evidenced, with no decision
+                comm_sent(
+                    record,
+                    None,
+                    None,
+                    ("cancelled", f"the {record.kind} was cancelled during the policy"),
+                )
+                raise
         if decision is not None:
             if decision.action == "modify":
                 assert decision.payload is not None
@@ -163,7 +175,9 @@ class Bus:
 
         # steps 2 to 4 run with no await, so nothing changes between check and commit
         storm = self._storms[record.channel]
-        rejection = self._liveness(record) or storm.check(record)
+        rejection = (
+            self._liveness(record) or _unencodable(record) or storm.check(record)
+        )
         if rejection is None:
             try:
                 state.admit(record)
@@ -231,6 +245,18 @@ class Bus:
                     f"{name} ended before the {record.kind} was delivered.",
                 )
         return None
+
+
+def _unencodable(record: Record) -> tuple[str, str] | None:
+    # model output can hold a lone surrogate, which no UTF-8 reader can take
+    try:
+        record.payload.encode("utf-8")
+    except UnicodeEncodeError as ex:
+        return (
+            "payload",
+            f"the {record.kind} is not valid text: it has an unpaired surrogate at character {ex.start}",
+        )
+    return None
 
 
 current_bus: ContextVar[Bus | None] = ContextVar(

@@ -23,9 +23,9 @@ class StormControls:
             )
         if self.rate is not None:
             count, window = self.rate
-            if count < 1 or window <= 0:
+            if count < 1 or not (0 < window < math.inf):
                 raise ValueError(
-                    f"StormControls: rate must be a positive count and a positive window in seconds, got {tuple(self.rate)}."
+                    f"StormControls: rate must be a positive count and a finite, positive window in seconds, got {tuple(self.rate)}."
                 )
 
 
