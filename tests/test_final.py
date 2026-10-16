@@ -1,0 +1,474 @@
+from pathlib import Path
+from typing import Any
+
+import anyio
+import pytest
+from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
+from inspect_ai.agent import Agent, AgentState, agent
+from inspect_ai.dataset import Sample
+from inspect_ai.event import SpanBeginEvent
+from inspect_ai.model import ChatMessageAssistant, ChatMessageUser, Model, ModelOutput
+from inspect_ai.util import store, token_limit
+
+from inspect_swarm import (
+    Budget,
+    Controller,
+    StopReason,
+    SwarmControl,
+    member,
+    swarm,
+    swarm_controller,
+)
+from inspect_swarm._final import first
+from inspect_swarm._record import RECORD_KEY, MemberResult, SwarmResultRecord
+
+from .swarm_runtime import (
+    TOKENS_PER_CALL,
+    Outcome,
+    Script,
+    evidence,
+    final,
+    generator,
+    output,
+    run_swarm,
+    sample,
+    scripted_model,
+    sleeper,
+    statuses,
+)
+
+
+def _controller(run: Any, name: str) -> Controller:
+    @swarm_controller(name=name)
+    def factory() -> Controller:
+        return Controller(run)
+
+    return factory()
+
+
+def _record() -> SwarmResultRecord:
+    return SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+
+
+# ---------------------------------------------------------------------------
+# first
+
+
+def _result(name: str, status: str | None, time: float | None) -> MemberResult:
+    return MemberResult(
+        name=name,
+        role=None,
+        model=None,
+        state="pending" if status is None else "ended",
+        status=status,
+        submitted=status == "submitted",
+        output=None if status is None else output(f"from {name}"),
+        time=time,
+    )
+
+
+@pytest.mark.parametrize(
+    "members,expected",
+    [
+        pytest.param(
+            [("a", "submitted", 2.0), ("b", "submitted", 1.0)], "b", id="earliest"
+        ),
+        pytest.param(
+            [("a", "submitted", 1.0), ("b", "submitted", 1.0)], "a", id="roster-order"
+        ),
+        pytest.param(
+            [
+                ("unsubmitted", "unsubmitted", 0.1),
+                ("stopped", "stopped", 0.1),
+                ("limited", "member_limit:token", 0.1),
+                ("capped", "swarm_cap", 0.1),
+                ("cancelled", "cancelled", 0.1),
+                ("errored", "errored", 0.1),
+                ("pending", None, None),
+                ("late", "submitted", 9.0),
+            ],
+            "late",
+            id="only-submissions",
+        ),
+        pytest.param(
+            [("stopped", "stopped", 0.1), ("pending", None, None)],
+            None,
+            id="no-submissions",
+        ),
+    ],
+)
+def test_first_is_the_earliest_submission_then_roster_order(
+    members: list[tuple[str, str | None, float | None]], expected: str | None
+) -> None:
+    chosen = first([_result(*m) for m in members])
+    assert (chosen.name if chosen is not None else None) == expected
+
+
+@pytest.mark.anyio
+async def test_no_submissions_give_an_empty_output_though_members_have_outputs() -> (
+    None
+):
+    scripts = [Script(), Script()]
+
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        while any(script.calls < 1 for script in scripts):
+            await anyio.sleep(0)
+        return "enough"
+
+    stop = await run_swarm(
+        swarm(
+            [
+                member(generator(scripted_model(script), calls=None), name=name)
+                for name, script in zip(["a", "b"], scripts, strict=True)
+            ],
+            controller=_controller(run, "final_test_no_submissions"),
+            channels=[],
+        )
+    )
+    assert statuses(stop) == {"a": "stopped", "b": "stopped"}
+    assert all(m.output is not None and not m.output.empty for m in stop.record.members)
+    assert stop.state.output.empty
+    assert stop.record.final.model_dump() == {
+        "mode": None,
+        "member": None,
+        "reason": "no_submissions",
+        "provisional": False,
+    }
+
+
+@agent
+def waiter(gate: anyio.Event, answer: str) -> Agent:
+    # answers once the gate is set, without a model call, so a soft stop does not end it
+    async def execute(state: AgentState) -> AgentState:
+        await gate.wait()
+        state.output = ModelOutput.from_content("mockllm", answer)
+        return state
+
+    return execute
+
+
+# ---------------------------------------------------------------------------
+# The provisional answer
+
+
+@pytest.mark.anyio
+async def test_the_provisional_answer_is_set_at_the_first_submission() -> None:
+    seen: list[tuple[str, SwarmResultRecord]] = []
+    state = AgentState(messages=[ChatMessageUser(content="task")])
+    gate = anyio.Event()
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("quick")
+        control.start("slow")
+        async for event in control.events():
+            if event.member == "quick":
+                seen.append((state.output.completion, _record()))
+                gate.set()
+        return "all_done"
+
+    agent_swarm = swarm(
+        [
+            member(generator(scripted_model(), calls=0, answer="quick"), name="quick"),
+            member(waiter(gate, "slow"), name="slow"),
+        ],
+        controller=_controller(run, "final_test_provisional"),
+        channels=[],
+    )
+    async with sample():
+        await agent_swarm(state)
+    [(completion, record)] = seen
+    assert completion == "quick"
+    assert (record.final.member, record.final.provisional) == ("quick", True)
+    assert [m.state for m in record.members] == ["ended", "running"]
+
+
+def _limited_task(*, early_submission: bool) -> Task:
+    # the sample's message limit ends the busy member, and so the sample
+    members = [
+        member(generator(scripted_model(Script(delay=0.01)), calls=None), name="busy")
+    ]
+    if early_submission:
+        members.insert(
+            0,
+            member(
+                generator(scripted_model(), calls=1, answer="early answer"),
+                name="early",
+            ),
+        )
+    return Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(members, channels=[]),
+        message_limit=6,
+    )
+
+
+@pytest.mark.parametrize("early_submission", [True, False])
+def test_an_outer_limit_leaves_the_provisional_answer(
+    tmp_path: Path, early_submission: bool
+) -> None:
+    [log] = eval(
+        _limited_task(early_submission=early_submission),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.samples is not None
+    [sample] = log.samples
+    assert sample.limit is not None and sample.limit.type == "message"
+    record = SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
+    assert record.final.provisional
+    if early_submission:
+        assert sample.output.completion == "early answer"
+        assert record.final.member == "early"
+    else:
+        assert sample.output.empty
+        assert (record.final.member, record.final.reason) == (None, "no_submissions")
+
+
+# ---------------------------------------------------------------------------
+# Finalisation
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("earlier", [True, False])
+async def test_a_submission_during_grace_is_chosen_only_without_an_earlier_one(
+    earlier: bool,
+) -> None:
+    gate = anyio.Event()
+
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        if earlier:
+            async for event in control.events():
+                if event.member == "early":
+                    break
+        # released as the stop begins, so the late member answers in grace
+        gate.set()
+        return "enough"
+
+    members = [member(waiter(gate, "late"), name="late")]
+    if earlier:
+        members.append(
+            member(generator(scripted_model(), calls=0, answer="early"), name="early")
+        )
+    stop = await run_swarm(
+        swarm(
+            members,
+            controller=_controller(run, f"final_test_grace_{earlier}"),
+            channels=[],
+            budget=Budget(grace=5),
+        )
+    )
+    assert stop.reason == "controller:enough"
+    assert set(statuses(stop).values()) == {"submitted"}
+    expected = "early" if earlier else "late"
+    assert stop.record.final.model_dump() == {
+        "mode": "first",
+        "member": expected,
+        "reason": None,
+        "provisional": False,
+    }
+    assert stop.state.output.completion == expected
+    assert final(stop.transcript)["member"] == expected
+
+
+# ---------------------------------------------------------------------------
+# The record
+
+
+@pytest.mark.anyio
+async def test_the_record_is_written_at_start_and_on_each_start_and_end() -> None:
+    seen: list[SwarmResultRecord] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        seen.append(_record())
+        control.start("started")
+        seen.append(_record())
+        async for _ in control.events():
+            seen.append(_record())
+        return "all_done"
+
+    model = scripted_model()
+    stop = await run_swarm(
+        swarm(
+            [
+                member(generator(model, calls=1), name="started", role="lead"),
+                member(generator(model, calls=1), name="never"),
+            ],
+            controller=_controller(run, "final_test_record_updates"),
+            channels=[],
+        )
+    )
+    at_start, after_start, after_end = seen
+    assert [m.state for m in at_start.members] == ["pending", "pending"]
+    assert at_start.final.model_dump() == {
+        "mode": None,
+        "member": None,
+        "reason": "no_submissions",
+        "provisional": True,
+    }
+    assert [m.state for m in after_start.members] == ["running", "pending"]
+    assert after_start.members[0].output is None
+    started = after_end.members[0]
+    assert (started.state, started.status, started.submitted) == (
+        "ended",
+        "submitted",
+        True,
+    )
+    assert (started.role, started.model) == ("lead", str(model))
+    assert started.output is not None and started.output.completion == "ok"
+    assert started.time is not None and started.time >= 0
+    assert after_end.final.member == "started" and after_end.final.provisional
+    # a member the controller never started stays pending
+    never = stop.record.members[1]
+    assert (never.state, never.status, never.output, never.time) == (
+        "pending",
+        None,
+        None,
+        None,
+    )
+    assert not stop.record.final.provisional
+
+
+@agent
+def drafter(model: Model) -> Agent:
+    # updates its state in place, then works on until it is cancelled
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(state.messages)
+        state.messages.append(state.output.message)
+        await anyio.sleep(3600)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_members_output_survives_its_own_limit_and_the_hard_stop() -> None:
+    drafts = Script()
+
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        async for event in control.events():
+            if event.member == "limited":
+                break
+        while drafts.calls < 1:
+            await anyio.sleep(0)
+        return "enough"
+
+    stop = await run_swarm(
+        swarm(
+            [
+                member(
+                    generator(scripted_model(), calls=None),
+                    name="limited",
+                    limits=[token_limit(2 * TOKENS_PER_CALL)],
+                ),
+                member(drafter(scripted_model(drafts)), name="drafter"),
+            ],
+            controller=_controller(run, "final_test_outputs_survive"),
+            channels=[],
+            budget=Budget(grace=0),
+        )
+    )
+    assert statuses(stop) == {"limited": "member_limit:token", "drafter": "cancelled"}
+    for m in stop.record.members:
+        assert m.output is not None and m.output.completion == "ok"
+        assert not m.submitted
+
+
+@pytest.mark.anyio
+async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> None:
+    secret = "SECRET-ANSWER-1729"
+    model = scripted_model(Script(outputs=[ModelOutput.from_content("m", secret)]))
+    busy = Script()
+
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        async for event in control.events():
+            if event.member == "a":
+                break
+        while busy.calls < 1:
+            await anyio.sleep(0)
+        return "enough"
+
+    stop = await run_swarm(
+        swarm(
+            [
+                member(generator(model, calls=1), name="a"),
+                member(generator(scripted_model(busy), calls=None), name="b"),
+            ],
+            controller=_controller(run, "final_test_evidence"),
+            channels=[],
+        )
+    )
+    spans = {
+        e.name: e.id
+        for e in stop.transcript.events
+        if isinstance(e, SpanBeginEvent) and e.type == "agent"
+    }
+    results = evidence(stop.transcript, "member_result")
+    common = {"version": 1, "type": "result"}
+    assert [r["member"] for r in results] == ["a", "b"]
+    for r in results:
+        assert r | common == r
+        assert r["kind"] == "member_result"
+        assert r["span_id"] == spans[r["member"]]
+    assert {r["member"]: r["status"] for r in results} == statuses(stop)
+    payload = final(stop.transcript)
+    assert payload == {
+        **common,
+        "kind": "final",
+        "member": "a",
+        "span_id": spans["swarm"],
+        "mode": "first",
+        "reason": None,
+        "stop_reason": "controller:enough",
+    }
+    assert secret not in repr([*results, payload])
+
+
+# ---------------------------------------------------------------------------
+# The returned state
+
+
+@agent
+def answerer(outputs: list[ModelOutput], answer: str) -> Agent:
+    # records the output it returns
+    async def execute(state: AgentState) -> AgentState:
+        state.output = ModelOutput.from_content("mockllm", answer)
+        state.output.message.metadata = {"own": True}
+        outputs.append(state.output)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_the_returned_state_is_the_input_and_the_chosen_output() -> None:
+    outputs: list[ModelOutput] = []
+    stop: Outcome = await run_swarm(
+        swarm(
+            [
+                member(answerer(outputs, "chosen"), name="a"),
+                member(sleeper(0.01), name="b"),
+            ],
+            channels=[],
+        ),
+        input="the task",
+    )
+    [chosen] = outputs
+    assert stop.state.output is chosen
+    user, message = stop.state.messages
+    assert isinstance(user, ChatMessageUser) and user.content == "the task"
+    assert isinstance(message, ChatMessageAssistant) and message.text == "chosen"
+    assert message.metadata == {
+        "own": True,
+        "inspect_swarm": {"final": {"mode": "first", "member": "a"}},
+    }
+    # the member's own message is unchanged
+    assert chosen.message.metadata == {"own": True}

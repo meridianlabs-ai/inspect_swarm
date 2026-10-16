@@ -96,7 +96,7 @@ async def test_member_limits_are_recreated_for_each_member_and_run(
     # the same swarm runs twice, as for a second sample: no limit object is reused
     for _ in range(2):
         stop = await run_swarm(agent_swarm)
-        assert stop["reason"] == "all_done"
+        assert stop.reason == "all_done"
         assert set(statuses(stop).values()) == {expected}
 
 
@@ -148,7 +148,7 @@ async def test_the_time_cap_stops_members_softly() -> None:
             budget=Budget(time=0.05),
         )
     )
-    assert stop["reason"] == "swarm_time"
+    assert stop.reason == "swarm_time"
     assert statuses(stop) == {"generator": "stopped"}
 
 
@@ -160,7 +160,7 @@ async def test_grace_is_clipped_to_half_the_samples_remaining_time() -> None:
         swarm(sleeper(), channels=[], budget=Budget(time=0.1, grace=100)),
         time=0.6,
     )
-    assert stop["reason"] == "swarm_time"
+    assert stop.reason == "swarm_time"
     assert statuses(stop) == {"sleeper": "cancelled"}
 
 
@@ -177,7 +177,7 @@ async def test_the_first_stop_wins() -> None:
             budget=Budget(tokens=2 * TOKENS_PER_CALL, time=0.1, grace=0.3),
         )
     )
-    assert stop["reason"] == "swarm_cap"
+    assert stop.reason == "swarm_cap"
     assert statuses(stop) == {
         "generator-1": "swarm_cap",
         "generator-2": "swarm_cap",
@@ -270,6 +270,7 @@ async def test_the_runtime_lever_and_member_levers_are_siblings(staged: bool) ->
     async with sample():
         swarm_run = SwarmRun(
             [(record, "a"), (record, "b")],
+            state=AgentState(messages=[]),
             input=[ChatMessageUser(content="task")],
             preambles={"a": "", "b": ""},
             caps=cap.nodes,
@@ -362,7 +363,7 @@ async def test_the_swarms_own_errors_become_statuses(
             budget=budget,
         )
     )
-    assert stop["reason"] == ("swarm_cap" if expected == "swarm_cap" else "all_done")
+    assert stop.reason == ("swarm_cap" if expected == "swarm_cap" else "all_done")
     assert statuses(stop) == {"member": expected, "sibling": "submitted"}
 
 
@@ -502,10 +503,10 @@ async def test_a_cap_reached_in_a_members_last_tool_call_stops_the_swarm(
         )
     )
     if case in ("below the caps", "member limit"):
-        assert stop["reason"] == "all_done"
+        assert stop.reason == "all_done"
         assert statuses(stop) == {"asker": "submitted", "sibling": "submitted"}
     else:
-        assert stop["reason"] == "swarm_cap"
+        assert stop.reason == "swarm_cap"
         assert statuses(stop) == {"asker": "submitted", "sibling": "cancelled"}
 
 
@@ -541,10 +542,10 @@ async def test_a_cap_reached_in_a_controllers_tool_call_stops_the_swarm(
         )
     )
     if case == "below the caps":
-        assert (stop["reason"], errors) == ("all_done", [None])
+        assert (stop.reason, errors) == ("all_done", [None])
         assert statuses(stop) == {"sibling": "submitted"}
     else:
-        assert stop["reason"] == "swarm_cap"
+        assert stop.reason == "swarm_cap"
         assert statuses(stop) == {"sibling": "cancelled"}
 
 
@@ -693,7 +694,7 @@ async def test_a_member_declared_bridged_is_cancelled_at_its_first_compaction(
             budget=Budget(tokens=TOKENS_PER_CALL // 2),
         )
     )
-    assert stop["reason"] == "swarm_cap"
+    assert stop.reason == "swarm_cap"
     assert statuses(stop) == {"cli": "swarm_cap"}
     # declared, it is cancelled with no error raised in its code; undeclared, it is
     # counted native until the bridge's mark and the cap's error is raised

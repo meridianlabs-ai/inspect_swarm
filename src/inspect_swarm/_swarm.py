@@ -91,6 +91,7 @@ def swarm(
             )
         await SwarmRun(
             runs,
+            state=state,
             input=state.messages,
             preambles=preambles,
             caps=cap_nodes,

@@ -7,6 +7,7 @@ from typing import Any, cast
 from inspect_ai._util.registry import (
     extract_named_params,
     has_registry_params,
+    is_model_dict,
     is_registry_object,
     registry_info,
     registry_log_name,
@@ -15,8 +16,8 @@ from inspect_ai._util.registry import (
     registry_unqualified_name,
     registry_value,
 )
-from inspect_ai.agent import Agent, run
-from inspect_ai.model import ChatMessage
+from inspect_ai.agent import Agent, AgentState
+from inspect_ai.model import ChatMessage, Model
 from inspect_ai.util import (
     Limit,
     LimitExceededError,
@@ -285,10 +286,13 @@ def member_nodes(record: Member, name: str) -> tuple[Lever, list[Limit]]:
     return lever, nodes
 
 
-# The member wrapper. Runs the member in its tool-state scope and cancel scope, under
-# its nodes and the swarm's caps, and returns its status. No error whose source is a
-# swarm node leaves it: a cap becomes a stop of the swarm, and the member's own nodes a
-# status. Anything else (a foreign error) is raised, without the swarm's leaves.
+# The member wrapper. Runs the member on `state` with `input` as its conversation, in
+# its tool-state scope and cancel scope, under its nodes and the swarm's caps, and
+# returns its status and the state the agent returned. The caller keeps `state`, as
+# as_solver() does, for the output of a member that does not return. No error whose
+# source is a swarm node leaves it: a cap becomes a stop of the swarm, and the member's
+# own nodes a status. Anything else (a foreign error) is raised, without the swarm's
+# leaves.
 async def run_member(
     record: Member,
     name: str,
@@ -297,20 +301,24 @@ async def run_member(
     nodes: list[Limit],
     caps: Sequence[Limit],
     input: list[ChatMessage],
-) -> str:
+    state: AgentState,
+) -> tuple[str, AgentState]:
     token = current_member.set(context)
     error: Exception | None = None
     try:
         with tool_state_scope(name), context.scope:
             agent = build_member(record)
-            # entered here rather than by run(), which builds the member's conversation
-            # before entering its limits: a member message limit replaces the
-            # sample's for that conversation from its first message. Errors from
-            # these nodes are classified below, as run() would have caught them.
+            # entered before the member's conversation is built, as run() does not: a
+            # member message limit replaces the sample's for that conversation from its
+            # first message. Errors from these nodes are classified below.
             with ExitStack() as entered:
                 for node in nodes:
                     entered.enter_context(node)
-                await run(agent, input, name=name)
+                # the member's own copy of its input, as run() makes one
+                state.messages = [
+                    message.model_copy(update={"source": "input"}) for message in input
+                ]
+                state = await agent(state)
     except Exception as ex:
         error = ex
     finally:
@@ -322,17 +330,28 @@ async def run_member(
             raise foreign
         if cap:
             # the cap began the swarm's stop when it was reached
-            return "swarm_cap"
+            return "swarm_cap", state
         assert owned is not None
-        return _status_for(owned, lever)
+        return _status_for(owned, lever), state
     if context.stop_cause is not None:
         # a node that stopped a bridged member, whose cancellation may not have been
         # delivered when its last call was the one that stopped it
-        return context.stop_cause
+        return context.stop_cause, state
     if context.scope.cancelled_caught:
         # the hard stop
-        return "cancelled"
-    return "submitted"
+        return "cancelled", state
+    return "submitted", state
+
+
+# The model a member is given, as its registry params or a factory's args name it.
+def member_model(record: Member) -> str | None:
+    params = registry_params(record.agent) if record.agent is not None else record.args
+    model = params.get("model")
+    if is_model_dict(model):
+        return str(model["model"])
+    if isinstance(model, str | Model):
+        return str(model)
+    return None
 
 
 def _status_for(error: LimitExceededError, lever: Lever) -> str:
