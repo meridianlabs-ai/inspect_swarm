@@ -1,6 +1,6 @@
 import contextvars
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
@@ -102,13 +102,13 @@ class SwarmControl(Protocol):
         """
         ...
 
-    def events(self) -> AsyncIterator[SwarmEvent]:
+    def events(self) -> AsyncGenerator[SwarmEvent, None]:
         """The swarm's events, in order from the swarm's start.
 
-        Each event is yielded once. The iterator ends when no member is running and no event is waiting; a member started later is reported by a new `events()` call. Use one iterator at a time.
+        Each event is yielded once. The iterator ends when no member is running and no event is waiting; a member started later is reported by a new `events()` call. Use one iterator at a time: an iterator holds the events from its first step until it ends or is closed (`aclose()`, or leaving a `contextlib.aclosing()` block).
 
         Raises:
-            RuntimeError: If another iterator is already waiting for events.
+            RuntimeError: If another iterator is still open.
         """
         ...
 
@@ -130,7 +130,9 @@ class MemberRun:
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
         self.context = MemberContext(
-            name, bridged=is_bridged(cast(Agent, agent), None), stop_swarm=stop
+            name,
+            bridged=is_bridged(cast(Agent, agent), record.bridged),
+            stop_swarm=stop,
         )
         self.lever, self.nodes = member_nodes(record, name)
 
@@ -165,7 +167,7 @@ class SwarmRun:
         self._member_ctx: contextvars.Context | None = None
         self._queue: deque[SwarmEvent] = deque()
         self._changed = anyio.Event()
-        self._waiting = False
+        self._iterating = False
         self._stopped = anyio.Event()
         self._effective_grace = grace
         self.stop_reason: str | None = None
@@ -208,24 +210,24 @@ class SwarmRun:
         )
         self._notify()
 
-    async def events(self) -> AsyncIterator[SwarmEvent]:
-        while True:
-            # checked before taking an event: a waiting iterator that has been woken
-            # but has not yet resumed owns the event that woke it
-            if self._waiting:
-                raise RuntimeError(
-                    "events(): another iterator is already waiting for events; use one at a time."
-                )
-            if self._queue:
-                yield self._queue.popleft()
-            elif not self._running():
-                return
-            else:
-                self._waiting = True
-                try:
+    async def events(self) -> AsyncGenerator[SwarmEvent, None]:
+        # an iterator holds the events from its first step until it ends or is closed,
+        # so a second one cannot take events from its stream
+        if self._iterating:
+            raise RuntimeError(
+                "events(): another iterator is still open; use one at a time, and let it end or close it first."
+            )
+        self._iterating = True
+        try:
+            while True:
+                if self._queue:
+                    yield self._queue.popleft()
+                elif not self._running():
+                    return
+                else:
                     await self._changed.wait()
-                finally:
-                    self._waiting = False
+        finally:
+            self._iterating = False
 
     # the runtime
 

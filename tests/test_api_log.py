@@ -66,7 +66,14 @@ def _swarm(members: Any) -> Agent:
 
 
 def _record(**fields: Any) -> dict[str, Any]:
-    return {"name": None, "role": None, "count": 1, "limits": [], **fields}
+    return {
+        "name": None,
+        "role": None,
+        "count": 1,
+        "limits": [],
+        "bridged": None,
+        **fields,
+    }
 
 
 def _agent_dict(name: str, **params: Any) -> dict[str, Any]:

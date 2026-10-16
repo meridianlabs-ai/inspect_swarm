@@ -1,4 +1,5 @@
 from typing import Any
+from uuid import uuid4
 
 import anyio
 import pytest
@@ -7,12 +8,19 @@ from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.model import (
     ChatMessageTool,
     ChatMessageUser,
+    GenerateConfig,
     Model,
+    ModelAPI,
     ModelCost,
     ModelInfo,
     ModelOutput,
     execute_tools,
+    get_model,
+    modelapi,
     set_model_info,
+)
+from inspect_ai.model._providers.mockllm import (  # pyright: ignore[reportMissingTypeStubs]
+    MockLLM,
 )
 from inspect_ai.tool import Tool, tool
 from inspect_ai.util import (
@@ -48,6 +56,7 @@ from .swarm_runtime import (
     sleeper,
     statuses,
 )
+from .test_budget import _bridge_generate, _GenerateCompaction
 
 
 def _controller(run: Any, name: str) -> Controller:
@@ -393,13 +402,36 @@ async def test_a_group_mixing_the_swarms_error_with_a_foreign_one_raises_only_th
     assert type(raised.value) is RuntimeError
 
 
+class _KeyedAPI(MockLLM):
+    """A provider that needs an explicit API key, as a configured model may."""
+
+    def __init__(
+        self,
+        model_name: str,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        config: GenerateConfig = GenerateConfig(),  # noqa: B008
+        **model_args: Any,
+    ) -> None:
+        if api_key is None:
+            raise ValueError("swarm_test_keyed needs an API key")
+        super().__init__(model_name, base_url, api_key, config, **model_args)
+
+
+@modelapi(name="swarm_test_keyed")
+def swarm_test_keyed() -> type[ModelAPI]:
+    return _KeyedAPI
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("form", ["built", "factory"])
+@pytest.mark.parametrize("provider", ["mockllm", "swarm_test_keyed"])
 async def test_the_cost_check_finds_a_model_priced_under_its_canonical_name(
-    form: str,
+    form: str, provider: str
 ) -> None:
-    # priced only under the canonical name ("m-..."), not the configured "mockllm/m-..."
-    model = scripted_model()
+    # priced only under the canonical name ("m-..."), not "<provider>/m-..."; the
+    # keyed model's key is in no log or environment, only on the model object
+    model = get_model(f"{provider}/m-{uuid4().hex}", api_key="explicit", memoize=False)
     set_model_info(
         model.canonical_name(),
         ModelInfo(
@@ -407,9 +439,9 @@ async def test_the_cost_check_finds_a_model_priced_under_its_canonical_name(
         ),
     )
     record = (
-        member(generator(model))
+        member(generator(model, calls=0))
         if form == "built"
-        else member(generator, args={"model": model})
+        else member(generator, args={"model": model, "calls": 0})
     )
     stop = await run_swarm(swarm(record, channels=[], budget=Budget(cost=10.0)))
     assert statuses(stop) == {"generator": "submitted"}
@@ -426,3 +458,44 @@ async def test_the_cost_check_refuses_an_unpriced_model(form: str) -> None:
     )
     with pytest.raises(PrerequisiteError, match="Missing cost data"):
         await run_swarm(swarm(record, channels=[], budget=Budget(cost=10.0)))
+
+
+@agent
+def bridged_builder(model: Model, raised: list[str]) -> Agent:
+    # a bridged agent outside inspect_swe, whose first request's bridge compaction
+    # generates before the bridge's mark
+    async def execute(state: AgentState) -> AgentState:
+        try:
+            await _bridge_generate(model, _GenerateCompaction(model, []))
+        except LimitExceededError:
+            # in a sandboxed sample this raise would reach the sandbox service and end
+            # the sample
+            raised.append("raised")
+            raise
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bridged", [True, None])
+async def test_a_member_declared_bridged_is_cancelled_at_its_first_compaction(
+    bridged: bool | None,
+) -> None:
+    raised: list[str] = []
+    stop = await run_swarm(
+        swarm(
+            member(
+                bridged_builder(scripted_model(), raised),
+                name="cli",
+                bridged=bridged,
+            ),
+            channels=[],
+            budget=Budget(tokens=TOKENS_PER_CALL // 2),
+        )
+    )
+    assert stop["reason"] == "swarm_cap"
+    assert statuses(stop) == {"cli": "swarm_cap"}
+    # declared, it is cancelled with no error raised in its code; undeclared, it is
+    # counted native until the bridge's mark and the cap's error is raised
+    assert raised == ([] if bridged else ["raised"])

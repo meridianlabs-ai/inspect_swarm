@@ -10,7 +10,7 @@ from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import is_registry_object, registry_info
 from inspect_ai.agent import Agent
 from inspect_ai.agent._bridge.util import in_bridge_model_generate
-from inspect_ai.model import Model, ModelUsage
+from inspect_ai.model import Model, ModelInfo, ModelUsage, get_model_info
 from inspect_ai.model._model_info import (
     _get_model_info_direct,  # pyright: ignore[reportPrivateUsage]
 )
@@ -185,13 +185,24 @@ def check_cost_data(models: Sequence[str | Model]) -> None:
         dict.fromkeys(
             str(model)
             for model in models
-            if (info := _get_model_info_direct(model)) is None or info.cost is None
+            if (info := _model_info(model)) is None or info.cost is None
         )
     )
     if missing:
         raise PrerequisiteError(
             f"A swarm cost cap requires cost data for every member's model. Missing cost data for: {', '.join(missing)}. Use set_model_cost() or --model-cost-config to configure pricing."
         )
+
+
+def _model_info(model: str | Model) -> ModelInfo | None:
+    # a model object is already built, so it is looked up as it is; a name is resolved
+    # as get_model_info() does, under its canonical name, with Inspect's placeholder
+    # credential rather than the member's
+    return (
+        _get_model_info_direct(model)
+        if isinstance(model, Model)
+        else get_model_info(model)
+    )
 
 
 def is_bridged(agent: Agent, bridged: bool | None) -> bool:

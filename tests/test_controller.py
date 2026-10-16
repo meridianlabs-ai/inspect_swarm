@@ -174,13 +174,49 @@ async def test_a_woken_iterator_keeps_the_event_that_woke_it() -> None:
 
         async with anyio.create_task_group() as tg:
             tg.start_soon(first)
-            while not run._waiting:
+            while not run._iterating:
                 await anyio.sleep(0)
             run._end(m, "submitted")
             # a competing iterator, before the woken one has resumed
             with pytest.raises(RuntimeError, match="one at a time"):
                 await run.events().__anext__()
     assert received == [MemberEnded("generator", "submitted", True)]
+
+
+@pytest.mark.anyio
+async def test_an_open_iterator_holds_the_events_until_it_ends_or_is_closed() -> None:
+    received: list[str] = []
+    refused: list[str] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        while any(m.state != "ended" for m in control.members):
+            await anyio.sleep(0)
+        # three events are queued; the first iterator takes one and stays open
+        first = control.events()
+        received.append((await first.__anext__()).member)
+        try:
+            await control.events().__anext__()
+        except RuntimeError as ex:
+            refused.append(str(ex))
+        received.append((await first.__anext__()).member)
+        # once it is closed, a new iterator takes the rest
+        await first.aclose()
+        async for event in control.events():
+            received.append(event.member)
+        return "all_done"
+
+    stop = await run_swarm(
+        swarm(
+            member(generator, args={"model": scripted_model(), "calls": 0}, count=3),
+            controller=_controller(run, "controller_test_open_iterator"),
+            channels=[],
+        )
+    )
+    assert len(refused) == 1 and "still open" in refused[0]
+    assert sorted(received) == ["generator-1", "generator-2", "generator-3"]
+    assert set(statuses(stop).values()) == {"submitted"}
 
 
 @pytest.mark.anyio

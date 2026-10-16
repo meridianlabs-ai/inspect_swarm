@@ -3,7 +3,6 @@ from typing import cast
 
 from inspect_ai._util.registry import (
     is_model_dict,
-    model_create_from_dict,
     registry_info,
     registry_params,
     registry_unqualified_name,
@@ -114,9 +113,9 @@ def _model(record: Member) -> str | Model:
         else record.args.get("model")
     )
     if is_model_dict(model):
-        # a built agent's params hold a Model as its logged dict; rebuild it as replay
-        # does, so that pricing is looked up under its canonical name too
-        model = model_create_from_dict(model)
+        # a built agent's params hold a Model as its logged dict, without its
+        # credentials, so it is checked by name
+        model = model["model"]
     return model if isinstance(model, str | Model) else get_model()
 
 
