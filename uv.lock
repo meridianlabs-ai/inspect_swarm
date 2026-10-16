@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -1076,8 +1076,8 @@ wheels = [
 
 [[package]]
 name = "inspect-ai"
-version = "0.3.281.dev8+ga11afc943"
-source = { git = "https://github.com/UKGovernmentBEIS/inspect_ai?rev=main#a11afc94322a431782f57c0f48a3d6b7666413c3" }
+version = "0.3.281"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "aiobotocore" },
@@ -1121,6 +1121,10 @@ dependencies = [
     { name = "zipp" },
     { name = "zstandard" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/a6/31/fab08a1fbabab65d063691cd3e8e05a0f402fd2b0583271bfd94c968cd87/inspect_ai-0.3.281.tar.gz", hash = "sha256:ba3e222874a8208214dc92fa83221d90851f736118a3b179b5c1fd30c7d428b0", size = 36542912, upload-time = "2026-10-15T18:01:09.227Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/5f/b3a79467d9318e47ff61f9421b97c5fd274c2dae48f95537ecbf9da7cdbd/inspect_ai-0.3.281-py3-none-any.whl", hash = "sha256:40f15a15242e3d6c41e20759bf83a1c426cd2b1c30e1f5c1e0dd35e6f5416006", size = 35262260, upload-time = "2026-10-15T18:01:05.441Z" },
+]
 
 [[package]]
 name = "inspect-swarm"
@@ -1145,7 +1149,7 @@ dist = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "inspect-ai", git = "https://github.com/UKGovernmentBEIS/inspect_ai?rev=main" }]
+requires-dist = [{ name = "inspect-ai", specifier = ">=0.3.281" }]
 
 [package.metadata.requires-dev]
 dev = [

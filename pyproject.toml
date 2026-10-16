@@ -15,12 +15,10 @@ classifiers = [
     "Development Status :: 1 - Planning",
 ]
 dependencies = [
-    # Development tracks inspect_ai's `main`, because swarm and inspect_ai are
-    # expected to co-develop. The git ref never reaches PyPI:
-    # release-pin-deps.yml rewrites it to a `>=<latest>` floor on the Release
-    # Please release PR, and release-dep-guard.yml blocks the release if it is
-    # still a git ref.
-    "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",
+    # A released inspect_ai, never a git ref. Raise the floor only when src/
+    # needs a newer release; a newer version needed only by tests goes in
+    # uv.lock. 0.3.281 adds the swarm registry types (_registry.py).
+    "inspect-ai>=0.3.281",
 ]
 
 [project.urls]
@@ -63,11 +61,6 @@ version-file = "src/inspect_swarm/_version.py"
 
 [tool.hatch.version.raw-options]
 local_scheme = "no-local-version" # Important for PyPI compatibility
-
-# hatchling rejects PEP 508 direct references (the inspect-ai git ref above)
-# without this
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.uv]
 managed = true

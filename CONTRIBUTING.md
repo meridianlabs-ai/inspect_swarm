@@ -20,7 +20,7 @@ uv sync --group dev
 
 This installs the package in editable mode along with the dev tools (ruff, pyright, pytest).
 
-Development tracks `inspect_ai` from `main`: the dependency in `pyproject.toml` is a git reference, so `uv sync` clones and builds inspect_ai's current `main` rather than installing a PyPI release. That is deliberate, because swarm and inspect_ai are expected to co-develop. To pick up new inspect_ai commits, run `uv lock --upgrade-package inspect-ai && uv sync --group dev`.
+Inspect Swarm depends on released versions of `inspect_ai`: `pyproject.toml` sets a minimum version, and `uv.lock` pins the release that development and CI use. To move to a newer inspect_ai release, run `uv lock --upgrade-package inspect-ai && uv sync --group dev`.
 
 ## Checks and tests
 
@@ -69,14 +69,9 @@ Choose the type deliberately. `feat:` and `fix:` drive the version bump and head
 
 Anything that isn't a user-facing feature or fix should avoid `feat:`/`fix:` so it stays out of the headline sections.
 
-### The inspect_ai pin at release time
+### The inspect_ai version
 
-A published package cannot depend on a git reference (PyPI rejects it, and a moving ref is not reproducible), so two workflows handle the pin on the Release Please release PR:
-
-- `release-dep-guard.yml` fails the release PR while any runtime dependency still points at a git ref.
-- `release-pin-deps.yml` rewrites the `inspect-ai` git reference to `>=<latest PyPI version>`, re-locks, and pushes to the release PR. It runs on release-PR events and every two hours, because an inspect_ai release produces no event in this repository.
-
-If the pinned release PR then fails its build or tests, swarm needs an inspect_ai change that has not shipped: cut an inspect_ai release first, and the scheduled run re-pins once it is on PyPI.
+The `inspect-ai` dependency is a minimum version, never a git reference, so a release can go to PyPI as it is. Raise the minimum only when code in `src/` needs a newer inspect_ai, and say in the PR which code needs it. When only tests need a newer release, update `uv.lock` instead. If a change needs an inspect_ai feature that is not released yet, it waits for that release.
 
 ## Reporting issues
 

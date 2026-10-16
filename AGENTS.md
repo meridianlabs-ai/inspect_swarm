@@ -32,7 +32,7 @@
 - `feat:`/`fix:` are for user-facing changes only: they headline the release notes and bump the version. `perf:`/`revert:` also appear in the notes (no bump); `docs:`, `refactor:`, `chore:`, `build:`, `ci:`, `test:`, `style:` are hidden
 - Body lines starting with `<type>:` are parsed as extra changelog entries—don't begin description lines with a conventional-commit prefix unless that's intended
 - Never edit `CHANGELOG.md`, version numbers, or `.release-please-manifest.json`—Release Please owns them
-- Never replace the `inspect-ai` git reference in `pyproject.toml` with a version floor—`release-pin-deps.yml` does that on the release PR
+- Depend on released `inspect-ai` versions (`inspect-ai>=X` in `pyproject.toml`), never a git reference. Raise the floor only when `src/` needs a newer release, and say in the PR which source line needs it; when only tests need a newer release, update `uv.lock` (`uv lock --upgrade-package inspect-ai`) instead
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines
 
 ## Python
