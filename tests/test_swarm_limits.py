@@ -8,19 +8,13 @@ from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.model import (
     ChatMessageTool,
     ChatMessageUser,
-    GenerateConfig,
     Model,
-    ModelAPI,
     ModelCost,
     ModelInfo,
     ModelOutput,
     execute_tools,
     get_model,
-    modelapi,
     set_model_info,
-)
-from inspect_ai.model._providers.mockllm import (  # pyright: ignore[reportMissingTypeStubs]
-    MockLLM,
 )
 from inspect_ai.tool import Tool, tool
 from inspect_ai.util import (
@@ -437,122 +431,34 @@ async def test_a_group_mixing_the_swarms_error_with_a_foreign_one_raises_only_th
     assert type(raised.value) is RuntimeError
 
 
-class _KeyedAPI(MockLLM):
-    """A routed provider that needs an explicit API key, as a configured model may.
-
-    Its canonical name depends on its configuration, as a proxy's or router's can: `m@<route>`, from the `route` model argument, else the base URL, else `default`.
-    """
-
-    def __init__(
-        self,
-        model_name: str,
-        base_url: str | None = None,
-        api_key: str | None = None,
-        config: GenerateConfig = GenerateConfig(),  # noqa: B008
-        **model_args: Any,
-    ) -> None:
-        if api_key is None:
-            raise ValueError("swarm_test_keyed needs an API key")
-        if model_args.get("route") == "checks-key" and api_key != "explicit":
-            raise ValueError("swarm_test_keyed rejected the API key")
-        self.route = str(model_args.pop("route", None) or base_url or "default")
-        super().__init__(model_name, base_url, api_key, config, **model_args)
-
-    def canonical_name(self) -> str:
-        return f"{self.model_name}@{self.route}"
-
-
-@modelapi(name="swarm_test_keyed")
-def swarm_test_keyed() -> type[ModelAPI]:
-    return _KeyedAPI
-
-
 @pytest.mark.anyio
 @pytest.mark.parametrize("form", ["built", "factory"])
-@pytest.mark.parametrize("provider", ["mockllm", "swarm_test_keyed"])
-async def test_the_cost_check_finds_a_model_priced_under_its_canonical_name(
-    form: str, provider: str
+@pytest.mark.parametrize("priced", ["name", "canonical"])
+async def test_the_cost_check_looks_a_model_up_as_metering_does(
+    form: str, priced: str
 ) -> None:
-    # priced only under the canonical name ("m-..."), not "<provider>/m-..."; the
-    # keyed model's key is in no log or environment, only on the model object
-    model = get_model(f"{provider}/m-{uuid4().hex}", api_key="explicit", memoize=False)
+    # a live model (a factory's arg) is found under its name or its canonical name, as
+    # metering finds it; a built member's model is known only by its logged name
+    model = get_model(f"mockllm/m-{uuid4().hex}", memoize=False)
+    assert model.canonical_name() != str(model)
     set_model_info(
-        model.canonical_name(),
+        str(model) if priced == "name" else model.canonical_name(),
         ModelInfo(
             cost=ModelCost(input=0, output=1, input_cache_write=0, input_cache_read=0)
         ),
     )
     record = (
-        member(generator(model, calls=0))
+        member(generator(model))
         if form == "built"
-        else member(generator, args={"model": model, "calls": 0})
-    )
-    stop = await run_swarm(swarm(record, channels=[], budget=Budget(cost=10.0)))
-    assert statuses(stop) == {"generator": "submitted"}
-
-
-def _price(name: str) -> None:
-    set_model_info(
-        name,
-        ModelInfo(
-            cost=ModelCost(input=0, output=1, input_cache_write=0, input_cache_read=0)
-        ),
-    )
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("form", ["built", "factory"])
-@pytest.mark.parametrize(
-    "configured",
-    [
-        pytest.param({"route": "eu"}, id="model-args"),
-        pytest.param({"base_url": "https://eu.example"}, id="base-url"),
-    ],
-)
-@pytest.mark.parametrize("priced", ["configured", "default"])
-async def test_the_cost_check_uses_the_configured_models_identity(
-    form: str, configured: dict[str, Any], priced: str
-) -> None:
-    # a model whose canonical name depends on its configuration is accepted when that
-    # configured model is priced, and refused when only the default one is
-    name = f"m-{uuid4().hex}"
-    model = get_model(
-        f"swarm_test_keyed/{name}", api_key="explicit", memoize=False, **configured
-    )
-    default = get_model(f"swarm_test_keyed/{name}", api_key="explicit", memoize=False)
-    assert model.canonical_name() != default.canonical_name()
-    _price(
-        model.canonical_name() if priced == "configured" else default.canonical_name()
-    )
-    record = (
-        member(generator(model, calls=0))
-        if form == "built"
-        else member(generator, args={"model": model, "calls": 0})
+        else member(generator, args={"model": model})
     )
     agent_swarm = swarm(record, channels=[], budget=Budget(cost=10.0))
-    if priced == "configured":
+    if form == "built" and priced == "canonical":
+        with pytest.raises(PrerequisiteError, match="use the member's factory form"):
+            await run_swarm(agent_swarm)
+    else:
         stop = await run_swarm(agent_swarm)
         assert statuses(stop) == {"generator": "submitted"}
-    else:
-        with pytest.raises(PrerequisiteError, match="Missing cost data"):
-            await run_swarm(agent_swarm)
-
-
-@pytest.mark.anyio
-async def test_the_cost_check_refuses_a_built_model_it_cannot_rebuild() -> None:
-    # a provider that checks its key when built cannot be rebuilt from the log, which
-    # holds no key, so its pricing cannot be checked: refused, never assumed
-    model = get_model(
-        f"swarm_test_keyed/m-{uuid4().hex}",
-        api_key="explicit",
-        memoize=False,
-        route="checks-key",
-    )
-    _price(model.canonical_name())
-    with pytest.raises(PrerequisiteError, match="could not be resolved"):
-        await run_swarm(
-            swarm(generator(model, calls=0), channels=[], budget=Budget(cost=10.0))
-        )
 
 
 @pytest.mark.anyio

@@ -1,6 +1,6 @@
 import logging
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Sequence, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Literal
@@ -10,9 +10,9 @@ from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import is_registry_object, registry_info
 from inspect_ai.agent import Agent
 from inspect_ai.agent._bridge.util import in_bridge_model_generate
-from inspect_ai.model import Model, ModelInfo, ModelUsage, get_model_info
+from inspect_ai.model import Model, ModelUsage
 from inspect_ai.model._model_info import (
-    _resolve_model_info,  # pyright: ignore[reportPrivateUsage]
+    _get_model_info_direct,  # pyright: ignore[reportPrivateUsage]
 )
 from inspect_ai.util import Limit, LimitExceededError, sample_limits
 from inspect_ai.util._limit import (
@@ -179,28 +179,28 @@ def _check_explicit(kind: str, cap: float, sample: Limit) -> None:
         )
 
 
-def check_cost_data(models: Sequence[str | Model]) -> None:
-    # run at swarm start when a cost cap applies, as Inspect does for the task's models
+def check_cost_data(
+    models: Sequence[str | Model], *, built: Set[str] = frozenset()
+) -> None:
+    # run at swarm start when a cost cap applies, as Inspect does for the task's models.
+    # The lookup is the one metering uses at generation time, cached by the model's
+    # string, so the check and the price charged agree. Two configurations that share
+    # a model string share that cached price, as they do under Inspect's cost_limit.
+    # `built` names the models of built members, known only by their logged name.
     missing = list(
         dict.fromkeys(
             str(model)
             for model in models
-            if (info := _model_info(model)) is None or info.cost is None
+            if (info := _get_model_info_direct(model)) is None or info.cost is None
         )
     )
     if missing:
+        remedy = "Use set_model_cost() or --model-cost-config to configure pricing."
+        if any(name in built for name in missing):
+            remedy += " A built member's model is looked up by its name alone; to look it up as configured, use the member's factory form, member(factory, args={'model': ...})."
         raise PrerequisiteError(
-            f"A swarm cost cap requires cost data for every member's model. Missing cost data for: {', '.join(missing)}. Use set_model_cost() or --model-cost-config to configure pricing."
+            f"A swarm cost cap requires cost data for every member's model. Missing cost data for: {', '.join(missing)}. {remedy}"
         )
-
-
-def _model_info(model: str | Model) -> ModelInfo | None:
-    # a model object is looked up under its own canonical name, uncached: Inspect's
-    # cache is keyed by the model string, which two configurations can share. A name
-    # is resolved as get_model_info() does, with Inspect's placeholder credential.
-    if isinstance(model, Model):
-        return _resolve_model_info(model, resolve_provider=False)
-    return get_model_info(model)
 
 
 def is_bridged(agent: Agent, bridged: bool | None) -> bool:

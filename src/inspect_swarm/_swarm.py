@@ -1,17 +1,14 @@
 from collections.abc import Mapping, Sequence
 from typing import cast
 
-from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import (
-    ModelDict,
     is_model_dict,
     registry_info,
     registry_params,
     registry_unqualified_name,
 )
 from inspect_ai.agent import Agent, AgentState, agent
-from inspect_ai.model import GenerateConfig, Model, get_model
-from inspect_ai.model._model_info import MODEL_INFO_LOOKUP_API_KEY
+from inspect_ai.model import Model, get_model
 from inspect_ai.util import Limit
 
 from ._budget import Budget, CostPair, SwarmTokenNode, check_cost_data, derive_caps
@@ -71,7 +68,11 @@ def swarm(
     async def execute(state: AgentState) -> AgentState:
         caps = derive_caps(resolved_budget, len(roster))
         if caps.cost is not None:
-            check_cost_data([_model(record) for record in records])
+            models = [_model(record) for record in records]
+            check_cost_data(
+                [model for model, _ in models],
+                built={str(model) for model, logged in models if logged},
+            )
         cap_nodes: list[Limit] = []
         if caps.cost is not None:
             cap_nodes.extend(CostPair(caps.cost, owner=None, role="cap").nodes)
@@ -107,37 +108,18 @@ def _preamble(member: MemberInfo, size: int, channels: Sequence[Channel]) -> str
     return "\n\n".join(parts)
 
 
-def _model(record: Member) -> str | Model:
-    # the member's configured model, else the sample's; a model the agent resolves
-    # itself at run time cannot be checked
+def _model(record: Member) -> tuple[str | Model, bool]:
+    # the member's configured model, else the sample's, and whether it is known only
+    # from a built agent's logged params; a model the agent resolves itself at run time
+    # cannot be checked. The logged dict's name is the string metering prices it under.
     model = (
         registry_params(record.agent).get("model")
         if record.agent is not None
         else record.args.get("model")
     )
     if is_model_dict(model):
-        return _lookup_model(model)
-    return model if isinstance(model, str | Model) else get_model()
-
-
-def _lookup_model(logged: ModelDict) -> Model:
-    # A built agent's params hold its Model as the logged dict, which keeps its
-    # configuration (base_url, config, model_args) but not its credentials. Rebuild it
-    # with Inspect's placeholder credential, as get_model_info() resolves a name, so
-    # that pricing is looked up under the canonical name of the configured model.
-    try:
-        return get_model(
-            logged["model"],
-            config=GenerateConfig(**logged["config"]),
-            base_url=logged["base_url"],
-            api_key=MODEL_INFO_LOOKUP_API_KEY,
-            memoize=False,
-            **logged["model_args"],
-        )
-    except Exception as ex:
-        raise PrerequisiteError(
-            f"A swarm cost cap requires cost data for every member's model, and the model of a built member, {logged['model']}, could not be resolved from its configuration to look it up: {ex}. Use the member's factory form, member(factory, args={{'model': ...}}), so the configured model itself is checked."
-        ) from ex
+        return model["model"], True
+    return (model if isinstance(model, str | Model) else get_model()), False
 
 
 def _members(members: object) -> list[Member]:
