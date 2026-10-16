@@ -4,9 +4,9 @@ Status: proposed, 2026-10-16. Issue: none. Author: agent (Claude), reviewed by C
 
 ## Overview
 
-inspect_ai gains `background_owner()`, an async context manager in `inspect_ai.util`. Inside its block, `background()` starts work in the owner instead of in the sample's task group; outside every owner it behaves exactly as today. When the block ends, the owner cancels whatever it still runs and waits for it to finish. A task that reaches a limit entered inside the block (or one the owner was told to contain) ends alone, so its siblings and the code in the block carry on; any other error ends the block, as an error in the sample's task group ends the sample today. deepagent's background dispatch always goes through `background()`, so under an owner its children belong to that owner and can outlive the deepagent call until the block ends.
+inspect_ai gains `background_owner()`, an async context manager in `inspect_ai.util`. Inside its block, `background()` starts work in the owner instead of in the sample's task group; outside every owner it behaves exactly as today. When the block ends, the owner cancels whatever it still runs and waits for it to finish. A task that reaches a limit entered inside the block (or one the owner was told to contain) ends alone, so its siblings and the code in the block carry on, and the owner can tell its creator at once through a callback; any other error ends the block, as an error in the sample's task group ends the sample today. deepagent's background dispatch always goes through `background()`, so under an owner its children belong to that owner and can outlive the deepagent call until the block ends.
 
-The swarm enters one owner per member, beside its tool-state scope, and contains its own caps there. When a member's agent returns, the member's status and submission are recorded at once, then the swarm drains the member's background work the way it stops members: it closes the member's lever so the children make no new model call, gives them the grace period to finish calls in flight, and cancels the rest. Only then does the member end. The swarm's own soft stop, grace and hard stop reach the children the same way. Children spend through the member's nodes, so their usage is the member's in the budget and the ledger, which also counts how many children each member started and how many the drain had to cancel. The rejection of `deepagent(background=...)` members is lifted, and any agent that calls `background()` is supported as a member. Background `general()` children reach the shared-memory channel as the member, as synchronous ones do.
+The swarm enters one owner per member, beside its tool-state scope, and contains its own caps there. When a member's agent returns, the member's status and submission are recorded at once, then the swarm drains the member's background work the way it stops members: it closes the member's lever so the children make no new model call, gives them the grace period to finish calls in flight, and cancels the rest. Only then does the member end. The swarm's own soft stop, grace and hard stop reach the children the same way. Children spend through the member's nodes, so their usage is the member's in the budget and the ledger, which also counts how many children each member started and how many the drain had to cancel. The rejection of `deepagent(background=...)` members is lifted, and any agent that calls `background()` while it runs is supported as a member; a factory that starts background work while building its agent is refused. Background `general()` children reach the shared-memory channel as the member, as synchronous ones do.
 
 ## Why
 
@@ -123,17 +123,15 @@ class BackgroundOwner:
     def cancelled(self) -> int:
         """How many were still running when the block ended and were cancelled by the owner. 0 until the block ends."""
 
-    @property
-    def limit_errors(self) -> list[LimitExceededError]:
-        """The limit errors that ended a task without ending the block, in the order they were raised."""
-
     async def wait(self) -> None:
         """Return once no task started in this owner is running, including tasks started while waiting. Returns at once when none is."""
 
 
 @asynccontextmanager
 async def background_owner(
-    *, contain: Sequence[Limit] = ()
+    *,
+    contain: Sequence[Limit] = (),
+    on_limit: Callable[[LimitExceededError], None] | None = None,
 ) -> AsyncIterator[BackgroundOwner]:
     """Own the background work started inside the block.
 
@@ -141,6 +139,7 @@ async def background_owner(
 
     Args:
         contain: Limits entered outside the block whose errors, raised in one of the owner's tasks, end only that task, as the errors of limits entered inside the block do.
+        on_limit: Called with each limit error that ends only its task, synchronously, in that task, as it ends.
     """
 ```
 
@@ -154,15 +153,17 @@ async def background_owner(
 **Limits and errors.** When the block is entered, the owner records the limit nodes active in the entering task: the leaf of each limit tree and its ancestors. A task can end in four ways:
 
 1. It returns, or is cancelled (by the owner, an enclosing cancel scope, or code of its own such as deepagent's `agent_cancel`). Neither is an error.
-2. It raises a bare `LimitExceededError` whose `source` was entered inside the block (any node that is not among the recorded ones) or is one of `contain`. The task ends; the error is appended to `limit_errors`; the other tasks and the block's own code continue. The error is not raised again.
+2. It raises a bare `LimitExceededError` whose `source` was entered inside the block (any node that is not among the recorded ones) or is one of `contain`. The task ends; the other tasks and the block's own code continue. If `on_limit` was given, it is called with the error, synchronously, in the ending task, so the owner's creator hears of the limit at once rather than when the block's code next checks. The error is not raised again. An exception from `on_limit` is treated as the task's exception under 3.
 3. It raises any other exception, including a `LimitExceededError` from a limit entered outside the block and not contained, one whose `source` is `None`, and an exception group. This cancels the block's code and the other tasks and is raised from the block, as an exception in a task group is, and as an exception in the sample's task group ends the sample today.
 4. The block's own code raises. The tasks are cancelled and the exception is raised from the block.
 
 The rule in 2 is the subagent rule generalised. A subagent's own limits end the subagent and not its parent (`apply_limits(..., catch_errors=True)` in `_run_background`); a limit entered inside the block bounds work the block contains, so reaching it ends that piece of work. A limit from outside bounds more than the block (the sample's limits, a caller's `run(..., limits=...)` around the owner), so it propagates as today. The code inside the block reaches every limit a child can reach, because the child's limits are its caller's: shared token, cost and turn nodes are reached by the block's code at its next check, which is how a synchronous subagent's limit error reaches its parent through the tool result. `contain` exists for limits the owner's creator entered further out but wants treated the same way; the swarm passes its caps ([Entering the owner](#entering-the-owner)).
 
-**Ending the block.** However the block ends, the owner cancels the tasks still running (recording how many in `cancelled`) and waits for them, so their `finally` blocks and cancellation handlers run before the block is left. There is no deadline on that wait: a task's cleanup is bounded by the task's own code, as in any anyio task group, and a deadline would leave work running outside any structure, which is what the owner exists to prevent. A caller who wants tasks to finish on their own first calls `wait()`, bounded by `anyio.move_on_after()`, before leaving the block; the swarm's drain does this.
+The block's code does not always reach the limit soon, though: it may be waiting on another task. deepagent's `agent_wait(mode="all")` waits for every selected future in turn (`src/inspect_ai/agent/_deepagent/lifecycle_tools.py:307-310`), so a parent waiting on one child stuck in a long tool call does not return when a sibling is stopped by a limit. `on_limit` is how a creator that must act on the limit at once, as the swarm must on a cap, is told without waiting for its code to check.
 
-Then it raises, as `owned_task_group()` does today: a single exception bare (the group the task group wraps it in is undone), several as an `ExceptionGroup`, and a cancellation from outside re-raised as that cancellation. `limit_errors` are never raised; a caller reads them.
+**Ending the block.** However the block ends, the owner cancels the tasks still running (recording how many in `cancelled`) and waits for them, so their `finally` blocks and cancellation handlers run before the block is left. There is no deadline on that wait: a task's cleanup is bounded by the task's own code, as in any anyio task group, and a deadline would leave work running outside any structure, which is what the owner exists to prevent. A caller who wants tasks to finish on their own first calls `wait()`, bounded by `anyio.move_on_after()`, before leaving the block; the swarm's drain does this. A caller's deadline therefore bounds how long tasks may keep working, not their cancellation cleanup: a task that shields its cleanup from cancellation holds the block until that cleanup ends, as a bridged agent's shielded proxy shutdown holds the swarm's hard stop today ([swarm-limits.md Stopping](swarm-limits.md#stopping)). The owner's tests pin that cleanup is awaited, and the swarm's docs say grace does not bound it.
+
+Then it raises, as `owned_task_group()` does today: a single exception bare (the group the task group wraps it in is undone), several as an `ExceptionGroup`, and a cancellation from outside re-raised as that cancellation. Errors handled under 2 are never raised; `on_limit` is the only way they are reported.
 
 ### deepagent's dispatch (AI-5)
 
@@ -183,9 +184,11 @@ The member wrapper enters the owner inside the member's tool-state scope and can
 token = current_member.set(context)
 try:
     with tool_state_scope(name), context.scope:
-        async with background_owner(contain=caps) as owner:
+        async with background_owner(contain=caps, on_limit=on_child_limit) as owner:
             try:
                 agent = build_member(record)
+                if owner.started:                 # construction started background work
+                    raise RuntimeError(...)       # refused; the owner cancels it
                 _, limit_error = await run(agent, input, limits=nodes, name=name)
             except Exception as ex:
                 cap, owned, foreign = classify_errors(ex, caps, nodes)
@@ -201,7 +204,8 @@ finally:
 
 - **Placement.** Inside `context.scope`, so the hard stop cancels the children with the member. Inside `tool_state_scope(name)` and the member ContextVar, so children keep the member's tool state and identity (they would anyway, by inheriting the context at dispatch). Around `run()`, so the member's nodes (lever, share, member limits) are entered inside the block, and a child that reaches one ends alone (rule 2). The swarm's caps are entered outside, once for the whole swarm, so they are passed as `contain`. Sample limits are neither, so a child that reaches one ends the sample at once, as it would outside a swarm.
 - **One owner per member, every member.** A member with no background work pays a ContextVar set and an empty task group. Bridged members never call `background()`.
-- **Factory-form members** are built inside the block, so anything a factory starts with `background()` is the member's.
+- **`on_child_limit`** is the wrapper's callback for rule 2: when the error's source is one of the swarm's caps it calls `stop("swarm_cap")` (a no-op once a stop has begun; `stop()` is synchronous up to its grace, `_control.py:255-268` at `ede24f8`), and it ignores every other source (the member's lever, share and limits, and limits the member's agent entered itself), which stop only the child. So a cap reached by any child starts the swarm's soft stop at once, whatever the member's agent is doing.
+- **Background work is started by the agent, not while it is built.** A factory-form member's agent is built inside the block, but before `run()` enters the member's nodes and opens its span (`src/inspect_ai/agent/_run.py:97-101`). A task started then would keep the context of its dispatch: the caps but not the member's lever, share or limits, and no member span, so the drain could not stop its next call and the member's call counts would miss it (a probe on asyncio and trio metered such a task's tokens to the cap and none to the member node, even when the task called the model after the node was entered). No factory does this: deepagent, `react()` and Epoch's builder start background work only from the running agent ([Who calls `background()`](#who-calls-background)). So the wrapper refuses it: if `owner.started` is not 0 after `build_member()`, it raises `RuntimeError` naming the member and saying that background work must be started by the agent when it runs, not by its factory. The owner's exit cancels the task; the error is foreign, so the member is `errored` and the error propagates, as for any factory error (M1-4).
 
 ### The drain at member end
 
@@ -211,7 +215,7 @@ When the member's agent has returned (normally, or on the lever, its share, a me
 2. Wait for the owner's tasks with `anyio.move_on_after(grace())`, where `grace()` is `SwarmRun._grace_now()`: `Budget.grace`, clipped to half the sample's remaining time. Children finish the calls and tool calls they have in flight, then reach the lever at their next check and end alone (rule 2).
 3. Leave the block. The owner cancels the children still running, waits for them, and records the count in `owner.cancelled`.
 
-Why a soft drain rather than cancelling at once: it is the soft stop's reason ([swarm-limits.md Stopping](swarm-limits.md#stopping)). Calls in flight finish and are recorded, so the member's spend stays known. The throwaway prototype of the owner (patched in for `background()` around today's deepagent, not committed) showed it: a top loop dispatched two children that each started a 0.5 s tool call, then submitted; after the lever closed, both children finished their tool calls, were refused their next call and ended alone, with `cancelled=0`, two lever errors in `limit_errors`, and no errored model event. With a 0.1 s grace the owner cancelled both. With the lever entered outside the block, the first child's error ended the block and was recorded as the sample's limit, as rule 3 says.
+Why a soft drain rather than cancelling at once: it is the soft stop's reason ([swarm-limits.md Stopping](swarm-limits.md#stopping)). Calls in flight finish and are recorded, so the member's spend stays known. The throwaway prototype of the owner (patched in for `background()` around today's deepagent, not committed) showed it: a top loop dispatched two children that each started a 0.5 s tool call, then submitted; after the lever closed, both children finished their tool calls, were refused their next call and ended alone, with `cancelled=0`, two lever errors held by the owner, and no errored model event. With a 0.1 s grace the owner cancelled both. With the lever entered outside the block, the first child's error ended the block and was recorded as the sample's limit, as rule 3 says.
 
 Why stop the children at member end at all: the swarm owns and drains all of a member's work ([swarm.md Goals](swarm.md#goals)), and the plan asks for the drain on member end ([D-2](swarm-implementation-plan.md#designs)). A member's children work on the member's attempt; once it has submitted or been stopped, their further spend serves nothing the swarm records. Epoch's members leave theirs running until the solver ends, which the Lean analysis lists as a cost they pay today ([Observations for Epoch](swarm-lean-open-problems.md#not-this-design)). The port keeps the arm, background deepagents with up to 64 children, and drops that waste.
 
@@ -225,7 +229,7 @@ Nothing new is needed; the drain composes with [Stopping](swarm-limits.md#stoppi
 - **Grace.** `_supervise()` waits for running members, and a draining member is running, so grace covers the children. A member's drain wait and the swarm's grace run side by side: a drain that began before the stop may end first, and one that has not ended when the swarm's grace does is cut short by the hard stop.
 - **Hard stop.** `_supervise()` cancels the scope of every member still running. The owner is inside that scope, so its children are cancelled with the member's agent, or with its drain. A member whose status was already decided keeps it (below); its ledger line says `cancelled`.
 - **Time cap.** It calls `stop("swarm_time")`, so it is the soft stop above.
-- **A cap reached inside a child.** The cap is in `contain`, so the child ends alone and its siblings' calls in flight finish; the member's agent reaches the cap at its next call and the wrapper calls `stop("swarm_cap")`, as it does today. A child can also be the only one to reach it (the member's agent already returned, or never calls the model again); the wrapper then finds a cap error in `owner.limit_errors` after the block and calls `stop("swarm_cap")` itself. Without `contain`, the first child to call the model after the cap was reached (cap checks run root to leaf, ahead of the lever) would cancel every sibling's call in flight at the moment the whole swarm is being soft-stopped.
+- **A cap reached inside a child.** The cap is in `contain`, so the child ends alone and its siblings' calls in flight finish. The owner calls the wrapper's `on_child_limit` in the child as it ends, which calls `stop("swarm_cap")` at once: the soft stop closes every running member's lever and grace starts, exactly as when a member's own agent reaches the cap. This does not wait for the member's agent, which may be blocked in `agent_wait(mode="all")` on a sibling in a long tool call, or may already have returned and be draining. That sibling finishes its tool call within grace, is refused its next call, `agent_wait` returns, and the agent reaches the cap at its next call (status `swarm_cap`); the hard stop bounds it if not. Without `contain`, the first child to call the model after the cap was reached (cap checks run root to leaf, ahead of the lever) would cancel every sibling's call in flight at the moment the whole swarm is being soft-stopped.
 
 ### Statuses, ended, and the record
 
@@ -247,11 +251,11 @@ So `MemberHandle.status` reads "how the member's agent ended, once it has", and 
 | What happens during the drain | Effect |
 |---|---|
 | Children reach the closed lever, the member's share or a member limit | Expected: that is how they stop. Ignored. |
-| A child reaches a swarm cap (in `limit_errors`) | `stop("swarm_cap")` if no stop has begun; status unchanged |
+| A child reaches a swarm cap (reported by `on_limit`) | `stop("swarm_cap")` if no stop has begun; status unchanged |
 | The swarm's hard stop cancels the member scope | Status unchanged; ledger `cancelled` |
 | A child raises a foreign error (a sample limit, `TerminateSampleError`, a refusal under `fail_on_refusal`, a sentinel failure, a custom worker's crash) | Status `errored`; the error is raised without the swarm's leaves, as for a foreign error from the agent |
 
-Before the drain (while the agent runs) the same events are handled as M1-4 handles errors from the agent: a cap or own-node limit reached by a child ends the child, and the agent reaches the same node at its next check; a foreign error from a child cancels the agent and the other children and makes the member `errored`.
+Before the drain (while the agent runs) the same events are handled as M1-4 handles errors from the agent: an own-node limit reached by a child ends the child, and the agent reaches the same node at its next check; a cap reached by a child ends the child and stops the swarm at once through `on_limit`; a foreign error from a child cancels the agent and the other children and makes the member `errored`.
 
 **Errors from children that do not reach the owner.** deepagent captures a child's ordinary exception on its future (`errored`) and the parent reads it with `agent_status` or `agent_wait`. It does not affect the member's status; the member's agent decides what to do with it, as it decides about a failed tool call.
 
@@ -278,9 +282,9 @@ The wrapper copies `owner.started` and `owner.cancelled` to the member's run rec
 
 ### Lifting the rejection
 
-M2-5 deletes `_check_background()` and its two calls. `deepagent(background=True)`, `deepagent(background=64)` and `member(deepagent, args={"background": 64})` are accepted, and so is any agent, wrapped or custom, that calls `background()`: the owner catches them all, so nothing depends on reading registry params. `member()`'s docstring replaces the refusal sentence with the contract:
+M2-5 deletes `_check_background()` and its two calls. `deepagent(background=True)`, `deepagent(background=64)` and `member(deepagent, args={"background": 64})` are accepted, and so is any agent, wrapped or custom, that calls `background()` while it runs: the owner catches them all, so nothing depends on reading registry params. A factory that calls `background()` while building the agent is refused when the member starts ([Entering the owner](#entering-the-owner)). `member()`'s docstring replaces the refusal sentence with the contract:
 
-> Background work belongs to the member. Work its agent starts with `background()`, such as `deepagent(background=...)` subagents, spends through the member's limits and share, and is the member's in the ledger. When the member's agent returns, its status is decided; the swarm then stops the background work from starting model calls, gives it the swarm's grace period to finish calls in flight, and cancels what is left. The member ends after that. Work started outside `background()` (an `asyncio` task, a process left running in the sandbox) is not stopped.
+> Background work belongs to the member. Work its agent starts with `background()`, such as `deepagent(background=...)` subagents, spends through the member's limits and share, and is the member's in the ledger. When the member's agent returns, its status is decided; the swarm then stops the background work from starting model calls, gives it the swarm's grace period to finish calls in flight, and cancels what is left. The member ends after that. Background work must be started by the agent while it runs; a factory that starts it while building the agent makes the member `errored`. Work started outside `background()` (an `asyncio` task, a process left running in the sandbox) is not stopped.
 
 ### The shared-memory channel
 
@@ -317,6 +321,8 @@ If M1-4 merges with a different shape, M2-5 keeps the same three placements: the
 **Let children run until the swarm stops**, so a member is "ended" while its children run, and drain only at the swarm's stop. This keeps Epoch's current behaviour exactly. But it breaks the guarantee that `ended` means no more spend from the member, makes `all_done` wait on children no member can see, and keeps spending on attempts that have already submitted or been stopped. The plan asks for the drain at member end.
 
 **Wait for children to finish without closing the lever**, up to a deadline. Children would keep starting new calls on an attempt that is over, so the drain's length would be the deadline every time.
+
+**Reporting contained limit errors when the block ends**, as a list the creator reads afterwards, instead of `on_limit`. Simpler, but the creator learns of a cap only when its own code next checks or the block ends, and a deepagent parent waiting in `agent_wait(mode="all")` on a sibling stuck in a long tool call does neither: the swarm's stop would wait on that tool call, and with no time cap indefinitely. An event or stream the creator awaits would need a task of its own in every member to watch it; a synchronous callback in the ending task needs nothing.
 
 **An owner that drains with a deadline on exit.** It would leave tasks running after the block, outside any structure. The deadline belongs to the caller, with `wait()` and `move_on_after()`.
 
@@ -356,7 +362,7 @@ Async tests on the suite's anyio backends, mockllm where a model is needed, no n
 - Inside an owner, without a sample: a task runs in the owner; leaving the block cancels a running task, runs its `finally` before the block is left, and sets `cancelled`; `started` and `running` count; `wait()` returns when the tasks finish, including one started while waiting, and at once with none.
 - Nesting: the nearest owner wins; an inner block ends only its tasks; `background()` called inside an owner's task attaches to that owner.
 - Errors: a task's `RuntimeError` cancels the block's code and a sibling and is raised bare; two task errors are an `ExceptionGroup`; the block's own exception cancels the tasks and is raised bare; an outside cancellation is re-raised as a cancellation (the cases of `TestNoLiveSampleTaskGroup`, at the owner level).
-- Limits (table-driven): a task that reaches a `token_limit` entered inside the block ends alone, a sibling keeps running, the block's code continues, and the error is in `limit_errors` and not raised; the same limit entered outside the block is raised and cancels the sibling; entered outside but in `contain`, it ends the task alone; a `LimitExceededError` with `source=None` is raised.
+- Limits (table-driven): a task that reaches a `token_limit` entered inside the block ends alone, a sibling keeps running, the block's code continues, and the error is passed to `on_limit`, in the ending task and before the block's code resumes, and is not raised; the same limit entered outside the block is raised and cancels the sibling; entered outside but in `contain`, it ends the task alone; a `LimitExceededError` with `source=None` is raised; an exception from `on_limit` is raised from the block as the task's.
 - Entering an owner twice raises; `background()` in a context saved inside a finished block raises `RuntimeError`.
 - Inside an eval: `background()` in a solver inside an owner leaves no task on the sample's task group after the block.
 
@@ -372,13 +378,15 @@ Runtime tests on mockllm with scripted outputs and controlled tool latency (anyi
 
 - **Drain at member end** (the plan's required case, both outcomes): a `deepagent(background=True)` member submits while one child is in a tool call that finishes within grace and another in one that does not. The first finishes its call, is refused its next one and ends; the second is cancelled by the owner's exit and awaited before the member ends. The member's status is `submitted`; `MemberEnded` comes after both children's spans have ended; its ledger line's usage includes both children's completed calls; `background_started == 2`, `background_cancelled == 1`, `total_complete` is false. With grace long enough for both, `background_cancelled == 0` and no model event is errored.
 - **Soft stop** (the controller's `all_done`, and the time cap): children with calls in flight finish them, none is cancelled, every call is recorded.
-- **Cap reached in a child**: siblings' calls in flight finish (no errored events); the stop reason is `swarm_cap`; the member is `swarm_cap` when its agent then reaches the cap, and keeps `submitted` when the cap was reached only during its drain (found in `limit_errors`).
+- **Cap reached in a child** (token and cost caps, table-driven): siblings' calls in flight finish (no errored events); the stop reason is `swarm_cap`; the member is `swarm_cap` when its agent then reaches the cap, and keeps `submitted` when the cap was reached only during its drain.
+- **Cap reached in a child while the parent is blocked**: the member's agent waits in `agent_wait(mode="all")` on two children; one reaches the cap, the other is in a tool call longer than the test's patience. `stop("swarm_cap")` is called when the first child ends (the stopped evidence and other members' levers show it at once, not after the second child), the second child finishes its tool call within grace and is refused its next call, the agent ends `swarm_cap`, and no call in flight is cancelled. With the second child's tool call longer than grace, the hard stop cancels it and the run ends within grace.
 - **Member limit reached in a child** (a member token limit): the child ends alone, the member ends `member_limit:token`, other members continue.
 - **Sample limit reached in a child**: recorded as the sample's limit, not a swarm cap, the member `errored`, as for the same deepagent outside a swarm.
 - **Hard stop during a drain**: a child stuck past the swarm's grace is cancelled; the member keeps `submitted` and its ledger line says `cancelled`.
 - **`first` across a drain**: member A submits at t1 and drains until t3, member B submits and ends at t2 (t1 < t2 < t3); the provisional answer is A's from t1 and the final answer is A's; A's `MemberResult.time` is t1.
 - **Isolation**: two background members' drains do not wait for each other's children; a child's tool state is its member's (`memory()` default instance), with `tests/test_tool_state.py`.
 - **A custom agent that calls `background()` directly**: its task is cancelled at member end, not at sample end, and counted in `background_started`.
+- **Construction-time background work is refused**: a factory that calls `background()` while building its agent makes the member `errored` with the `RuntimeError` naming the member, and the task it started is cancelled before the member ends, on asyncio and trio.
 - **Construction** (`tests/test_member.py`): the four rejection cases become acceptance cases, and the logged member dict with `background` round-trips in both forms.
 - **Shared memory** (with whichever of M2-5 and M2-8 merges second, in `tests/test_shared_memory.py`): a background `general()` child writes and views a file; the write's `sender` is the member, its `sender_span_id` the child's agent span, `nested: true`; the member's other loops see it as the member's.
 
@@ -395,14 +403,14 @@ Follow-ups, not edits made here:
 - **swarm-implementation-plan.md.** D-2: done, with this document's path, once merged. AI-5: files and tests as [Implementation plan](#implementation-plan) step 1, a `feat:` title. M2-5: files and tests as step 2 (adding `_controller/_control.py`, the ledger and record modules and `pyproject.toml`; `_swarm.py` only if the wrapper lives there), and "Depends on" gains M1-5 and an inspect_ai release containing AI-5. M2-8's sentence on the background-child test stands. Compatibility: "AI-5 changes nothing outside an owner scope, as D-2 must confirm" becomes confirmed, linking [Compatibility and migration](#compatibility-and-migration). Security: D-2's section is [Security](#security).
 - **swarm.md** [Members](swarm.md#members): "Not supported in M1" says M2 supports members that use `background()`, through the member's owner, and links here; "Lifting the restriction" links here for the owner and the drain. Goals ("Until the swarm can do that ...") and the Testing bullet that rejects `background` in `args` say M1, and M2-5 replaces that test with the acceptance cases here. The current-behaviour section on deepagent's background subagents stays as a description of inspect_ai outside an owner.
 - **swarm-api.md** [Members](swarm-api.md#members): the rejection paragraph says M2-5 removes it and links here; Testing's `test_member.py` rejection cases are replaced by acceptance cases in M2-5. `MemberHandle.status` is "how the member's agent ended, once it has", which can precede `state == "ended"` for a member draining background work.
-- **swarm-limits.md.** [Stopping](swarm-limits.md#stopping): a member's background work is drained at member end by the procedure here, and the soft stop, grace and hard stop reach children through the member's owner; the member wrapper sketch gains the owner, the drain and the decided-then-ended split. [The ledger](swarm-limits.md#the-ledger): `background_started` and `background_cancelled`, the extra `total_complete` condition, and "background children once they are supported" becomes "background children". [Interactions](swarm-limits.md#interactions): the background-subagents bullet links here and adds that caps are contained in each member's owner.
+- **swarm-limits.md.** [Stopping](swarm-limits.md#stopping): a member's background work is drained at member end by the procedure here, and the soft stop, grace and hard stop reach children through the member's owner; the member wrapper sketch gains the owner, the construction refusal, the drain and the decided-then-ended split; the cap trigger adds a cap reached in a background child, reported by the owner's `on_limit`. [The ledger](swarm-limits.md#the-ledger): `background_started` and `background_cancelled`, the extra `total_complete` condition, and "background children once they are supported" becomes "background children". [Interactions](swarm-limits.md#interactions): the background-subagents bullet links here and adds that caps are contained in each member's owner.
 - **swarm-scoring.md** [What the swarm records](swarm-scoring.md#what-the-swarm-records): `MemberResult.time` is the swarm time the member's agent returned, and a member's result (status, output, time) is written then, with its state `ended` written after the drain.
 - **swarm-lean-open-problems.md** [Recommendation 3](swarm-lean-open-problems.md#3-m2-background-deepagent-members): Change links here. The port sketch's comment that `"deep"` must not set `background` before Rec. 3, "What it cannot do yet", and the line under [Could inspect_swarm express their experiment?](swarm-lean-open-problems.md#could-inspect_swarm-express-their-experiment) that needs a synchronous deepagent say the builder keeps `background=64` once M2-5 lands, with children stopped at their member's end.
 - **swarm-memory-channel.md** [Descendants](swarm-memory-channel.md#descendants): no change of design; it can note that a background child's writes during its member's drain are accepted and that none follows the member's end.
 
 ## Open questions
 
-1. **The public inspect_ai names.** `inspect_ai.util.background_owner()` returning a `BackgroundOwner`, with `contain=`. Recommendation: as named; "owner" is the word every swarm design uses, and the shape parallels `tool_state_scope()`. The names are upstream API, so they are Ransom's to settle before AI-5 opens.
+1. **The public inspect_ai names.** `inspect_ai.util.background_owner()` returning a `BackgroundOwner`, with `contain=` and `on_limit=`. Recommendation: as named; "owner" is the word every swarm design uses, and the shape parallels `tool_state_scope()`. The names are upstream API, so they are Ransom's to settle before AI-5 opens.
 
 ## Not this design
 
