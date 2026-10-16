@@ -67,6 +67,7 @@ from inspect_swarm._budget import (
     MemberContext,
     NodeRole,
     SwarmMessageNode,
+    SwarmNode,
     SwarmTokenNode,
     SwarmTurnNode,
     check_cost_data,
@@ -805,6 +806,13 @@ def test_node_raises_its_own_error_without_a_sample_limit_event(
     assert not any(isinstance(e, SampleLimitEvent) for e in fresh_transcript.events)
 
 
+def _stop_with(nodes: list[Limit], stops: list[str]) -> None:
+    # as the runtime does: the swarm's caps stop it when they are reached
+    for node in nodes:
+        if isinstance(node, SwarmNode) and node.role == "cap":
+            node.stop_swarm = stops.append
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("declared", [True, False], ids=["declared", "marked"])
 @pytest.mark.parametrize("case", NODE_CASES, ids=lambda c: c.id)
@@ -812,10 +820,11 @@ async def test_node_cancels_a_bridged_member_instead_of_raising(
     case: _NodeCase, declared: bool
 ) -> None:
     stops: list[str] = []
-    member = MemberContext("a", bridged=declared, stop_swarm=stops.append)
+    member = MemberContext("a", bridged=declared)
     token = current_member.set(member)
     try:
         nodes, _ = case.nodes()
+        _stop_with(nodes, stops)
         with member.scope:
             with _entered(nodes):
                 if declared:
@@ -840,9 +849,10 @@ async def test_bridge_compaction_reaching_a_cap(bridged: bool) -> None:
     # bridge compaction generates before the bridge's mark, so only a member declared
     # bridged is cancelled there; a native member's error would end a sandboxed sample
     stops: list[str] = []
-    member = MemberContext("a", bridged=bridged, stop_swarm=stops.append)
+    member = MemberContext("a", bridged=bridged)
     model = _model()
     cap = SwarmTokenNode(0, owner=None, role="cap")
+    _stop_with([cap], stops)
     token = current_member.set(member)
     try:
         with member.scope, cap:
@@ -855,7 +865,8 @@ async def test_bridge_compaction_reaching_a_cap(bridged: bool) -> None:
     finally:
         current_member.reset(token)
     assert member.scope.cancelled_caught is bridged
-    assert set(stops) == ({"swarm_cap"} if bridged else set())
+    # the cap begins the swarm's stop whether it cancels the member or raises
+    assert set(stops) == {"swarm_cap"}
     assert member.stop_cause == ("swarm_cap" if bridged else None)
 
 
@@ -900,9 +911,10 @@ async def test_member_found_bridged_by_a_successful_marked_request(
     # and marks the member bridged; the next request's compaction, before the mark,
     # reaches the cap and must cancel the member rather than raise
     stops: list[str] = []
-    member = MemberContext("a", bridged=False, stop_swarm=stops.append)
+    member = MemberContext("a", bridged=False)
     model = _model(cost_per_call=case.cost_per_call)
     nodes, cap = case.nodes()
+    _stop_with(nodes, stops)
     token = current_member.set(member)
     try:
         with member.scope, _entered(nodes):

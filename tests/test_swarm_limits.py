@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -432,6 +433,121 @@ async def test_a_group_mixing_the_swarms_error_with_a_foreign_one_raises_only_th
     assert type(raised.value) is RuntimeError
 
 
+@tool
+def ask(model: Model, suspended: bool = False) -> Tool:
+    async def execute() -> str:
+        """Ask the model once."""
+        with suspend_token_limit() if suspended else nullcontext():
+            return (await model.generate("question")).completion
+
+    return execute
+
+
+async def call_ask(model: Model, suspended: bool) -> ChatMessageTool:
+    # one call of the ask tool, whose errors execute_tools returns as a tool message
+    call = ModelOutput.for_tool_call("mockllm", "ask", {})
+    result = await execute_tools([call.message], [ask(model, suspended)])
+    [reply] = result.messages
+    assert isinstance(reply, ChatMessageTool)
+    return reply
+
+
+@agent
+def asker(model: Model, suspended: bool = False) -> Agent:
+    # its last act is a tool call; it returns normally whatever the tool returned
+    async def execute(state: AgentState) -> AgentState:
+        state.messages.append(await call_ask(model, suspended))
+        return state
+
+    return execute
+
+
+# Caps a single 50-token, $1 call reaches, and budgets it stays within.
+_CAP_CASES = {
+    "token cap": (Budget(tokens=TOKENS_PER_CALL // 2, grace=0.05), False),
+    "cost cap": (Budget(cost=0.5, grace=0.05), False),
+    "cost cap, suspended": (Budget(cost=0.5, grace=0.05), True),
+    "below the caps": (Budget(tokens=10 * TOKENS_PER_CALL, cost=10.0), False),
+}
+
+
+def _waiting_sibling() -> Agent:
+    # priced, and still in its call when a stop's short grace ends
+    return generator(scripted_model(Script(delay=0.5), cost=0.0))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "case", [*_CAP_CASES, "member limit"], ids=lambda c: c.replace(" ", "-")
+)
+async def test_a_cap_reached_in_a_members_last_tool_call_stops_the_swarm(
+    case: str,
+) -> None:
+    # the tool returns the cap's error as a message and the member returns normally,
+    # so only the cap itself can begin the stop
+    budget, suspended = _CAP_CASES.get(case, (Budget(), False))
+    limits = [token_limit(TOKENS_PER_CALL // 2)] if case == "member limit" else []
+    stop = await run_swarm(
+        swarm(
+            [
+                member(
+                    asker(scripted_model(cost=1.0), suspended=suspended),
+                    name="asker",
+                    limits=limits,
+                ),
+                member(_waiting_sibling(), name="sibling"),
+            ],
+            channels=[],
+            budget=budget,
+        )
+    )
+    if case in ("below the caps", "member limit"):
+        assert stop["reason"] == "all_done"
+        assert statuses(stop) == {"asker": "submitted", "sibling": "submitted"}
+    else:
+        assert stop["reason"] == "swarm_cap"
+        assert statuses(stop) == {"asker": "submitted", "sibling": "cancelled"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "case",
+    ["token cap", "cost cap", "below the caps"],
+    ids=lambda c: c.replace(" ", "-"),
+)
+async def test_a_cap_reached_in_a_controllers_tool_call_stops_the_swarm(
+    case: str,
+) -> None:
+    budget, suspended = _CAP_CASES[case]
+    model = scripted_model(cost=1.0)
+    errors: list[str | None] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("sibling")
+        reply = await call_ask(model, suspended)
+        errors.append(reply.error.type if reply.error is not None else None)
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    stop = await run_swarm(
+        swarm(
+            member(_waiting_sibling(), name="sibling"),
+            controller=_controller(
+                run, f"limits_test_controller_tool_{case.replace(' ', '_')}"
+            ),
+            channels=[],
+            budget=budget,
+        )
+    )
+    if case == "below the caps":
+        assert (stop["reason"], errors) == ("all_done", [None])
+        assert statuses(stop) == {"sibling": "submitted"}
+    else:
+        assert stop["reason"] == "swarm_cap"
+        assert statuses(stop) == {"sibling": "cancelled"}
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("form", ["built", "factory"])
 @pytest.mark.parametrize("priced", ["name", "canonical"])
@@ -500,6 +616,34 @@ async def test_the_cost_check_refuses_a_member_using_its_default_model(
     else:
         stop = await run_swarm(agent_swarm)
         assert statuses(stop) == {"default_model_generator": "submitted"}
+
+
+@agent
+def delegator(model: Agent | Model) -> Agent:
+    # react's model may be an agent it delegates its calls to
+    if isinstance(model, Model):
+        return generator(model)
+    return model
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("form", ["built", "factory"])
+@pytest.mark.parametrize("model", ["agent", "model"])
+async def test_the_cost_check_refuses_a_model_argument_it_cannot_price(
+    form: str, model: str
+) -> None:
+    priced = scripted_model(cost=1.0)
+    args = {"model": generator(priced) if model == "agent" else priced}
+    record = (
+        member(delegator(**args)) if form == "built" else member(delegator, args=args)
+    )
+    agent_swarm = swarm(record, channels=[], budget=Budget(cost=10.0))
+    if model == "agent":
+        with pytest.raises(PrerequisiteError, match="not a model name or Model"):
+            await run_swarm(agent_swarm)
+    else:
+        stop = await run_swarm(agent_swarm)
+        assert statuses(stop) == {"delegator": "submitted"}
 
 
 @pytest.mark.parametrize("split", ["pool", "equal", (1.0, 2.0)])

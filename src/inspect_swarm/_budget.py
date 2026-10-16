@@ -218,7 +218,6 @@ def is_bridged(agent: Agent, bridged: bool | None) -> bool:
 class MemberContext:
     name: str
     bridged: bool
-    stop_swarm: Callable[[str], None]
     scope: anyio.CancelScope = field(default_factory=anyio.CancelScope)
     stop_cause: str | None = None
     # counted as native, but found bridged at its first marked bridge generation
@@ -238,6 +237,8 @@ class SwarmNode(Limit):
     # the member that owns this node, or None for the swarm's shared nodes
     owner: str | None
     role: NodeRole
+    # set by the runtime on the swarm's caps
+    stop_swarm: Callable[[str], None] | None = None
 
     def detect_bridge(self) -> None:
         # every check, met or not, so a member found bridged by the bridge's mark stays
@@ -257,14 +258,16 @@ class SwarmNode(Limit):
         reason: str | None = None,
     ) -> None:
         self.detect_bridge()
+        if self.stop_swarm is not None:
+            # here rather than where the error is caught: a tool or handoff may turn
+            # it into a message, and its caller go on or return normally
+            self.stop_swarm("swarm_cap")
         member = current_member.get()
         if member is not None and member.bridged:
             # a raise here would reach the sandbox service and end the sample
             if member.stop_cause is None:
                 member.stop_cause = self._stop_cause(type)
             member.scope.cancel()
-            if self.role == "cap":
-                member.stop_swarm("swarm_cap")
             return
         raise LimitExceededError(
             type,

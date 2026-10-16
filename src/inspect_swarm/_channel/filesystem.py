@@ -39,7 +39,7 @@ def filesystem(
         The channel.
 
     Raises:
-        ValueError: If `scratch` has a placeholder other than `{member}`.
+        ValueError: If `scratch` has no `{member}` placeholder, or has another placeholder.
     """
     try:
         fields = [
@@ -49,12 +49,13 @@ def filesystem(
         ]
     except ValueError as ex:
         raise _bad_scratch(scratch) from ex
-    if any(field != ("member", "", None) for field in fields):
+    # without the member's name every member would be given the same directory
+    if not fields or any(field != ("member", "", None) for field in fields):
         raise _bad_scratch(scratch)
     return _Filesystem(shared, notes, scratch)
 
 
 def _bad_scratch(scratch: str) -> ValueError:
     return ValueError(
-        f"filesystem(): scratch may use only the {{member}} placeholder, got {scratch!r}."
+        f"filesystem(): scratch must use the {{member}} placeholder, and no other, got {scratch!r}."
     )

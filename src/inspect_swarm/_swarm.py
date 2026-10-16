@@ -136,7 +136,15 @@ def _model(record: Member) -> tuple[str | Model, bool]:
     model = params.get("model")
     if is_model_dict(model):
         return model["model"], True
-    return (model if isinstance(model, str | Model) else get_model()), False
+    if isinstance(model, str | Model):
+        return model, False
+    if model is not None:
+        # an agent or other object the member delegates its calls to
+        name = registry_info(record.agent or factory).name
+        raise PrerequisiteError(
+            f"A swarm cost cap requires cost data for every member's model, and {name} is given a model argument that is not a model name or Model, which the swarm cannot check. Give the member a model name or Model."
+        )
+    return get_model(), False
 
 
 def _default_model(factory: object) -> object:

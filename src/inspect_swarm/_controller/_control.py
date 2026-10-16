@@ -12,7 +12,7 @@ from inspect_ai.log import transcript
 from inspect_ai.model import ChatMessage, ChatMessageUser
 from inspect_ai.util import Limit, sample_limits
 
-from .._budget import Lever, MemberContext, is_bridged
+from .._budget import Lever, MemberContext, SwarmNode, is_bridged
 from .._member import Member, classify_errors, member_nodes, run_member, unwrap
 
 MemberState = Literal["pending", "running", "ended"]
@@ -134,7 +134,7 @@ def _without_refusals(error: Exception) -> Exception | None:
 # enters. Its lever and limits are created here, once per run, so that a stop can close
 # the lever of a member that has started but whose task has not yet entered it.
 class MemberRun:
-    def __init__(self, record: Member, name: str, stop: Callable[[str], None]) -> None:
+    def __init__(self, record: Member, name: str) -> None:
         self.record = record
         self.name = name
         self.role = record.role
@@ -143,9 +143,7 @@ class MemberRun:
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
         self.context = MemberContext(
-            name,
-            bridged=is_bridged(cast(Agent, agent), record.bridged),
-            stop_swarm=stop,
+            name, bridged=is_bridged(cast(Agent, agent), record.bridged)
         )
         self.lever, self.nodes = member_nodes(record, name)
 
@@ -167,7 +165,10 @@ class SwarmRun:
         time: float | None,
         grace: float,
     ) -> None:
-        self._members = [MemberRun(record, name, self.stop) for record, name in records]
+        self._members = [MemberRun(record, name) for record, name in records]
+        for node in caps:
+            if isinstance(node, SwarmNode):
+                node.stop_swarm = self.stop
         self._by_name = {m.name: m for m in self._members}
         self._input = input
         self._preambles = preambles
@@ -300,13 +301,10 @@ class SwarmRun:
             if rest is None:
                 # the stop is under way
                 return
-            cap, _, foreign = classify_errors(
-                rest, self._caps, self._runtime_lever.nodes
-            )
+            # a cap began the swarm's stop when it was reached
+            _, _, foreign = classify_errors(rest, self._caps, self._runtime_lever.nodes)
             if foreign is not None:
                 raise foreign
-            if cap:
-                self.stop("swarm_cap")
             return
         if not isinstance(reason, str):
             raise TypeError(

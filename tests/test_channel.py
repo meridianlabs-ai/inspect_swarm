@@ -107,12 +107,15 @@ async def test_each_member_gets_each_channels_instructions(
         "/scratch/{member:>9}",
         "/scratch/{}",
         "/scratch/{member",
+        # no placeholder: every member would be given the same directory
+        "/scratch",
+        "/scratch/{{member}}",
     ],
 )
-def test_filesystem_refuses_a_scratch_template_with_other_placeholders(
+def test_filesystem_refuses_a_scratch_template_without_exactly_the_member_placeholder(
     scratch: str,
 ) -> None:
-    with pytest.raises(ValueError, match="only the {member} placeholder"):
+    with pytest.raises(ValueError, match="must use the {member} placeholder"):
         filesystem(scratch=scratch)
 
 

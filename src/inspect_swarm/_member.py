@@ -321,7 +321,7 @@ async def run_member(
         if foreign is not None:
             raise foreign
         if cap:
-            context.stop_swarm("swarm_cap")
+            # the cap began the swarm's stop when it was reached
             return "swarm_cap"
         assert owned is not None
         return _status_for(owned, lever)
