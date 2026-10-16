@@ -37,6 +37,7 @@ from inspect_ai.model import (
     ModelInfo,
     ModelOutput,
     ModelUsage,
+    ServedModelUsage,
     execute_tools,
     get_model,
     set_model_info,
@@ -1103,13 +1104,58 @@ def _retrying_model(script: Script, cost: float) -> Model:
     return _api_model(Retrying, script, cost)
 
 
+def _rated_model(
+    outputs: Sequence[ModelOutput], *, input_call: float, output_call: float
+) -> Model:
+    # priced per TOKENS_PER_CALL input tokens and per TOKENS_PER_CALL output tokens
+    name = f"mockllm/m-{uuid4().hex}"
+    set_model_info(
+        name,
+        ModelInfo(
+            cost=ModelCost(
+                input=input_call * 1_000_000 / TOKENS_PER_CALL,
+                output=output_call * 1_000_000 / TOKENS_PER_CALL,
+                input_cache_write=0,
+                input_cache_read=0,
+            )
+        ),
+    )
+    return get_model(name, memoize=False, custom_outputs=Script(outputs))
+
+
+def _usage_output(
+    *, input: int = 0, output: int = 0, model: str = "mockllm"
+) -> ModelOutput:
+    result = ModelOutput.from_content(model, "ok")
+    result.usage = ModelUsage(
+        input_tokens=input, output_tokens=output, total_tokens=input + output
+    )
+    return result
+
+
+def _router_model(outputs: Sequence[ModelOutput]) -> Model:
+    # an unpriced model whose provider reports which model served each call
+    class Router(MockLLM):
+        def served_model_usage(
+            self, output: ModelOutput
+        ) -> list[ServedModelUsage] | None:
+            if output.usage is None:
+                return None
+            return [ServedModelUsage(output.model, output.usage)]
+
+    return _api_model(Router, Script(outputs), None)
+
+
 @agent
-def _approving(model: Model) -> Agent:
-    # generates, then makes an approval call, which runs with token metering suspended
+def _approving(
+    model: Model, approver: Model | None = None, approvals: int = 1
+) -> Agent:
+    # generates, then makes approval calls, which run with token metering suspended
     async def execute(state: AgentState) -> AgentState:
         state.output = await model.generate(state.messages)
         with suspend_token_limit():
-            await model.generate("approve?")
+            for _ in range(approvals):
+                await (approver or model).generate("approve?")
         return state
 
     return execute
@@ -1137,12 +1183,16 @@ def _compacting(model: Model) -> Agent:
 
 
 @agent
-def _recording(model: Model) -> Agent:
+def _recording(model: Model, cost: float) -> Agent:
     # records usage in the limit tree that the sample's usage never sees
     async def execute(state: AgentState) -> AgentState:
         state.output = await model.generate(state.messages)
         record_model_usage(
-            ModelUsage(output_tokens=TOKENS_PER_CALL, total_tokens=TOKENS_PER_CALL)
+            ModelUsage(
+                output_tokens=TOKENS_PER_CALL,
+                total_tokens=TOKENS_PER_CALL,
+                total_cost=cost,
+            )
         )
         return state
 
@@ -1173,8 +1223,13 @@ def _written_ledger(transcript: Transcript) -> SwarmLedger:
     return SwarmLedger.model_validate(record)
 
 
-async def _ledger(agent_swarm: Agent, **limits: Any) -> SwarmLedger:
+async def _ledger(
+    agent_swarm: Agent, before: Sequence[Model] = (), **limits: Any
+) -> SwarmLedger:
+    # `before`: models the sample calls once each before the swarm starts
     async with sample(**limits) as t:
+        for model in before:
+            await model.generate("before")
         await agent_swarm(AgentState(messages=[ChatMessageUser(content="task")]))
         return _written_ledger(t)
 
@@ -1506,17 +1561,104 @@ async def test_ledger_a_recovered_error_clears_total_complete() -> None:
 
 
 @pytest.mark.anyio
+async def test_ledger_an_unpriced_approval_call_clears_total_complete() -> None:
+    # the suspended call bypasses the token node's count; the sample delta and the
+    # call's event both show it
+    gc.collect()
+    approver = scripted_model()
+    ledger = await _ledger(
+        swarm(_approving(scripted_model(cost=1.0), approver), channels=[])
+    )
+    assert ledger.calls == Calls(calls=2, unpriced=1)
+    assert ledger.unpriced_calls_recorded == 0
+    assert ledger.unpriced_models == [str(approver)]
+    assert not ledger.total_complete
+
+
+@pytest.mark.anyio
+async def test_ledger_an_unpriced_routed_approval_call_clears_total_complete() -> None:
+    # two approval calls to one model, served by a priced and an unpriced model: the
+    # model's aggregate keeps the known cost, so only the per-call check sees it
+    gc.collect()
+    served = f"mockllm/served-{uuid4().hex}"
+    _price(served, 1.0)
+    router = _router_model(
+        [
+            _usage_output(output=TOKENS_PER_CALL, model=served),
+            _usage_output(
+                output=TOKENS_PER_CALL, model=f"mockllm/unpriced-{uuid4().hex}"
+            ),
+        ]
+    )
+    ledger = await _ledger(
+        swarm(_approving(scripted_model(cost=1.0), router, approvals=2), channels=[])
+    )
+    assert ledger.calls == Calls(calls=3, unpriced=1)
+    assert ledger.unpriced_calls_recorded == 0
+    assert ledger.unpriced_models == []
+    assert not ledger.total_complete
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "case", ["one-model", "small-model-first", "large-model-first"]
+)
+async def test_ledger_reconciles_after_prior_sample_spend(
+    case: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # the sample spent $100 before the swarm; the swarm's calls cost $0.000001 each.
+    # The sample's interval cost is a difference of cumulative sums, rounded at $100.
+    gc.collect()
+    large = _rated_model(
+        [
+            _usage_output(output=TOKENS_PER_CALL),  # $100, before the swarm
+            _usage_output(input=TOKENS_PER_CALL),  # $0.000001
+        ],
+        input_call=1e-6,
+        output_call=100.0,
+    )
+    small = _rated_model(
+        [_usage_output(output=TOKENS_PER_CALL)] * 2, input_call=0, output_call=1e-6
+    )
+    if case == "one-model":
+        members: list[Agent] = [generator(large)]
+        before = [large]
+    else:
+        # the sample's usage lists models in the order of their first call
+        members = [generator(small), generator(large)]
+        before = [small, large] if case == "small-model-first" else [large, small]
+    with caplog.at_level(logging.ERROR, logger="inspect_swarm"):
+        ledger = await _ledger(swarm(members, channels=[]), before=before)
+    assert "does not reconcile" not in caplog.text
+    assert ledger.unattributed.total_tokens == 0
+    assert ledger.unattributed.total_cost == pytest.approx(0.0, abs=1e-12)
+    assert ledger.total_complete and ledger.attribution_complete
+
+
+@pytest.mark.anyio
 async def test_ledger_counts_a_hard_stopped_call_as_errored() -> None:
     gc.collect()
-    held = scripted_model(Script(gate=anyio.Event()), cost=1.0)
+    script = Script(gate=anyio.Event())
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start(control.members[0])
+        # stop once the member's call is in flight; with no grace it is cancelled
+        while script.started < 1:
+            await anyio.sleep(0)
+        return "all_done"
+
     ledger = await _ledger(
-        swarm(generator(held), channels=[], budget=Budget(time=0.05, grace=0))
+        swarm(
+            generator(scripted_model(script, cost=1.0)),
+            controller=controller(run, "budget_test_hard_stop"),
+            channels=[],
+            budget=Budget(grace=0),
+        )
     )
     [m] = ledger.members
     assert (m.status, m.cancelled) == ("cancelled", True)
     assert m.calls == Calls(errored=1)
-    assert ledger.stop_reason == "swarm_time"
-    assert ledger.overshoot["time"] > 0
+    assert ledger.stop_reason == "all_done"
     assert not ledger.total_complete
 
 
@@ -1572,9 +1714,16 @@ async def test_ledger_logs_an_error_when_the_meters_exceed_the_sample(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     gc.collect()
+    # the sample has spent $100 before the swarm, and the swarm meter records $1 more
+    # than the sample did
+    prior = scripted_model(cost=100.0)
     with caplog.at_level(logging.ERROR, logger="inspect_swarm"):
-        ledger = await _ledger(swarm(_recording(scripted_model(cost=1.0)), channels=[]))
+        ledger = await _ledger(
+            swarm(_recording(scripted_model(cost=1.0), cost=1.0), channels=[]),
+            before=[prior],
+        )
     assert ledger.unattributed.total_tokens == -TOKENS_PER_CALL
+    assert ledger.unattributed.total_cost == pytest.approx(-1.0)
     assert "does not reconcile" in caplog.text
 
 

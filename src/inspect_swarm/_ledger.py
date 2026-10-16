@@ -15,8 +15,10 @@ from ._budget import Budget, CostPair, SwarmCostNode, SwarmTokenNode
 
 logger = logging.getLogger(__name__)
 
-# The relative tolerance on the unattributed cost: the sample sums cost per model, the
-# meters per call, so the two can differ by summation order.
+# The relative tolerance on the unattributed cost. The sample's cost over the interval
+# is the difference of two cumulative sums, which carry the rounding error of the whole
+# sample's cost so far, and the meters sum per call; so the tolerance is relative to the
+# cumulative cost of the models in the interval, not to the interval's cost.
 COST_TOLERANCE = 1e-9
 
 _TOKEN_FIELDS = (
@@ -212,11 +214,13 @@ class LedgerInterval:
             self._span_id,
             {m.name: m.span_id for m in members if m.span_id is not None},
         )
-        delta, unpriced_models = _usage_delta(self._start_usage, _usage_snapshot())
+        delta, unpriced_models, cost_scale = _usage_delta(
+            self._start_usage, _usage_snapshot()
+        )
         swarm_meter = _meter(swarm)
         unattributed = _minus(delta, swarm_meter.usage)
         unattributed.total_cost = (delta.total_cost or 0.0) - swarm_meter.cost
-        tolerance = COST_TOLERANCE * abs(delta.total_cost or 0.0)
+        tolerance = COST_TOLERANCE * cost_scale
         if any((getattr(unattributed, f) or 0) < 0 for f in _TOKEN_FIELDS) or (
             unattributed.total_cost < -tolerance
         ):
@@ -352,10 +356,12 @@ def _usage_snapshot() -> dict[str, ModelUsage]:
 
 def _usage_delta(
     start: Mapping[str, ModelUsage], end: Mapping[str, ModelUsage]
-) -> tuple[ModelUsage, list[str]]:
-    # the sample's usage over the interval, and the models in it with tokens but no cost
+) -> tuple[ModelUsage, list[str], float]:
+    # the sample's usage over the interval, the models in it with tokens but no cost, and
+    # the cumulative cost of the priced ones at the end
     total = ModelUsage()
     cost: float | None = None
+    scale = 0.0
     unpriced: list[str] = []
     for model, usage in end.items():
         before = start.get(model, ModelUsage())
@@ -368,9 +374,10 @@ def _usage_delta(
         if usage.total_cost is None:
             unpriced.append(model)
         else:
-            cost = (cost or 0.0) + usage.total_cost - (before.total_cost or 0.0)
+            cost = (cost or 0.0) + (usage.total_cost - (before.total_cost or 0.0))
+            scale += abs(usage.total_cost)
     total.total_cost = cost
-    return total, unpriced
+    return total, unpriced, scale
 
 
 def _minus(a: ModelUsage, b: ModelUsage) -> ModelUsage:
