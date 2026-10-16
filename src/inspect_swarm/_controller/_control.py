@@ -3,7 +3,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import anyio
 from anyio.abc import TaskGroup
@@ -14,6 +14,10 @@ from inspect_ai.util import Limit, sample_limits
 
 from .._budget import Lever, MemberContext, SwarmNode, is_bridged
 from .._member import Member, classify_errors, member_nodes, run_member, unwrap
+
+if TYPE_CHECKING:
+    from .._bus._policy import CommPolicy
+    from .._channel._channel import Channel
 
 MemberState = Literal["pending", "running", "ended"]
 """A member's lifecycle: not started, running, or ended."""
@@ -164,8 +168,15 @@ class SwarmRun:
         caps: list[Limit],
         time: float | None,
         grace: float,
+        channels: Sequence["Channel"] = (),
+        policy: "CommPolicy | None" = None,
     ) -> None:
+        # deferred: the bus imports the channels, which import this module's package
+        from .._bus._bus import Bus
+
         self._members = [MemberRun(record, name) for record, name in records]
+        # the channel states open here, before any member starts
+        self.bus = Bus(self._members, channels, policy)
         for node in caps:
             if isinstance(node, SwarmNode):
                 node.stop_swarm = self.stop
@@ -246,7 +257,10 @@ class SwarmRun:
     # the runtime
 
     async def run(self, controller: Callable[["SwarmControl"], Awaitable[str]]) -> None:
+        from .._bus._bus import current_bus
+
         error: Exception | None = None
+        bus_token = current_bus.set(self.bus)
         try:
             with ExitStack() as caps:
                 for node in self._caps:
@@ -263,6 +277,8 @@ class SwarmRun:
             # a foreign error from a member or the controller; the wrappers have
             # already removed the swarm's own leaves
             error = ex
+        finally:
+            current_bus.reset(bus_token)
         if error is not None:
             raise unwrap(error)
 
@@ -271,6 +287,8 @@ class SwarmRun:
         # no member can start once a stop has begun
         if self.stop_reason is not None:
             return
+        # first, so that no record commits once a stop has begun
+        self.bus.close()
         self.stop_reason = reason
         # a no-op when the controller has returned
         self._controller_scope.cancel()
