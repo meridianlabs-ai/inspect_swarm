@@ -287,12 +287,12 @@ def member_nodes(record: Member, name: str) -> tuple[Lever, list[Limit]]:
 
 
 # The member wrapper. Runs the member on `state` with `input` as its conversation, in
-# its tool-state scope and cancel scope, under its nodes and the swarm's caps, and
-# returns its status and the state the agent returned. The caller keeps `state`, as
-# as_solver() does, for the output of a member that does not return. No error whose
-# source is a swarm node leaves it: a cap becomes a stop of the swarm, and the member's
-# own nodes a status. Anything else (a foreign error) is raised, without the swarm's
-# leaves.
+# its tool-state scope, under its nodes and the swarm's caps, and returns its status
+# and the state the agent returned. The caller enters the member's cancel scope, so a
+# cancellation propagates, and keeps `state`, as as_solver() does, for the output of a
+# member that does not return. No error whose source is a swarm node leaves it: a cap
+# becomes a stop of the swarm, and the member's own nodes a status. Anything else (a
+# foreign error) is raised, without the swarm's leaves.
 async def run_member(
     record: Member,
     name: str,
@@ -306,7 +306,7 @@ async def run_member(
     token = current_member.set(context)
     error: Exception | None = None
     try:
-        with tool_state_scope(name), context.scope:
+        with tool_state_scope(name):
             agent = build_member(record)
             # entered before the member's conversation is built, as run() does not: a
             # member message limit replaces the sample's for that conversation from its
@@ -337,9 +337,6 @@ async def run_member(
         # a node that stopped a bridged member, whose cancellation may not have been
         # delivered when its last call was the one that stopped it
         return context.stop_cause, state
-    if context.scope.cancelled_caught:
-        # the hard stop
-        return "cancelled", state
     return "submitted", state
 
 

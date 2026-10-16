@@ -8,7 +8,7 @@ from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.dataset import Sample
 from inspect_ai.event import SpanBeginEvent
 from inspect_ai.model import ChatMessageAssistant, ChatMessageUser, Model, ModelOutput
-from inspect_ai.util import store, token_limit
+from inspect_ai.util import span_id_provider, store, token_limit
 
 from inspect_swarm import (
     Budget,
@@ -381,6 +381,33 @@ async def test_a_members_output_survives_its_own_limit_and_the_hard_stop() -> No
 
 
 @pytest.mark.anyio
+async def test_a_member_blocked_entering_its_span_is_hard_stopped() -> None:
+    # a span-id provider that never answers for the member's span
+    async def provider(name: str, parent_id: str | None, id: str | None) -> str:
+        if name == "blocked":
+            await anyio.sleep_forever()
+        return id or name
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("blocked")
+        return "enough"
+
+    with anyio.fail_after(10), span_id_provider(provider):
+        stop = await run_swarm(
+            swarm(
+                member(sleeper(), name="blocked"),
+                controller=_controller(run, "final_test_blocked_span"),
+                channels=[],
+                budget=Budget(grace=0),
+            )
+        )
+    [blocked] = stop.record.members
+    assert (blocked.state, blocked.status) == ("ended", "cancelled")
+    [result] = evidence(stop.transcript, "member_result")
+    assert (result["status"], result["span_id"]) == ("cancelled", None)
+
+
+@pytest.mark.anyio
 async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> None:
     secret = "SECRET-ANSWER-1729"
     model = scripted_model(Script(outputs=[ModelOutput.from_content("m", secret)]))
@@ -434,6 +461,26 @@ async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> No
 
 # ---------------------------------------------------------------------------
 # The returned state
+
+
+@agent
+def blank_completion() -> Agent:
+    # an output whose completion is empty on purpose, though its message has text
+    async def execute(state: AgentState) -> AgentState:
+        state.output = ModelOutput.from_content("mockllm", "working text")
+        state.output.completion = ""
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_recording_an_output_leaves_its_completion_unchanged() -> None:
+    async with sample():
+        state = await swarm(blank_completion(), channels=[])(AgentState(messages=[]))
+        stored = store().get(RECORD_KEY)
+    assert state.output.completion == ""
+    assert stored["members"][0]["output"]["completion"] == ""
 
 
 @agent

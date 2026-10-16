@@ -169,7 +169,9 @@ class MemberRun:
             if self.state == "ended" and self.agent_state is not None
             else None
         )
-        return MemberResult(
+        # unvalidated: validating would rerun ModelOutput's validator on the member's
+        # own output, which fills an empty completion from the message text
+        return MemberResult.model_construct(
             name=self.name,
             role=self.role,
             model=self.model,
@@ -179,6 +181,14 @@ class MemberRun:
             output=output,
             time=self.time,
         )
+
+
+# A member's status when its wrapper did not return one: cancelled, by the hard stop or
+# from outside, unless a node stopped a bridged member by cancelling it.
+def _ended(m: MemberRun, status: str | None) -> str:
+    if status is not None:
+        return status
+    return m.context.stop_cause or "cancelled"
 
 
 # The runtime for one sample: the controller surface, member tasks and the stop
@@ -360,26 +370,36 @@ class SwarmRun:
     async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
         # its conversation is built inside the member's limits
         m.agent_state = AgentState(messages=[])
-        # the span is the member's own, so its result is written inside it
-        async with span(m.name, type=AGENT_SPAN_TYPE):
-            m.span_id = current_span_id()
-            status = "cancelled"
-            try:
-                status, m.agent_state = await run_member(
-                    m.record,
-                    m.name,
-                    m.context,
-                    m.lever,
-                    m.nodes,
-                    self._caps,
-                    input,
-                    m.agent_state,
-                )
-            except Exception:
-                status = "errored"
-                raise
-            finally:
-                self._end(m, status)
+        status: str | None = None
+        try:
+            # the hard stop cancels this scope, which covers entering the span
+            with m.context.scope:
+                # the member's own span, so that its result is written inside it
+                async with span(m.name, type=AGENT_SPAN_TYPE):
+                    m.span_id = current_span_id()
+                    try:
+                        status, m.agent_state = await run_member(
+                            m.record,
+                            m.name,
+                            m.context,
+                            m.lever,
+                            m.nodes,
+                            self._caps,
+                            input,
+                            m.agent_state,
+                        )
+                    except Exception:
+                        status = "errored"
+                        raise
+                    finally:
+                        self._end(m, _ended(m, status))
+        except Exception:
+            status = "errored"
+            raise
+        finally:
+            if m.state != "ended":
+                # the span was never entered
+                self._end(m, _ended(m, status))
 
     def _end(self, m: MemberRun, status: str) -> None:
         # the member counts as running until its event is queued
