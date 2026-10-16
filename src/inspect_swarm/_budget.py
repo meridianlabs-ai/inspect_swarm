@@ -193,14 +193,17 @@ def share_nodes(
         )
     weights = [1.0] * len(names) if budget.split == "equal" else list(budget.split)
     assert len(weights) == len(names)
-    total = sum(weights)
-    tokens = None if caps.tokens is None else _token_shares(caps.tokens, weights)
+    # each member's fraction of the caps, exact: large weights neither overflow nor
+    # round a share away
+    total = sum(Fraction(w) for w in weights)
+    fractions = [Fraction(w) / total for w in weights]
+    costs = None if caps.cost is None else _cost_shares(caps.cost, fractions)
+    tokens = None if caps.tokens is None else _token_shares(caps.tokens, fractions)
     shares: dict[str, list[Limit]] = {}
     for i, name in enumerate(names):
         nodes: list[Limit] = []
-        if caps.cost is not None:
-            share = caps.cost * weights[i] / total
-            nodes.extend(CostPair(share, owner=name, role="share").nodes)
+        if costs is not None:
+            nodes.extend(CostPair(costs[i], owner=name, role="share").nodes)
         if tokens is not None:
             nodes.append(
                 SwarmTokenNode(tokens[i], caps.token_type, owner=name, role="share")
@@ -209,18 +212,26 @@ def share_nodes(
     return shares
 
 
-def _token_shares(cap: int, weights: Sequence[float]) -> list[int]:
+def _cost_shares(cap: float, fractions: Sequence[Fraction]) -> list[float]:
+    shares = [float(cap * f) for f in fractions]
+    if 0 in shares:
+        raise ValueError(
+            f"Budget.split gives a member a cost share of zero: its weight is too small a fraction of the total to divide the swarm's cost cap of ${cap:,}. Use weights closer together."
+        )
+    return shares
+
+
+def _token_shares(cap: int, fractions: Sequence[Fraction]) -> list[int]:
     # whole shares that sum to the cap: each member's floor, then one token at a time to
-    # the largest fractional parts, ties by roster order. Exact, so no rounding moves a token.
-    total = sum(Fraction(w) for w in weights)
-    exact = [cap * Fraction(w) / total for w in weights]
+    # the largest fractional parts, ties by roster order
+    exact = [cap * f for f in fractions]
     shares = [math.floor(x) for x in exact]
     by_fraction = sorted(range(len(exact)), key=lambda i: (shares[i] - exact[i], i))
     for i in by_fraction[: cap - sum(shares)]:
         shares[i] += 1
     if 0 in shares:
         raise ValueError(
-            f"The swarm's token cap of {cap:,} is too small to split between its {len(weights)} members: a member's share would be zero tokens. Raise the token cap, or use split='pool'."
+            f"The swarm's token cap of {cap:,} is too small to split between its {len(fractions)} members: a member's share would be zero tokens. Raise the token cap, or use split='pool'."
         )
     return shares
 

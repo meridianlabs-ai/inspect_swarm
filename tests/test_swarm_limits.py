@@ -662,6 +662,8 @@ async def test_the_cost_check_refuses_a_model_argument_it_cannot_price(
         (Budget(tokens=8 * TOKENS_PER_CALL, split=(1, 1, 2)), None, (1, 2, 4)),
         # $2, $2 and $8, at $1 a call
         (Budget(cost=12.0, split=(1, 1, 4)), None, (1, 2, 8)),
+        # the same with weights large enough to overflow cap * weight
+        (Budget(cost=12.0, split=(2.0**1020, 2.0**1020, 2.0**1022)), None, (1, 2, 8)),
     ],
 )
 async def test_members_stop_on_their_own_shares(

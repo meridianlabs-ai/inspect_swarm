@@ -667,6 +667,9 @@ def _shares(
         # equal fractions: by roster order
         ("equal", None, 10, [(None, 4), (None, 3), (None, 3)]),
         ((0.1, 0.2), 3.0, 7, [(1.0, 2), (2.0, 5)]),
+        # large weights: the sum and cap * weight would overflow a float
+        ((1e308, 1e308), 10.0, 10, [(5.0, 5), (5.0, 5)]),
+        ((1e308, 1e307), 11.0, None, [(10.0, None), (1.0, None)]),
     ],
 )
 def test_shares_divide_the_caps_by_weight(
@@ -708,6 +711,7 @@ def test_a_pool_has_no_shares() -> None:
             Caps(None, 50, "all", None),
             "token cap of 50 .* 3 members",
         ),
+        ((1e308, 1e308, 5e-324), Caps(10.0, None, "all", None), "cost share of zero"),
     ],
 )
 def test_share_errors(
