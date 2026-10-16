@@ -4,7 +4,7 @@ from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import anyio
@@ -66,6 +66,7 @@ from inspect_swarm._budget import (
     Lever,
     MemberContext,
     NodeRole,
+    SwarmCostNode,
     SwarmMessageNode,
     SwarmNode,
     SwarmTokenNode,
@@ -74,6 +75,7 @@ from inspect_swarm._budget import (
     current_member,
     derive_caps,
     is_bridged,
+    share_nodes,
 )
 
 TOKENS_PER_CALL = 50
@@ -634,6 +636,85 @@ def test_check_cost_data() -> None:
     with pytest.raises(PrerequisiteError, match=str(unpriced)) as raised:
         check_cost_data([priced, unpriced, unpriced])
     assert str(priced) not in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# Splits
+
+
+def _shares(
+    budget: Budget, caps: Caps, members: int
+) -> list[tuple[float | None, int | None]]:
+    # each member's (cost share, token share), in roster order
+    shares = share_nodes(budget, caps, [f"m{i}" for i in range(members)])
+    result: list[tuple[float | None, int | None]] = []
+    for nodes in shares.values():
+        cost = [n.limit for n in nodes if isinstance(n, SwarmCostNode)]
+        # a cost pair's token-tree node has no token limit
+        tokens = [n.limit for n in nodes if isinstance(n, SwarmTokenNode) and n.limit]
+        result.append((cost[0] if cost else None, tokens[0] if tokens else None))
+    return result
+
+
+@pytest.mark.parametrize(
+    "split, cost, tokens, expected",
+    [
+        ("equal", 9.0, None, [(3.0, None)] * 3),
+        ((1, 2, 3), 12.0, None, [(2.0, None), (4.0, None), (6.0, None)]),
+        ("equal", None, 300, [(None, 100)] * 3),
+        # the remainder goes to the largest fractional parts: 42.86 and 28.57
+        ((1, 2, 3, 1), None, 100, [(None, 14), (None, 29), (None, 43), (None, 14)]),
+        # equal fractions: by roster order
+        ("equal", None, 10, [(None, 4), (None, 3), (None, 3)]),
+        ((0.1, 0.2), 3.0, 7, [(1.0, 2), (2.0, 5)]),
+    ],
+)
+def test_shares_divide_the_caps_by_weight(
+    split: Literal["equal"] | tuple[float, ...],
+    cost: float | None,
+    tokens: int | None,
+    expected: list[tuple[float | None, int | None]],
+) -> None:
+    caps = Caps(cost=cost, tokens=tokens, token_type="all", time=None)
+    shares = _shares(Budget(split=split), caps, len(expected))
+    assert shares == [
+        (pytest.approx(c) if c is not None else None, t) for c, t in expected
+    ]
+    if tokens is not None:
+        assert sum(t for _, t in shares if t is not None) == tokens
+
+
+def test_shares_keep_the_token_caps_metering_type() -> None:
+    caps = Caps(cost=None, tokens=100, token_type="output", time=None)
+    shares = share_nodes(Budget(split="equal"), caps, ["a", "b"])
+    for name, [node] in shares.items():
+        assert isinstance(node, SwarmTokenNode)
+        assert (node.owner, node.role, node.type) == (name, "share", "output")
+
+
+def test_a_pool_has_no_shares() -> None:
+    caps = Caps(cost=10.0, tokens=100, token_type="all", time=None)
+    assert share_nodes(Budget(), caps, ["a", "b"]) == {}
+
+
+@pytest.mark.parametrize(
+    "split, caps, match",
+    [
+        ("equal", Caps(None, None, "all", 60.0), "neither"),
+        ("equal", Caps(None, 2, "all", None), "token cap of 2 .* 3 members"),
+        # weights can give a member a zero share of a cap larger than the roster
+        (
+            (1.0, 1.0, 100.0),
+            Caps(None, 50, "all", None),
+            "token cap of 50 .* 3 members",
+        ),
+    ],
+)
+def test_share_errors(
+    split: Literal["equal"] | tuple[float, ...], caps: Caps, match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        share_nodes(Budget(split=split), caps, ["a", "b", "c"])
 
 
 # ---------------------------------------------------------------------------
