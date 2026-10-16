@@ -1,5 +1,365 @@
-from typing import Protocol
+import contextvars
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass
+from typing import Literal, Protocol, cast
+
+import anyio
+from anyio.abc import TaskGroup
+from inspect_ai.agent import Agent
+from inspect_ai.log import transcript
+from inspect_ai.model import ChatMessage, ChatMessageUser
+from inspect_ai.util import Limit, sample_limits
+
+from .._budget import Lever, MemberContext, is_bridged
+from .._member import Member, classify_errors, member_nodes, run_member, unwrap
+
+MemberState = Literal["pending", "running", "ended"]
+"""A member's lifecycle: not started, running, or ended."""
+
+
+class MemberHandle(Protocol):
+    """A member as a controller sees it: its name, role, state and status, never its text."""
+
+    @property
+    def name(self) -> str:
+        """The member's name."""
+        ...
+
+    @property
+    def role(self) -> str | None:
+        """The member's role, if it has one."""
+        ...
+
+    @property
+    def state(self) -> MemberState:
+        """The member's lifecycle state."""
+        ...
+
+    @property
+    def status(self) -> str | None:
+        """How the member ended, once it has: `submitted`, `stopped`, `member_limit:<type>`, `swarm_cap`, `cancelled` or `errored`."""
+        ...
+
+    @property
+    def submitted(self) -> bool:
+        """Whether the member ended with a submission (status `submitted`)."""
+        ...
+
+
+@dataclass(frozen=True)
+class MemberEnded:
+    """A member ended."""
+
+    member: str
+    """The member's name."""
+
+    status: str
+    """How it ended, as `MemberHandle.status`."""
+
+    submitted: bool
+    """Whether it ended with a submission."""
+
+
+SwarmEvent = MemberEnded
+"""An event a controller receives from `SwarmControl.events()`. Later versions add kinds, so test an event's type before reading its fields."""
 
 
 class SwarmControl(Protocol):
     """What a controller's `run` works through: the swarm's members and their events, for one sample."""
+
+    @property
+    def members(self) -> Sequence[MemberHandle]:
+        """The members, in roster order."""
+        ...
+
+    def member(self, name: str) -> MemberHandle:
+        """The member with this name.
+
+        Args:
+            name: The member's name.
+
+        Raises:
+            KeyError: If no member has this name.
+        """
+        ...
+
+    def start(
+        self, member: str | MemberHandle, input: str | list[ChatMessage] | None = None
+    ) -> None:
+        """Start a member, and return at once.
+
+        The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm's input when `input` is `None`, followed by the member's preamble: its name, role and roster size, and each channel's instructions.
+
+        Args:
+            member: The member, or its name.
+            input: The member's input. `None` gives it the swarm's input.
+
+        Raises:
+            KeyError: If no member has this name.
+            RuntimeError: If the member has already started (a member runs once), or the swarm is stopping.
+        """
+        ...
+
+    def events(self) -> AsyncIterator[SwarmEvent]:
+        """The swarm's events, in order from the swarm's start.
+
+        Each event is yielded once. The iterator ends when no member is running and no event is waiting; a member started later is reported by a new `events()` call. Use one iterator at a time.
+
+        Raises:
+            RuntimeError: If another iterator is already waiting for events.
+        """
+        ...
+
+
+# Reasons a controller may return as they are; any other is recorded as controller:<reason>.
+_TOPOLOGY_REASONS = frozenset({"all_done", "verified", "quiescence"})
+
+
+# A member in one run of the swarm: what its handle shows, and the nodes its wrapper
+# enters. Its lever and limits are created here, once per run, so that a stop can close
+# the lever of a member that has started but whose task has not yet entered it.
+class MemberRun:
+    def __init__(self, record: Member, name: str, stop: Callable[[str], None]) -> None:
+        self.record = record
+        self.name = name
+        self.role = record.role
+        self.state: MemberState = "pending"
+        self.status: str | None = None
+        # read from the record, before any agent is built
+        agent = record.agent if record.agent is not None else record.factory
+        self.context = MemberContext(
+            name, bridged=is_bridged(cast(Agent, agent), None), stop_swarm=stop
+        )
+        self.lever, self.nodes = member_nodes(record, name)
+
+    @property
+    def submitted(self) -> bool:
+        return self.status == "submitted"
+
+
+# The runtime for one sample: the controller surface, member tasks and the stop
+# procedure. One is created for each run of the swarm.
+class SwarmRun:
+    def __init__(
+        self,
+        records: Sequence[tuple[Member, str]],
+        *,
+        input: list[ChatMessage],
+        preambles: dict[str, str],
+        caps: list[Limit],
+        time: float | None,
+        grace: float,
+    ) -> None:
+        self._members = [MemberRun(record, name, self.stop) for record, name in records]
+        self._by_name = {m.name: m for m in self._members}
+        self._input = input
+        self._preambles = preambles
+        self._caps = caps
+        self._time = time
+        self._grace = grace
+        self._runtime_lever = Lever(owner=None)
+        self._controller_scope = anyio.CancelScope()
+        self._members_tg: TaskGroup | None = None
+        self._member_ctx: contextvars.Context | None = None
+        self._queue: deque[SwarmEvent] = deque()
+        self._changed = anyio.Event()
+        self._waiting = False
+        self._stopped = anyio.Event()
+        self._effective_grace = grace
+        self.stop_reason: str | None = None
+
+    # SwarmControl
+
+    @property
+    def members(self) -> Sequence[MemberHandle]:
+        return list(self._members)
+
+    def member(self, name: str) -> MemberHandle:
+        return self._lookup(name)
+
+    def start(
+        self, member: str | MemberHandle, input: str | list[ChatMessage] | None = None
+    ) -> None:
+        m = self._lookup(member if isinstance(member, str) else member.name)
+        if self.stop_reason is not None:
+            raise RuntimeError(
+                f"start({m.name!r}): the swarm is stopping ({self.stop_reason}), so no member can start."
+            )
+        if m.state != "pending":
+            raise RuntimeError(
+                f"start({m.name!r}): the member has already started, and a member runs once."
+            )
+        assert self._members_tg is not None and self._member_ctx is not None
+        messages: list[ChatMessage] = (
+            list(self._input)
+            if input is None
+            else [ChatMessageUser(content=input)]
+            if isinstance(input, str)
+            else list(input)
+        )
+        messages.append(ChatMessageUser(content=self._preambles[m.name]))
+        m.state = "running"
+        # from the saved context, so the member's lever is a child of the caps and never
+        # of the runtime lever, whichever task starts it
+        self._member_ctx.copy().run(
+            self._members_tg.start_soon, self._run_member, m, messages, name=m.name
+        )
+        self._notify()
+
+    async def events(self) -> AsyncIterator[SwarmEvent]:
+        while True:
+            if self._queue:
+                yield self._queue.popleft()
+            elif not self._running():
+                return
+            else:
+                if self._waiting:
+                    raise RuntimeError(
+                        "events(): another iterator is already waiting for events; use one at a time."
+                    )
+                self._waiting = True
+                try:
+                    await self._changed.wait()
+                finally:
+                    self._waiting = False
+
+    # the runtime
+
+    async def run(self, controller: Callable[["SwarmControl"], Awaitable[str]]) -> None:
+        error: Exception | None = None
+        try:
+            with ExitStack() as caps:
+                for node in self._caps:
+                    caps.enter_context(node)
+                async with anyio.create_task_group() as members_tg:
+                    self._members_tg = members_tg
+                    self._member_ctx = contextvars.copy_context()
+                    async with anyio.create_task_group() as runtime_tg:
+                        runtime_tg.start_soon(self._supervise, runtime_tg)
+                        if self._time is not None:
+                            runtime_tg.start_soon(self._time_cap, self._time)
+                        runtime_tg.start_soon(self._run_controller, controller)
+        except Exception as ex:
+            # a foreign error from a member or the controller; the wrappers have
+            # already removed the swarm's own leaves
+            error = ex
+        if error is not None:
+            raise unwrap(error)
+
+    def stop(self, reason: str) -> None:
+        # the first call wins; everything before the grace period is synchronous, so
+        # no member can start once a stop has begun
+        if self.stop_reason is not None:
+            return
+        self.stop_reason = reason
+        # a no-op when the controller has returned
+        self._controller_scope.cancel()
+        for m in self._members:
+            if m.state == "running":
+                m.lever.close(reason)
+        self._runtime_lever.close(reason)
+        self._effective_grace = self._grace_now()
+        self._stopped.set()
+
+    async def _run_controller(
+        self, controller: Callable[["SwarmControl"], Awaitable[str]]
+    ) -> None:
+        error: Exception | None = None
+        reason: object = None
+        with ExitStack() as lever:
+            for node in self._runtime_lever.nodes:
+                lever.enter_context(node)
+            with self._controller_scope:
+                try:
+                    reason = await controller(self)
+                except Exception as ex:
+                    error = ex
+            if self._controller_scope.cancelled_caught:
+                return
+        if error is not None:
+            cap, _, foreign = classify_errors(
+                error, self._caps, self._runtime_lever.nodes
+            )
+            if foreign is not None:
+                raise foreign
+            if cap:
+                self.stop("swarm_cap")
+            return
+        if not isinstance(reason, str):
+            raise TypeError(
+                f"A controller's run must return its stop reason as a str, got {type(reason).__name__}."
+            )
+        self.stop(reason if reason in _TOPOLOGY_REASONS else f"controller:{reason}")
+
+    async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
+        status = "cancelled"
+        try:
+            status = await run_member(
+                m.record, m.name, m.context, m.lever, m.nodes, self._caps, input
+            )
+        except Exception:
+            status = "errored"
+            raise
+        finally:
+            m.state = "ended"
+            m.status = status
+            self._queue.append(MemberEnded(m.name, status, m.submitted))
+            self._notify()
+
+    async def _time_cap(self, seconds: float) -> None:
+        await anyio.sleep(seconds)
+        self.stop("swarm_time")
+
+    async def _supervise(self, runtime_tg: TaskGroup) -> None:
+        await self._stopped.wait()
+        # grace: members finish the calls they have in flight and are refused the next
+        with anyio.move_on_after(self._effective_grace):
+            await self._until_quiet()
+        # hard stop
+        for m in self._members:
+            if m.state == "running":
+                m.context.scope.cancel()
+        await self._until_quiet()
+        transcript().info(
+            {
+                "version": 1,
+                "type": "swarm",
+                "kind": "stopped",
+                "reason": self.stop_reason,
+                "members": [
+                    {"member": m.name, "state": m.state, "status": m.status}
+                    for m in self._members
+                ],
+            },
+            source="inspect_swarm",
+        )
+        # ends the time cap's timer
+        runtime_tg.cancel_scope.cancel()
+
+    def _grace_now(self) -> float:
+        # the final step keeps at least half the sample's remaining time
+        time = sample_limits().time
+        if time.limit is None:
+            return self._grace
+        return min(self._grace, max(0.0, (time.limit - time.usage) / 2))
+
+    def _lookup(self, name: str) -> MemberRun:
+        try:
+            return self._by_name[name]
+        except KeyError:
+            raise KeyError(
+                f"No member named {name!r}; the members are {', '.join(self._by_name)}."
+            ) from None
+
+    def _running(self) -> bool:
+        return any(m.state == "running" for m in self._members)
+
+    async def _until_quiet(self) -> None:
+        while self._running():
+            await self._changed.wait()
+
+    def _notify(self) -> None:
+        self._changed.set()
+        self._changed = anyio.Event()

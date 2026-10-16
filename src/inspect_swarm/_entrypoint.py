@@ -2,3 +2,5 @@
 # `inspect_swarm/<name>` it has not seen, so that names resolve without
 # importing the package first. The built-in controllers and channels are
 # imported here as they are added.
+from ._channel.filesystem import filesystem as filesystem
+from ._controller.leaderless import leaderless as leaderless

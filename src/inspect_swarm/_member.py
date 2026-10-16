@@ -14,13 +14,16 @@ from inspect_ai._util.registry import (
     registry_unqualified_name,
     registry_value,
 )
-from inspect_ai.agent import Agent
+from inspect_ai.agent import Agent, run
+from inspect_ai.model import ChatMessage
 from inspect_ai.util import (
     Limit,
+    LimitExceededError,
     cost_limit,
     message_limit,
     time_limit,
     token_limit,
+    tool_state_scope,
     turn_limit,
 )
 from inspect_ai.util._limit import (
@@ -39,6 +42,16 @@ from pydantic import (
     model_validator,
 )
 
+from ._budget import (
+    CostPair,
+    Lever,
+    MemberContext,
+    SwarmMessageNode,
+    SwarmTokenNode,
+    SwarmTurnNode,
+    current_member,
+)
+
 AgentFactory = Callable[..., Agent]
 """A registered `@agent` factory, such as `deepagent`."""
 
@@ -52,6 +65,9 @@ _LIMIT_KINDS: dict[str, type[Limit]] = {
 }
 
 _DEEPAGENT = "inspect_ai/deepagent"
+
+# characters a tool-state scope name may not contain
+_RESERVED = "/#"
 
 
 class Member(BaseModel):
@@ -112,6 +128,13 @@ class Member(BaseModel):
     def _check(self) -> "Member":
         if self.count < 1:
             raise ValueError(f"member(): count must be at least 1, got {self.count}.")
+        if self.name is not None and (
+            not self.name or any(c in self.name for c in _RESERVED)
+        ):
+            # the member's name is its tool-state scope, which refuses these
+            raise ValueError(
+                f"member(): name must be non-empty and must not contain '/' or '#', got {self.name!r}."
+            )
         if self.agent is not None:
             if self.factory is not None:
                 raise TypeError("member(): give an agent or a factory, not both.")
@@ -160,12 +183,12 @@ def member(
 
     Tool state. Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member. An explicit `instance` is used as given: members, or the copies of one counted member, that name the same instance share its state, so a board shared on purpose is `memory(instance="board")`. The sample store itself is shared. State that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with `tool_state_instance()`. Built-in tool state that a setup solver prepared at the default instance before the swarm runs is not visible to the members.
 
-    `deepagent()` members with background dispatch (`background=True` or an integer) are not supported yet and are refused.
+    `deepagent()` members with background dispatch (`background=True` or an integer) are not supported yet and are refused. So are ACP agents, which wait for their caller to drive them rather than returning: a built one when `member()` is called, and a factory's when the member is built.
 
     Args:
         agent: A built, registered agent, or a registered `@agent` factory.
         args: The factory's keyword arguments. Only for a factory.
-        name: The member's name. Defaults to the agent's or factory's registry name, without its package. With `count` above 1 the members are `name-1` to `name-k`.
+        name: The member's name. Defaults to the agent's or factory's registry name, without its package. With `count` above 1 the members are `name-1` to `name-k`. It names the member's tool-state scope, so it cannot be empty or contain "/" or "#".
         role: The member's role, given to the controller and in the member's preamble.
         count: How many members this record stands for. Above 1 needs a factory.
         limits: The member's own token, cost, turn, message or time limits.
@@ -174,8 +197,8 @@ def member(
         The member record.
 
     Raises:
-        TypeError: If `agent` is not registered with `@agent`, if a built agent is given `args` or `count` above 1, or if `args` do not match the factory's parameters.
-        ValueError: If `count` is below 1, a limit is a working limit, or a `deepagent()` member uses background dispatch.
+        TypeError: If `agent` is not registered with `@agent` or is an ACP agent, if a built agent is given `args` or `count` above 1, or if `args` do not match the factory's parameters.
+        ValueError: If `count` is below 1, `name` is empty or contains "/" or "#", a limit is a working limit, or a `deepagent()` member uses background dispatch.
     """
     form = "factory" if is_factory(agent) else "agent"
     return Member.model_validate(
@@ -227,7 +250,137 @@ def build_member(record: Member) -> Agent:
     if record.agent is not None:
         return record.agent
     assert record.factory is not None
-    return record.factory(**record.args)
+    agent = record.factory(**record.args)
+    _check_not_acp(agent)
+    return agent
+
+
+# The member's lever and the nodes its wrapper enters: the lever's pair, then its own
+# limits re-created from their values, fresh for each run (limits are single-use).
+def member_nodes(record: Member, name: str) -> tuple[Lever, list[Limit]]:
+    lever = Lever(owner=name)
+    nodes = lever.nodes
+    for limit in record.limits:
+        if isinstance(limit, _TokenLimit):
+            nodes.append(
+                SwarmTokenNode(limit.limit, limit.type, owner=name, role="limit")
+            )
+        elif isinstance(limit, _CostLimit):
+            nodes.extend(CostPair(limit.limit, owner=name, role="limit").nodes)
+        elif isinstance(limit, _TurnLimit):
+            nodes.append(SwarmTurnNode(limit.limit, owner=name))
+        elif isinstance(limit, _MessageLimit):
+            nodes.append(SwarmMessageNode(limit.limit, owner=name))
+        else:
+            # a time limit stays Inspect's: it cancels where it was entered, here
+            nodes.append(time_limit(limit.limit))
+    return lever, nodes
+
+
+# The member wrapper. Runs the member in its tool-state scope and cancel scope, under
+# its nodes and the swarm's caps, and returns its status. No error whose source is a
+# swarm node leaves it: a cap becomes a stop of the swarm, and the member's own nodes a
+# status. Anything else (a foreign error) is raised, without the swarm's leaves.
+async def run_member(
+    record: Member,
+    name: str,
+    context: MemberContext,
+    lever: Lever,
+    nodes: list[Limit],
+    caps: Sequence[Limit],
+    input: list[ChatMessage],
+) -> str:
+    token = current_member.set(context)
+    error: Exception | None = None
+    limit_error: LimitExceededError | None = None
+    try:
+        with tool_state_scope(name), context.scope:
+            agent = build_member(record)
+            _, limit_error = await run(agent, input, limits=nodes, name=name)
+    except Exception as ex:
+        error = ex
+    finally:
+        current_member.reset(token)
+
+    if error is not None:
+        cap, owned, foreign = classify_errors(error, caps, nodes)
+        if foreign is not None:
+            raise foreign
+        if cap:
+            context.stop_swarm("swarm_cap")
+            return "swarm_cap"
+        assert owned is not None
+        return _status_for(owned, lever)
+    if context.scope.cancelled_caught:
+        # the hard stop, or a node that stopped a bridged member
+        return context.stop_cause or "cancelled"
+    return _status_for(limit_error, lever)
+
+
+def _status_for(error: LimitExceededError | None, lever: Lever) -> str:
+    if error is None:
+        return "submitted"
+    if _source_in(error, lever.nodes):
+        return "stopped"
+    return f"member_limit:{error.type}"
+
+
+# Splits an error from a member or the controller into its leaves: whether any is from
+# one of the swarm's caps, the first from the caller's own nodes, and the rest, which is
+# foreign: a single leaf bare, several as a group.
+def classify_errors(
+    error: Exception, caps: Sequence[Limit], own: Sequence[Limit]
+) -> tuple[bool, LimitExceededError | None, Exception | None]:
+    group = (
+        cast(ExceptionGroup[Exception], error)
+        if isinstance(error, ExceptionGroup)
+        else ExceptionGroup("swarm", [error])
+    )
+    cap_errors, rest = group.split(lambda e: _source_in(e, caps))
+    owned, foreign = (
+        rest.split(lambda e: _source_in(e, own)) if rest is not None else (None, None)
+    )
+    owned_leaf = _leaves(owned)[0] if owned is not None else None
+    assert owned_leaf is None or isinstance(owned_leaf, LimitExceededError)
+    return (
+        cap_errors is not None,
+        owned_leaf,
+        unwrap(foreign) if foreign is not None else None,
+    )
+
+
+# A group with a single leaf as that leaf, as collect() raises it; others unchanged.
+def unwrap(error: Exception) -> Exception:
+    if isinstance(error, ExceptionGroup):
+        leaves = _leaves(cast(ExceptionGroup[Exception], error))
+        if len(leaves) == 1:
+            return leaves[0]
+    return cast(Exception, error)
+
+
+def _source_in(error: BaseException, nodes: Sequence[Limit]) -> bool:
+    return isinstance(error, LimitExceededError) and any(
+        error.source is node for node in nodes
+    )
+
+
+def _leaves(group: BaseExceptionGroup[Exception]) -> list[Exception]:
+    leaves: list[Exception] = []
+    for ex in group.exceptions:
+        if isinstance(ex, BaseExceptionGroup):
+            leaves.extend(_leaves(ex))
+        else:
+            leaves.append(ex)
+    return leaves
+
+
+def _check_not_acp(agent: object) -> None:
+    # by name, so that inspect_swarm does not import inspect_swe
+    for cls in type(agent).__mro__:
+        if cls.__name__ == "ACPAgent" and cls.__module__.split(".")[0] == "inspect_swe":
+            raise TypeError(
+                f"{_name(agent)} is an ACP agent. ACP agents are interactive sessions driven by their caller and cannot be swarm members."
+            )
 
 
 def is_factory(value: object) -> bool:
@@ -263,6 +416,7 @@ def _not_registered(value: object) -> TypeError:
 
 
 def _check_agent(agent: Agent, args: Mapping[str, Any], count: int) -> None:
+    _check_not_acp(agent)
     if is_factory(agent):
         raise TypeError(
             f"member(): {_name(agent)} is a factory: pass it as member({_name(agent)}, args={{...}})."
