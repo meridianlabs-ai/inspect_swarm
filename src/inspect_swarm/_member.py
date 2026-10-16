@@ -22,7 +22,9 @@ from inspect_ai.util import (
     Limit,
     LimitExceededError,
     cost_limit,
+    current_span_id,
     message_limit,
+    span,
     time_limit,
     token_limit,
     tool_state_scope,
@@ -36,6 +38,7 @@ from inspect_ai.util._limit import (
     _TurnLimit,  # pyright: ignore[reportPrivateUsage]
     _WorkingLimit,  # pyright: ignore[reportPrivateUsage]
 )
+from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -287,12 +290,12 @@ def member_nodes(record: Member, name: str) -> tuple[Lever, list[Limit]]:
 
 
 # The member wrapper. Runs the member on `state` with `input` as its conversation, in
-# its tool-state scope, under its nodes and the swarm's caps, and returns its status
-# and the state the agent returned. The caller enters the member's cancel scope, so a
-# cancellation propagates, and keeps `state`, as as_solver() does, for the output of a
-# member that does not return. No error whose source is a swarm node leaves it: a cap
-# becomes a stop of the swarm, and the member's own nodes a status. Anything else (a
-# foreign error) is raised, without the swarm's leaves.
+# its tool-state scope, cancel scope and agent span, under its nodes and the swarm's
+# caps, and returns its status and the state the agent returned. The caller keeps
+# `state`, as as_solver() does, for the output of a member that does not return. No
+# error whose source is a swarm node leaves it: a cap becomes a stop of the swarm, and
+# the member's own nodes a status. Anything else (a foreign error) is raised, without
+# the swarm's leaves.
 async def run_member(
     record: Member,
     name: str,
@@ -306,7 +309,7 @@ async def run_member(
     token = current_member.set(context)
     error: Exception | None = None
     try:
-        with tool_state_scope(name):
+        with tool_state_scope(name), context.scope:
             agent = build_member(record)
             # entered before the member's conversation is built, as run() does not: a
             # member message limit replaces the sample's for that conversation from its
@@ -318,7 +321,11 @@ async def run_member(
                 state.messages = [
                     message.model_copy(update={"source": "input"}) for message in input
                 ]
-                state = await agent(state)
+                # inside the member's limits and cancel scope, as run() opens it: a
+                # span-id provider may await
+                async with span(name, type=AGENT_SPAN_TYPE):
+                    context.span_id = current_span_id()
+                    state = await agent(state)
     except Exception as ex:
         error = ex
     finally:
@@ -337,6 +344,9 @@ async def run_member(
         # a node that stopped a bridged member, whose cancellation may not have been
         # delivered when its last call was the one that stopped it
         return context.stop_cause, state
+    if context.scope.cancelled_caught:
+        # the hard stop
+        return "cancelled", state
     return "submitted", state
 
 

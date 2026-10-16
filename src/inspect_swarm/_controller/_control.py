@@ -9,8 +9,7 @@ import anyio
 from anyio.abc import TaskGroup
 from inspect_ai.agent import Agent, AgentState
 from inspect_ai.model import ChatMessage, ChatMessageUser
-from inspect_ai.util import Limit, current_span_id, sample_limits, span
-from inspect_ai.util._span import AGENT_SPAN_TYPE
+from inspect_ai.util import Limit, current_span_id, sample_limits
 
 from .._budget import Lever, MemberContext, SwarmNode, is_bridged
 from .._evidence import evidence
@@ -150,7 +149,6 @@ class MemberRun:
         self.status: str | None = None
         # the state the member runs on, kept for its output however it ends
         self.agent_state: AgentState | None = None
-        self.span_id: str | None = None
         self.time: float | None = None
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
@@ -181,14 +179,6 @@ class MemberRun:
             output=output,
             time=self.time,
         )
-
-
-# A member's status when its wrapper did not return one: cancelled, by the hard stop or
-# from outside, unless a node stopped a bridged member by cancelling it.
-def _ended(m: MemberRun, status: str | None) -> str:
-    if status is not None:
-        return status
-    return m.context.stop_cause or "cancelled"
 
 
 # The runtime for one sample: the controller surface, member tasks and the stop
@@ -370,47 +360,36 @@ class SwarmRun:
     async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
         # its conversation is built inside the member's limits
         m.agent_state = AgentState(messages=[])
-        status: str | None = None
+        status = "cancelled"
         try:
-            # the hard stop cancels this scope, which covers entering the span
-            with m.context.scope:
-                # the member's own span, so that its result is written inside it
-                async with span(m.name, type=AGENT_SPAN_TYPE):
-                    m.span_id = current_span_id()
-                    try:
-                        status, m.agent_state = await run_member(
-                            m.record,
-                            m.name,
-                            m.context,
-                            m.lever,
-                            m.nodes,
-                            self._caps,
-                            input,
-                            m.agent_state,
-                        )
-                    except Exception:
-                        status = "errored"
-                        raise
-                    finally:
-                        self._end(m, _ended(m, status))
+            status, m.agent_state = await run_member(
+                m.record,
+                m.name,
+                m.context,
+                m.lever,
+                m.nodes,
+                self._caps,
+                input,
+                m.agent_state,
+            )
         except Exception:
             status = "errored"
             raise
         finally:
-            if m.state != "ended":
-                # the span was never entered
-                self._end(m, _ended(m, status))
+            self._end(m, status)
 
     def _end(self, m: MemberRun, status: str) -> None:
         # the member counts as running until its event is queued
         m.state = "ended"
         m.status = status
         m.time = anyio.current_time() - self._start
+        # in the swarm's span: the status is known only once the member's span has
+        # closed, since the member's own limits are entered outside it
         evidence(
             "result",
             "member_result",
             member=m.name,
-            span_id=m.span_id,
+            span_id=m.context.span_id,
             status=status,
             time=m.time,
         )

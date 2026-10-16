@@ -8,7 +8,7 @@ from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.dataset import Sample
 from inspect_ai.event import SpanBeginEvent
 from inspect_ai.model import ChatMessageAssistant, ChatMessageUser, Model, ModelOutput
-from inspect_ai.util import span_id_provider, store, token_limit
+from inspect_ai.util import span_id_provider, store, time_limit, token_limit
 
 from inspect_swarm import (
     Budget,
@@ -380,19 +380,33 @@ async def test_a_members_output_survives_its_own_limit_and_the_hard_stop() -> No
         assert not m.submitted
 
 
+async def _blocked_provider(name: str, parent_id: str | None, id: str | None) -> str:
+    # a span-id provider that never answers for the member's span
+    if name == "blocked":
+        await anyio.sleep_forever()
+    return id or name
+
+
+@pytest.mark.anyio
+async def test_a_member_time_limit_bounds_entering_its_span() -> None:
+    with anyio.fail_after(10), span_id_provider(_blocked_provider):
+        stop = await run_swarm(
+            swarm(
+                member(sleeper(), name="blocked", limits=[time_limit(0.05)]),
+                channels=[],
+            )
+        )
+    assert stop.reason == "all_done"
+    assert statuses(stop) == {"blocked": "member_limit:time"}
+
+
 @pytest.mark.anyio
 async def test_a_member_blocked_entering_its_span_is_hard_stopped() -> None:
-    # a span-id provider that never answers for the member's span
-    async def provider(name: str, parent_id: str | None, id: str | None) -> str:
-        if name == "blocked":
-            await anyio.sleep_forever()
-        return id or name
-
     async def run(control: SwarmControl) -> StopReason:
         control.start("blocked")
         return "enough"
 
-    with anyio.fail_after(10), span_id_provider(provider):
+    with anyio.fail_after(10), span_id_provider(_blocked_provider):
         stop = await run_swarm(
             swarm(
                 member(sleeper(), name="blocked"),
