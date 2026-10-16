@@ -128,7 +128,11 @@ def sleeper(seconds: float = 3600.0) -> Agent:
 
 @asynccontextmanager
 async def sample(
-    *, tokens: int | None = None, cost: float | None = None, time: float | None = None
+    *,
+    tokens: int | None = None,
+    cost: float | None = None,
+    time: float | None = None,
+    messages: int | None = None,
 ) -> AsyncGenerator[Transcript]:
     """The limit roots, store and transcript of a running sample."""
     # the registry's limiters are bound to the async backend that created them
@@ -140,7 +144,7 @@ async def sample(
         with (
             token_limit(tokens),
             cost_limit(cost),
-            message_limit(None),
+            message_limit(messages),
             turn_limit(None),
             working_limit(None),
             time_limit(time),
@@ -157,9 +161,12 @@ async def run_swarm(
     tokens: int | None = None,
     cost: float | None = None,
     time: float | None = None,
+    messages: int | None = None,
 ) -> dict[str, Any]:
     """Run a swarm in a sample and return its `stopped` evidence: the stop reason and each member's state and status."""
-    async with sample(tokens=tokens, cost=cost, time=time) as transcript:
+    async with sample(
+        tokens=tokens, cost=cost, time=time, messages=messages
+    ) as transcript:
         await swarm(AgentState(messages=[ChatMessageUser(content=input)]))
     return stopped(transcript)
 

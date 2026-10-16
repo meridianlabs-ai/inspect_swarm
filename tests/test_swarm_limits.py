@@ -104,6 +104,41 @@ async def test_member_limits_are_recreated_for_each_member_and_run(
         assert set(statuses(stop).values()) == {expected}
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "sample_limit,member_limit,expected",
+    [
+        pytest.param(1, 10, "submitted", id="member-limit-above-sample"),
+        pytest.param(10, 1, "member_limit:message", id="member-limit-below-sample"),
+        pytest.param(10, 10, "submitted", id="both-above"),
+    ],
+)
+async def test_a_member_message_limit_applies_from_its_first_message(
+    sample_limit: int, member_limit: int, expected: str
+) -> None:
+    # each member starts with two messages (the input and its preamble) and adds none:
+    # its own message limit, not the sample's, decides whether that is allowed
+    stop = await run_swarm(
+        swarm(
+            [
+                member(
+                    generator(scripted_model(), calls=0),
+                    name="limited",
+                    limits=[message_limit(member_limit)],
+                ),
+                member(
+                    generator(scripted_model(), calls=0),
+                    name="sibling",
+                    limits=[message_limit(10)],
+                ),
+            ],
+            channels=[],
+        ),
+        messages=sample_limit,
+    )
+    assert statuses(stop) == {"limited": expected, "sibling": "submitted"}
+
+
 # ---------------------------------------------------------------------------
 # Stopping
 

@@ -132,7 +132,10 @@ async def test_events_allows_one_waiting_iterator() -> None:
 
         async with anyio.create_task_group() as tg:
             tg.start_soon(iterate)
-            await anyio.sleep(0.01)
+            # until the first iterator holds the events, without depending on timing
+            assert isinstance(control, SwarmRun)
+            while not control._iterating:
+                await anyio.sleep(0)
             try:
                 await iterate()
             except RuntimeError as ex:

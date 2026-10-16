@@ -1,6 +1,7 @@
 import inspect
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from typing import Any, cast
 
 from inspect_ai._util.registry import (
@@ -299,11 +300,17 @@ async def run_member(
 ) -> str:
     token = current_member.set(context)
     error: Exception | None = None
-    limit_error: LimitExceededError | None = None
     try:
         with tool_state_scope(name), context.scope:
             agent = build_member(record)
-            _, limit_error = await run(agent, input, limits=nodes, name=name)
+            # entered here rather than by run(), which builds the member's conversation
+            # before entering its limits: a member message limit replaces the
+            # sample's for that conversation from its first message. Errors from
+            # these nodes are classified below, as run() would have caught them.
+            with ExitStack() as entered:
+                for node in nodes:
+                    entered.enter_context(node)
+                await run(agent, input, name=name)
     except Exception as ex:
         error = ex
     finally:
@@ -321,12 +328,10 @@ async def run_member(
     if context.scope.cancelled_caught:
         # the hard stop, or a node that stopped a bridged member
         return context.stop_cause or "cancelled"
-    return _status_for(limit_error, lever)
+    return "submitted"
 
 
-def _status_for(error: LimitExceededError | None, lever: Lever) -> str:
-    if error is None:
-        return "submitted"
+def _status_for(error: LimitExceededError, lever: Lever) -> str:
     if _source_in(error, lever.nodes):
         return "stopped"
     return f"member_limit:{error.type}"
