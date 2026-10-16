@@ -1,14 +1,17 @@
 from collections.abc import Mapping, Sequence
 from typing import cast
 
+from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import (
+    ModelDict,
     is_model_dict,
     registry_info,
     registry_params,
     registry_unqualified_name,
 )
 from inspect_ai.agent import Agent, AgentState, agent
-from inspect_ai.model import Model, get_model
+from inspect_ai.model import GenerateConfig, Model, get_model
+from inspect_ai.model._model_info import MODEL_INFO_LOOKUP_API_KEY
 from inspect_ai.util import Limit
 
 from ._budget import Budget, CostPair, SwarmTokenNode, check_cost_data, derive_caps
@@ -113,10 +116,28 @@ def _model(record: Member) -> str | Model:
         else record.args.get("model")
     )
     if is_model_dict(model):
-        # a built agent's params hold a Model as its logged dict, without its
-        # credentials, so it is checked by name
-        model = model["model"]
+        return _lookup_model(model)
     return model if isinstance(model, str | Model) else get_model()
+
+
+def _lookup_model(logged: ModelDict) -> Model:
+    # A built agent's params hold its Model as the logged dict, which keeps its
+    # configuration (base_url, config, model_args) but not its credentials. Rebuild it
+    # with Inspect's placeholder credential, as get_model_info() resolves a name, so
+    # that pricing is looked up under the canonical name of the configured model.
+    try:
+        return get_model(
+            logged["model"],
+            config=GenerateConfig(**logged["config"]),
+            base_url=logged["base_url"],
+            api_key=MODEL_INFO_LOOKUP_API_KEY,
+            memoize=False,
+            **logged["model_args"],
+        )
+    except Exception as ex:
+        raise PrerequisiteError(
+            f"A swarm cost cap requires cost data for every member's model, and the model of a built member, {logged['model']}, could not be resolved from its configuration to look it up: {ex}. Use the member's factory form, member(factory, args={{'model': ...}}), so the configured model itself is checked."
+        ) from ex
 
 
 def _members(members: object) -> list[Member]:

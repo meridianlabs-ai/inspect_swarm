@@ -12,7 +12,7 @@ from inspect_ai.agent import Agent
 from inspect_ai.agent._bridge.util import in_bridge_model_generate
 from inspect_ai.model import Model, ModelInfo, ModelUsage, get_model_info
 from inspect_ai.model._model_info import (
-    _get_model_info_direct,  # pyright: ignore[reportPrivateUsage]
+    _resolve_model_info,  # pyright: ignore[reportPrivateUsage]
 )
 from inspect_ai.util import Limit, LimitExceededError, sample_limits
 from inspect_ai.util._limit import (
@@ -195,14 +195,12 @@ def check_cost_data(models: Sequence[str | Model]) -> None:
 
 
 def _model_info(model: str | Model) -> ModelInfo | None:
-    # a model object is already built, so it is looked up as it is; a name is resolved
-    # as get_model_info() does, under its canonical name, with Inspect's placeholder
-    # credential rather than the member's
-    return (
-        _get_model_info_direct(model)
-        if isinstance(model, Model)
-        else get_model_info(model)
-    )
+    # a model object is looked up under its own canonical name, uncached: Inspect's
+    # cache is keyed by the model string, which two configurations can share. A name
+    # is resolved as get_model_info() does, with Inspect's placeholder credential.
+    if isinstance(model, Model):
+        return _resolve_model_info(model, resolve_provider=False)
+    return get_model_info(model)
 
 
 def is_bridged(agent: Agent, bridged: bool | None) -> bool:
