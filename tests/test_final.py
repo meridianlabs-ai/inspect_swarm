@@ -6,9 +6,21 @@ import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.dataset import Sample
-from inspect_ai.event import SpanBeginEvent
-from inspect_ai.model import ChatMessageAssistant, ChatMessageUser, Model, ModelOutput
-from inspect_ai.util import span_id_provider, store, time_limit, token_limit
+from inspect_ai.event import InfoEvent, SpanBeginEvent, SpanEndEvent
+from inspect_ai.model import (
+    ChatMessageAssistant,
+    ChatMessageUser,
+    Model,
+    ModelOutput,
+)
+from inspect_ai.model._model_output import ModelFallback
+from inspect_ai.util import (
+    message_limit,
+    span_id_provider,
+    store,
+    time_limit,
+    token_limit,
+)
 
 from inspect_swarm import (
     Budget,
@@ -44,6 +56,17 @@ def _controller(run: Any, name: str) -> Controller:
         return Controller(run)
 
     return factory()
+
+
+def final_event(outcome: Outcome) -> InfoEvent:
+    [event] = [
+        e
+        for e in outcome.transcript.events
+        if isinstance(e, InfoEvent)
+        and isinstance(e.data, dict)
+        and e.data.get("kind") == "final"
+    ]
+    return event
 
 
 def _record() -> SwarmResultRecord:
@@ -229,6 +252,41 @@ def test_an_outer_limit_leaves_the_provisional_answer(
 
 # ---------------------------------------------------------------------------
 # Finalisation
+
+
+def test_an_answer_finalisation_cannot_fit_ends_the_sample_on_its_message_limit(
+    tmp_path: Path,
+) -> None:
+    # the member's own message limit lets it submit; the swarm's conversation, the
+    # input and the answer, is over the sample's
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            member(
+                generator(scripted_model(), calls=0, answer="42"),
+                name="a",
+                limits=[message_limit(10)],
+            ),
+            channels=[],
+        ),
+        message_limit=1,
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    assert log.samples is not None
+    [sample] = log.samples
+    assert sample.limit is not None and sample.limit.type == "message"
+    assert sample.output.completion == "42"
+    record = SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
+    [a] = record.members
+    assert (a.state, a.status) == ("ended", "submitted")
+    assert (record.final.member, record.final.provisional) == ("a", True)
+    assert not [
+        e
+        for e in sample.events
+        if isinstance(e, InfoEvent)
+        and isinstance(e.data, dict)
+        and e.data.get("kind") == "final"
+    ]
 
 
 @pytest.mark.anyio
@@ -430,8 +488,10 @@ async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> No
     async def run(control: SwarmControl) -> StopReason:
         for m in control.members:
             control.start(m)
+        ended: set[str] = set()
         async for event in control.events():
-            if event.member == "a":
+            ended.add(event.member)
+            if ended == {"a", "limited"}:
                 break
         while busy.calls < 1:
             await anyio.sleep(0)
@@ -442,24 +502,44 @@ async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> No
             [
                 member(generator(model, calls=1), name="a"),
                 member(generator(scripted_model(busy), calls=None), name="b"),
+                member(
+                    generator(scripted_model(), calls=None),
+                    name="limited",
+                    limits=[token_limit(TOKENS_PER_CALL)],
+                ),
             ],
             controller=_controller(run, "final_test_evidence"),
             channels=[],
         )
     )
+    events = stop.transcript.events
     spans = {
         e.name: e.id
-        for e in stop.transcript.events
+        for e in events
         if isinstance(e, SpanBeginEvent) and e.type == "agent"
     }
-    results = evidence(stop.transcript, "member_result")
+    span_ends = {e.id: i for i, e in enumerate(events) if isinstance(e, SpanEndEvent)}
+    results = {
+        str(e.data["member"]): (i, e)
+        for i, e in enumerate(events)
+        if isinstance(e, InfoEvent)
+        and isinstance(e.data, dict)
+        and e.data.get("kind") == "member_result"
+    }
     common = {"version": 1, "type": "result"}
-    assert [r["member"] for r in results] == ["a", "b"]
-    for r in results:
+    assert statuses(stop) == {
+        "a": "submitted",
+        "b": "stopped",
+        "limited": "member_limit:token",
+    }
+    for name, (i, e) in results.items():
+        r = e.data
+        assert isinstance(r, dict)
         assert r | common == r
-        assert r["kind"] == "member_result"
-        assert r["span_id"] == spans[r["member"]]
-    assert {r["member"]: r["status"] for r in results} == statuses(stop)
+        assert (r["kind"], r["status"]) == ("member_result", statuses(stop)[name])
+        # written in the member's span, before it ends
+        assert r["span_id"] == e.span_id == spans[name]
+        assert i < span_ends[spans[name]]
     payload = final(stop.transcript)
     assert payload == {
         **common,
@@ -470,7 +550,60 @@ async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> No
         "reason": None,
         "stop_reason": "controller:enough",
     }
-    assert secret not in repr([*results, payload])
+    assert final_event(stop).span_id == spans["swarm"]
+    assert secret not in repr([*(e.data for _, e in results.values()), payload])
+
+
+@agent
+def odd_metadata(where: str, outputs: list[ModelOutput]) -> Agent:
+    # an output holding a value JSON cannot, after a pause so that it is not the first
+    async def execute(state: AgentState) -> AgentState:
+        await anyio.sleep(0.01)
+        state.output = ModelOutput.from_content("mockllm", "late")
+        odd = {"diagnostic": object()}
+        if where == "output":
+            state.output.metadata = odd
+        elif where == "message":
+            state.output.message.metadata = odd
+        else:
+            state.output.fallback = ModelFallback(
+                model="mockllm/a", fallback_model="mockllm/b", metadata=odd
+            )
+        outputs.append(state.output)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("where", ["output", "message", "fallback"])
+async def test_an_output_json_cannot_hold_is_recorded_with_nulls(where: str) -> None:
+    outputs: list[ModelOutput] = []
+    async with sample():
+        state = await swarm(
+            [
+                member(generator(scripted_model(), calls=0, answer="first"), name="a"),
+                member(odd_metadata(where, outputs), name="b"),
+            ],
+            channels=[],
+        )(AgentState(messages=[]))
+        stored = store().get(RECORD_KEY)
+    assert state.output.completion == "first"
+    [odd] = outputs
+    stored_output = stored["members"][1]["output"]
+    if where == "output":
+        live, recorded = odd.metadata, stored_output["metadata"]
+    elif where == "message":
+        live = odd.message.metadata
+        recorded = stored_output["choices"][0]["message"]["metadata"]
+    else:
+        assert odd.fallback is not None
+        live, recorded = odd.fallback.metadata, stored_output["fallback"]["metadata"]
+    assert recorded == {"diagnostic": None}
+    # the member's own output keeps its value
+    assert live is not None and type(live["diagnostic"]) is object
+    assert stored["members"][1]["state"] == "ended"
+    assert stored["members"][0]["role"] is None
 
 
 # ---------------------------------------------------------------------------

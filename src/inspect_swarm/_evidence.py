@@ -3,8 +3,9 @@ from pydantic import JsonValue
 
 
 # The swarm's evidence: an InfoEvent with source "inspect_swarm" whose payload has the
-# format version, the evidence type and kind, the member whose span it is written in
-# (None for the swarm's own) and that span's id. Never member text.
+# format version, the evidence type and kind, a member and a span id. A member's result
+# names the member and is written in its span; the final event names the chosen member
+# (None without one) and is written in the swarm's span. Never member text.
 def evidence(
     type: str,
     kind: str,

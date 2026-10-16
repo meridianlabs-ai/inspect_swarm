@@ -67,6 +67,7 @@ class SwarmResultRecord(BaseModel):
     """The final answer."""
 
 
-# Only the runtime writes the record.
+# Only the runtime writes the record. A value JSON cannot hold (in a member's output
+# metadata, say) is written as null, as Inspect serializes the store.
 def write_record(record: SwarmResultRecord) -> None:
-    store().set(RECORD_KEY, record.model_dump(mode="json"))
+    store().set(RECORD_KEY, record.model_dump(mode="json", fallback=lambda _: None))

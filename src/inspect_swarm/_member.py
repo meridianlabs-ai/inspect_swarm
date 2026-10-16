@@ -1,7 +1,7 @@
 import inspect
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import AsyncExitStack, ExitStack
 from typing import Any, cast
 
 from inspect_ai._util.registry import (
@@ -291,11 +291,12 @@ def member_nodes(record: Member, name: str) -> tuple[Lever, list[Limit]]:
 
 # The member wrapper. Runs the member on `state` with `input` as its conversation, in
 # its tool-state scope, cancel scope and agent span, under its nodes and the swarm's
-# caps, and returns its status and the state the agent returned. The caller keeps
-# `state`, as as_solver() does, for the output of a member that does not return. No
-# error whose source is a swarm node leaves it: a cap becomes a stop of the swarm, and
-# the member's own nodes a status. Anything else (a foreign error) is raised, without
-# the swarm's leaves.
+# caps, then calls `end` with its status and the state the agent returned, inside the
+# member's span when the span was entered. The caller keeps `state`, as as_solver()
+# does, for the output of a member that does not return. No error whose source is a
+# swarm node leaves it: a cap becomes a stop of the swarm, and the member's own nodes a
+# status. Anything else (a foreign error) is raised, without the swarm's leaves, after
+# `end` with `errored`; a cancellation from outside ends the member as `cancelled`.
 async def run_member(
     record: Member,
     name: str,
@@ -305,6 +306,33 @@ async def run_member(
     caps: Sequence[Limit],
     input: list[ChatMessage],
     state: AgentState,
+    end: Callable[[str, AgentState], None],
+) -> None:
+    status = "cancelled"
+    # holds the member's span open after its limits and cancel scope have exited, so
+    # that their errors are classified inside it
+    async with AsyncExitStack() as member_span:
+        try:
+            status, state = await _run_member(
+                record, name, context, lever, nodes, caps, input, state, member_span
+            )
+        except Exception:
+            status = "errored"
+            raise
+        finally:
+            end(status, state)
+
+
+async def _run_member(
+    record: Member,
+    name: str,
+    context: MemberContext,
+    lever: Lever,
+    nodes: list[Limit],
+    caps: Sequence[Limit],
+    input: list[ChatMessage],
+    state: AgentState,
+    member_span: AsyncExitStack,
 ) -> tuple[str, AgentState]:
     token = current_member.set(context)
     error: Exception | None = None
@@ -321,11 +349,11 @@ async def run_member(
                 state.messages = [
                     message.model_copy(update={"source": "input"}) for message in input
                 ]
-                # inside the member's limits and cancel scope, as run() opens it: a
-                # span-id provider may await
-                async with span(name, type=AGENT_SPAN_TYPE):
-                    context.span_id = current_span_id()
-                    state = await agent(state)
+                # entered inside the member's limits and cancel scope, as run() enters
+                # it, since a span-id provider may await
+                await member_span.enter_async_context(span(name, type=AGENT_SPAN_TYPE))
+                context.span_id = current_span_id()
+                state = await agent(state)
     except Exception as ex:
         error = ex
     finally:

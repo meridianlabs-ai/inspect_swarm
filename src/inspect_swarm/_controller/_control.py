@@ -360,31 +360,29 @@ class SwarmRun:
     async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
         # its conversation is built inside the member's limits
         m.agent_state = AgentState(messages=[])
-        status = "cancelled"
-        try:
-            status, m.agent_state = await run_member(
-                m.record,
-                m.name,
-                m.context,
-                m.lever,
-                m.nodes,
-                self._caps,
-                input,
-                m.agent_state,
-            )
-        except Exception:
-            status = "errored"
-            raise
-        finally:
+
+        def end(status: str, state: AgentState) -> None:
+            m.agent_state = state
             self._end(m, status)
+
+        await run_member(
+            m.record,
+            m.name,
+            m.context,
+            m.lever,
+            m.nodes,
+            self._caps,
+            input,
+            m.agent_state,
+            end,
+        )
 
     def _end(self, m: MemberRun, status: str) -> None:
         # the member counts as running until its event is queued
         m.state = "ended"
         m.status = status
         m.time = anyio.current_time() - self._start
-        # in the swarm's span: the status is known only once the member's span has
-        # closed, since the member's own limits are entered outside it
+        # in the member's span, unless it ended before entering it
         evidence(
             "result",
             "member_result",
