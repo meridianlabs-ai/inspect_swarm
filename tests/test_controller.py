@@ -28,6 +28,7 @@ from inspect_swarm._controller._control import SwarmRun
 from .swarm_runtime import (
     TOKENS_PER_CALL,
     Script,
+    evidence,
     generator,
     run_swarm,
     sample,
@@ -61,7 +62,7 @@ async def test_leaderless_starts_every_member_and_returns_all_done() -> None:
     stop = await run_swarm(
         swarm([generator(model, calls=1), generator(model, calls=1)], channels=[])
     )
-    assert stop["reason"] == "all_done"
+    assert stop.reason == "all_done"
     assert statuses(stop) == {"generator-1": "submitted", "generator-2": "submitted"}
     assert script.calls == 2
 
@@ -161,6 +162,7 @@ async def test_a_woken_iterator_keeps_the_event_that_woke_it() -> None:
     async with sample():
         run = SwarmRun(
             [(member(generator(scripted_model())), "generator")],
+            state=AgentState(messages=[]),
             input=[],
             preambles={"generator": ""},
             caps=[],
@@ -251,7 +253,7 @@ async def test_returning_soft_stops_members_and_cancels_them_after_grace() -> No
             budget=Budget(grace=0.2),
         )
     )
-    assert stop["reason"] == "controller:enough"
+    assert stop.reason == "controller:enough"
     assert statuses(stop) == {
         "quick": "submitted",
         "busy": "stopped",
@@ -315,22 +317,19 @@ async def test_a_stop_closes_scheduling_and_cancels_only_the_controller(
             budget=budget,
         )
     )
-    assert stop["reason"] == trigger
+    assert stop.reason == trigger
     # cancelling the controller left the scout running into grace, where it could
     # start no worker and dispatch no call: the reached cap, checked before the
     # scout's lever, or the lever refused it
     assert len(attempts) == 1 and "stopping" in attempts[0]
     assert scout_calls.started == 0
     assert controller_acted == []
-    by_name = {m["member"]: m for m in stop["members"]}
-    assert by_name["scout"]["status"] == (
+    by_name = {m.name: m for m in stop.record.members}
+    assert by_name["scout"].status == (
         "swarm_cap" if trigger == "swarm_cap" else "stopped"
     )
     for worker in ("worker-1", "worker-2"):
-        assert (by_name[worker]["state"], by_name[worker]["status"]) == (
-            "pending",
-            None,
-        )
+        assert (by_name[worker].state, by_name[worker].status) == ("pending", None)
 
 
 @pytest.mark.anyio
@@ -372,7 +371,7 @@ async def test_a_controller_woken_as_a_stop_begins_ends_with_the_stop(
             await run_swarm(agent_swarm)
     else:
         stop = await run_swarm(agent_swarm)
-        assert stop["reason"] == "swarm_time"
+        assert stop.reason == "swarm_time"
         assert statuses(stop) == {"first": "submitted", "second": None}
 
 
@@ -442,7 +441,7 @@ async def test_a_member_limit_ends_only_that_member() -> None:
             channels=[],
         )
     )
-    assert stop["reason"] == "all_done"
+    assert stop.reason == "all_done"
     assert statuses(stop) == {"limited": "member_limit:token", "free": "submitted"}
 
 
@@ -470,7 +469,11 @@ async def test_no_member_text_reaches_the_controller() -> None:
         )
     )
     assert statuses(stop) == {"generator": "submitted"}
-    assert seen and not any(secret in text for text in [*seen, repr(stop)])
+    swarm_evidence = [
+        *evidence(stop.transcript, "member_result"),
+        *evidence(stop.transcript, "final"),
+    ]
+    assert seen and not any(secret in text for text in [*seen, repr(swarm_evidence)])
 
 
 @agent

@@ -213,13 +213,14 @@ def is_bridged(agent: Agent, bridged: bool | None) -> bool:
 
 
 # What a node needs to know about the member it is checking for. The member wrapper sets
-# `current_member` and runs the member inside `scope`.
+# `current_member`, runs the member inside `scope` and records its span in `span_id`.
 @dataclass(eq=False)
 class MemberContext:
     name: str
     bridged: bool
     scope: anyio.CancelScope = field(default_factory=anyio.CancelScope)
     stop_cause: str | None = None
+    span_id: str | None = None
     # counted as native, but found bridged at its first marked bridge generation
     bridged_late: bool = False
 

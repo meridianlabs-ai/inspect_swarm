@@ -2,11 +2,12 @@
 
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
 import anyio
-from inspect_ai.agent import Agent, AgentState, agent
+from inspect_ai.agent import Agent, AgentState, agent, run
 from inspect_ai.event import InfoEvent
 from inspect_ai.log._transcript import Transcript, _transcript
 from inspect_ai.model import (
@@ -31,7 +32,9 @@ from inspect_ai.util import (
     working_limit,
 )
 from inspect_ai.util._concurrency import init_concurrency
-from inspect_ai.util._store import Store, init_subtask_store
+from inspect_ai.util._store import Store, init_subtask_store, store
+
+from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
 
 TOKENS_PER_CALL = 50
 
@@ -154,6 +157,16 @@ async def sample(
         _transcript.reset(token)
 
 
+@dataclass
+class Outcome:
+    """What a swarm run left: its stop reason, its result record, the state it returned and its transcript."""
+
+    reason: str
+    record: SwarmResultRecord
+    state: AgentState
+    transcript: Transcript
+
+
 async def run_swarm(
     swarm: Agent,
     input: str = "task",
@@ -162,29 +175,35 @@ async def run_swarm(
     cost: float | None = None,
     time: float | None = None,
     messages: int | None = None,
-) -> dict[str, Any]:
-    """Run a swarm in a sample and return its `stopped` evidence: the stop reason and each member's state and status."""
+) -> Outcome:
+    """Run a swarm in a sample and return what it left."""
     async with sample(
         tokens=tokens, cost=cost, time=time, messages=messages
     ) as transcript:
-        await swarm(AgentState(messages=[ChatMessageUser(content=input)]))
-    return stopped(transcript)
+        # in its own agent span, as as_solver() and run() give it
+        state = await run(swarm, [ChatMessageUser(content=input)])
+        record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+    return Outcome(final(transcript)["stop_reason"], record, state, transcript)
 
 
-def stopped(transcript: Transcript) -> dict[str, Any]:
-    """The swarm's `stopped` evidence from a transcript."""
-    [data] = [
+def evidence(transcript: Transcript, kind: str) -> list[dict[str, Any]]:
+    """The swarm's evidence payloads of one kind, in order."""
+    return [
         e.data
         for e in transcript.events
         if isinstance(e, InfoEvent)
         and e.source == "inspect_swarm"
         and isinstance(e.data, dict)
-        and e.data.get("kind") == "stopped"
+        and e.data.get("kind") == kind
     ]
-    assert isinstance(data, dict)
+
+
+def final(transcript: Transcript) -> dict[str, Any]:
+    """The swarm's `final` evidence from a transcript."""
+    [data] = evidence(transcript, "final")
     return data
 
 
-def statuses(stop: dict[str, Any]) -> dict[str, str | None]:
-    """Each member's status, by name, from the `stopped` evidence."""
-    return {m["member"]: m["status"] for m in stop["members"]}
+def statuses(outcome: Outcome) -> dict[str, str | None]:
+    """Each member's status, by name, from the result record."""
+    return {m.name: m.status for m in outcome.record.members}
