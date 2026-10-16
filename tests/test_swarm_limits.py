@@ -341,6 +341,9 @@ def tool_loop(model: Model) -> Agent:
         (generator, [], Budget(tokens=TOKENS_PER_CALL), "swarm_cap"),
         (grouped, [], Budget(tokens=TOKENS_PER_CALL), "swarm_cap"),
         (tool_loop, [], Budget(tokens=TOKENS_PER_CALL), "swarm_cap"),
+        # the member's share, grouped and after a tool error, below the cap
+        (grouped, [], Budget(tokens=4 * TOKENS_PER_CALL, split="equal"), "share"),
+        (tool_loop, [], Budget(tokens=4 * TOKENS_PER_CALL, split="equal"), "share"),
     ],
 )
 async def test_the_swarms_own_errors_become_statuses(
@@ -700,6 +703,29 @@ async def test_members_stop_on_their_own_shares(
 
 
 @pytest.mark.anyio
+async def test_the_swarm_cap_wins_over_a_share_reached_at_the_same_check() -> None:
+    # two members, each with half the cap; the second reaches its share and the cap
+    # together, and the cap stops the swarm
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+            async for _ in control.events():
+                pass
+        return "all_done"
+
+    stop = await run_swarm(
+        swarm(
+            member(generator, args={"model": scripted_model(), "calls": None}, count=2),
+            controller=_controller(run, "limits_test_staged_shares"),
+            channels=[],
+            budget=Budget(tokens=4 * TOKENS_PER_CALL, split="equal"),
+        )
+    )
+    assert stop["reason"] == "swarm_cap"
+    assert statuses(stop) == {"generator-1": "share", "generator-2": "swarm_cap"}
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "budget, match",
     [
@@ -770,6 +796,8 @@ async def test_a_member_declared_bridged_is_cancelled_at_its_first_compaction(
             "member_limit:token",
             id="member-limit",
         ),
+        # a 30-token share each, below the 60-token cap
+        pytest.param([], Budget(tokens=60, split="equal"), "share", id="share"),
         pytest.param([], Budget(), "submitted", id="control"),
     ],
 )
@@ -787,9 +815,14 @@ async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
             pass
         return "all_done"
 
+    # a split needs a second member, which is never started
+    sibling = [member(sleeper(), name="sibling")] if budget.split != "pool" else []
     stop = await run_swarm(
         swarm(
-            member(generator(scripted_model()), bridged=True, limits=limits),
+            [
+                member(generator(scripted_model()), bridged=True, limits=limits),
+                *sibling,
+            ],
             controller=_controller(
                 run, f"limits_test_last_call_{expected.replace(':', '_')}"
             ),
@@ -797,6 +830,6 @@ async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
             budget=budget,
         )
     )
-    assert statuses(stop) == {"generator": expected}
+    assert statuses(stop) == {"generator": expected} | {m.name: None for m in sibling}
     [handle] = handles
     assert (handle.status, handle.submitted) == (expected, expected == "submitted")

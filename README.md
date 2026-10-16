@@ -17,7 +17,7 @@ A swarm takes its budget from the sample's limits. With the default `Budget()`, 
 - `"equal"`: each member gets an equal share.
 - A tuple of weights, one per member in roster order: `(1, 1, 2)` gives the third member half.
 
-A member that uses up its share stops. Its unused share is not given to the others, so the split stays a fixed condition of the experiment.
+A member that uses up its share stops with status `share`. Its unused share is not given to the others, so the split stays a fixed condition of the experiment. The swarm's caps still apply above the shares: when a call reaches a cap and a share at once, the cap wins, and the swarm stops with `swarm_cap`.
 
 Agent count, budget and split are task parameters, so they can be swept:
 
@@ -42,9 +42,12 @@ def research(
             budget=Budget(split=split),
         ),
         scorer=...,
+        sandbox="docker",
         cost_limit=budget,
     )
 ```
+
+The members' `bash()` tool runs in the sample's sandbox, so this example needs Docker.
 
 The task sets the sample's cost limit once, and the swarm derives its cap from it, so a single-agent arm reads the same number. Three sweeps:
 
