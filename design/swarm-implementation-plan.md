@@ -281,7 +281,6 @@ flowchart LR
   M2_7 --> M2_8[M2-8 memory channel]
   M2_8 --> M2_9[M2-9 notices]
   M2_8 --> M2_10[M2-10 comm metrics]
-  AI6[AI-6 tool result metadata] --> M2_8
   M2_1 & M2_2 & M2_3 & M2_4 & M2_5 & M2_9 & M2_10 --> M2_11[M2-11 docs and examples]
   M2_11 --> M2_12[M2-12 API statement, packaging, first release]
 ```
@@ -290,7 +289,7 @@ flowchart LR
 
 - **Isolation and limits:** M2-1, M2-2, M2-3 and M2-4, each alone.
 - **Background members:** D-2 → AI-5 → M2-5. D-2 starts during M1 (decision: Ransom, 2026-10-14).
-- **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8, and AI-6 before M2-8. AI-6 is independent of every M2 pull request, so it can start at once. D-1 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-memory-channel.md](swarm-memory-channel.md), #22).
+- **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8. D-1 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-memory-channel.md](swarm-memory-channel.md), #22).
 - **Release:** M2-11 and M2-12, after the three strands above.
 
 ### Designs
@@ -311,12 +310,7 @@ flowchart LR
 - Files and tests: as D-2 specifies (inspect_ai's `background()` utility and deepagent's background dispatch, with tests in its own suite).
 - Depends on: D-2.
 
-**AI-6. Message metadata the swarm's ids rely on.** Two small parts, one pull request ([swarm-communication.md Records and the bus](swarm-communication.md#records-and-the-bus), "Records in model input"):
-- **A tool can set its result message's metadata.** Today `execute_tools` builds a call's `ChatMessageTool` from the content, the tool call id, the function and the error only (`src/inspect_ai/model/_call_tools.py:412-418`), and a tool's return type has no place for metadata (`src/inspect_ai/tool/_tool.py:36-47`). AI-6 adds a function a running tool calls, `tool_result_metadata(metadata)`, which records the mapping in a cell `call_tool` creates for each call, and which `execute_tools` copies into that call's `ChatMessageTool.metadata`; it raises outside a tool. The swarm's read tools use it to name the records they return.
-- **Combined user messages keep their full lineage.** Today each pairwise merge sets `combined_from` to the two ids it merged (`src/inspect_ai/model/_model.py:2829-2837`), so a third message's merge replaces the first two originals with the intermediate message's new id. AI-6 makes it the concatenation of each side's `combined_from`, or its id when it has none, so the list names every original message in order. Observers join notices and injections inside a combined message through it.
-- No schema change: `ChatMessage.metadata` exists, and `combined_from` keeps its key and type.
-- Files and tests: `src/inspect_ai/model/_call_tools.py`, `src/inspect_ai/model/_model.py` and an export from `inspect_ai.tool`, with tests in inspect_ai's suite: two concurrent calls in one batch each get their own metadata, a call that does not set it gets none, the metadata is in the next `ModelEvent`'s input, and three and four adjacent user messages combine with every original id in `combined_from`.
-- Depends on: nothing. M2-8 needs it merged on inspect_ai `main`, and bumps the swarm's locked inspect-ai commit with `uv lock --upgrade-package inspect-ai`.
+**No metadata contract in M2.** Earlier revisions of #23 added AI-6 here: an inspect_ai helper, `tool_result_metadata()`, that lets a running tool set its result message's metadata, and full `combined_from` lineage across repeated user-message merges, so that read results carried the swarm's ids in metadata. No M2 piece reads those ids; their only consumer is ORBIT's exposure observer, so the contract moved to the ORBIT port, after M2, which chooses how a read result names its records for that observer ([swarm-orbit.md P2](swarm-orbit.md#p2-bus-extensions)) ([Decisions](#decisions), item 10). The lineage fix is an optional standalone inspect_ai fix, not a swarm prerequisite.
 
 Three inspect_ai fixes opened while this plan was revised, inspect_ai#5884 (a `ToolEvent`'s span is its tool span), #5883 (a `ModelEvent`'s input is a snapshot) and #5882 (Groq and Mistral send a tool result's error), are standalone Inspect fixes and not swarm prerequisites, now that the swarm computes no exposure (decision: Ransom, 2026-10-15). #5883 helps any log-based analysis of what a generation was sent.
 
@@ -373,10 +367,10 @@ None in M2, and none in M1.
 - Depends on: M2-6, D-1 (merged; the binding rule for a member's descendants).
 - Implements: swarm-communication.md step 2; [Members and identity](swarm-communication.md#members-and-identity), [Tools reach members through a tool source](swarm-communication.md#tools-reach-members-through-a-tool-source); [swarm-memory-channel.md Descendants](swarm-memory-channel.md#descendants).
 
-**M2-8. The shared-memory channel.** As D-1 specifies ([swarm-memory-channel.md](swarm-memory-channel.md#design)): the `@swarm_channel` factory `shared_memory()`, its `ChannelState` with `admit()` and `apply()`, its `shared_memory` tool, fenced reads, its `read` evidence, and each view's read metadata on its result message through AI-6; exported and imported by the entry point. In place of the `messages` channel, it is the first channel with records, so the bus's fencing (`src/inspect_swarm/_fence.py`, shared later with `synthesize`) lands here.
+**M2-8. The shared-memory channel.** As D-1 specifies ([swarm-memory-channel.md](swarm-memory-channel.md#design)): the `@swarm_channel` factory `shared_memory()`, its `ChannelState` with `admit()` and `apply()`, its `shared_memory` tool, fenced reads, its `read` evidence; exported and imported by the entry point. In place of the `messages` channel, it is the first channel with records, so the bus's fencing (`src/inspect_swarm/_fence.py`, shared later with `synthesize`) lands here.
 - Files: `src/inspect_swarm/_channel/shared_memory.py`, `src/inspect_swarm/_fence.py`, `src/inspect_swarm/_evidence.py` (`read`), `src/inspect_swarm/__init__.py`, `src/inspect_swarm/_entrypoint.py`.
 - Tests: as [swarm-memory-channel.md Testing](swarm-memory-channel.md#testing) lists: `tests/test_shared_memory_channel.py`, `tests/test_shared_memory.py` (commands, concurrency, fencing and budget), `tests/test_fence.py`, and the channel's descendant cases. D-1 gives descendants the board, so a synchronous `general()` child of a `deepagent()` member reads and writes it here, and a background `general()` child does so in a test that lands with whichever of M2-5 and M2-8 merges second.
-- Depends on: D-1, M2-7, AI-6 (merged on inspect_ai `main`).
+- Depends on: D-1, M2-7.
 - Implements: [Lean Rec. 7](swarm-lean-open-problems.md#7-m2-a-shared-memory-channel-through-the-bus); [swarm-communication.md Fencing](swarm-communication.md#fencing); [swarm-memory-channel.md Implementation plan](swarm-memory-channel.md#implementation-plan), step 3.
 
 **M2-9. Notices.** `swarm_on_continue()` with its continuation rules, the fixed template, notice evidence, the wiring checks and `delivery_effective` in the sample metadata, exercised through the memory channel's `notice_lines`.
@@ -399,7 +393,7 @@ None in M2, and none in M1.
 
 **M2-12. API statement, packaging and the first release.** The README and the package docstring state which API is supported and which is experimental, as decided ([Decisions](#decisions), item 6); classifiers move from "Development Status :: 1 - Planning"; `requires-python` stays at M1-0's 3.11; the `push` trigger is restored in `release.yaml`, so Release Please opens the 0.1.0 release pull request, whose `release-pin-deps.yml` step pins inspect_ai to its latest release.
 - Files: `README.md`, `src/inspect_swarm/__init__.py`, `pyproject.toml`, `.github/workflows/release.yaml`.
-- Depends on: M2-11, and an inspect_ai PyPI release containing AI-1, AI-2, AI-5 and AI-6 (the release pull request's build fails until there is one, which is the guard `release-pin-deps.yml` describes). Epoch's configs pin inspect_ai 0.3.273 ([Lean, What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)); the port moves them to that release.
+- Depends on: M2-11, and an inspect_ai PyPI release containing AI-1, AI-2 and AI-5 (the release pull request's build fails until there is one, which is the guard `release-pin-deps.yml` describes). Epoch's configs pin inspect_ai 0.3.273 ([Lean, What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)); the port moves them to that release.
 - Implements: what an external release needs.
 
 ## Future work
@@ -428,7 +422,7 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 - Safety hooks: roles as data, per-member prompt, model and tool overrides, joint-monitor helpers on inspect_sentinel, a scheduled execution mode.
 - Replacing `policy=` with a sentinel adapter (swarm-communication.md's open question 1).
 - A first-class inter-agent event type in inspect_ai (swarm.md's open question 1).
-- ORBIT on inspect_swarm (PR #4).
+- ORBIT on inspect_swarm (PR #4), including how read results name their records for ORBIT's exposure observer ([swarm-orbit.md P2](swarm-orbit.md#p2-bus-extensions)).
 - Red-team features: forged senders, secret channels, targeted injection.
 - Inspect Scout scanners for coordination failures.
 - The inspect_ai fix for limits reached inside bridged agents (swarm-limits.md's open question 2).
@@ -455,7 +449,7 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 
 - **inspect_swarm** has no released API until M2-12; nothing in M1 or M2 before it is a compatibility concern. From M2-12, the API statement says what later releases keep.
 - **Eval logs.** M1 and M2 write only existing event types, store entries and message metadata, each payload carrying `version: 1`, as the deep dives specify. No log schema, generated TypeScript type or ts-mono change is in either milestone.
-- **inspect_ai.** AI-1 adds two literal values outside the log schema; AI-2 changes nothing outside a scope; AI-5 changes nothing outside an owner scope, as D-2 must confirm. AI-6 changes no schema and nothing for a tool that does not set metadata. The optional AI-3 and AI-4 add observability without changing behaviour.
+- **inspect_ai.** AI-1 adds two literal values outside the log schema; AI-2 changes nothing outside a scope; AI-5 changes nothing outside an owner scope, as D-2 must confirm. The optional AI-3 and AI-4 add observability without changing behaviour.
 - **External users' inspect_ai versions.** A release of inspect_swarm requires an inspect_ai release with its prerequisites, so users pinned to older inspect_ai (Epoch: 0.3.273) must move.
 
 ## Security
@@ -487,13 +481,13 @@ Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his wor
 
 9. **M1-10 reports "members stuck in loops" as a signal, not a verdict.** swarm.md lists the check among the harness-validity checks ([Observer, Analysis](swarm.md#observer-evidence-accounting-and-metrics)). Per member, the longest run of consecutive identical tool calls (same function and arguments) is reported as a metric, with no threshold fixed until there is data. Ransom: "OQ1 agree with recommendation".
 
-10. **The swarm writes no exposure or proposal events** (2026-10-15). Exposure came from ORBIT, where only ORBIT's own observer can see it, and the swarm's own uses are served by `read`; every swarm message in model input carries metadata ids instead, which needs AI-6. This supersedes the same day's decision to rest exposure on inspect_ai#5884, #5883 and #5882 and to mark exposure through an errored result inferred. Ransom: "yes, drop exposed and proposed, send it. Let the loops finish."
+10. **The swarm writes no exposure or proposal events** (2026-10-15). Exposure came from ORBIT, where only ORBIT's own observer can see it, and the swarm's own uses are served by `read`; notices and injections carry their ids in metadata, which the swarm writes when it creates them. This supersedes the same day's decision to rest exposure on inspect_ai#5884, #5883 and #5882 and to mark exposure through an errored result inferred. Ransom: "yes, drop exposed and proposed, send it. Let the loops finish." On 2026-10-16, asked whether to add AI-6 so that read results also carry the ids in metadata, Ransom answered: "This is only needed by ORBIT? In that case it should be after M2." So M2 identifies a read by its `read` event and the fenced ids in its result text, and how a read result names its records for ORBIT's observer is the ORBIT port's choice, with stamping in `swarm_on_continue()` the leading option (Ransom: "I agree that c sounds most promising here, we can decide for sure once we start work."; [swarm-orbit.md P2](swarm-orbit.md#p2-bus-extensions)).
 
 One more decision shapes this plan: the result record's store key is documented as owned by the runtime and readable by member code (Ransom: "yes, add the docs line"; M1-13, M2-11 and [swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records)).
 
 ## Open questions
 
-1. **Approve AI-6, a new public inspect_ai helper.** Follow-up 4's metadata contract needs a tool to set its result message's metadata, which Inspect cannot do today, and needs combined user messages to keep their lineage. Options: (a) AI-6 as specified, `tool_result_metadata()` plus full `combined_from` lineage, before M2-8; (b) no inspect_ai change, with observers parsing the bus-stamped fence attributes from result text and losing notices merged three deep. Recommendation: (a).
+None. The last one, whether to add AI-6 before M2-8, was answered on 2026-10-16 ([Decisions](#decisions), item 10).
 
 ## Not this design
 
