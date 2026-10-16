@@ -15,10 +15,11 @@ classifiers = [
     "Development Status :: 1 - Planning",
 ]
 dependencies = [
-    # A released inspect_ai, never a git ref. Raise the floor only when src/
-    # needs a newer release; a newer version needed only by tests goes in
-    # uv.lock. 0.3.281 adds the swarm registry types (_registry.py).
-    "inspect-ai>=0.3.281",
+    # Temporarily inspect_ai's `main`: the runtime needs tool_state_scope()
+    # (UKGovernmentBEIS/inspect_ai#5861), which no release has yet. Go back to
+    # a released `inspect-ai>=X` floor once one does (decision: Ransom,
+    # 2026-10-16).
+    "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",
 ]
 
 [project.urls]
@@ -61,6 +62,11 @@ version-file = "src/inspect_swarm/_version.py"
 
 [tool.hatch.version.raw-options]
 local_scheme = "no-local-version" # Important for PyPI compatibility
+
+# hatchling rejects PEP 508 direct references (the inspect-ai git ref above)
+# without this
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.uv]
 managed = true
