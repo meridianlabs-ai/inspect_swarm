@@ -4,7 +4,6 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
-from uuid import uuid4
 
 import anyio
 from anyio.abc import TaskGroup
@@ -149,8 +148,6 @@ class MemberRun:
             name, bridged=is_bridged(cast(Agent, agent), record.bridged)
         )
         self.lever, self.nodes = member_nodes(record, name)
-        # the span its run() opens, so the ledger can find its model events
-        self.span_id = uuid4().hex
 
     @property
     def submitted(self) -> bool:
@@ -298,7 +295,7 @@ class SwarmRun:
                             status=m.status,
                             bridged=m.context.bridged,
                             lever=m.lever,
-                            span_id=m.span_id,
+                            span_id=m.context.span_id,
                             cancelled=m.cancelled,
                         )
                         for m in self._members
@@ -371,7 +368,6 @@ class SwarmRun:
                 m.nodes,
                 self._caps,
                 input,
-                m.span_id,
             )
         except Exception:
             status = "errored"

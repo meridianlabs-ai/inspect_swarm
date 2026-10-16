@@ -222,6 +222,8 @@ class MemberContext:
     stop_cause: str | None = None
     # counted as native, but found bridged at its first marked bridge generation
     bridged_late: bool = False
+    # the span its run() opened, as Inspect named it (a span-id provider may)
+    span_id: str | None = None
 
 
 current_member: ContextVar[MemberContext | None] = ContextVar(

@@ -51,6 +51,7 @@ from inspect_ai.util import (
     LimitExceededError,
     cost_limit,
     message_limit,
+    span_id_provider,
     store,
     time_limit,
     token_limit,
@@ -1286,6 +1287,104 @@ async def test_ledger_counts_only_the_swarm_span_tree() -> None:
     assert ledger.unattributed.total_tokens == TOKENS_PER_CALL
     assert ledger.total_complete
     assert not ledger.attribution_complete
+
+
+@pytest.mark.anyio
+async def test_ledger_keeps_usage_reported_without_a_total() -> None:
+    # some providers report component counts with total_tokens of zero
+    gc.collect()
+    output = _output()
+    output.usage = ModelUsage(output_tokens=TOKENS_PER_CALL, total_tokens=0)
+    ledger = await _ledger(
+        swarm(generator(scripted_model(Script([output]), cost=2.0)), channels=[])
+    )
+    assert ledger.sample_delta.output_tokens == TOKENS_PER_CALL
+    assert ledger.sample_delta.total_cost == pytest.approx(2.0)
+    assert ledger.unattributed.output_tokens == 0
+    assert ledger.unattributed.total_cost == pytest.approx(0.0, abs=1e-9)
+    assert ledger.total_complete and ledger.attribution_complete
+
+
+@agent
+def _delegating(model: Model) -> Agent:
+    # generates, then runs a subagent that generates in a span of its own
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(state.messages)
+        await run(_generate_once(model), "x")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_ledger_finds_member_spans_named_by_a_span_id_provider() -> None:
+    # a span-id provider may ignore the id run() asks for
+    gc.collect()
+
+    async def provider(name: str, parent: str | None, requested: str | None) -> str:
+        return f"provided-{uuid4().hex}"
+
+    agent_swarm = swarm(_delegating(scripted_model(cost=1.0)), channels=[])
+    async with sample() as t:
+        with span_id_provider(provider):
+            await run(agent_swarm, "task")
+        ledger = _written_ledger(t)
+    assert ledger.calls == Calls(calls=2)
+    assert ledger.members[0].calls == Calls(calls=2)
+
+
+@solver
+def _swarm_solver(agent_swarm: Agent) -> Solver:
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        result = await run(agent_swarm, state.messages)
+        state.output = result.output
+        return state
+
+    return solve
+
+
+@pytest.mark.parametrize(
+    "budget,limits,status",
+    [
+        pytest.param(Budget(cost=201.0), [], "swarm_cap", id="swarm-cost-cap"),
+        pytest.param(
+            Budget(),
+            [token_limit(101 * TOKENS_PER_CALL - 25)],
+            "member_limit:token",
+            id="member-token-limit",
+        ),
+    ],
+)
+def test_ledger_reads_the_price_of_a_limit_reaching_call_from_a_bounded_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    budget: Budget,
+    limits: list[Limit],
+    status: str,
+) -> None:
+    # Inspect prices a call after its event's last update, so the event a bounded
+    # transcript has evicted and serialized for the call that reaches a limit has no
+    # price. Each call costs $2; the 101st reaches the limit, after the resident window.
+    gc.collect()
+    monkeypatch.setenv("INSPECT_TRANSCRIPT_BOUNDED", "1")
+    model = scripted_model(cost=2.0)
+    agent_swarm = swarm(
+        member(generator(model, calls=None), name="spender", limits=limits),
+        channels=[],
+        budget=budget,
+    )
+    [log] = eval(
+        Task(dataset=[Sample(input="task")], solver=_swarm_solver(agent_swarm)),
+        model=model,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success" and log.samples is not None
+    ledger = SwarmLedger.model_validate(log.samples[0].store[LEDGER_KEY])
+    assert ledger.members[0].status == status
+    assert ledger.calls == Calls(calls=101)
+    assert ledger.swarm.cost == pytest.approx(202.0)
+    assert ledger.total_complete
 
 
 @pytest.mark.anyio

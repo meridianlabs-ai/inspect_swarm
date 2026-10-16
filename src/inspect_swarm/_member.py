@@ -15,12 +15,13 @@ from inspect_ai._util.registry import (
     registry_unqualified_name,
     registry_value,
 )
-from inspect_ai.agent import Agent, run
+from inspect_ai.agent import Agent, AgentState, run
 from inspect_ai.model import ChatMessage
 from inspect_ai.util import (
     Limit,
     LimitExceededError,
     cost_limit,
+    current_span_id,
     message_limit,
     time_limit,
     token_limit,
@@ -297,7 +298,6 @@ async def run_member(
     nodes: list[Limit],
     caps: Sequence[Limit],
     input: list[ChatMessage],
-    span_id: str,
 ) -> str:
     token = current_member.set(context)
     error: Exception | None = None
@@ -311,7 +311,7 @@ async def run_member(
             with ExitStack() as entered:
                 for node in nodes:
                     entered.enter_context(node)
-                await run(agent, input, name=name, span_id=span_id)
+                await run(_in_span(agent, context), input, name=name)
     except Exception as ex:
         error = ex
     finally:
@@ -334,6 +334,16 @@ async def run_member(
         # the hard stop
         return "cancelled"
     return "submitted"
+
+
+# The member's agent, recording the id of the span run() opened for it, so the ledger
+# can find the member's model events.
+def _in_span(agent: Agent, context: MemberContext) -> Agent:
+    async def execute(state: AgentState, *args: Any, **kwargs: Any) -> AgentState:
+        context.span_id = current_span_id()
+        return await agent(state, *args, **kwargs)
+
+    return execute
 
 
 def _status_for(error: LimitExceededError, lever: Lever) -> str:

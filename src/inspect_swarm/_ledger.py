@@ -1,6 +1,6 @@
 import logging
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from inspect_ai.event import Event, ModelEvent, SpanBeginEvent
@@ -51,18 +51,19 @@ class Calls(BaseModel):
     # completed with usage whose total_cost is None
     unpriced: int = 0
 
-    def count(self, event: ModelEvent) -> None:
-        if event.cache == "read":
+    def count(self, call: "CallRecord") -> None:
+        if call.cache_read:
             self.cache_replays += 1
-        elif event.error is not None or event.pending:
+        elif call.errored or call.pending:
             # an event still pending once the swarm has drained never completed
             self.errored += 1
         else:
             self.calls += 1
-            usage = event.output.usage
-            if usage is None:
+            if call.usage is None:
                 self.no_usage += 1
-            elif usage.total_cost is None:
+            elif call.usage.total_cost is None:
+                # read when the swarm ends: Inspect prices a call's usage in place,
+                # after its event's last update when the call reaches a limit
                 self.unpriced += 1
 
 
@@ -129,15 +130,52 @@ class MemberAccount:
     status: str | None
     bridged: bool
     lever: CostPair
-    span_id: str
+    # None for a member never started
+    span_id: str | None
     cancelled: bool
+
+
+# A model event as it last stood, with its live usage object.
+@dataclass(frozen=True)
+class CallRecord:
+    span_id: str | None
+    cache_read: bool
+    errored: bool
+    pending: bool
+    usage: ModelUsage | None
+
+
+# The spans and model events the transcript reports during the swarm's interval, kept
+# as they happen rather than read back from the history: a bounded transcript serializes
+# an event at its last update, which can come before Inspect prices its usage.
+class EventLog:
+    def __init__(self) -> None:
+        self.parents: dict[str, str | None] = {}
+        self.calls: dict[str, CallRecord] = {}
+
+    def __call__(self, event: Event) -> None:
+        if isinstance(event, SpanBeginEvent):
+            self.parents[event.id] = event.parent_id
+        elif isinstance(event, ModelEvent):
+            # the transcript gives every event a uuid before it reports it
+            assert event.uuid is not None
+            self.calls[event.uuid] = CallRecord(
+                span_id=event.span_id,
+                cache_read=event.cache == "read",
+                errored=event.error is not None,
+                pending=bool(event.pending),
+                usage=event.output.usage,
+            )
 
 
 # The ledger's view of the swarm's interval: what it reads when the swarm starts, and
 # the ledger it builds from that and the runtime's state when the swarm ends.
 class LedgerInterval:
     def __init__(self) -> None:
-        self._first_event = transcript().history.event_count
+        self._events = EventLog()
+        self._unsubscribe = transcript()._subscribe(  # pyright: ignore[reportPrivateUsage]
+            self._events
+        )
         self._span_id = current_span_id()
         self._start_usage = _usage_snapshot()
         self._start_time = time.monotonic()
@@ -168,10 +206,11 @@ class LedgerInterval:
         final_cancelled: bool,
     ) -> SwarmLedger:
         # synchronous, so that it runs under cancellation too
+        self._unsubscribe()
         calls, member_calls = count_calls(
-            transcript().history.events_from(self._first_event),
+            self._events,
             self._span_id,
-            {m.name: m.span_id for m in members},
+            {m.name: m.span_id for m in members if m.span_id is not None},
         )
         delta, unpriced_models = _usage_delta(self._start_usage, _usage_snapshot())
         swarm_meter = _meter(swarm)
@@ -192,7 +231,7 @@ class LedgerInterval:
                 status=m.status,
                 bridged=m.bridged,
                 meter=_meter(m.lever),
-                calls=member_calls[m.name],
+                calls=member_calls.get(m.name, Calls()),
                 cancelled=m.cancelled,
             )
             for m in members
@@ -241,10 +280,10 @@ class LedgerInterval:
 # Counts the model events in the swarm's span tree, and those in each member's spans.
 # With no swarm span (the swarm called outside any span), every event counts.
 def count_calls(
-    events: Iterable[Event], swarm_span: str | None, member_spans: Mapping[str, str]
+    events: EventLog, swarm_span: str | None, member_spans: Mapping[str, str]
 ) -> tuple[Calls, dict[str, Calls]]:
     owners = {span: name for name, span in member_spans.items()}
-    parents: dict[str, str | None] = {}
+    parents = events.parents
     places: dict[str | None, tuple[bool, str | None]] = {}
 
     def place(span: str | None) -> tuple[bool, str | None]:
@@ -264,15 +303,12 @@ def count_calls(
 
     total = Calls()
     per_member = {name: Calls() for name in member_spans}
-    for event in events:
-        if isinstance(event, SpanBeginEvent):
-            parents[event.id] = event.parent_id
-        elif isinstance(event, ModelEvent):
-            inside, member = place(event.span_id)
-            if inside:
-                total.count(event)
-            if member is not None:
-                per_member[member].count(event)
+    for call in events.calls.values():
+        inside, member = place(call.span_id)
+        if inside:
+            total.count(call)
+        if member is not None:
+            per_member[member].count(call)
     return total, per_member
 
 
@@ -324,7 +360,9 @@ def _usage_delta(
     for model, usage in end.items():
         before = start.get(model, ModelUsage())
         delta = _minus(usage, before)
-        if delta.total_tokens == 0:
+        # a provider may report component counts with a total of zero
+        tokens = any(getattr(delta, f) for f in _TOKEN_FIELDS)
+        if not tokens and usage.total_cost == before.total_cost:
             continue
         total = _plus(total, delta)
         if usage.total_cost is None:
