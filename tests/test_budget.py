@@ -1245,6 +1245,50 @@ async def test_ledger_meters_sum_to_the_swarm_meter_and_reconcile() -> None:
 
 
 @pytest.mark.anyio
+async def test_ledger_counts_only_the_swarm_span_tree() -> None:
+    # the swarm runs in its own agent span, as under as_solver(), while the sample
+    # makes a call outside it: the sample's delta holds that call, the swarm's counts
+    # and meters do not
+    gc.collect()
+    outside = scripted_model(cost=1.0)
+    started = anyio.Event()
+    outside_done = anyio.Event()
+
+    async def run_members(control: SwarmControl) -> StopReason:
+        started.set()
+        await outside_done.wait()
+        for m in control.members:
+            control.start(m)
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    agent_swarm = swarm(
+        generator(scripted_model(cost=1.0)),
+        controller=controller(run_members, "budget_test_span_tree"),
+        channels=[],
+    )
+
+    async def call_outside() -> None:
+        await started.wait()
+        await outside.generate("x")
+        outside_done.set()
+
+    async with sample() as t:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run, agent_swarm, "task")
+            tg.start_soon(call_outside)
+        ledger = _written_ledger(t)
+    assert ledger.calls == Calls(calls=1)
+    assert ledger.members[0].calls == Calls(calls=1)
+    assert ledger.swarm.usage.total_tokens == TOKENS_PER_CALL
+    assert ledger.sample_delta.total_tokens == 2 * TOKENS_PER_CALL
+    assert ledger.unattributed.total_tokens == TOKENS_PER_CALL
+    assert ledger.total_complete
+    assert not ledger.attribution_complete
+
+
+@pytest.mark.anyio
 async def test_ledger_charges_an_approval_call_to_its_member_and_leaves_its_tokens_unattributed() -> (
     None
 ):
