@@ -111,7 +111,7 @@ sample task group (unchanged; background() lands here when the seam is unset)
 └── swarm runtime: caps entered once
     └── member task
         tool_state_scope(name), member cancel scope
-        └── member_background(contain=[*nodes, *caps])   ← inspect_swarm, one per member;
+        └── MemberBackground(contain=[*nodes, *caps])    ← inspect_swarm, one per member;
             │                                               sets inspect_ai's seam to itself
             ├── ExitStack: the member's nodes (lever, share, limits, time limit)
             │   └── run(agent, input)                       ← the member's agent (top loop)
@@ -155,22 +155,22 @@ A new private module, `src/inspect_swarm/_background.py`:
 
 ```python
 class MemberBackground:
-    # the target of inspect_ai's background_target while the member runs
+    # the target of inspect_ai's background_target while the member runs; entered once
+    def __init__(self, contain: Sequence[Limit]) -> None: ...
+    async def __aenter__(self) -> "MemberBackground": ...
+    async def __aexit__(self, *exc_info: object) -> bool | None: ...
+
     started: int     # tasks background() has started in this owner
     running: int     # of those, not finished
-    cancelled: int   # still running when the owner ended and cancelled by it; 0 until then
+    cancelled: int   # of those, ended by a cancellation from the owner or an enclosing scope
 
     def start_soon(self, func, *args) -> None: ...
     async def wait(self) -> None: ...   # returns once none is running, including tasks started while waiting
-
-
-@asynccontextmanager
-async def member_background(contain: Sequence[Limit]) -> AsyncIterator[MemberBackground]: ...
 ```
 
-**Entering and leaving.** `member_background()` opens an anyio task group, sets `background_target` to the owner, and yields it. On the way out it resets the ContextVar, cancels the task group's scope (recording `running` as `cancelled`), and waits for the tasks, so their `finally` blocks and cancellation handlers run before the block is left. It then raises as `owned_task_group()` does: a single exception bare, several as an `ExceptionGroup`, and a cancellation from outside (the hard stop) re-raised as that cancellation.
+**Entering and leaving.** Entering opens an anyio task group and sets `background_target` to the owner. Leaving resets the ContextVar, cancels the task group's scope, and waits for the tasks, so their `finally` blocks and cancellation handlers run before the block is left. It then raises as `owned_task_group()` does: a single exception bare, several as an `ExceptionGroup`, and a cancellation from outside (the hard stop) re-raised as that cancellation.
 
-**Starting a task.** `start_soon()` counts the task in `started` and `running` and starts it in the task group, wrapped so that `running` drops when it ends. After the owner has ended, `start_soon()` raises `RuntimeError` ("the member's background work has ended"), so a context saved inside the member and used later cannot start work nothing owns. A task started while the owner is cancelling starts cancelled, as anyio does.
+**Starting a task.** `start_soon()` counts the task in `started` and `running` and starts it in the task group, wrapped so that `running` drops when it ends. The wrapper also counts cancellation as it happens: when the cancellation exception (`anyio.get_cancelled_exc_class()`) leaves the task's function, it adds one to `cancelled`, then drops `running`, then re-raises, in one `except` handler with no `await` in between. So each task is counted once, whichever cancelled it: the owner's exit at the end of the drain, the owner's task group after a foreign error, or the member's scope at the hard stop, which cancels the children and the owner's own code together, so that a child can finish its cancellation before the owner's exit runs. A count taken from the tasks still running at exit would miss that child. A child deepagent's `agent_cancel` stopped is not counted: that cancellation is absorbed by the child's own cancel scope inside `_run_background()` (`agent_tool.py:767-772`), and the task returns normally. A task that catches the cancellation and returns is not counted either; anyio code must not do that. After the owner has ended, `start_soon()` raises `RuntimeError` ("the member's background work has ended"), so a context saved inside the member and used later cannot start work nothing owns. A task started while the owner is cancelling starts cancelled, as anyio does.
 
 **How a task ends.** Only the expected cases are specified:
 
@@ -213,8 +213,9 @@ token = current_member.set(context)
 status: str | None = None
 try:
     with tool_state_scope(name), context.scope:
-        async with member_background(contain=[*nodes, *caps]) as owner:
-            try:
+        owner = MemberBackground(contain=[*nodes, *caps])
+        try:
+            async with owner:
                 try:
                     agent = build_member(record)
                     if owner.started:                 # construction started background work
@@ -232,8 +233,9 @@ try:
                         raise foreign                 # no drain: the owner cancels the children
                     status = ...                      # cap: stop("swarm_cap"); owned: its status
                 await drain(owner, lever, grace())
-            finally:
-                outcome.started, outcome.cancelled = owner.started, owner.cancelled
+        finally:
+            # after the owner's exit, so its cancellations and their cleanup are counted
+            outcome.started, outcome.cancelled = owner.started, owner.cancelled
     ...                                               # status if not set: stop_cause / cancelled
 finally:
     current_member.reset(token)
@@ -247,7 +249,7 @@ return status
 
 ### The run record
 
-`run_member()` gains one parameter, `outcome: MemberOutcome`, a small mutable record on M1-4's `MemberRun`: `state: AgentState | None`, `background_started: int` and `background_cancelled: int`. The wrapper sets `state` before it awaits the agent and writes the counts in a `finally` around the owner's block, so all three are there on every path, a foreign error and the hard stop included. `_run_member()` keeps its shape: it receives the status, or sets `errored` on an exception, and calls `_end()` in its `finally`, which reads the output and the counts from `outcome` and ends the member as in M1. The status is worked out when the agent returns and is final; the drain cannot change it, except that a foreign error from a child makes the member `errored`, as the same error from its agent does ([Statuses, ended, and the record](#statuses-ended-and-the-record)). A hard stop that cancels the member's scope while its agent runs gives `stop_cause` or `cancelled`, as M1-4 returns them; one that cancels only the drain leaves the agent's status.
+`run_member()` gains one parameter, `outcome: MemberOutcome`, a small mutable record on M1-4's `MemberRun`: `state: AgentState | None`, `background_started: int` and `background_cancelled: int`. The wrapper sets `state` before it awaits the agent and copies the counts in a synchronous `finally` around the whole owner block, so the copy runs after the owner's exit has cancelled and awaited what was left, and all three are there on every path: a normal drain, a foreign error and the hard stop. `_run_member()` keeps its shape: it receives the status, or sets `errored` on an exception, and calls `_end()` in its `finally`, which reads the output and the counts from `outcome` and ends the member as in M1. The status is worked out when the agent returns and is final; the drain cannot change it, except that a foreign error from a child makes the member `errored`, as the same error from its agent does ([Statuses, ended, and the record](#statuses-ended-and-the-record)). A hard stop that cancels the member's scope while its agent runs gives `stop_cause` or `cancelled`, as M1-4 returns them; one that cancels only the drain leaves the agent's status.
 
 ### The drain at member end
 
@@ -255,7 +257,7 @@ When the member's agent has returned (normally, or on the lever, its share, a me
 
 1. Close the member's lever with the reason `member_ended`: every child's next model call is refused, with "Stopped by the swarm: member_ended". If a stop already closed it, the lever keeps that reason. Only children can still make calls in the member's context: its own loop has returned.
 2. Wait for the owner's tasks with `anyio.move_on_after(grace())`, where `grace()` is `SwarmRun._grace_now()`: `Budget.grace`, clipped to half the sample's remaining time. Children finish the calls and tool calls they have in flight, then reach the lever at their next check and end alone (rule 2).
-3. Leave the block. The owner cancels the children still running, waits for their cleanup, and records the count in `owner.cancelled`. The member then ends.
+3. Leave the block. The owner cancels the children still running and waits for their cleanup; each one cancelled adds to `owner.cancelled` as it ends. The member then ends.
 
 With `Budget.grace=0` the wait times out at once, so children are cancelled at member end, as they are at the swarm's stop with no grace. That is the only setting: there is no separate member-end grace.
 
@@ -318,7 +320,7 @@ Children run in the member's context, so every node they reach is reached by the
 class MemberLedger(BaseModel):
     ...
     background_started: int     # tasks background() started in the member's owner
-    background_cancelled: int   # of those, still running when the drain gave up, cancelled by the owner
+    background_cancelled: int   # of those, ended by a cancellation: the drain's end, a foreign error or the hard stop
 ```
 
 They count every task `background()` started anywhere in the member, nested deepagents' children included, since deepagent steps aside under the owner, and the ledger reads them from the member's `outcome` ([The run record](#the-run-record)). `total_complete` additionally requires `background_cancelled == 0` for every member, for the same reason it requires no member `cancelled`: a cancelled agent loop may have had work in flight that left no trace. Calls a cancelled child had in flight are counted as `errored`, as anywhere. A child the model cancelled with `agent_cancel` is its own decision; its in-flight call, if any, is an errored event and already clears `total_complete`. Evidence of which children ran is their spans; the swarm adds no event of its own.
@@ -429,6 +431,7 @@ Runtime tests on mockllm with scripted outputs and controlled tool latency (anyi
 - Limits (table-driven): a task that raises a bare limit error from a node in `contain` ends alone, a sibling keeps running, and the block's code continues; a limit from a node outside `contain` (a sample limit) cancels the sibling and the block's code and is raised; a `LimitExceededError` with `source=None` and a type other than `custom` is raised; one with `type="custom"` and `source=None` ends its task alone once M2-2 is in, and is raised before it (the case lands with whichever of M2-2 and M2-5 merges second).
 - Errors: a task's `RuntimeError` cancels the block's code and a sibling and is raised bare; two task errors are an `ExceptionGroup`; the block's own exception cancels the tasks and is raised bare; a cancellation from outside is re-raised as a cancellation; a task whose cleanup is shielded holds the block until the cleanup ends.
 - `start_soon()` after the owner has ended raises `RuntimeError`; the ContextVar is reset on every exit path.
+- Cancellation counts (table-driven): `cancelled` counts each task once when it is cancelled by the owner's exit, by the task group after a foreign error, or by an enclosing cancel scope that cancels the owner's code and the tasks together, including when the task finishes its cancellation before the owner's exit runs; a task that returns, or whose own inner cancel scope absorbs a cancellation, is not counted; `cancelled` read after leaving the block equals the number of tasks that ended cancelled.
 
 `tests/test_background_members.py`, the swarm:
 
@@ -445,7 +448,7 @@ Runtime tests on mockllm with scripted outputs and controlled tool latency (anyi
 - **Member limit reached in a child** (a member token limit): the child ends alone, the member ends `member_limit:token`, other members continue.
 - **Member message limit reached in a child**: a child whose conversation passes the member's message limit ends alone; the member's agent, with a shorter conversation, keeps going and submits (`submitted`), and other children are unaffected.
 - **Sample limit reached in a child**, while the member's agent runs and during its drain: recorded as the sample's limit, not a swarm cap, and the member `errored`; in the drain case, with another member already ended `submitted`, the sample's output is that member's provisional answer.
-- **Hard stop during a drain**: a child stuck past the swarm's grace is cancelled; the member keeps `submitted` and `background_cancelled == 1`.
+- **Hard stop** (round 9's B2), while the member's agent runs and during its drain: one child in a held tool call is cancelled by the member's scope. `background_cancelled == 1` in both cases, including the ordering where the child finishes its cancellation before the owner's exit runs (the test makes the child's cleanup return at once and the owner's code yield first); in the drain case the member keeps `submitted`. A child the parent stopped with `agent_cancel` before the stop is not counted.
 - **Isolation**: two background members' drains do not wait for each other's children; a child's tool state is its member's (`memory()` default instance), with `tests/test_tool_state.py`.
 - **A custom agent that calls `background()` directly**: its task is cancelled at member end, not at sample end, and counted in `background_started`.
 - **Construction-time background work is refused**: a factory that calls `background()` while building its agent makes the member `errored` with the `RuntimeError` naming the member, and the task it started is cancelled before the member ends.
@@ -455,7 +458,7 @@ Runtime tests on mockllm with scripted outputs and controlled tool latency (anyi
 ## Implementation plan
 
 1. **AI-5 (inspect_ai), one pull request.** `BackgroundTarget` and `background_target` in `src/inspect_ai/util/_background.py`, with the branch in `background()`; the condition in `BackgroundRegistry.owned_task_group()` in `src/inspect_ai/agent/_deepagent/agent_tool.py`, and the docstrings of both. Tests as above in `tests/util/test_background.py` and `tests/agent/deepagent/test_deepagent_background.py`. No public API and no docs, so not a `feat:` (`refactor:`). Depends on nothing.
-2. **M2-5 (inspect_swarm), one pull request**, after a PyPI release of inspect_ai containing AI-5, and after M1-4, M1-5 and M1-6. `src/inspect_swarm/_background.py` (new: `MemberBackground`, `member_background()`); `src/inspect_swarm/_member.py` (the owner in `run_member()` around the node stack, the agent run as `as_solver()` runs it if M1 has not done so, the `outcome` parameter, the drain, `_check_background()` deleted, `member()`'s docstring); `src/inspect_swarm/_budget.py` (the cap notification in `SwarmNode.exceeded()`); `src/inspect_swarm/_controller/_control.py` (the wrapper receives `self._caps` as before, `self._grace_now` and `MemberRun.outcome`; `_end()` reads the output and counts from it); the ledger module from M1-6 (`_budget.py` or `_ledger.py`) for the two fields and the completeness rule; `pyproject.toml` (the floor) and `uv.lock`. `_swarm.py` changes only if M1-4 lands the wrapper there. Tests as above, in `tests/test_background.py`, `tests/test_background_members.py`, `tests/test_member.py` and `tests/test_tool_state.py`.
+2. **M2-5 (inspect_swarm), one pull request**, after a PyPI release of inspect_ai containing AI-5, and after M1-4, M1-5 and M1-6. `src/inspect_swarm/_background.py` (new: `MemberBackground`); `src/inspect_swarm/_member.py` (the owner in `run_member()` around the node stack, the agent run as `as_solver()` runs it if M1 has not done so, the `outcome` parameter, the drain, `_check_background()` deleted, `member()`'s docstring); `src/inspect_swarm/_budget.py` (the cap notification in `SwarmNode.exceeded()`); `src/inspect_swarm/_controller/_control.py` (the wrapper receives `self._caps` as before, `self._grace_now` and `MemberRun.outcome`; `_end()` reads the output and counts from it); the ledger module from M1-6 (`_budget.py` or `_ledger.py`) for the two fields and the completeness rule; `pyproject.toml` (the floor) and `uv.lock`. `_swarm.py` changes only if M1-4 lands the wrapper there. Tests as above, in `tests/test_background.py`, `tests/test_background_members.py`, `tests/test_member.py` and `tests/test_tool_state.py`.
 3. **The shared-memory background case** goes into whichever of M2-5 and M2-8 merges second.
 4. **The custom-limit case** (a sourceless `custom` limit from a child ends the child alone) goes into whichever of M2-2 and M2-5 merges second: the owner's rule in `src/inspect_swarm/_background.py` and its tests.
 
