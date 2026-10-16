@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
+from uuid import uuid4
 
 import anyio
 from anyio.abc import TaskGroup
@@ -12,7 +13,9 @@ from inspect_ai.log import transcript
 from inspect_ai.model import ChatMessage, ChatMessageUser
 from inspect_ai.util import Limit, sample_limits
 
-from .._budget import Lever, MemberContext, SwarmNode, is_bridged
+from .._budget import Budget, CostPair, Lever, MemberContext, SwarmNode, is_bridged
+from .._evidence import write_ledger
+from .._ledger import LedgerInterval, MemberAccount
 from .._member import Member, classify_errors, member_nodes, run_member, unwrap
 
 MemberState = Literal["pending", "running", "ended"]
@@ -146,10 +149,21 @@ class MemberRun:
             name, bridged=is_bridged(cast(Agent, agent), record.bridged)
         )
         self.lever, self.nodes = member_nodes(record, name)
+        # the span its run() opens, so the ledger can find its model events
+        self.span_id = uuid4().hex
 
     @property
     def submitted(self) -> bool:
         return self.status == "submitted"
+
+    @property
+    def cancelled(self) -> bool:
+        # its agent loop was cancelled: the hard stop, the bridged branch, a member
+        # time limit, or a cancellation from outside the swarm
+        return self.context.scope.cancel_called or self.status in (
+            "cancelled",
+            "member_limit:time",
+        )
 
 
 # The runtime for one sample: the controller surface, member tasks and the stop
@@ -164,6 +178,7 @@ class SwarmRun:
         caps: list[Limit],
         time: float | None,
         grace: float,
+        budget: Budget,
     ) -> None:
         self._members = [MemberRun(record, name) for record, name in records]
         for node in caps:
@@ -176,6 +191,11 @@ class SwarmRun:
         self._time = time
         self._grace = grace
         self._runtime_lever = Lever(owner=None)
+        self._budget = budget
+        # the ledger's meters: the swarm meter around everything the swarm runs, and the
+        # final meter around its final step
+        self._swarm_meter = CostPair(owner=None, role="meter")
+        self._final_meter = CostPair(owner=None, role="meter")
         self._controller_scope = anyio.CancelScope()
         self._members_tg: TaskGroup | None = None
         self._member_ctx: contextvars.Context | None = None
@@ -246,10 +266,12 @@ class SwarmRun:
     # the runtime
 
     async def run(self, controller: Callable[["SwarmControl"], Awaitable[str]]) -> None:
+        interval = LedgerInterval()
         error: Exception | None = None
+        ended = False
         try:
             with ExitStack() as caps:
-                for node in self._caps:
+                for node in [*self._swarm_meter.nodes, *self._caps]:
                     caps.enter_context(node)
                 async with anyio.create_task_group() as members_tg:
                     self._members_tg = members_tg
@@ -259,10 +281,36 @@ class SwarmRun:
                         if self._time is not None:
                             runtime_tg.start_soon(self._time_cap, self._time)
                         runtime_tg.start_soon(self._run_controller, controller)
+            ended = True
         except Exception as ex:
             # a foreign error from a member or the controller; the wrappers have
             # already removed the swarm's own leaves
             error = ex
+        finally:
+            write_ledger(
+                interval.ledger(
+                    budget=self._budget,
+                    caps=self._caps,
+                    time_cap=self._time,
+                    members=[
+                        MemberAccount(
+                            name=m.name,
+                            status=m.status,
+                            bridged=m.context.bridged,
+                            lever=m.lever,
+                            span_id=m.span_id,
+                            cancelled=m.cancelled,
+                        )
+                        for m in self._members
+                    ],
+                    runtime=self._runtime_lever,
+                    final=self._final_meter,
+                    swarm=self._swarm_meter,
+                    stop_reason=self.stop_reason,
+                    interrupted=not ended,
+                    final_cancelled=False,
+                )
+            )
         if error is not None:
             raise unwrap(error)
 
@@ -316,7 +364,14 @@ class SwarmRun:
         status = "cancelled"
         try:
             status = await run_member(
-                m.record, m.name, m.context, m.lever, m.nodes, self._caps, input
+                m.record,
+                m.name,
+                m.context,
+                m.lever,
+                m.nodes,
+                self._caps,
+                input,
+                m.span_id,
             )
         except Exception:
             status = "errored"

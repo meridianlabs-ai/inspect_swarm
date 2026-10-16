@@ -1,10 +1,12 @@
+import gc
 import logging
 import math
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import anyio
@@ -12,6 +14,7 @@ import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai._eval.evalset import task_identifier
 from inspect_ai._util.error import PrerequisiteError
+from inspect_ai._util.registry import RegistryInfo, set_registry_info
 from inspect_ai.agent import Agent, AgentState, agent, run
 from inspect_ai.agent._bridge.types import AgentBridge
 from inspect_ai.agent._bridge.util import (
@@ -20,7 +23,10 @@ from inspect_ai.agent._bridge.util import (
     in_bridge_model_generate,
 )
 from inspect_ai.dataset import Sample
-from inspect_ai.event import SampleLimitEvent, ToolEvent
+from inspect_ai.event import InfoEvent, ModelEvent, SampleLimitEvent, ToolEvent
+from inspect_ai.log._samples import (
+    _sample_active,  # pyright: ignore[reportPrivateUsage]
+)
 from inspect_ai.log._transcript import Transcript, _transcript, transcript
 from inspect_ai.model import (
     ChatMessage,
@@ -35,6 +41,9 @@ from inspect_ai.model import (
     get_model,
     set_model_info,
 )
+from inspect_ai.model._providers.mockllm import (  # pyright: ignore[reportMissingTypeStubs]
+    MockLLM,
+)
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.tool import Tool, ToolChoice, ToolInfo, tool
 from inspect_ai.util import (
@@ -42,10 +51,15 @@ from inspect_ai.util import (
     LimitExceededError,
     cost_limit,
     message_limit,
+    store,
     time_limit,
     token_limit,
     turn_limit,
     working_limit,
+)
+from inspect_ai.util._checkpoint.checkpointer import ResumeCheckpoint
+from inspect_ai.util._checkpoint.checkpointer_impl import (
+    _CheckpointerSetup,  # pyright: ignore[reportPrivateUsage]
 )
 from inspect_ai.util._concurrency import init_concurrency
 from inspect_ai.util._limit import (
@@ -58,7 +72,16 @@ from inspect_ai.util._limit import (
     suspend_token_limit,
 )
 from pydantic import ValidationError
+from tenacity import wait_none
+from tenacity.wait import WaitBaseT
 
+from inspect_swarm import (
+    Controller,
+    StopReason,
+    SwarmControl,
+    member,
+    swarm,
+)
 from inspect_swarm._budget import (
     Budget,
     Caps,
@@ -75,6 +98,10 @@ from inspect_swarm._budget import (
     derive_caps,
     is_bridged,
 )
+from inspect_swarm._evidence import LEDGER_KEY
+from inspect_swarm._ledger import Calls, SwarmLedger, sample_resumed
+
+from .swarm_runtime import Script, controller, generator, sample, scripted_model
 
 TOKENS_PER_CALL = 50
 
@@ -1001,3 +1028,441 @@ async def _unregistered(state: AgentState) -> AgentState:
 )
 def test_is_bridged(member: Agent, declared: bool | None, expected: bool) -> None:
     assert is_bridged(member, declared) is expected
+
+
+# ---------------------------------------------------------------------------
+# The ledger
+
+
+def _price(name: str, cost: float) -> None:
+    # each call uses TOKENS_PER_CALL output tokens and costs `cost` dollars
+    set_model_info(
+        name,
+        ModelInfo(
+            cost=ModelCost(
+                input=0,
+                output=cost * 1_000_000 / TOKENS_PER_CALL,
+                input_cache_write=0,
+                input_cache_read=0,
+            )
+        ),
+    )
+
+
+def _api_model(api: type[MockLLM], script: Script, cost: float | None) -> Model:
+    # a model on a test provider class, which lives only as long as the model
+    set_registry_info(api, RegistryInfo(type="modelapi", name="mockllm"))
+    name = f"m-{uuid4().hex}"
+    if cost is not None:
+        _price(f"mockllm/{name}", cost)
+    return Model(
+        api(name, custom_outputs=cast(Any, script)), GenerateConfig(max_retries=2)
+    )
+
+
+def _native_compaction_model(cost: float) -> Model:
+    class NativeCompaction(MockLLM):
+        async def compact(
+            self,
+            input: list[ChatMessage],
+            tools: list[ToolInfo],
+            config: GenerateConfig,
+            instructions: str | None = None,
+        ) -> tuple[list[ChatMessage], ModelUsage | None]:
+            usage = ModelUsage(
+                output_tokens=TOKENS_PER_CALL, total_tokens=TOKENS_PER_CALL
+            )
+            return input, usage
+
+    return _api_model(NativeCompaction, Script(), cost)
+
+
+def _no_usage_model(cost: float) -> Model:
+    class NoUsage(MockLLM):
+        async def generate(
+            self,
+            input: list[ChatMessage],
+            tools: list[ToolInfo],
+            tool_choice: ToolChoice,
+            config: GenerateConfig,
+        ) -> ModelOutput:
+            return ModelOutput.from_content("mockllm", "ok")
+
+    return _api_model(NoUsage, Script(), cost)
+
+
+def _retrying_model(script: Script, cost: float) -> Model:
+    class Retrying(MockLLM):
+        def should_retry(self, ex: Exception) -> bool:
+            return True
+
+        def retry_wait(self) -> WaitBaseT | None:
+            return wait_none()
+
+    return _api_model(Retrying, script, cost)
+
+
+@agent
+def _approving(model: Model) -> Agent:
+    # generates, then makes an approval call, which runs with token metering suspended
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(state.messages)
+        with suspend_token_limit():
+            await model.generate("approve?")
+        return state
+
+    return execute
+
+
+@agent
+def _cached(model: Model) -> Agent:
+    # the second call is a cache replay of the first
+    async def execute(state: AgentState) -> AgentState:
+        for _ in range(2):
+            state.output = await model.generate("same", cache=True)
+        return state
+
+    return execute
+
+
+@agent
+def _compacting(model: Model) -> Agent:
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(state.messages)
+        await model.compact(state.messages, [])
+        return state
+
+    return execute
+
+
+@agent
+def _recording(model: Model) -> Agent:
+    # records usage in the limit tree that the sample's usage never sees
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(state.messages)
+        record_model_usage(
+            ModelUsage(output_tokens=TOKENS_PER_CALL, total_tokens=TOKENS_PER_CALL)
+        )
+        return state
+
+    return execute
+
+
+@agent
+def _failing() -> Agent:
+    async def execute(state: AgentState) -> AgentState:
+        raise RuntimeError("member crashed")
+
+    return execute
+
+
+def _written_ledger(transcript: Transcript) -> SwarmLedger:
+    [data] = [
+        e.data
+        for e in transcript.events
+        if isinstance(e, InfoEvent)
+        and e.source == "inspect_swarm"
+        and isinstance(e.data, dict)
+        and e.data.get("type") == "ledger"
+    ]
+    assert isinstance(data, dict)
+    record = {k: v for k, v in data.items() if k != "type"}
+    # the store entry is the same record
+    assert store().get(LEDGER_KEY) == record
+    return SwarmLedger.model_validate(record)
+
+
+async def _ledger(agent_swarm: Agent, **limits: Any) -> SwarmLedger:
+    async with sample(**limits) as t:
+        await agent_swarm(AgentState(messages=[ChatMessageUser(content="task")]))
+        return _written_ledger(t)
+
+
+def _starting_all(*runtime_calls: Model) -> Controller:
+    # makes each runtime call, then starts every member and waits for them
+    async def run(control: SwarmControl) -> StopReason:
+        for model in runtime_calls:
+            await model.generate("plan")
+        for m in control.members:
+            control.start(m)
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    return controller(run, f"budget_test_{uuid4().hex}")
+
+
+@pytest.mark.anyio
+async def test_ledger_meters_sum_to_the_swarm_meter_and_reconcile() -> None:
+    # no native-capable class from another test may still be loaded
+    gc.collect()
+    planner = scripted_model(cost=3.0)
+    agent_swarm = swarm(
+        [
+            member(generator(scripted_model(cost=1.0)), name="a"),
+            member(generator(scripted_model(cost=10.0), calls=2), name="b"),
+        ],
+        controller=_starting_all(planner),
+        channels=[],
+    )
+    ledger = await _ledger(agent_swarm, cost=100.0)
+
+    a, b = ledger.members
+    assert (a.name, a.status, a.meter.cost, a.calls.calls) == (
+        "a",
+        "submitted",
+        pytest.approx(1.0),
+        1,
+    )
+    assert (b.name, b.status, b.meter.cost, b.calls.calls) == (
+        "b",
+        "submitted",
+        pytest.approx(20.0),
+        2,
+    )
+    assert ledger.runtime.cost == pytest.approx(3.0)
+    assert ledger.final.cost == 0
+    meters = [a.meter, b.meter, ledger.runtime, ledger.final]
+    assert ledger.swarm.cost == pytest.approx(sum(m.cost for m in meters))
+    assert ledger.swarm.usage.total_tokens == sum(m.usage.total_tokens for m in meters)
+    assert ledger.swarm.usage.total_tokens == 4 * TOKENS_PER_CALL
+    assert ledger.calls == Calls(calls=4)
+    # two priced models and the runtime's: the sample's delta is the swarm meter
+    assert ledger.sample_delta.total_tokens == 4 * TOKENS_PER_CALL
+    assert ledger.sample_delta.total_cost == pytest.approx(24.0)
+    assert ledger.unattributed.total_tokens == 0
+    assert ledger.unattributed.total_cost == pytest.approx(0.0, abs=1e-9)
+    assert ledger.caps == {"cost": pytest.approx(95.0), "tokens": None, "time": None}
+    assert ledger.sample_limits["cost"] == 100.0
+    assert ledger.overshoot == {}
+    assert ledger.native_compaction_classes == []
+    assert (ledger.stop_reason, ledger.interrupted, ledger.resumed) == (
+        "all_done",
+        False,
+        False,
+    )
+    assert ledger.total_complete and ledger.attribution_complete
+
+
+@pytest.mark.anyio
+async def test_ledger_charges_an_approval_call_to_its_member_and_leaves_its_tokens_unattributed() -> (
+    None
+):
+    gc.collect()
+    ledger = await _ledger(swarm(_approving(scripted_model(cost=1.0)), channels=[]))
+    [m] = ledger.members
+    assert m.meter.cost == pytest.approx(2.0)
+    assert m.meter.suspended_cost == pytest.approx(1.0)
+    assert m.meter.usage.total_tokens == TOKENS_PER_CALL
+    assert ledger.unattributed.total_tokens == TOKENS_PER_CALL
+    assert ledger.unattributed.total_cost == pytest.approx(0.0, abs=1e-9)
+    assert ledger.total_complete
+    assert not ledger.attribution_complete
+
+
+@pytest.mark.anyio
+async def test_ledger_counts_cache_replays_and_charges_them_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gc.collect()
+    monkeypatch.setenv("INSPECT_CACHE_DIR", str(tmp_path))
+    ledger = await _ledger(swarm(_cached(scripted_model(cost=1.0)), channels=[]))
+    [m] = ledger.members
+    assert m.calls == Calls(calls=1, cache_replays=1)
+    assert m.meter.cost == pytest.approx(1.0)
+    assert m.meter.usage.total_tokens == TOKENS_PER_CALL
+    assert ledger.total_complete and ledger.attribution_complete
+
+
+@pytest.mark.anyio
+async def test_ledger_attributes_native_compaction_to_the_member() -> None:
+    model = _native_compaction_model(cost=1.0)
+    ledger = await _ledger(swarm(_compacting(model), channels=[]))
+    [m] = ledger.members
+    # the compaction has no model event, but the member's lever records it
+    assert m.calls == Calls(calls=1)
+    assert m.meter.usage.total_tokens == 2 * TOKENS_PER_CALL
+    assert m.meter.cost == pytest.approx(2.0)
+    assert ledger.unattributed.total_tokens == 0
+    # a loaded class with native compaction leaves the total a lower bound
+    assert any(c.endswith("NativeCompaction") for c in ledger.native_compaction_classes)
+    assert not ledger.total_complete
+
+
+@pytest.mark.anyio
+async def test_ledger_a_loaded_native_compaction_class_clears_total_complete() -> None:
+    gc.collect()
+    loaded = _native_compaction_model(cost=1.0)
+    ledger = await _ledger(swarm(generator(scripted_model(cost=1.0)), channels=[]))
+    assert ledger.calls == Calls(calls=1)
+    assert ledger.native_compaction_classes != []
+    assert not ledger.total_complete
+    del loaded
+
+
+@pytest.mark.anyio
+async def test_ledger_an_unpriced_call_clears_total_complete() -> None:
+    gc.collect()
+    unpriced = scripted_model()
+    ledger = await _ledger(
+        swarm(
+            [
+                member(generator(scripted_model(cost=1.0)), name="priced"),
+                member(generator(unpriced), name="unpriced"),
+            ],
+            channels=[],
+        )
+    )
+    assert ledger.calls == Calls(calls=2, unpriced=1)
+    assert ledger.members[1].calls == Calls(calls=1, unpriced=1)
+    assert ledger.unpriced_calls_recorded == 1
+    assert ledger.unpriced_models == [str(unpriced)]
+    assert not ledger.total_complete
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("caller", ["member", "controller"])
+async def test_ledger_a_response_without_usage_clears_total_complete(
+    caller: str,
+) -> None:
+    gc.collect()
+    model = _no_usage_model(cost=1.0)
+    priced = scripted_model(cost=1.0)
+    if caller == "member":
+        agent_swarm = swarm(generator(model), channels=[])
+    else:
+        agent_swarm = swarm(
+            generator(priced), controller=_starting_all(model), channels=[]
+        )
+    ledger = await _ledger(agent_swarm)
+    assert ledger.calls.no_usage == 1
+    [m] = ledger.members
+    assert m.calls.no_usage == (1 if caller == "member" else 0)
+    assert not ledger.total_complete
+
+
+@pytest.mark.anyio
+async def test_ledger_a_recovered_error_clears_total_complete() -> None:
+    gc.collect()
+    failures = [RuntimeError("transport timeout")]
+
+    def respond(input: list[ChatMessage]) -> ModelOutput:
+        if failures:
+            raise failures.pop()
+        return _output()
+
+    script = Script(respond=respond)
+    ledger = await _ledger(
+        swarm(generator(_retrying_model(script, cost=1.0)), channels=[])
+    )
+    [m] = ledger.members
+    # the errored attempt, then the retry that succeeded
+    assert m.status == "submitted"
+    assert m.calls == Calls(calls=1, errored=1)
+    assert not ledger.total_complete
+
+
+@pytest.mark.anyio
+async def test_ledger_counts_a_hard_stopped_call_as_errored() -> None:
+    gc.collect()
+    held = scripted_model(Script(gate=anyio.Event()), cost=1.0)
+    ledger = await _ledger(
+        swarm(generator(held), channels=[], budget=Budget(time=0.05, grace=0))
+    )
+    [m] = ledger.members
+    assert (m.status, m.cancelled) == ("cancelled", True)
+    assert m.calls == Calls(errored=1)
+    assert ledger.stop_reason == "swarm_time"
+    assert ledger.overshoot["time"] > 0
+    assert not ledger.total_complete
+
+
+@pytest.mark.anyio
+async def test_ledger_records_the_cap_overshoot() -> None:
+    gc.collect()
+    script = Script(gate=anyio.Event())
+    model = scripted_model(script, cost=10.0)
+
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        # both calls are in flight before either records
+        while script.started < 2:
+            await anyio.sleep(0)
+        assert script.gate is not None
+        script.gate.set()
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    ledger = await _ledger(
+        swarm(
+            member(generator, args={"model": model}, count=2),
+            controller=controller(run, "budget_test_overshoot"),
+            channels=[],
+            budget=Budget(cost=15.0),
+        )
+    )
+    assert ledger.stop_reason == "swarm_cap"
+    assert ledger.caps == {"cost": 15.0, "tokens": None, "time": None}
+    assert ledger.overshoot == {"cost": pytest.approx(5.0)}
+    assert ledger.swarm.cost == pytest.approx(20.0)
+
+
+@pytest.mark.anyio
+async def test_ledger_is_written_when_a_member_crashes() -> None:
+    gc.collect()
+    async with sample() as t:
+        with pytest.raises(RuntimeError, match="member crashed"):
+            await swarm(_failing(), channels=[])(
+                AgentState(messages=[ChatMessageUser(content="task")])
+            )
+        ledger = _written_ledger(t)
+    [m] = ledger.members
+    assert m.status == "errored"
+    assert ledger.interrupted
+    assert not ledger.total_complete
+
+
+@pytest.mark.anyio
+async def test_ledger_logs_an_error_when_the_meters_exceed_the_sample(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gc.collect()
+    with caplog.at_level(logging.ERROR, logger="inspect_swarm"):
+        ledger = await _ledger(swarm(_recording(scripted_model(cost=1.0)), channels=[]))
+    assert ledger.unattributed.total_tokens == -TOKENS_PER_CALL
+    assert "does not reconcile" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_pinned_a_priced_model_event_carries_its_cost(
+    fresh_transcript: Transcript,
+) -> None:
+    # the ledger's per-call pricing check reads the cost Inspect sets on the event's usage
+    await scripted_model(cost=2.0).generate("x")
+    [event] = [e for e in fresh_transcript.events if isinstance(e, ModelEvent)]
+    assert event.output.usage is not None
+    assert event.output.usage.total_cost == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    "attempt,expected",
+    [(None, False), ("initial", False), ("resume", True)],
+)
+def test_pinned_sample_resumed_reads_the_checkpointer_setup(
+    attempt: Literal["initial", "resume"] | None, expected: bool
+) -> None:
+    setup = _CheckpointerSetup(
+        config=cast(Any, None),
+        log_location="",
+        sample_id=1,
+        epoch=1,
+        resume_checkpoint=None if attempt is None else ResumeCheckpoint(attempt),
+    )
+    token = _sample_active.set(cast(Any, SimpleNamespace(checkpointer=setup)))
+    try:
+        assert sample_resumed() is expected
+    finally:
+        _sample_active.reset(token)
+    assert sample_resumed() is False

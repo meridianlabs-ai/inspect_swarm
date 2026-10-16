@@ -297,6 +297,7 @@ async def run_member(
     nodes: list[Limit],
     caps: Sequence[Limit],
     input: list[ChatMessage],
+    span_id: str,
 ) -> str:
     token = current_member.set(context)
     error: Exception | None = None
@@ -310,7 +311,7 @@ async def run_member(
             with ExitStack() as entered:
                 for node in nodes:
                     entered.enter_context(node)
-                await run(agent, input, name=name)
+                await run(agent, input, name=name, span_id=span_id)
     except Exception as ex:
         error = ex
     finally:

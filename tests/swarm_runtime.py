@@ -21,6 +21,7 @@ from inspect_ai.model import (
     get_model,
     set_model_info,
 )
+from inspect_ai.model._model import init_sample_model_usage
 from inspect_ai.tool import ToolChoice, ToolInfo
 from inspect_ai.util import (
     cost_limit,
@@ -32,6 +33,8 @@ from inspect_ai.util import (
 )
 from inspect_ai.util._concurrency import init_concurrency
 from inspect_ai.util._store import Store, init_subtask_store
+
+from inspect_swarm import Controller, swarm_controller
 
 TOKENS_PER_CALL = 50
 
@@ -126,6 +129,16 @@ def sleeper(seconds: float = 3600.0) -> Agent:
     return execute
 
 
+def controller(run: Any, name: str) -> Controller:
+    """A controller registered under `name` whose run is `run`."""
+
+    @swarm_controller(name=name)
+    def factory() -> Controller:
+        return Controller(run)
+
+    return factory()
+
+
 @asynccontextmanager
 async def sample(
     *,
@@ -138,6 +151,7 @@ async def sample(
     # the registry's limiters are bound to the async backend that created them
     init_concurrency()
     init_subtask_store(Store())
+    init_sample_model_usage()
     transcript = Transcript()
     token = _transcript.set(transcript)
     try:
