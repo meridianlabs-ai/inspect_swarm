@@ -14,7 +14,15 @@ from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.model import Model, get_model
 from inspect_ai.util import Limit
 
-from ._budget import Budget, CostPair, SwarmTokenNode, check_cost_data, derive_caps
+from ._budget import (
+    Budget,
+    CostPair,
+    SwarmTokenNode,
+    check_cost_data,
+    derive_caps,
+    is_bridged,
+)
+from ._bus._policy import CommPolicy
 from ._channel._channel import Channel
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
@@ -29,6 +37,7 @@ def swarm(
     controller: str | Controller = "leaderless",
     channels: str | Channel | Sequence[str | Channel] = ("filesystem",),
     budget: Budget = Budget(),  # noqa: B008
+    policy: CommPolicy | None = None,
 ) -> Agent:
     """A swarm of agents working on one sample.
 
@@ -37,13 +46,14 @@ def swarm(
         controller: How the swarm runs: who starts, when and with what input, and when the swarm is done. A name resolves to a registered controller with its default parameters.
         channels: How members share information. A name resolves to a registered channel with its default parameters. `[]` means none: members get no channel instructions, though a shared sandbox is still shared.
         budget: The swarm-wide cap.
+        policy: A check the bus runs on each record a channel delivers, before it is delivered: it can let the record through, change its payload, reject it or end the sample. The log records it by name only, so a task that varies it takes it from a task argument or sets it inside a registered swarm builder.
 
     Returns:
         The swarm, as an agent.
 
     Raises:
-        TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
-        ValueError: If member names collide, the same agent object is in two members, a channel is given twice, a name does not resolve, or the controller refuses the roster.
+        TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, an argument has the wrong type, or `policy` is a string, as a replay from the log passes it.
+        ValueError: If member names collide, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, or a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet).
         NotImplementedError: If `budget` divides the caps into shares (`split` other than `"pool"`).
     """
     records = _members(members)
@@ -59,6 +69,8 @@ def swarm(
     resolved_controller = resolve("swarm_controller", controller)
     if resolved_controller.check is not None:
         resolved_controller.check(roster)
+    _check_bus_channels(resolved_channels, records, names, roster)
+    resolved_policy = _policy(policy)
     resolved_budget = _budget(budget)
     if resolved_budget.split != "pool":
         # shares are milestone M1-8; until then a split would run as one pool
@@ -96,6 +108,8 @@ def swarm(
             caps=cap_nodes,
             time=caps.time,
             grace=resolved_budget.grace,
+            channels=resolved_channels,
+            policy=resolved_policy,
         ).run(resolved_controller.run)
         return state
 
@@ -212,6 +226,56 @@ def _channels(channels: str | Channel | Sequence[str | Channel]) -> list[Channel
             f"channels=: each channel may be given once; {', '.join(duplicates)} is given more than once."
         )
     return resolved
+
+
+def _check_bus_channels(
+    channels: Sequence[Channel],
+    records: Sequence[Member],
+    names: Sequence[list[str]],
+    roster: Sequence[MemberInfo],
+) -> None:
+    # channels with records must not collide, and bridged members have no way to their
+    # tools yet
+    for channel in channels:
+        if (channel.name is None) != (channel.prefix is None):
+            raise ValueError(
+                f"channels=: {registry_info(channel).name} must set both a record name and a record prefix, or neither."
+            )
+    for field in ("name", "prefix"):
+        seen: dict[str, str] = {}
+        for channel in channels:
+            value = getattr(channel, field)
+            if value is None:
+                continue
+            other = seen.setdefault(value, registry_info(channel).name)
+            if other != registry_info(channel).name:
+                raise ValueError(
+                    f"channels=: {other} and {registry_info(channel).name} both have the record {field} {value!r}, so their records would collide."
+                )
+    for channel in channels:
+        channel.check(roster)
+    bus_channels = [c for c in channels if c.name is not None]
+    if not bus_channels:
+        return
+    for record, record_names in zip(records, names, strict=True):
+        agent = record.agent if record.agent is not None else record.factory
+        if is_bridged(cast(Agent, agent), record.bridged):
+            raise ValueError(
+                f"swarm(): member {record_names[0]!r} is bridged, and bridged members cannot use bus channels such as {registry_info(bus_channels[0]).name} yet. Leave the channel out, or the member."
+            )
+
+
+def _policy(policy: object) -> CommPolicy | None:
+    if isinstance(policy, str):
+        # a callable is logged by its name, which a replay from the log passes back
+        raise TypeError(
+            f"policy= got the string {policy!r}: a policy cannot be rebuilt from a log; rebuild the swarm through its task or a registered builder."
+        )
+    if policy is not None and not callable(policy):
+        raise TypeError(
+            f"policy= must be an async function or None, got a {type(policy).__name__}."
+        )
+    return cast(CommPolicy | None, policy)
 
 
 def _budget(budget: object) -> Budget:
