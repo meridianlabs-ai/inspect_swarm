@@ -23,12 +23,14 @@ from inspect_swarm import (
     swarm,
     swarm_controller,
 )
+from inspect_swarm._controller._control import SwarmRun
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
     Script,
     generator,
     run_swarm,
+    sample,
     scripted_model,
     sleeper,
     statuses,
@@ -147,6 +149,38 @@ async def test_events_allows_one_waiting_iterator() -> None:
     )
     assert len(errors) == 1 and "one at a time" in errors[0]
     assert statuses(stop) == {"generator": "submitted"}
+
+
+@pytest.mark.anyio
+async def test_a_woken_iterator_keeps_the_event_that_woke_it() -> None:
+    # the interval after a member's end wakes a waiting iterator and before it
+    # resumes, driven by hand so that no scheduling order decides it
+    async with sample():
+        run = SwarmRun(
+            [(member(generator(scripted_model())), "generator")],
+            input=[],
+            preambles={"generator": ""},
+            caps=[],
+            time=None,
+            grace=0,
+        )
+        [m] = run._members
+        m.state = "running"
+        received: list[MemberEnded] = []
+
+        async def first() -> None:
+            async for event in run.events():
+                received.append(event)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(first)
+            while not run._waiting:
+                await anyio.sleep(0)
+            run._end(m, "submitted")
+            # a competing iterator, before the woken one has resumed
+            with pytest.raises(RuntimeError, match="one at a time"):
+                await run.events().__anext__()
+    assert received == [MemberEnded("generator", "submitted", True)]
 
 
 @pytest.mark.anyio

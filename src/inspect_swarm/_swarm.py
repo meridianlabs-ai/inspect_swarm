@@ -2,6 +2,8 @@ from collections.abc import Mapping, Sequence
 from typing import cast
 
 from inspect_ai._util.registry import (
+    is_model_dict,
+    model_create_from_dict,
     registry_info,
     registry_params,
     registry_unqualified_name,
@@ -111,9 +113,10 @@ def _model(record: Member) -> str | Model:
         if record.agent is not None
         else record.args.get("model")
     )
-    if isinstance(model, Mapping):
-        # a built agent's params hold a Model as its logged dict
-        model = cast(Mapping[str, object], model).get("model")
+    if is_model_dict(model):
+        # a built agent's params hold a Model as its logged dict; rebuild it as replay
+        # does, so that pricing is looked up under its canonical name too
+        model = model_create_from_dict(model)
     return model if isinstance(model, str | Model) else get_model()
 
 

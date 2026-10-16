@@ -2,13 +2,17 @@ from typing import Any
 
 import anyio
 import pytest
+from inspect_ai._util.error import PrerequisiteError
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.model import (
     ChatMessageTool,
     ChatMessageUser,
     Model,
+    ModelCost,
+    ModelInfo,
     ModelOutput,
     execute_tools,
+    set_model_info,
 )
 from inspect_ai.tool import Tool, tool
 from inspect_ai.util import (
@@ -244,21 +248,15 @@ async def test_the_runtime_lever_and_member_levers_are_siblings(staged: bool) ->
 
 
 @agent
-def grouped(model: Model, crash: bool = False) -> Agent:
+def grouped(model: Model) -> Agent:
     # generates inside a task group of its own, so its errors arrive grouped
     async def execute(state: AgentState) -> AgentState:
         async def generate() -> None:
             while True:
                 await model.generate(state.messages)
 
-        async def fail() -> None:
-            await anyio.sleep(0.01)
-            raise RuntimeError("foreign")
-
         async with anyio.create_task_group() as tg:
             tg.start_soon(generate)
-            if crash:
-                tg.start_soon(fail)
         return state
 
     return execute
@@ -358,18 +356,73 @@ async def test_a_grouped_lever_stop_gives_the_same_status_as_a_bare_one() -> Non
     }
 
 
+@agent
+def mixed(model: Model) -> Agent:
+    # captures a real limit error from the swarm's nodes, then raises it in a group
+    # with a foreign error
+    async def execute(state: AgentState) -> AgentState:
+        try:
+            while True:
+                await model.generate(state.messages)
+        except LimitExceededError as limit:
+            raise ExceptionGroup("mixed", [limit, RuntimeError("foreign")]) from None
+
+    return execute
+
+
 @pytest.mark.anyio
-async def test_a_group_mixing_an_own_limit_and_a_foreign_error_raises_the_foreign_leaf() -> (
-    None
-):
+@pytest.mark.parametrize(
+    "limits,budget",
+    [
+        pytest.param([token_limit(TOKENS_PER_CALL)], Budget(), id="member-limit"),
+        pytest.param([], Budget(tokens=TOKENS_PER_CALL), id="swarm-cap"),
+    ],
+)
+async def test_a_group_mixing_the_swarms_error_with_a_foreign_one_raises_only_the_foreign_leaf(
+    limits: list[Limit], budget: Budget
+) -> None:
     with pytest.raises(RuntimeError, match="foreign") as raised:
         await run_swarm(
             swarm(
-                member(
-                    grouped(scripted_model(Script(delay=0.02)), crash=True),
-                    limits=[token_limit(TOKENS_PER_CALL)],
-                ),
+                member(mixed(scripted_model()), limits=limits),
                 channels=[],
+                budget=budget,
             )
         )
-    assert not isinstance(raised.value, LimitExceededError)
+    # the swarm's leaf was removed, so the foreign one escapes bare, not as a group
+    assert type(raised.value) is RuntimeError
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("form", ["built", "factory"])
+async def test_the_cost_check_finds_a_model_priced_under_its_canonical_name(
+    form: str,
+) -> None:
+    # priced only under the canonical name ("m-..."), not the configured "mockllm/m-..."
+    model = scripted_model()
+    set_model_info(
+        model.canonical_name(),
+        ModelInfo(
+            cost=ModelCost(input=0, output=1, input_cache_write=0, input_cache_read=0)
+        ),
+    )
+    record = (
+        member(generator(model))
+        if form == "built"
+        else member(generator, args={"model": model})
+    )
+    stop = await run_swarm(swarm(record, channels=[], budget=Budget(cost=10.0)))
+    assert statuses(stop) == {"generator": "submitted"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("form", ["built", "factory"])
+async def test_the_cost_check_refuses_an_unpriced_model(form: str) -> None:
+    model = scripted_model()
+    record = (
+        member(generator(model))
+        if form == "built"
+        else member(generator, args={"model": model})
+    )
+    with pytest.raises(PrerequisiteError, match="Missing cost data"):
+        await run_swarm(swarm(record, channels=[], budget=Budget(cost=10.0)))

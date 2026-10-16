@@ -210,15 +210,17 @@ class SwarmRun:
 
     async def events(self) -> AsyncIterator[SwarmEvent]:
         while True:
+            # checked before taking an event: a waiting iterator that has been woken
+            # but has not yet resumed owns the event that woke it
+            if self._waiting:
+                raise RuntimeError(
+                    "events(): another iterator is already waiting for events; use one at a time."
+                )
             if self._queue:
                 yield self._queue.popleft()
             elif not self._running():
                 return
             else:
-                if self._waiting:
-                    raise RuntimeError(
-                        "events(): another iterator is already waiting for events; use one at a time."
-                    )
                 self._waiting = True
                 try:
                     await self._changed.wait()
@@ -303,10 +305,14 @@ class SwarmRun:
             status = "errored"
             raise
         finally:
-            m.state = "ended"
-            m.status = status
-            self._queue.append(MemberEnded(m.name, status, m.submitted))
-            self._notify()
+            self._end(m, status)
+
+    def _end(self, m: MemberRun, status: str) -> None:
+        # the member counts as running until its event is queued
+        m.state = "ended"
+        m.status = status
+        self._queue.append(MemberEnded(m.name, status, m.submitted))
+        self._notify()
 
     async def _time_cap(self, seconds: float) -> None:
         await anyio.sleep(seconds)
