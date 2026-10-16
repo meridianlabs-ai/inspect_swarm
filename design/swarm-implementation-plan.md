@@ -109,7 +109,7 @@ Everything else the deep dives place after M2 or later is future work.
 
 ## M1 pull requests
 
-IDs: `AI-n` are inspect_ai pull requests (opened on the Meridian fork and promoted to `UKGovernmentBEIS/inspect_ai` as usual); `M1-n` are inspect_swarm. An inspect_swarm pull request that depends on an inspect_ai one needs it merged on inspect_ai `main`, and bumps this repository's lock with `uv lock --upgrade-package inspect-ai` in its own diff. inspect_ai's changelog is written by Release Please from the pull request title, so no inspect_ai pull request edits `CHANGELOG.md`.
+IDs: `AI-n` are inspect_ai pull requests (opened on the Meridian fork and promoted to `UKGovernmentBEIS/inspect_ai` as usual); `M1-n` are inspect_swarm. An inspect_swarm pull request that depends on an inspect_ai one waits for a PyPI release containing it, raises the minimum in `pyproject.toml` when `src/` needs that release, and updates `uv.lock` with `uv lock --upgrade-package inspect-ai` in its own diff; when only tests need it, it updates only the lock. inspect_ai's changelog is written by Release Please from the pull request title, so no inspect_ai pull request edits `CHANGELOG.md`.
 
 ### Graph
 
