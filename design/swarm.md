@@ -511,7 +511,7 @@ The bus uses sentinel's action vocabulary from the start. Sentinel's dispatcher 
 
 ### Observer: evidence, accounting and metrics
 
-**Evidence.** Each communication produces records of the kinds ORBIT uses: `sent`, `delivered`, `notified` and `read`. The swarm writes no `exposed` event: whether content entered a model's input is for an observer of that input, which finds swarm records there through each read's `read` event and tool call id and the metadata ids on notices and injections ([swarm-communication.md Records and the bus](swarm-communication.md#records-and-the-bus)). Two of ORBIT's meanings differ: its `delivered` is content inserted into a conversation, and its `notified` a notice that reached a model's input ([swarm-orbit.md](swarm-orbit.md#p3-exposure) maps them). Each record carries:
+**Evidence.** Each communication produces records of the kinds ORBIT uses: `sent`, `delivered`, `notified` and `read`. The swarm writes no `exposed` event: whether content entered a model's input is for an observer of that input, which can correlate it with swarm records through each read's `read` event and `ToolEvent` and the metadata ids on notices and injections. That correlation is external analysis and can be ambiguous after repeated tool call ids, message edits or merged user messages; an exact input join is not an M2 guarantee ([swarm-communication.md Records and the bus](swarm-communication.md#records-and-the-bus)). Two of ORBIT's meanings differ: its `delivered` is content inserted into a conversation, and its `notified` a notice that reached a model's input ([swarm-orbit.md](swarm-orbit.md#p3-exposure) maps them). Each record carries:
 
 - sender and recipients (member names);
 - channel and kind;
