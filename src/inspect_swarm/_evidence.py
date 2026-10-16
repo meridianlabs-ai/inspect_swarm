@@ -1,3 +1,4 @@
+import copy
 from collections.abc import Mapping
 
 from inspect_ai.log import transcript
@@ -74,7 +75,7 @@ def _record(record: Record) -> dict[str, JsonValue]:
         "recipients": list(record.recipients),
         "routed_out": list(record.routed_out),
         "payload": record.payload,
-        "op": None if record.op is None else dict(record.op),
+        "op": None if record.op is None else copy.deepcopy(dict(record.op)),
         "wake": record.wake,
         "reply_to": record.reply_to,
         "via": record.via,

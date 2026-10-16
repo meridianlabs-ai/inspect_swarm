@@ -12,6 +12,7 @@ from inspect_ai.event import InfoEvent
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import ChatMessageUser
 from inspect_ai.tool import Tool, ToolError
+from inspect_ai.util import token_limit
 from pydantic import JsonValue
 
 from inspect_swarm import (
@@ -37,7 +38,7 @@ from inspect_swarm._bus._bus import Bus, Delivery, current_bus
 from inspect_swarm._bus._record import Draft
 from inspect_swarm._bus._storm import StormControls
 
-from .swarm_runtime import run_swarm, sample
+from .swarm_runtime import run_swarm, sample, scripted_model, statuses, stopped
 
 
 class _BoardState:
@@ -617,6 +618,37 @@ async def test_only_the_runs_own_members_can_deliver(same_name: bool) -> None:
 
 
 @pytest.mark.anyio
+async def test_a_record_keeps_the_operation_data_it_was_sent_with() -> None:
+    entered, release = anyio.Event(), anyio.Event()
+    seen: list[Any] = []
+
+    async def policy(record: Record, view: SwarmView) -> None:
+        entered.set()
+        await release.wait()
+        seen.append(record.op)
+
+    op: dict[str, JsonValue] = {"files": [{"file": "f-1", "path": "/a"}]}
+    original = {"files": [{"file": "f-1", "path": "/a"}]}
+    bus, _ = _bus(policy)
+    async with sample() as transcript:
+        async with _held(bus, entered, op=op) as outcome:
+            # the tool's dict changes while the policy runs
+            files = op["files"]
+            assert isinstance(files, list) and isinstance(files[0], dict)
+            files[0]["path"] = "/b"
+            release.set()
+    [delivery] = outcome
+    files[0]["path"] = "/c"
+    assert seen == [original]
+    assert delivery.record.op == original
+    assert (
+        [r.op for r in bus.records] == [r.op for r in _board(bus).applied] == [original]
+    )
+    [sent, _] = _comm(transcript)
+    assert sent["record"]["op"] == original
+
+
+@pytest.mark.anyio
 async def test_record_ids_count_per_channel_from_one() -> None:
     bus, _ = _bus(channels=[_Board(), _Notes()])
     ids = [
@@ -819,6 +851,48 @@ async def test_an_attempt_cancelled_during_the_policy_is_evidenced() -> None:
     assert sent["rejected"] == {
         "control": "cancelled",
         "reason": "the note was cancelled during the policy",
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "limit,status",
+    [("swarm", "swarm_cap"), ("member", "member_limit:token")],
+)
+async def test_a_limit_the_policys_model_reaches_is_evidenced(
+    limit: str, status: str
+) -> None:
+    model = scripted_model()
+
+    async def policy(record: Record, view: SwarmView) -> None:
+        # a model-backed check, whose call is the member's
+        await model.generate("is this note safe?")
+
+    buses: list[Bus] = []
+    outcomes: list[str] = []
+    agent = swarm(
+        member(
+            bus_user,
+            args={"buses": buses, "send": True, "outcomes": outcomes},
+            name="w",
+            limits=[token_limit(1)] if limit == "member" else None,
+        ),
+        channels=["bus_test_board"],
+        budget=Budget(tokens=1) if limit == "swarm" else Budget(),
+        policy=policy,
+    )
+    async with sample() as transcript:
+        await agent(AgentState(messages=[ChatMessageUser(content="task")]))
+    assert statuses(stopped(transcript)) == {"w": status}
+    assert outcomes == []
+    [bus] = buses
+    assert (bus.records, _board(bus).applied) == ((), [])
+    [sent] = _comm(transcript)
+    assert sent["record"]["id"] == "b-1"
+    assert sent["decision"] is None
+    assert sent["rejected"] == {
+        "control": "policy_error",
+        "reason": "the swarm's policy raised LimitExceededError",
     }
 
 

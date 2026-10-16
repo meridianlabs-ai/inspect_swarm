@@ -1,3 +1,4 @@
+import copy
 import logging
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
@@ -125,7 +126,8 @@ class Bus:
             recipients=recipients,
             routed_out=(),
             payload=draft.payload,
-            op=draft.op,
+            # a snapshot: the tool's own dict may change while the policy runs
+            op=None if draft.op is None else copy.deepcopy(dict(draft.op)),
             wake=False,
             reply_to=None,
             via="tool",
@@ -150,6 +152,16 @@ class Bus:
                     None,
                     None,
                     ("cancelled", f"the {record.kind} was cancelled during the policy"),
+                )
+                raise
+            except Exception as ex:
+                # a limit its model calls reached, or an error of its own: raised as it
+                # is, after the attempt's evidence
+                comm_sent(
+                    record,
+                    None,
+                    None,
+                    ("policy_error", f"the swarm's policy raised {type(ex).__name__}"),
                 )
                 raise
         if decision is not None:
