@@ -1,4 +1,3 @@
-import copy
 import logging
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
@@ -16,7 +15,7 @@ from .._channel._channel import Channel, ChannelRun, ChannelState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_sent
 from ._policy import CommDecision, CommPolicy
-from ._record import Draft, Record
+from ._record import Draft, FrozenJson, Record, freeze_json
 from ._storm import Storm
 
 if TYPE_CHECKING:
@@ -126,8 +125,8 @@ class Bus:
             recipients=recipients,
             routed_out=(),
             payload=draft.payload,
-            # a snapshot: the tool's own dict may change while the policy runs
-            op=None if draft.op is None else copy.deepcopy(dict(draft.op)),
+            # detached from the tool's own dict, and read-only at every depth
+            op=None if draft.op is None else _frozen_op(draft.op),
             wake=False,
             reply_to=None,
             via="tool",
@@ -257,6 +256,12 @@ class Bus:
                     f"{name} ended before the {record.kind} was delivered.",
                 )
         return None
+
+
+def _frozen_op(op: Mapping[str, JsonValue]) -> Mapping[str, FrozenJson]:
+    frozen = freeze_json(op)
+    assert isinstance(frozen, Mapping)
+    return frozen
 
 
 def _unencodable(record: Record) -> tuple[str, str] | None:

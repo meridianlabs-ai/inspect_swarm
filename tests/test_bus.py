@@ -35,7 +35,7 @@ from inspect_swarm import (
 )
 from inspect_swarm._budget import MemberContext, current_member
 from inspect_swarm._bus._bus import Bus, Delivery, current_bus
-from inspect_swarm._bus._record import Draft
+from inspect_swarm._bus._record import Draft, thaw_json
 from inspect_swarm._bus._storm import StormControls
 
 from .swarm_runtime import run_swarm, sample, scripted_model, statuses, stopped
@@ -617,35 +617,58 @@ async def test_only_the_runs_own_members_can_deliver(same_name: bool) -> None:
     assert (seen, _comm(transcript), _board(bus).applied) == ([], [], [])
 
 
+def _set_path(op: Any, path: str) -> None:
+    op["files"][0]["path"] = path
+
+
 @pytest.mark.anyio
 async def test_a_record_keeps_the_operation_data_it_was_sent_with() -> None:
     entered, release = anyio.Event(), anyio.Event()
-    seen: list[Any] = []
+    kept: list[Record] = []
+    refused: list[str] = []
+
+    def mutate(op: Any, where: str) -> None:
+        try:
+            _set_path(op, "/changed")
+        except TypeError:
+            refused.append(where)
 
     async def policy(record: Record, view: SwarmView) -> None:
-        entered.set()
-        await release.wait()
-        seen.append(record.op)
+        if record.id == "b-1":
+            kept.append(record)
+            mutate(record.op, "policy argument")
+            entered.set()
+            await release.wait()
+        else:
+            mutate(view.records[0].op, "history")
 
     op: dict[str, JsonValue] = {"files": [{"file": "f-1", "path": "/a"}]}
     original = {"files": [{"file": "f-1", "path": "/a"}]}
     bus, _ = _bus(policy)
     async with sample() as transcript:
         async with _held(bus, entered, op=op) as outcome:
-            # the tool's dict changes while the policy runs
-            files = op["files"]
-            assert isinstance(files, list) and isinstance(files[0], dict)
-            files[0]["path"] = "/b"
+            # the tool's own dict changes while the policy runs
+            _set_path(op, "/b")
             release.set()
-    [delivery] = outcome
-    files[0]["path"] = "/c"
-    assert seen == [original]
-    assert delivery.record.op == original
-    assert (
-        [r.op for r in bus.records] == [r.op for r in _board(bus).applied] == [original]
-    )
-    [sent, _] = _comm(transcript)
-    assert sent["record"]["op"] == original
+        [delivery] = outcome
+        _set_path(op, "/c")
+        mutate(kept[0].op, "retained argument")
+        mutate(delivery.record.op, "delivery")
+        await _send(bus, "w-2")
+    assert refused == ["policy argument", "retained argument", "delivery", "history"]
+    for record in (kept[0], delivery.record, bus.records[0], _board(bus).applied[0]):
+        assert record.op is not None and thaw_json(record.op) == original
+    sent = [e for e in _comm(transcript) if e["kind"] == "sent"]
+    assert sent[0]["record"]["op"] == original
+
+
+@pytest.mark.anyio
+async def test_operation_data_that_is_not_json_is_refused() -> None:
+    bus, _ = _bus()
+    op: Any = {"files": {"f-1", "f-2"}}
+    with pytest.raises(TypeError, match="op must be JSON data; it holds a set"):
+        await _send(bus, op=op)
+    assert _board(bus).applied == []
 
 
 @pytest.mark.anyio

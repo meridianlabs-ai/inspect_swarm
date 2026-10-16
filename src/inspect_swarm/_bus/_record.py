@@ -1,8 +1,20 @@
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from types import MappingProxyType
+from typing import Literal, TypeAlias, cast
 
 from pydantic import JsonValue
+
+FrozenJson: TypeAlias = (
+    str
+    | int
+    | float
+    | bool
+    | None
+    | tuple["FrozenJson", ...]
+    | Mapping[str, "FrozenJson"]
+)
+"""JSON data that cannot be changed: objects are read-only mappings and arrays are tuples."""
 
 
 @dataclass(frozen=True)
@@ -39,8 +51,8 @@ class Record:
     payload: str
     """The text the record carries. A policy's `modify` replaces it."""
 
-    op: Mapping[str, JsonValue] | None
-    """The channel's operation data, if any."""
+    op: Mapping[str, FrozenJson] | None
+    """The channel's operation data, if any, as JSON that cannot be changed: objects are read-only mappings and arrays are tuples. A record is shared by the policy, the channel and the bus's history, so none of them can change what the others see."""
 
     wake: bool
     """Whether the record ends a recipient's wait."""
@@ -68,3 +80,33 @@ class Draft:
     to: tuple[str, ...] = ()
     payload: str = ""
     op: Mapping[str, JsonValue] | None = None
+
+
+# A record's operation data, detached from the draft's and read-only at every depth.
+def freeze_json(value: object) -> FrozenJson:
+    if isinstance(value, Mapping):
+        items = cast(Mapping[object, object], value).items()
+        frozen: dict[str, FrozenJson] = {}
+        for key, item in items:
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"A record's op must be JSON data; it has the key {key!r}."
+                )
+            frozen[key] = freeze_json(item)
+        return MappingProxyType(frozen)
+    if isinstance(value, list | tuple):
+        return tuple(freeze_json(item) for item in cast(Sequence[object], value))
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    raise TypeError(
+        f"A record's op must be JSON data; it holds a {type(value).__name__}."
+    )
+
+
+# Operation data as plain JSON again, for evidence.
+def thaw_json(value: FrozenJson) -> JsonValue:
+    if isinstance(value, Mapping):
+        return {key: thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [thaw_json(item) for item in value]
+    return value

@@ -5,7 +5,7 @@ from inspect_ai.log import transcript
 from pydantic import JsonValue
 
 from ._bus._policy import CommDecision
-from ._bus._record import Record
+from ._bus._record import Record, thaw_json
 
 # Communication evidence: an InfoEvent for each record that reached the bus (`sent`) and
 # for each one it delivered (`delivered`), written in the span the channel's tool runs in.
@@ -47,7 +47,8 @@ def comm_delivered(
             "recipients": list(record.recipients),
             "seq": seq,
             "notify": list(notify),
-            "result": None if result is None else dict(result),
+            # a copy: the channel keeps its own
+            "result": None if result is None else copy.deepcopy(dict(result)),
         },
         source="inspect_swarm",
     )
@@ -75,7 +76,7 @@ def _record(record: Record) -> dict[str, JsonValue]:
         "recipients": list(record.recipients),
         "routed_out": list(record.routed_out),
         "payload": record.payload,
-        "op": None if record.op is None else copy.deepcopy(dict(record.op)),
+        "op": None if record.op is None else thaw_json(record.op),
         "wake": record.wake,
         "reply_to": record.reply_to,
         "via": record.via,
