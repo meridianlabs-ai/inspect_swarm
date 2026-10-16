@@ -9,7 +9,7 @@ from inspect_ai.tool import ToolError
 from inspect_ai.util._span import current_agent_span_id, current_span_id
 from pydantic import JsonValue
 
-from .._budget import current_member
+from .._budget import MemberContext, current_member
 from .._channel._channel import Channel, ChannelRun, ChannelState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_sent
@@ -43,11 +43,15 @@ class Bus:
     def __init__(
         self,
         members: Sequence["MemberHandle"],
+        contexts: Mapping[str, MemberContext],
         channels: Sequence[Channel],
         policy: CommPolicy | None,
     ) -> None:
         self._members = list(members)
         self._by_name = {m.name: m for m in self._members}
+        # the context the runtime runs each member in, which its descendants inherit;
+        # a member of another run with the same name has a context of its own
+        self._contexts = dict(contexts)
         self._policy = policy
         self._stopping = False
         self._records: list[Record] = []
@@ -104,9 +108,9 @@ class Bus:
 
     async def deliver(self, draft: Draft) -> Delivery:
         # step 0: bind and resolve, before a record exists
+        sender = self._sender()
         if self._stopping:
             raise ToolError(_STOPPING)
-        sender = self._sender()
         state = self._state(draft.channel)
         recipients = self._resolve(sender, draft.to)
         number = self._ids.get(draft.channel, 0) + 1
@@ -183,7 +187,7 @@ class Bus:
 
     def _sender(self) -> str:
         context = current_member.get()
-        if context is None or context.name not in self._by_name:
+        if context is None or self._contexts.get(context.name) is not context:
             raise RuntimeError(
                 "Bus.deliver() was called outside a member of this swarm; channel tools deliver records for the member that calls them."
             )

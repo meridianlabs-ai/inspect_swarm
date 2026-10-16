@@ -1,7 +1,7 @@
 import logging
 from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import anyio
@@ -144,6 +144,10 @@ class _Member:
     state: MemberState = "running"
     status: str | None = None
     role: str | None = None
+    context: MemberContext = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.context = MemberContext(self.name, bridged=False)
 
     @property
     def submitted(self) -> bool:
@@ -162,12 +166,18 @@ def _bus(
     members = {
         name: _Member(name, (states or {}).get(name, "running")) for name in MEMBERS
     }
-    return Bus(list(members.values()), channels or [_Board()], policy), members
+    bus = Bus(
+        list(members.values()),
+        {name: m.context for name, m in members.items()},
+        channels or [_Board()],
+        policy,
+    )
+    return bus, members
 
 
 @contextmanager
-def _as(name: str) -> Generator[None]:
-    token = current_member.set(MemberContext(name, bridged=False))
+def _as(context: MemberContext | None) -> Generator[None]:
+    token = current_member.set(context)
     try:
         yield
     finally:
@@ -183,7 +193,9 @@ async def _send(
     payload: str = "",
     op: Mapping[str, JsonValue] | None = None,
 ) -> Delivery:
-    with _as(sender):
+    member = bus.member(sender)
+    assert isinstance(member, _Member)
+    with _as(member.context):
         return await bus.deliver(Draft(channel, "note", to, payload, op))
 
 
@@ -564,6 +576,23 @@ async def test_seq_is_the_commit_order_when_policies_finish_out_of_id_order() ->
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("same_name", [False, True])
+async def test_only_the_runs_own_members_can_deliver(same_name: bool) -> None:
+    # outside any member, or in another run's member of the same name
+    context = MemberContext("w-1", bridged=False) if same_name else None
+    seen: list[Record] = []
+
+    async def policy(record: Record, view: SwarmView) -> None:
+        seen.append(record)
+
+    bus, _ = _bus(policy)
+    async with sample() as transcript:
+        with _as(context), pytest.raises(RuntimeError, match="outside a member"):
+            await bus.deliver(Draft("board", "note"))
+    assert (seen, _comm(transcript), _board(bus).applied) == ([], [], [])
+
+
+@pytest.mark.anyio
 async def test_record_ids_count_per_channel_from_one() -> None:
     bus, _ = _bus(channels=[_Board(), _Notes()])
     ids = [
@@ -628,6 +657,58 @@ async def test_each_run_opens_its_own_channel_states(
         assert [t for s in bus.states.values() for t in s.tools()] == []
     if opened:
         assert first.states["board"] is not second.states["board"]
+
+
+@agent
+def bus_test_neighbour(
+    side: str, buses: dict[str, Bus], ready: anyio.Event, done: anyio.Event
+) -> Agent:
+    # "a" delivers from itself and a child task once "b", a member of the same name in
+    # another run, has tried to deliver through a's bus
+    async def execute(state: AgentState) -> AgentState:
+        bus = current_bus.get()
+        assert bus is not None
+        buses[side] = bus
+        if side == "a":
+            ready.set()
+            await done.wait()
+            await bus.deliver(Draft("board", "note", payload="a"))
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(bus.deliver, Draft("board", "note", payload="a's child"))
+        else:
+            await ready.wait()
+            try:
+                with pytest.raises(RuntimeError, match="outside a member"):
+                    await buses["a"].deliver(Draft("board", "note", payload="b"))
+            finally:
+                done.set()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_member_of_another_run_with_the_same_name_cannot_deliver() -> None:
+    buses: dict[str, Bus] = {}
+    ready, done = anyio.Event(), anyio.Event()
+
+    def run(side: str) -> Agent:
+        return swarm(
+            member(
+                bus_test_neighbour,
+                args={"side": side, "buses": buses, "ready": ready, "done": done},
+                name="w",
+            ),
+            channels=["bus_test_board"],
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_swarm, run("a"))
+        tg.start_soon(run_swarm, run("b"))
+    applied = {
+        side: [r.payload for r in _board(bus).applied] for side, bus in buses.items()
+    }
+    assert applied == {"a": ["a", "a's child"], "b": []}
 
 
 @pytest.mark.anyio

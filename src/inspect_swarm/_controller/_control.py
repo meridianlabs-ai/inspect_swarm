@@ -176,7 +176,12 @@ class SwarmRun:
 
         self._members = [MemberRun(record, name) for record, name in records]
         # the channel states open here, before any member starts
-        self.bus = Bus(self._members, channels, policy)
+        self.bus = Bus(
+            self._members,
+            {m.name: m.context for m in self._members},
+            channels,
+            policy,
+        )
         for node in caps:
             if isinstance(node, SwarmNode):
                 node.stop_swarm = self.stop
