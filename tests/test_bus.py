@@ -638,8 +638,10 @@ async def test_a_stop_refuses_records_whose_policy_was_running_and_later_ones() 
         entered.set()
         bus = current_bus.get()
         assert bus is not None
-        while not bus.stopping:
-            await anyio.sleep(0.01)
+        # the controller's return closes the bus
+        with anyio.fail_after(5):
+            while not bus.stopping:
+                await anyio.sleep(0.01)
 
     @swarm_controller(name="bus_test_stop_while_held")
     def stop_while_held() -> Controller:
