@@ -449,7 +449,7 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 
 - **inspect_swarm** has no released API until M2-12; nothing in M1 or M2 before it is a compatibility concern. From M2-12, the API statement says what later releases keep.
 - **Eval logs.** M1 and M2 write only existing event types, store entries and message metadata, each payload carrying `version: 1`, as the deep dives specify. No log schema, generated TypeScript type or ts-mono change is in either milestone.
-- **inspect_ai.** AI-1 adds two literal values outside the log schema; AI-2 changes nothing outside a scope; AI-5 changes nothing outside an owner scope, as D-2 must confirm. The optional AI-3 and AI-4 add observability without changing behaviour.
+- **inspect_ai.** AI-1 adds two literal values outside the log schema; AI-2 leaves default store keys and ordinary explicit instances unchanged outside a scope, while reserving instances that start with `@` and applying the skill tool's shared install checks everywhere ([swarm.md Members](swarm.md#members)); AI-5 changes nothing outside an owner scope, as D-2 must confirm. The optional AI-3 and AI-4 add observability without changing behaviour.
 - **External users' inspect_ai versions.** A release of inspect_swarm requires an inspect_ai release with its prerequisites, so users pinned to older inspect_ai (Epoch: 0.3.273) must move.
 
 ## Security
