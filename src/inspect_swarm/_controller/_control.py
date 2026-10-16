@@ -1,6 +1,6 @@
 import contextvars
 from collections import deque
-from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
@@ -39,7 +39,7 @@ class MemberHandle(Protocol):
 
     @property
     def status(self) -> str | None:
-        """How the member ended, once it has: `submitted`, `stopped`, `member_limit:<type>`, `swarm_cap`, `cancelled` or `errored`."""
+        """How the member ended, once it has: `submitted`, `stopped`, `share`, `member_limit:<type>`, `swarm_cap`, `cancelled` or `errored`."""
         ...
 
     @property
@@ -134,7 +134,7 @@ def _without_refusals(error: Exception) -> Exception | None:
 # enters. Its lever and limits are created here, once per run, so that a stop can close
 # the lever of a member that has started but whose task has not yet entered it.
 class MemberRun:
-    def __init__(self, record: Member, name: str) -> None:
+    def __init__(self, record: Member, name: str, share: Sequence[Limit]) -> None:
         self.record = record
         self.name = name
         self.role = record.role
@@ -145,7 +145,7 @@ class MemberRun:
         self.context = MemberContext(
             name, bridged=is_bridged(cast(Agent, agent), record.bridged)
         )
-        self.lever, self.nodes = member_nodes(record, name)
+        self.lever, self.nodes = member_nodes(record, name, share)
 
     @property
     def submitted(self) -> bool:
@@ -164,8 +164,12 @@ class SwarmRun:
         caps: list[Limit],
         time: float | None,
         grace: float,
+        shares: Mapping[str, Sequence[Limit]] | None = None,
     ) -> None:
-        self._members = [MemberRun(record, name) for record, name in records]
+        shares = shares or {}
+        self._members = [
+            MemberRun(record, name, shares.get(name, ())) for record, name in records
+        ]
         for node in caps:
             if isinstance(node, SwarmNode):
                 node.stop_swarm = self.stop
@@ -316,7 +320,7 @@ class SwarmRun:
         status = "cancelled"
         try:
             status = await run_member(
-                m.record, m.name, m.context, m.lever, m.nodes, self._caps, input
+                m.record, m.name, m.context, m.nodes, self._caps, input
             )
         except Exception:
             status = "errored"

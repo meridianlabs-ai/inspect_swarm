@@ -48,6 +48,7 @@ from ._budget import (
     Lever,
     MemberContext,
     SwarmMessageNode,
+    SwarmNode,
     SwarmTokenNode,
     SwarmTurnNode,
     current_member,
@@ -263,11 +264,14 @@ def build_member(record: Member) -> Agent:
     return agent
 
 
-# The member's lever and the nodes its wrapper enters: the lever's pair, then its own
-# limits re-created from their values, fresh for each run (limits are single-use).
-def member_nodes(record: Member, name: str) -> tuple[Lever, list[Limit]]:
+# The member's lever and the nodes its wrapper enters: the lever's pair, its share of
+# the swarm's caps, then its own limits re-created from their values, fresh for each
+# run (limits are single-use).
+def member_nodes(
+    record: Member, name: str, share: Sequence[Limit]
+) -> tuple[Lever, list[Limit]]:
     lever = Lever(owner=name)
-    nodes = lever.nodes
+    nodes = [*lever.nodes, *share]
     for limit in record.limits:
         if isinstance(limit, _TokenLimit):
             nodes.append(
@@ -293,7 +297,6 @@ async def run_member(
     record: Member,
     name: str,
     context: MemberContext,
-    lever: Lever,
     nodes: list[Limit],
     caps: Sequence[Limit],
     input: list[ChatMessage],
@@ -324,7 +327,7 @@ async def run_member(
             # the cap began the swarm's stop when it was reached
             return "swarm_cap"
         assert owned is not None
-        return _status_for(owned, lever)
+        return _status_for(owned)
     if context.stop_cause is not None:
         # a node that stopped a bridged member, whose cancellation may not have been
         # delivered when its last call was the one that stopped it
@@ -335,9 +338,10 @@ async def run_member(
     return "submitted"
 
 
-def _status_for(error: LimitExceededError, lever: Lever) -> str:
-    if _source_in(error, lever.nodes):
-        return "stopped"
+def _status_for(error: LimitExceededError) -> str:
+    # the member's lever, share or own limit; a member time limit is Inspect's own node
+    if isinstance(error.source, SwarmNode):
+        return error.source.stop_cause(error.type)
     return f"member_limit:{error.type}"
 
 
