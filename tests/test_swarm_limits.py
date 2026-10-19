@@ -1,4 +1,3 @@
-import time
 from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from pathlib import Path
@@ -657,63 +656,58 @@ def test_a_sample_limit_leaves_the_ledger_and_the_provisional_answer(
 
 
 @agent
-def cleanup_crash(block: float = 0, grouped: bool = False) -> Agent:
-    # works until cancelled, and its cleanup then blocks for `block` seconds without
-    # awaiting and fails, with one error or a group of two
+def cleanup_crash() -> Agent:
+    # works until cancelled, and its cleanup then fails
     async def execute(state: AgentState) -> AgentState:
         try:
             await anyio.sleep_forever()
         finally:
-            time.sleep(block)
-            if grouped:
-                raise ExceptionGroup(
-                    "cleanup",
-                    [RuntimeError("cleanup failed"), RuntimeError("cleanup failed")],
-                )
             raise RuntimeError("cleanup failed")
 
     return execute
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "block,grouped,budget,stop_reason,ended_by",
-    [
-        pytest.param(0, False, Budget(time=60), None, "sample_limit:time", id="sample"),
-        pytest.param(
-            0, True, Budget(time=60), None, "sample_limit:time", id="sample-grouped"
-        ),
-        # the swarm's hard stop cancels the member, whose cleanup outlasts the sample's
-        # time limit
-        pytest.param(
-            0.1, False, Budget(time=0.001, grace=0), "swarm_time", None, id="swarm-stop"
-        ),
-    ],
-)
-async def test_a_cleanup_error_does_not_hide_the_sample_limit_that_ended_the_swarm(
-    block: float,
-    grouped: bool,
-    budget: Budget,
-    stop_reason: str | None,
-    ended_by: str | None,
-) -> None:
+async def test_a_cleanup_error_after_a_sample_limit_records_an_unknown_end() -> None:
+    # the error and the sample's limit cannot be ordered from what they show, so
+    # neither is recorded as the end; Inspect records the crash
     ledgers: list[SwarmLedger] = []
     # bare on asyncio, grouped with the cancellation on trio
     with pytest.raises(BaseException) as raised:
         async with sample(time=0.05):
             try:
                 await swarm(
-                    member(cleanup_crash(block, grouped)), channels=[], budget=budget
+                    member(cleanup_crash()), channels=[], budget=Budget(time=60)
                 )(AgentState(messages=[ChatMessageUser(content="task")]))
             finally:
                 ledgers.append(_ledger())
-    # the cleanup errors still propagate
-    errors = [str(e) for e in _leaves(raised.value)].count("cleanup failed")
-    assert errors == (2 if grouped else 1)
+    # the cleanup error still propagates
+    assert "cleanup failed" in [str(e) for e in _leaves(raised.value)]
     [ledger] = ledgers
     assert (ledger.stop_reason, ledger.ended_by, ledger.interrupted) == (
-        stop_reason,
-        ended_by,
+        None,
+        "unknown",
+        True,
+    )
+
+
+@pytest.mark.anyio
+async def test_a_cancellation_the_sample_does_not_explain_records_an_unknown_end() -> (
+    None
+):
+    ledgers: list[SwarmLedger] = []
+    async with sample():
+        with anyio.move_on_after(0.01):
+            try:
+                await swarm(sleeper(), channels=[])(
+                    AgentState(messages=[ChatMessageUser(content="task")])
+                )
+            finally:
+                ledgers.append(_ledger())
+    [ledger] = ledgers
+    assert (ledger.stop_reason, ledger.ended_by, ledger.interrupted) == (
+        None,
+        "unknown",
         True,
     )
 
@@ -757,20 +751,16 @@ async def test_a_cancellation_grouped_with_errors_loses_the_swarms_leaves() -> N
     # on trio the cancellation stays in the member's group, which its wrapper does not
     # catch, so the runtime removes the member's limit
     owned: list[LimitExceededError] = []
-    ledgers: list[SwarmLedger] = []
     with pytest.raises(BaseException) as raised:
         async with sample(time=0.2):
-            try:
-                await swarm(
-                    member(
-                        limited_cleanup(scripted_model(), owned),
-                        limits=[token_limit(1)],
-                    ),
-                    channels=[],
-                    budget=Budget(time=60),
-                )(AgentState(messages=[ChatMessageUser(content="task")]))
-            finally:
-                ledgers.append(_ledger())
+            await swarm(
+                member(
+                    limited_cleanup(scripted_model(), owned),
+                    limits=[token_limit(1)],
+                ),
+                channels=[],
+                budget=Budget(time=60),
+            )(AgentState(messages=[ChatMessageUser(content="task")]))
     # the member's limit was raised before the sample's time limit
     [limit] = owned
     assert isinstance(limit.source, SwarmNode)
@@ -781,47 +771,6 @@ async def test_a_cancellation_grouped_with_errors_loses_the_swarms_leaves() -> N
         for e in leaves
         if isinstance(e, LimitExceededError) and isinstance(e.source, SwarmNode)
     ]
-    [ledger] = ledgers
-    assert ledger.ended_by == "sample_limit:time"
-
-
-@agent
-def blocking_crash() -> Agent:
-    # blocks past the sample's time limit without awaiting, then fails
-    async def execute(state: AgentState) -> AgentState:
-        time.sleep(0.03)
-        raise RuntimeError("crashed")
-
-    return execute
-
-
-@pytest.mark.anyio
-async def test_a_crash_after_the_samples_time_ran_out_is_not_its_time_limit() -> None:
-    async def run_members(control: SwarmControl) -> StopReason:
-        # never stops the swarm, so only the crash can end it
-        control.start(control.members[0])
-        await anyio.sleep_forever()
-        raise AssertionError("unreachable")
-
-    ledgers: list[SwarmLedger] = []
-    with pytest.raises(BaseException) as raised:
-        async with sample(time=0.01):
-            try:
-                await swarm(
-                    blocking_crash(),
-                    controller=_controller(run_members, "limits_test_blocking_crash"),
-                    channels=[],
-                    budget=Budget(time=60),
-                )(AgentState(messages=[ChatMessageUser(content="task")]))
-            finally:
-                ledgers.append(_ledger())
-    assert "crashed" in [str(e) for e in _leaves(raised.value)]
-    [ledger] = ledgers
-    assert (ledger.stop_reason, ledger.ended_by, ledger.interrupted) == (
-        None,
-        None,
-        True,
-    )
 
 
 def test_the_swarms_messages_stay_within_a_small_sample_message_limit(

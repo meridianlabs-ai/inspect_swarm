@@ -120,7 +120,8 @@ class SwarmLedger(BaseModel):
     # the reason of the swarm's own stop, the first one begun; None when none began
     stop_reason: str | None
     # the sample limit (sample_limit:<type>) or operator interrupt that ended the swarm,
-    # even during its stop; None when nothing from outside ended it
+    # even during its stop; "unknown" when an outside cause may have ended it but
+    # cannot be attributed; None when nothing from outside ended it
     ended_by: str | None
     # a foreign error or outside cancellation ended the swarm
     interrupted: bool
