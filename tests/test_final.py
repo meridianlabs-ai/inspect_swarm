@@ -29,7 +29,9 @@ from inspect_swarm import (
     swarm,
     swarm_controller,
 )
+from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._final import first
+from inspect_swarm._ledger import SwarmLedger
 from inspect_swarm._record import RECORD_KEY, MemberResult, SwarmResultRecord
 
 from .swarm_runtime import (
@@ -275,6 +277,9 @@ def test_an_answer_finalisation_cannot_fit_ends_the_sample_on_its_message_limit(
     [a] = record.members
     assert (a.state, a.status) == ("ended", "submitted")
     assert (record.final.member, record.final.provisional) == ("a", True)
+    # the ledger is written after the final step, which the sample's limit ended
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert (ledger.stop_reason, ledger.interrupted) == ("sample_limit:message", True)
     assert not [
         e
         for e in sample.events

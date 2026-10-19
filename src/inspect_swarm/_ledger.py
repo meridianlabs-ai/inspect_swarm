@@ -117,7 +117,8 @@ class SwarmLedger(BaseModel):
     native_compaction_classes: list[str]
     # per capped kind: usage at the end minus the cap, if positive
     overshoot: dict[str, float]
-    # how the swarm stopped, or None when it ended without a stop
+    # how the swarm stopped: the sample limit (sample_limit:<type>) or operator
+    # interrupt that ended it, else the stop's reason; None when it ended without either
     stop_reason: str | None
     # a foreign error or outside cancellation ended the swarm
     interrupted: bool
