@@ -71,7 +71,7 @@ All in `src/inspect_ai/tool/_tools/_memory.py`.
 ### How descendants reach a member's tools
 
 - **Tools flow to `general()`.** deepagent's `tools` become `general()`'s tools when its `tools` is left at `"default"` (`deepagent.py:160-166`, `:330-337`). deepagent's own memory tool does not: `general(memory=False)` is the default (`src/inspect_ai/agent/_deepagent/general.py:38`, `:57-59`), and a subagent gets a fresh `memory()` only when it asks for one (`agent_tool.py:942-949`). So a board passed in `tools`, as Epoch's is, reaches every `general()` child, and so does a swarm tool source.
-- **Synchronous children** run under `run()` in their own agent span (`agent_tool.py:612-630`). **Background children** run in a deepagent registry's task group or, when the sample's group is live, through `background()`, which starts them in the sample's task group (`agent_tool.py:633-688`, `src/inspect_ai/util/_background.py:81`), each in an agent span of its own (`agent_tool.py:747`). D-2 designs the scoped owner that will hold them per member.
+- **Synchronous children** run under `run()` in their own agent span (`agent_tool.py:612-630`). **Background children** run in a deepagent registry's task group or, when the sample's group is live, through `background()`, which starts them in the sample's task group (`agent_tool.py:633-688`, `src/inspect_ai/util/_background.py:81`), each in an agent span of its own (`agent_tool.py:747`). D-2 puts them, from M2-5, in an owner per member that the swarm sets as `background()`'s target ([swarm-background-members.md](swarm-background-members.md)).
 - **What a child's tool sees** *(spike: a `deepagent(tools=[source], subagents=[general()], background=True)` run under `run(..., name="worker-1")` after setting a ContextVar, on mockllm, asyncio and trio)*: the tool source was resolved in the top-level loop, the synchronous child and the background child; in all three the tool read the ContextVar's value, `current_agent_span_id()` returned that loop's own agent span (`src/inspect_ai/util/_span.py:88-90`, `:140-141`), and `current_agent_channel()` returned a distinct agent channel per loop. Both children's agent spans were children of the parent's `agent` tool span inside the member's agent span, so the member's span subtree holds every loop.
 
 ### The bus as merged
@@ -158,7 +158,7 @@ class SharedMemoryState:                   # implements ChannelState
 
 ### The tool
 
-`SharedMemoryState.tools()` returns one tool, built per run with `parallel=True` and `max_output=0`, with memory()'s signature and parameter descriptions adapted to the root and the rules below. Every command first reads the member from the swarm's ContextVar and refuses ("`worker-1` has ended") unless the member is `running`, so a background child that outlives its member, before D-2's drain cancels it, can neither read nor write. Results end with the status line ([Notices](#notices-and-the-status-line)).
+`SharedMemoryState.tools()` returns one tool, built per run with `parallel=True` and `max_output=0`, with memory()'s signature and parameter descriptions adapted to the root and the rules below. Every command first reads the member from the swarm's ContextVar and refuses ("`worker-1` has ended") unless the member is `running`, so no loop of a member that has ended can read or write. From M2-5 no background child outlives its member: the member's owner ends it in the drain, before the member ends ([swarm-background-members.md The shared-memory channel](swarm-background-members.md#the-shared-memory-channel)). Results end with the status line ([Notices](#notices-and-the-status-line)).
 
 | Command | Semantics (differences from memory() in bold) |
 |---|---|
@@ -261,10 +261,11 @@ A directory view lists, inside `<peer_listing path="/shared_memory/notes">`, one
 
 **Decision: a member's descendants read and write the board as the member.** deepagent's `general()` children, synchronous and background, and any nested loop given `swarm_tools()`, get the `shared_memory` tool, and their writes are records whose `sender` is the member.
 
-- **Why.** Epoch's children read and write their board today, and both of their configs use background children ([Who uses a shared board today](#who-uses-a-shared-board-today)). A board restricted to the top loop would make the port a different arm, and the children that do most of the proving would lose the channel the swarm paragraph tells them is "the only channel between you". The reason the bus gives one reader per inbox, that a read marks messages read for the member ([Members and identity](swarm-communication.md#members-and-identity)), does not apply to a board: viewing a file consumes nothing, and each loop's `seen` is its own.
+- **Why.** Epoch's children read and write their board today, and both of their configs use background children ([Who uses a shared board today](#who-uses-a-shared-board-today)). A board restricted to the top loop would change the experiment: the children, which do most of the proving, would lose the board, the channel the swarm paragraph tells them is "the only channel between you", so the port's results would not be comparable to Epoch's. The reason the bus gives one reader per inbox, that a read marks messages read for the member ([Members and identity](swarm-communication.md#members-and-identity)), does not apply to a board: viewing a file consumes nothing, and each loop's `seen` is its own.
 - **The binding rule for this channel.** `Channel` gains a class attribute `reach: ClassVar[Literal["loop", "member"]] = "loop"`, and this channel sets `"member"`. `swarm_tools()` still binds the member to the first agent channel it is resolved in during an activation, and that loop still alone gets notices and every `"loop"` channel's tools. Resolved in any other agent channel of the member, it now returns the tools of the `"member"`-reach channels instead of none. Nothing else in [Members and identity](swarm-communication.md#members-and-identity) changes, and the later messages channel keeps `"loop"`.
 - **Attribution.** The member is the record's `sender`, bound from the ContextVar the children inherit *(spike)*. The loop is the agent span the call runs in (`sender_span_id` on writes, `span_id` on reads), plus `nested: true` when it is not the bound loop. A descendant does not need to resolve the tool source itself for this, because attribution reads the span at call time.
 - **Rate and limits are the member's.** A member's 64 children share its `rate`, so descendants cannot multiply one member's write volume.
+- **Background children and the drain** (M2-5). While its member drains, the member is still `running`, so the views and writes of a background child finishing a tool call are accepted, as part of the work the drain lets complete; once a swarm stop has begun, writes are refused as for every loop. None follows the member's end, because the member's owner has ended its children by then ([swarm-background-members.md The shared-memory channel](swarm-background-members.md#the-shared-memory-channel)).
 - **Supported shapes.** Members whose top loop is `react()` or `deepagent()`, and their `general()` children (deepagent's only nested loops that inherit tools), are the shapes this is designed and tested for. A custom agent that runs nested work outside agent spans makes all its calls look like one loop; its writes are still attributed to the member, and the shared `seen` only makes the rule more permissive for it. Bridged members are refused (M2-6).
 
 **With several readers per member, `read` means:**
@@ -310,7 +311,7 @@ A partial view (`view_range`) depends on part of a version only; the evidence re
 - **How this relates to memory()'s limits.** memory() has none; its views are truncated by Inspect at 16 KiB, so a large file is shown cut ([Current behaviour](#inspect_ais-memory)). The channel bounds files instead, so a view is never truncated, and its default largest view is somewhat larger than memory()'s effective one. An arm that wants smaller results lowers `max_file_bytes` and `max_file_lines`.
 - **Volume in the log.** Each `sent` holds at most one payload and an op, at most `rate` per member per window; the evidence grows with what members write, not with board size.
 - **Reads are not limited.** A view changes nothing and puts text only in the reader's own context, which its own limits bound.
-- **Stopping.** Once the swarm begins to stop, writes are refused ("the swarm is stopping") as sends are; views still work. A write from a member that ended, or from its leftover child, is refused at the tool and again at step 2.
+- **Stopping.** Once the swarm begins to stop, writes are refused ("the swarm is stopping") as sends are; views still work. A write from a member that ended is refused at the tool and again at step 2; from M2-5 none of its background children is left to try.
 
 ### Relation to `memory(instance="...")`
 
@@ -319,7 +320,7 @@ They are two channels and stay so. `memory(instance="board")` in every member's 
 **Migrating a task**, for example Epoch's port ([Lean, A port, sketch](swarm-lean-open-problems.md#a-port-sketch)):
 
 1. In the member builder, replace `memory(instance=board)` with `swarm_tools()` in the tools, and pass `on_continue=swarm_on_continue(inner)` for notices ([swarm-communication.md Tools reach members through a tool source](swarm-communication.md#tools-reach-members-through-a-tool-source)). The builder stays a registered `@agent`, so the tool source is not a logged callable.
-2. For a deepagent member, pass `memory=False` to keep one memory tool as before, or leave deepagent's private `memory()` as an extra, per-member notebook; the two are different arms.
+2. For a deepagent member, pass `memory=False` to keep one memory tool as before, or leave deepagent's private `memory()` as an extra, per-member notebook; the two are different experimental conditions: one memory tool shared through the board, or a board plus a private notebook per member.
 3. Replace the instructions-only channel (`memory_board()`) with `"shared_memory"` or `shared_memory(...)` in `channels=`; its instructions replace theirs.
 4. Change the prompt's tool and path names (`memory`, `/memories`) to `shared_memory` and `/shared_memory`.
 
@@ -338,7 +339,7 @@ And one on `Channel`: the `reach` class attribute of [Descendants](#descendants)
 
 ## Alternatives considered
 
-**Restrict the board to the member's top loop**, the bus's default binding. Keeps one reader per member and simpler evidence. Rejected: Epoch's children use the board and do most of the work; the port would be a different arm, and a board has no consumable inbox that the single-reader rule protects.
+**Restrict the board to the member's top loop**, the bus's default binding. Keeps one reader per member and simpler evidence. Rejected: Epoch's children use the board, and restricting it would change the experiment: the children, which do most of the proving, would lose the board, so the port's results would not be comparable to Epoch's. And a board has no consumable inbox that the single-reader rule protects.
 
 **Treat each descendant loop as its own sender**, with a name like `worker-1/AGENT-3`. Rejected: names would be harness-made rather than roster-validated, the roster and every address resolver would grow loop names, and a descendant acts for its member in every other respect (budget, limits, status). The loop is recorded as evidence instead.
 

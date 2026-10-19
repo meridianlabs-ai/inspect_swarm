@@ -94,10 +94,11 @@ In inspect_ai unless noted.
 
 ### Terms
 
-- **Member output.** The member's `AgentState.output` when it stops, however it stops: what Inspect would have scored had that member been the only solver. The runtime's member wrapper keeps a reference to the member's `AgentState`, as `as_solver()` does, so the output survives the member's own limit and the stop procedure. For agents that do not update their state in place, a cancelled member's output is empty.
+- **Member output.** The member's `AgentState.output` when it stops, however it stops: what Inspect would have scored had that member been the only solver. The runtime's member wrapper keeps a reference to the member's `AgentState`, as `as_solver()` does, so the output survives the member's own limit and the stop procedure. For agents that do not update their state in place, a cancelled member's output is empty. The wrapper does this since M1-5 (#31): it builds the member's `AgentState` itself and calls the agent on it, rather than through `run()`, which would discard the state when the agent raises (`src/inspect_swarm/_member.py`, `_run_member()`). A member with background work keeps the output its agent ended with through its drain ([swarm-background-members.md](swarm-background-members.md#entering-the-owner)).
 - **Submission.** A member output from a member that ended with status `submitted`: it finished normally.
   - For `react()` that is a submit; for a bridged agent it is the agent returning.
   - A member that ended with any other status (stopped, its own or the swarm's limit, cancelled, errored) has an output but no submission.
+  - A member with background work ends after its drain (M2-5). A foreign error from one of its background children during the drain makes it `errored`, even when its agent had submitted, so that submission never enters the provisional answer, which holds only ended members' submissions ([swarm-background-members.md Statuses, ended, and the record](swarm-background-members.md#statuses-ended-and-the-record)).
   - Each member submits at most once in M1, because a member runs once and `react()`'s internal attempts are not visible outside it.
 - **Not started.** A member the controller never started stays `pending`. It has no output and no submission.
 - **Final answer.** What the swarm returns as its `AgentState.output`.
@@ -134,7 +135,7 @@ class MemberResult(BaseModel):
     state: MemberState                # swarm-api.md: "pending", "running" or "ended"
     status: str | None                # the limits deep dive's status once ended, else None
     submitted: bool                   # status == "submitted"
-    time: float | None                # swarm time when the member stopped
+    time: float | None                # swarm time when the member ended, after any background drain (M2-5)
 
 class FinalRecord(BaseModel):
     mode: str | None                  # the mode that produced the answer: "first" in M1
