@@ -1,5 +1,10 @@
 from inspect_ai.log import transcript
+from inspect_ai.util import store
 from pydantic import JsonValue
+
+from ._ledger import SwarmLedger
+
+LEDGER_KEY = "inspect_swarm:ledger"
 
 
 # The swarm's evidence: an InfoEvent with source "inspect_swarm" whose payload has the
@@ -25,3 +30,10 @@ def evidence(
         },
         source="inspect_swarm",
     )
+
+
+def write_ledger(ledger: SwarmLedger) -> None:
+    # synchronous, so that it runs under cancellation too; scorers read the store entry
+    data = ledger.model_dump(mode="json")
+    transcript().info({"type": "ledger", **data}, source="inspect_swarm")
+    store().set(LEDGER_KEY, data)

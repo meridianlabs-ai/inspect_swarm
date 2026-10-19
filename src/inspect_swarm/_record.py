@@ -6,7 +6,7 @@ from pydantic import BaseModel
 MemberState = Literal["pending", "running", "ended"]
 """A member's lifecycle: not started, running, or ended."""
 
-RECORD_KEY = "inspect_swarm.result"
+RECORD_KEY = "inspect_swarm:result"
 
 
 class MemberResult(BaseModel):
@@ -48,7 +48,7 @@ class FinalRecord(BaseModel):
 
 
 class SwarmResultRecord(BaseModel):
-    """What the swarm did in a sample: each member's result and the final answer, kept in the sample store under `inspect_swarm.result`."""
+    """What the swarm did in a sample: each member's result and the final answer, kept in the sample store under `inspect_swarm:result`."""
 
     version: Literal[1] = 1
     """The record's format version."""

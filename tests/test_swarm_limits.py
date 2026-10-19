@@ -276,6 +276,7 @@ async def test_the_runtime_lever_and_member_levers_are_siblings(staged: bool) ->
             caps=cap.nodes,
             time=None,
             grace=1.0,
+            budget=Budget(),
         )
         await swarm_run.run(run)
     # each member's call is charged to its own lever and the cap, never the runtime's

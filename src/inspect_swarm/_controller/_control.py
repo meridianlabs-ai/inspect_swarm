@@ -11,9 +11,10 @@ from inspect_ai.agent import Agent, AgentState
 from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
 from inspect_ai.util import Limit, current_span_id, sample_limits
 
-from .._budget import Lever, MemberContext, SwarmNode, is_bridged
-from .._evidence import evidence
+from .._budget import Budget, CostPair, Lever, MemberContext, SwarmNode, is_bridged
+from .._evidence import evidence, write_ledger
 from .._final import finalise, settle
+from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
     Member,
     classify_errors,
@@ -160,6 +161,15 @@ class MemberRun:
     def submitted(self) -> bool:
         return self.status == "submitted"
 
+    @property
+    def cancelled(self) -> bool:
+        # its agent loop was cancelled: the hard stop, the bridged branch, a member
+        # time limit, or a cancellation from outside the swarm
+        return self.context.scope.cancel_called or self.status in (
+            "cancelled",
+            "member_limit:time",
+        )
+
     def result(self) -> MemberResult:
         return MemberResult(
             name=self.name,
@@ -184,6 +194,7 @@ class SwarmRun:
         caps: list[Limit],
         time: float | None,
         grace: float,
+        budget: Budget,
     ) -> None:
         self._members = [MemberRun(record, name) for record, name in records]
         for node in caps:
@@ -197,6 +208,11 @@ class SwarmRun:
         self._time = time
         self._grace = grace
         self._runtime_lever = Lever(owner=None)
+        self._budget = budget
+        # the ledger's meters: the swarm meter around everything the swarm runs, and the
+        # final meter around its final step
+        self._swarm_meter = CostPair(owner=None, role="meter")
+        self._final_meter = CostPair(owner=None, role="meter")
         self._controller_scope = anyio.CancelScope()
         self._members_tg: TaskGroup | None = None
         self._member_ctx: contextvars.Context | None = None
@@ -270,14 +286,16 @@ class SwarmRun:
     # the runtime
 
     async def run(self, controller: Callable[["SwarmControl"], Awaitable[str]]) -> None:
+        interval = LedgerInterval()
         self._start = anyio.current_time()
         # the swarm's span
         self._span_id = current_span_id()
         self._settle()
         error: Exception | None = None
+        ended = False
         try:
             with ExitStack() as caps:
-                for node in self._caps:
+                for node in [*self._swarm_meter.nodes, *self._caps]:
                     caps.enter_context(node)
                 async with anyio.create_task_group() as members_tg:
                     self._members_tg = members_tg
@@ -287,10 +305,36 @@ class SwarmRun:
                         if self._time is not None:
                             runtime_tg.start_soon(self._time_cap, self._time)
                         runtime_tg.start_soon(self._run_controller, controller)
+            ended = True
         except Exception as ex:
             # a foreign error from a member or the controller; the wrappers have
             # already removed the swarm's own leaves
             error = ex
+        finally:
+            write_ledger(
+                interval.ledger(
+                    budget=self._budget,
+                    caps=self._caps,
+                    time_cap=self._time,
+                    members=[
+                        MemberAccount(
+                            name=m.name,
+                            status=m.status,
+                            bridged=m.context.bridged,
+                            lever=m.lever,
+                            span_id=m.context.span_id,
+                            cancelled=m.cancelled,
+                        )
+                        for m in self._members
+                    ],
+                    runtime=self._runtime_lever,
+                    final=self._final_meter,
+                    swarm=self._swarm_meter,
+                    stop_reason=self.stop_reason,
+                    interrupted=not ended,
+                    final_cancelled=False,
+                )
+            )
         if error is not None:
             raise unwrap(error)
         finalise(

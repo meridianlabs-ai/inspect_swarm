@@ -97,6 +97,7 @@ def swarm(
             caps=cap_nodes,
             time=caps.time,
             grace=resolved_budget.grace,
+            budget=resolved_budget,
         ).run(resolved_controller.run)
         return state
 

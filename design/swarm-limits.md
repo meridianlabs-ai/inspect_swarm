@@ -217,11 +217,12 @@ The swarm never uses Inspect's own node classes for its stopping rules; it subcl
 
 The swarm meter, the cost cap, each lever, each cost share, the final meter and each re-created member cost limit are pairs. The token cap and token shares are single `_SwarmTokenNode`s with a token limit; a pair's token-tree node also meters tokens for the ledger. Unpriced calls add nothing to the accumulator and are counted separately, so a cost cap never meters them (the ledger reports them).
 
-Swarm nodes differ from Inspect's in three more ways:
+Swarm nodes differ from Inspect's in four more ways:
 
 - **Ownership.** Each has an owner: the swarm, or one member. The runtime recognises its own errors by `error.source` identity against the nodes it created, split into *shared* nodes (swarm meter, caps, runtime lever, final meter) and *member-owned* nodes (that member's lever, shares and re-created limits).
+- **Cap stop.** A swarm cap, when exceeded, first calls the runtime's `stop("swarm_cap")`, for a native or a bridged member and for the controller (`_budget.py`, `SwarmNode.exceeded`), and only then raises or cancels as below. So a native tool or handoff that consumes the cap's error still leaves the swarm stopping ([Stopping](#stopping), Triggers).
 - **Messages.** When exceeded for a native member they raise `LimitExceededError` as usual, with the kind's `type`, except the lever, which raises `type="custom"`. The message names the swarm and the reason ("Swarm cost cap reached", "Stopped by the swarm: verified answer"). They write no `SampleLimitEvent`, which the viewer would show as a sample limit; the runtime writes an `InfoEvent` instead ([Ledger](#the-ledger)).
-- **Bridged members.** A node exceeded while checking for a bridged member does not raise, because a raise in the sandbox service ends the sample ([Bridged generations](#bridged-generations)). It records why the member must stop and cancels that member's cancel scope synchronously; if the node is a swarm cap, it also calls the runtime's `stop("swarm_cap")`. The bridged agent's pending call is cancelled at its next await, before or just after dispatch.
+- **Bridged members.** A node exceeded while checking for a bridged member does not raise, because a raise in the sandbox service ends the sample ([Bridged generations](#bridged-generations)). It records why the member must stop and cancels that member's cancel scope synchronously; a swarm cap has already called the runtime's `stop("swarm_cap")` (Cap stop, above). The bridged agent's pending call is cancelled at its next await, before or just after dispatch.
 
 **Knowing a member is bridged.** A member is bridged from its first instruction, so the swarm decides before the member starts rather than inferring it from a generation (bridge compaction and filters run before the bridge's mark, [Bridged generations](#bridged-generations)):
 
@@ -258,7 +259,7 @@ This keeps the sample's own nodes untouched: a sample limit reached inside a bri
 - **Verification runs in the runtime's task, not the member's.** A member's wrapper hands its submission to the runtime's verifier task, which verifies submissions one at a time, as swarm-scoring.md requires, and queues the member's `MemberEnded` after the verdict. A verifier call made in the member's task would be charged to the member's lever.
 - **Cancelling the controller cancels no member.** `run_controller` has its own cancel scope inside `runtime_tg`, and members live in `members_tg`, so step 0 of a stop cancels the controller and leaves the members to the soft stop and grace ([Stopping](#stopping)).
 - The soft stop closes the runtime lever as it closes a member's, and the runtime ends its verifier task after grace. A verification that the lever or a reached cap refused, or that had not started, leaves its submission unverified, and finalisation verifies it inside the final meter (swarm-scoring.md's finalisation, step 1).
-- Errors are classified as in the member wrapper ([Stopping](#stopping)): a swarm cap leaf becomes `stop("swarm_cap")`, a refusal by the runtime lever ends only that call, and anything else propagates as swarm-api.md specifies for an exception from `run`.
+- Errors from `run` are classified leaf by leaf as in the member wrapper ([Stopping](#stopping)), after removing `start()` refusals raised because a stop had begun: swarm-cap leaves (whose node has already called `stop("swarm_cap")`) and runtime-lever leaves are the swarm's own and are removed, and only the remaining foreign leaves propagate ([Exhaustion and errors](#exhaustion-and-errors), step 2).
 
 ### What each kind does in a swarm
 
@@ -271,7 +272,7 @@ This keeps the sample's own nodes untouched: a sample limit reached inside a bri
 | message | no | yes | no | Per conversation. A node above members has no meaning. |
 | working | no | rejected (`ValueError`) | no | Never enforced below the sample, and collapses under contention. |
 
-- **Member limits** come from `member(agent_or_factory, limits=[...])`, a field of swarm-api.md's `Member` record, which logs each limit by kind and value (with the metering type, for tokens) and rebuilds it with the matching Inspect factory on replay ([swarm-api.md](swarm-api.md#members)). `member()` raises `ValueError` for a `working_limit`. The runtime reads each object's value (and metering type, for tokens) and creates fresh nodes from them on every invocation: a pair for cost; a `_SwarmTokenNode`, `_SwarmTurnNode` or `_SwarmMessageNode` for tokens, turns and messages; and a new Inspect `time_limit(value)` for time. The time limit keeps its cancel-scope semantics, so it stops a bridged member without going through the sandbox service.
+- **Member limits** come from `member(agent_or_factory, limits=[...])`, a field of swarm-api.md's `Member` record, which logs each limit by kind and value (with the metering type, for tokens) and rebuilds it with the matching Inspect factory on replay ([swarm-api.md](swarm-api.md#members)). `member()` raises `ValueError` for a `working_limit`. The runtime reads each object's value (and metering type, for tokens) and creates fresh nodes from them on every invocation, which the member wrapper enters before `run()` builds the member's conversation ([Stopping](#stopping), "Member wrapper and statuses"): a pair for cost; a `_SwarmTokenNode`, `_SwarmTurnNode` or `_SwarmMessageNode` for tokens, turns and messages; and a new Inspect `time_limit(value)` for time. The time limit keeps its cancel-scope semantics, so it stops a bridged member without going through the sandbox service.
 - **The task's objects are never entered.** Limits are single-use ([Limit trees](#limit-trees)), so entering the task's objects would fail on a second member from `member(..., count=k)`, on the next sample, or on a second invocation. Re-creating them per invocation is what deepagent does for its subagents.
 
 ### Splits
@@ -295,7 +296,7 @@ Every stop goes through one runtime method, `stop(reason)`. The first call wins:
 
 swarm-api.md fixes the steps around the soft stop, so that nothing starts once a stop has begun:
 
-0. **Close, synchronously.** Before its first await, `stop()` marks the swarm as stopping, so the controller's `start()` raises `RuntimeError` from then on; from M2 it also closes the bus, which, once the messages channel exists, releases every member waiting in `read_messages` ([swarm-communication.md](swarm-communication.md)). For a stop the controller did not request (`swarm_cap`, `swarm_time`), it cancels the controller's `run`, which runs in a scope of its own and cancels no member.
+0. **Close, synchronously.** Before its first await, `stop()` marks the swarm as stopping, so the controller's `start()` raises `RuntimeError` from then on (a refusal the runtime removes from `run`'s errors, so a controller that resumed and met it ends with the stop; [Exhaustion and errors](#exhaustion-and-errors), step 2); from M2 it also closes the bus, which, once the messages channel exists, releases every member waiting in `read_messages` ([swarm-communication.md](swarm-communication.md)). For a stop the controller did not request (`swarm_cap`, `swarm_time`), it cancels the controller's `run`, which runs in a scope of its own and cancels no member.
 1. **Soft stop.** For every member still running, set its lever to its current usage and close its stop gate. A native member raises at its next pre-dispatch check (or after its in-flight call completes), including calls made by an approval or review callback, so calls already in flight finish and are recorded, and no new call starts except at most one native compaction per agent loop, which has no pre-dispatch check. A bridged member is cancelled at its next check instead (see [Swarm nodes](#swarm-nodes)).
 2. **Grace.** Wait until every member has returned, or the effective grace has passed. Effective grace is `Budget.grace`. When the sample has a time limit, it is clipped to half the sample's remaining time at the moment of the stop, so the final step always keeps the other half.
 3. **Hard stop.** Cancel the cancel scope of every member still running. Calls they have in flight are cancelled, and the ledger then reports the totals as incomplete ([The ledger](#the-ledger)).
@@ -313,47 +314,50 @@ Grace bounds members that are inside a long tool call (a test suite in the sandb
 
 Triggers:
 
-- **Token and cost caps** trip themselves. The first member to raise a swarm cap error has its wrapper call `stop("swarm_cap")`. The other members would trip the reached cap at their next dispatch anyway, and the soft stop makes that uniform. A cap reached inside a bridged member calls `stop()` from the node ([Swarm nodes](#swarm-nodes)).
+- **Token and cost caps** trip themselves. A cap node calls `stop("swarm_cap")` when it is reached, for a native or a bridged member and for the controller, so the stop happens even when a tool or handoff turns the cap's error into a message and the member then returns normally. The node owns the stop: the wrapper records `swarm_cap` when it receives a cap error without foreign leaves, while a native member that consumes that error (in a tool or handoff) and returns normally remains `submitted`, and only the swarm's stop reason is `swarm_cap`; a bridged member stopped by the node keeps the node's stop cause ([Swarm nodes](#swarm-nodes)). The other members would trip the reached cap at their next dispatch anyway, and the soft stop makes that uniform.
 - **The time cap** is a timer task in the runtime's task group, not an Inspect `time_limit`. It calls `stop("swarm_time")`, so the time cap gets the same soft stop. The sample's own time limit stays a hard stop around everything.
 - **Controller stops.** A controller requests a stop by returning from its `run` with a reason: `all_done` (the built-in `leaderless` in M1), after M2 `verified`, later `quiescence`, or its own `controller:<reason>` ([swarm-api.md](swarm-api.md#controllers)).
 
-**Member wrapper and statuses.** `run()` returns a bare owned limit error but lets a grouped one escape ([Limit trees](#limit-trees)), so the wrapper classifies every leaf itself:
+**Member wrapper and statuses.** The wrapper enters the member's nodes itself, around `run()`, rather than passing them as `run(limits=...)`: `run()` builds the member's `AgentState` from its input before it enters its limits (`src/inspect_ai/agent/_run.py:94`), so the input and preamble would be checked against the sample's message limit, not the member's. Entered first, a member message limit replaces the sample's for that conversation from its first message, above or below it. `run()` then catches none of the member's limit errors, and `run()` would in any case return a bare owned limit error but let a grouped one escape ([Limit trees](#limit-trees)), so the wrapper classifies every leaf itself. This is M1-4's wrapper (`src/inspect_swarm/_member.py`, `run_member()`):
 
 ```python
-async def _run_member(m: Member) -> None:
-    token = _current_member.set(m)
-    nodes = m.create_nodes()  # lever, shares, re-created limits: fresh per invocation
+async def run_member(m: MemberRun, input: list[ChatMessage]) -> str:
+    token = current_member.set(m.context)
+    error: Exception | None = None
     try:
         # tool_state_scope: swarm.md's per-member tool state; output kept as swarm-scoring.md says
-        with tool_state_scope(m.name), anyio.CancelScope() as m.scope:
-            agent = build_member(m)  # the built agent, or the factory's agent built in this scope (swarm-api.md, the member contract)
-            _, err = await run(agent, m.input, limits=nodes, name=m.name)
-        if m.scope.cancelled_caught:
-            m.status = m.stop_cause or "cancelled"  # hard stop, or the bridged branch
-        else:
-            m.status = _status_for(err)  # submitted, unsubmitted, stopped, share, member_limit:<type>
+        with tool_state_scope(m.name), m.context.scope:
+            agent = build_member(m.record)  # the built agent, or the factory's agent built in this scope (swarm-api.md, the member contract)
+            with ExitStack() as entered:
+                for node in m.nodes:  # lever, re-created member limits (shares from M1-8): fresh per run
+                    entered.enter_context(node)
+                await run(agent, input, name=m.name)
     except Exception as ex:
-        group = ex if isinstance(ex, BaseExceptionGroup) else ExceptionGroup("member", [ex])
-        caps, rest = group.split(lambda e: _source_in(e, swarm.cap_nodes))
-        owned, foreign = (rest.split(lambda e: _source_in(e, nodes))
-                          if rest is not None else (None, None))
-        if foreign is not None:
-            m.status = "errored"
-            raise _unwrap(foreign)  # a single leaf bare, several as a group
-        if caps is not None:
-            m.status = "swarm_cap"
-            swarm.stop("swarm_cap")
-        else:
-            m.status = _status_for(_first_leaf(owned))
+        error = ex
     finally:
-        _current_member.reset(token)
+        current_member.reset(token)
+
+    if error is not None:
+        cap, owned, foreign = classify_errors(error, swarm.cap_nodes, m.nodes)
+        if foreign is not None:
+            raise foreign  # without the swarm's leaves: a single leaf bare, several as a group
+        if cap:
+            return "swarm_cap"  # the cap node began the swarm's stop when it was reached
+        return _status_for(owned)  # stopped (the lever), share, member_limit:<type>
+    if m.context.stop_cause is not None:
+        return m.context.stop_cause  # a node stopped a bridged member whose cancellation had not arrived
+    if m.context.scope.cancelled_caught:
+        return "cancelled"  # the hard stop
+    return "submitted"  # unsubmitted from M1-9
 ```
+
+The runtime's task for the member records the returned status, or `errored` when the wrapper raises, and queues the member's `MemberEnded`.
 
 - `_source_in(e, ns)` is true for a `LimitExceededError` whose `source` is one of `ns`.
 - A group containing only the member's own limits (a member limit, its share, or its lever during a soft stop) gives the same status as the bare error would.
 - A group with any foreign leaf re-raises only the foreign leaves.
 - From M2, a `LimitExceededError` with `type="custom"` and no `source`, which an agent raises to stop itself, counts as the member's own too, bare or grouped: the member ends `member_limit:custom` (M2-2 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m2-pull-requests); [swarm-lean-open-problems.md](swarm-lean-open-problems.md#2-m2-an-agent-raised-custom-limit-ends-only-the-member)). Until then it is foreign.
-- Swarm cap leaves are removed from what propagates. A cap leaf with no foreign leaves stops the swarm.
+- Swarm cap leaves are removed from what propagates. They do not start the stop: the cap node began it when it was reached ([Stopping](#stopping), Triggers), before the error was raised. A cap leaf with no foreign leaves gives the member `swarm_cap`; with foreign leaves, only those propagate.
 
 Member statuses are a closed set: `submitted`, `unsubmitted`, `stopped` (soft stop), `share`, `member_limit:<type>`, `swarm_cap`, `cancelled`, `errored`. swarm-api.md's `MemberHandle.status` and swarm-scoring.md's record use this set unchanged. `unsubmitted` is a normal return whose `output.stop_reason` is `content_filter` or `model_length`, which is how `react()` returns after three refusals or an unhandled context overflow rather than a submit; `submitted` is any other normal return, which is the scoring deep dive's submission (M1-9 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m1-pull-requests); [swarm-lean-open-problems.md](swarm-lean-open-problems.md#6-m1-tighten-submitted-m2-document-stopping-on-the-first-proof)). Each member's status and stop cause go into its evidence and the ledger.
 
@@ -361,8 +365,8 @@ Member statuses are a closed set: `submitted`, `unsubmitted`, `stopped` (soft st
 
 The runtime runs members in its own task group inside the swarm nodes. Its handling, in order:
 
-1. **Own nodes.** No error whose source is a swarm node leaves a member wrapper, bare or grouped. Shared caps become a `stop()`, and member-owned nodes become a status. This also covers a cap reached after a tool or handoff turned it into a message, since the member then raises at its next generate.
-2. **Foreign errors** (a sample limit, `TerminateSampleError`, a member's crash) propagate out of the wrapper, already stripped of swarm leaves. An exception from the controller's `run` that is not a swarm cap is foreign too ([swarm-api.md](swarm-api.md#controllers)). The task group cancels the other members, so their in-flight calls become unknown. The runtime removes any swarm leaves from the task group's exception again with `ExceptionGroup.split()`, so that a sample limit is not recorded as a swarm cap. It re-raises a single remaining exception bare and several as a group, as `collect()` does. The runner then records a sample limit as the sample's limit, as for any agent.
+1. **Own nodes.** No error whose source is a swarm node leaves a member wrapper, bare or grouped. Shared caps become a `stop()`, called by the cap node when it is reached, and member-owned nodes become a status. So a cap reached after a tool or handoff turned it into a message still stops the swarm, even when the member or controller then returns normally.
+2. **Foreign errors** (a sample limit, `TerminateSampleError`, a member's crash) propagate out of the wrapper, already stripped of swarm leaves. An exception from the controller's `run` is classified leaf by leaf, bare or grouped ([swarm-api.md](swarm-api.md#controllers)): `start()` refusals raised because a stop had already begun are removed, so a controller that resumed just as the stop began ends with the stop and grace still runs; swarm-cap leaves and runtime-lever leaves are the swarm's own and are removed, so a controller's model call that reaches a cap ends through the `swarm_cap` stop its node began; the remaining leaves are foreign and propagate, an ordinary `RuntimeError` included, a single leaf bare and several as a group. The task group cancels the other members, so their in-flight calls become unknown. The runtime removes any swarm leaves from the task group's exception again with `ExceptionGroup.split()`, so that a sample limit is not recorded as a swarm cap. It re-raises a single remaining exception bare and several as a group, as `collect()` does. The runner then records a sample limit as the sample's limit, as for any agent.
 3. **Cancellation from outside** (the sample's time or working limit, the sample's cost or token limit surfacing from a bridged member, an operator interrupt) arrives as a cancellation. The runtime does no awaiting work in that path.
 4. **On every exit path** the runtime writes the ledger and the output in a synchronous `finally`. `transcript().info()` and store writes are synchronous (`src/inspect_ai/log/_transcript.py:544`), so they run even during cancellation. When the cause is not an exception it can see, it reads it from `sample_active().limit_exceeded_error` (a working limit or a bridged sample limit), from the sample's time node, or from the active sample's interrupt action, and records `sample_limit:<type>` or `operator`.
 
@@ -398,7 +402,7 @@ class Meter(BaseModel):
 class Calls(BaseModel):        # counted from ModelEvents
     calls: int                 # completed, non-cache model calls
     cache_replays: int         # events with cache="read": charged zero
-    errored: int               # attempts that ended in an error, cancellation included: usage unknown
+    errored: int               # attempts that ended in an error, cancellation included, and retries inside a call: usage unknown
     no_usage: int              # completed with output but no usage
     unpriced: int              # completed with usage whose total_cost is None
 
@@ -449,6 +453,7 @@ Sources and coverage:
   - The token-tree node's own per-call count (`unpriced_calls_recorded`, taken in `record()` before aggregation) and `unpriced_models` (models whose sample delta has tokens but no cost) are kept as cross-checks.
   - **Errored and usage-less calls:**
     - `errored` counts every non-cache attempt whose event ended with an `error`. That includes Inspect's cancellation (`_model.py:1666-1674`), attempt and stream-idle timeouts (`_model.py:1641-1650`), transport and SDK timeouts, errors after streaming began (`src/inspect_ai/model/_openai.py:1562-1569` handles an SDK error after HTTP 200), and provider error responses, whether or not a retry later succeeded (`_model.py:1652-1657`).
+    - It also counts the requests a provider's client retried inside one call, which Inspect's HTTP hooks add to the event's `retries` (`log/_samples.py:781-786`). Each retry follows a failed request, and the event keeps the usage of only the last one.
     - None of these records usage, and the event keeps only an error string, not a status code (`event/_model.py:126`). So the ledger cannot tell a request the provider rejected before inference from one it ran and billed, and counts every errored attempt as unknown expenditure. There is no zero-spend exception, not even for rate-limit (HTTP 429) rejections.
     - A refusal at Inspect's own pre-dispatch check is not counted: it is raised before the event exists (`_model.py:1568-1570`) and sends nothing.
     - `no_usage` counts events completed with output but no usage (`_model.py:1733-1736`).
@@ -461,7 +466,7 @@ Sources and coverage:
   - If the list is empty, no native compaction could have run in the process during the interval. If it is not, completeness cannot be established, whether or not any compaction happened, and the total is a lower bound.
   - The one case outside this test is a `ModelAPI` subclass created dynamically (with no module keeping it alive), used and garbage-collected entirely within the interval. That is the claim's stated limit, as the filesystem observation limit is for communication ([Security](swarm.md#security)).
 - **The sample delta** is the sample's model usage at the end minus at the start. `unattributed` is what it holds beyond the swarm meter: the tokens of approval and review calls (their cost is in the meter, through the cost-tree node), plus anything that ran in the sample during the swarm outside its contexts.
-- **Totals per arm** stay as swarm.md set them: Inspect's sample `model_usage`, which every arm has. It includes the task's scorer calls, because it is read after scoring; M1 accepts that, since every arm is graded by the same scorers (decision: Ransom, 2026-10-08). The ledger is written when the swarm returns, before scoring, so its own figures (the meters and `sample_delta`) cover the solve only. When swarm-scoring.md's deferred cost boundary is built, arm totals move to its `solve_usage` ([swarm-scoring.md](swarm-scoring.md#the-cost-boundary-deferred)). The ledger reconciles with the sample's usage over its own interval: `unattributed` must not be negative in tokens or, beyond a relative tolerance of `1e-9` of the delta's cost, in cost. The tolerance absorbs summation order, since the sample sums per model and the meters sum per call. A negative remainder would mean the swarm counted a call twice, so the implementation logs an error and tests pin it.
+- **Totals per arm** stay as swarm.md set them: Inspect's sample `model_usage`, which every arm has. It includes the task's scorer calls, because it is read after scoring; M1 accepts that, since every arm is graded by the same scorers (decision: Ransom, 2026-10-08). The ledger is written when the swarm returns, before scoring, so its own figures (the meters and `sample_delta`) cover the solve only. When swarm-scoring.md's deferred cost boundary is built, arm totals move to its `solve_usage` ([swarm-scoring.md](swarm-scoring.md#the-cost-boundary-deferred)). The ledger reconciles with the sample's usage over its own interval: `unattributed` must not be negative in tokens or, beyond a tolerance of `1e-9` of the cumulative end cost of the models used in the interval, in cost. The tolerance is relative to the cumulative cost, not the delta's, because the delta is a difference of cumulative sums and carries their rounding error; it also absorbs summation order, since the sample sums per model and the meters sum per call. A negative remainder would mean the swarm counted a call twice, so the implementation logs an error and tests pin it.
 
 Claims. Completeness is judged over the whole interval the ledger covers (members, the runtime lever, the final step and any other call in the swarm's span), and is conservative where calls cannot be observed:
 
@@ -582,7 +587,9 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
   - `token_limit_tree.is_suspended()`;
   - `in_bridge_model_generate()`;
   - `_get_model_info_direct()`;
-  - `sample_active()`.
+  - `sample_active()`;
+  - `Transcript._subscribe()`, which the ledger uses to follow model events and spans live, so a call's final usage and price are read even when a bounded transcript has evicted the event;
+  - `_resume_checkpoint` on `sample_active().checkpointer`, which sets the ledger's `resumed`.
 
   This is allowed (decision: Ransom, 2026-10-07). They are pinned by tests in this repository ([Testing](#testing)), so an inspect_ai change that breaks them fails CI here.
 - **No inspect_ai changes for limits.** M1's two inspect_ai PRs, the registry types and the tool-state scope, come from swarm-api.md and swarm.md, not from this design. The bridge fix in [Alternatives](#alternatives-considered) and the two observability changes in [open question 3](#open-questions) are optional; the ledger's completeness rules relax as they land.
@@ -668,7 +675,7 @@ All in inspect_swarm, as part of M1 ([Implementation plan](swarm.md#implementati
 
 1. **Swarm nodes and the budget parameter.** `Budget` as a frozen pydantic model with validation, cap derivation, the swarm node classes and cost pairs (ownership, messages, per-call pricing, the bridged branch), bridged detection, and the pinned-behaviour tests. Before swarm-api.md's step 3, whose `swarm()` signature takes a `Budget`. Files: `src/inspect_swarm/_budget.py`, `tests/test_budget.py`.
 2. **Members and stopping.** The member wrapper with lever, shares, re-created member limits and leaf-by-leaf error classification; the runtime lever; `stop()` with step 0, soft stop, grace and hard stop; the time-cap timer; member statuses and stop reasons. With swarm-api.md's step 4 (the controller surface in the runtime), which starts members through this wrapper and passes the controller's reason to `stop()`. swarm-scoring.md's M1 PR follows it. Files: `src/inspect_swarm/_member.py`, `_swarm.py`, `tests/test_swarm_limits.py`.
-3. **Exhaustion and the final step.** Recovery of own caps, propagation with own errors removed, the synchronous `finally`, and the final meter around swarm-scoring.md's finalisation and provisional answer. Files: `_swarm.py`, `_final.py`, tests.
+3. **Exhaustion and the final step.** Recovery of own caps and propagation with own errors removed (both already supplied by step 2 as M1-4 built it), the synchronous `finally`, and the final meter around swarm-scoring.md's finalisation and provisional answer. Files: `_swarm.py`, `_final.py`, tests.
 4. **The ledger.** `MemberLedger`, `SwarmLedger`, event counting, reconciliation and claims, written as an `InfoEvent` and a store entry. Files: `_budget.py` (or `_ledger.py` if it grows), `_evidence.py`, tests.
 5. **Splits and the sweep example.** Share nodes and validation, and a task example in the docs showing the three sweeps. Files: `_budget.py`, tests, `README.md`.
 
