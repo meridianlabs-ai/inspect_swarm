@@ -10,10 +10,8 @@ from inspect_ai.event import InfoEvent, SpanBeginEvent, SpanEndEvent
 from inspect_ai.model import (
     ChatMessageAssistant,
     ChatMessageUser,
-    Model,
     ModelOutput,
 )
-from inspect_ai.model._model_output import ModelFallback
 from inspect_ai.util import (
     message_limit,
     span_id_provider,
@@ -41,7 +39,6 @@ from .swarm_runtime import (
     evidence,
     final,
     generator,
-    output,
     run_swarm,
     sample,
     scripted_model,
@@ -81,11 +78,9 @@ def _result(name: str, status: str | None, time: float | None) -> MemberResult:
     return MemberResult(
         name=name,
         role=None,
-        model=None,
         state="pending" if status is None else "ended",
         status=status,
         submitted=status == "submitted",
-        output=None if status is None else output(f"from {name}"),
         time=time,
     )
 
@@ -151,7 +146,6 @@ async def test_no_submissions_give_an_empty_output_though_members_have_outputs()
         )
     )
     assert statuses(stop) == {"a": "stopped", "b": "stopped"}
-    assert all(m.output is not None and not m.output.empty for m in stop.record.members)
     assert stop.state.output.empty
     assert stop.record.final.model_dump() == {
         "mode": None,
@@ -340,6 +334,7 @@ async def test_a_submission_during_grace_is_chosen_only_without_an_earlier_one(
 @pytest.mark.anyio
 async def test_the_record_is_written_at_start_and_on_each_start_and_end() -> None:
     seen: list[SwarmResultRecord] = []
+    stored: list[dict[str, Any]] = []
 
     async def run(control: SwarmControl) -> StopReason:
         seen.append(_record())
@@ -347,6 +342,7 @@ async def test_the_record_is_written_at_start_and_on_each_start_and_end() -> Non
         seen.append(_record())
         async for _ in control.events():
             seen.append(_record())
+            stored.append(store().get(RECORD_KEY))
         return "all_done"
 
     model = scripted_model()
@@ -369,73 +365,29 @@ async def test_the_record_is_written_at_start_and_on_each_start_and_end() -> Non
         "provisional": True,
     }
     assert [m.state for m in after_start.members] == ["running", "pending"]
-    assert after_start.members[0].output is None
     started = after_end.members[0]
     assert (started.state, started.status, started.submitted) == (
         "ended",
         "submitted",
         True,
     )
-    assert (started.role, started.model) == ("lead", str(model))
-    assert started.output is not None and started.output.completion == "ok"
+    assert started.role == "lead"
+    # no member's output: those stay in the members' states
+    [after_end_stored] = stored
+    assert set(after_end_stored["members"][0]) == {
+        "name",
+        "role",
+        "state",
+        "status",
+        "submitted",
+        "time",
+    }
     assert started.time is not None and started.time >= 0
     assert after_end.final.member == "started" and after_end.final.provisional
     # a member the controller never started stays pending
     never = stop.record.members[1]
-    assert (never.state, never.status, never.output, never.time) == (
-        "pending",
-        None,
-        None,
-        None,
-    )
+    assert (never.state, never.status, never.time) == ("pending", None, None)
     assert not stop.record.final.provisional
-
-
-@agent
-def drafter(model: Model) -> Agent:
-    # updates its state in place, then works on until it is cancelled
-    async def execute(state: AgentState) -> AgentState:
-        state.output = await model.generate(state.messages)
-        state.messages.append(state.output.message)
-        await anyio.sleep(3600)
-        return state
-
-    return execute
-
-
-@pytest.mark.anyio
-async def test_a_members_output_survives_its_own_limit_and_the_hard_stop() -> None:
-    drafts = Script()
-
-    async def run(control: SwarmControl) -> StopReason:
-        for m in control.members:
-            control.start(m)
-        async for event in control.events():
-            if event.member == "limited":
-                break
-        while drafts.calls < 1:
-            await anyio.sleep(0)
-        return "enough"
-
-    stop = await run_swarm(
-        swarm(
-            [
-                member(
-                    generator(scripted_model(), calls=None),
-                    name="limited",
-                    limits=[token_limit(2 * TOKENS_PER_CALL)],
-                ),
-                member(drafter(scripted_model(drafts)), name="drafter"),
-            ],
-            controller=_controller(run, "final_test_outputs_survive"),
-            channels=[],
-            budget=Budget(grace=0),
-        )
-    )
-    assert statuses(stop) == {"limited": "member_limit:token", "drafter": "cancelled"}
-    for m in stop.record.members:
-        assert m.output is not None and m.output.completion == "ok"
-        assert not m.submitted
 
 
 async def _blocked_provider(name: str, parent_id: str | None, id: str | None) -> str:
@@ -554,58 +506,6 @@ async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> No
     assert secret not in repr([*(e.data for _, e in results.values()), payload])
 
 
-@agent
-def odd_metadata(where: str, outputs: list[ModelOutput]) -> Agent:
-    # an output holding a value JSON cannot, after a pause so that it is not the first
-    async def execute(state: AgentState) -> AgentState:
-        await anyio.sleep(0.01)
-        state.output = ModelOutput.from_content("mockllm", "late")
-        odd = {"diagnostic": object()}
-        if where == "output":
-            state.output.metadata = odd
-        elif where == "message":
-            state.output.message.metadata = odd
-        else:
-            state.output.fallback = ModelFallback(
-                model="mockllm/a", fallback_model="mockllm/b", metadata=odd
-            )
-        outputs.append(state.output)
-        return state
-
-    return execute
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("where", ["output", "message", "fallback"])
-async def test_an_output_json_cannot_hold_is_recorded_with_nulls(where: str) -> None:
-    outputs: list[ModelOutput] = []
-    async with sample():
-        state = await swarm(
-            [
-                member(generator(scripted_model(), calls=0, answer="first"), name="a"),
-                member(odd_metadata(where, outputs), name="b"),
-            ],
-            channels=[],
-        )(AgentState(messages=[]))
-        stored = store().get(RECORD_KEY)
-    assert state.output.completion == "first"
-    [odd] = outputs
-    stored_output = stored["members"][1]["output"]
-    if where == "output":
-        live, recorded = odd.metadata, stored_output["metadata"]
-    elif where == "message":
-        live = odd.message.metadata
-        recorded = stored_output["choices"][0]["message"]["metadata"]
-    else:
-        assert odd.fallback is not None
-        live, recorded = odd.fallback.metadata, stored_output["fallback"]["metadata"]
-    assert recorded == {"diagnostic": None}
-    # the member's own output keeps its value
-    assert live is not None and type(live["diagnostic"]) is object
-    assert stored["members"][1]["state"] == "ended"
-    assert stored["members"][0]["role"] is None
-
-
 # ---------------------------------------------------------------------------
 # The returned state
 
@@ -622,12 +522,10 @@ def blank_completion() -> Agent:
 
 
 @pytest.mark.anyio
-async def test_recording_an_output_leaves_its_completion_unchanged() -> None:
+async def test_the_answer_keeps_its_completion() -> None:
     async with sample():
         state = await swarm(blank_completion(), channels=[])(AgentState(messages=[]))
-        stored = store().get(RECORD_KEY)
     assert state.output.completion == ""
-    assert stored["members"][0]["output"]["completion"] == ""
 
 
 @agent

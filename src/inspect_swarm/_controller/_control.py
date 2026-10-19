@@ -8,7 +8,7 @@ from typing import Protocol, cast
 import anyio
 from anyio.abc import TaskGroup
 from inspect_ai.agent import Agent, AgentState
-from inspect_ai.model import ChatMessage, ChatMessageUser
+from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
 from inspect_ai.util import Limit, current_span_id, sample_limits
 
 from .._budget import Lever, MemberContext, SwarmNode, is_bridged
@@ -17,7 +17,6 @@ from .._final import finalise, settle
 from .._member import (
     Member,
     classify_errors,
-    member_model,
     member_nodes,
     run_member,
     unwrap,
@@ -144,11 +143,11 @@ class MemberRun:
         self.record = record
         self.name = name
         self.role = record.role
-        self.model = member_model(record)
         self.state: MemberState = "pending"
         self.status: str | None = None
-        # the state the member runs on, kept for its output however it ends
-        self.agent_state: AgentState | None = None
+        # the state the member runs on, kept for its output however it ends; its
+        # conversation is built inside the member's limits
+        self.agent_state = AgentState(messages=[])
         self.time: float | None = None
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
@@ -162,21 +161,12 @@ class MemberRun:
         return self.status == "submitted"
 
     def result(self) -> MemberResult:
-        output = (
-            self.agent_state.output
-            if self.state == "ended" and self.agent_state is not None
-            else None
-        )
-        # unvalidated: validating would rerun ModelOutput's validator on the member's
-        # own output, which fills an empty completion from the message text
-        return MemberResult.model_construct(
+        return MemberResult(
             name=self.name,
             role=self.role,
-            model=self.model,
             state=self.state,
             status=self.status,
             submitted=self.submitted,
-            output=output,
             time=self.time,
         )
 
@@ -307,6 +297,7 @@ class SwarmRun:
             self._state,
             self._input,
             self._results(),
+            self._outputs(),
             span_id=self._span_id,
             stop_reason=self.stop_reason,
         )
@@ -358,9 +349,6 @@ class SwarmRun:
         self.stop(reason if reason in _TOPOLOGY_REASONS else f"controller:{reason}")
 
     async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
-        # its conversation is built inside the member's limits
-        m.agent_state = AgentState(messages=[])
-
         def end(status: str, state: AgentState) -> None:
             m.agent_state = state
             self._end(m, status)
@@ -397,10 +385,16 @@ class SwarmRun:
 
     # the record and the provisional answer, after each change
     def _settle(self) -> None:
-        settle(self._state, self._results(), provisional=True)
+        settle(self._state, self._results(), self._outputs(), provisional=True)
 
     def _results(self) -> list[MemberResult]:
         return [m.result() for m in self._members]
+
+    # the ended members' outputs, kept here rather than in the record
+    def _outputs(self) -> dict[str, ModelOutput]:
+        return {
+            m.name: m.agent_state.output for m in self._members if m.state == "ended"
+        }
 
     async def _time_cap(self, seconds: float) -> None:
         await anyio.sleep(seconds)

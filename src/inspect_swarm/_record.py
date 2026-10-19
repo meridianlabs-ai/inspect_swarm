@@ -1,6 +1,5 @@
 from typing import Literal
 
-from inspect_ai.model import ModelOutput
 from inspect_ai.util import store
 from pydantic import BaseModel
 
@@ -19,9 +18,6 @@ class MemberResult(BaseModel):
     role: str | None
     """The member's role, if it has one."""
 
-    model: str | None
-    """The model the member is given, or `None` when it uses the sample's model or its own default."""
-
     state: MemberState
     """The member's lifecycle state."""
 
@@ -30,9 +26,6 @@ class MemberResult(BaseModel):
 
     submitted: bool
     """Whether the member ended with a submission (status `submitted`)."""
-
-    output: ModelOutput | None
-    """The member's output when it ended, however it ended; `None` until then."""
 
     time: float | None
     """Swarm time (seconds from the swarm's start) when the member ended; `None` until then."""
@@ -67,7 +60,6 @@ class SwarmResultRecord(BaseModel):
     """The final answer."""
 
 
-# Only the runtime writes the record. A value JSON cannot hold (in a member's output
-# metadata, say) is written as null, as Inspect serializes the store.
+# Only the runtime writes the record.
 def write_record(record: SwarmResultRecord) -> None:
-    store().set(RECORD_KEY, record.model_dump(mode="json", fallback=lambda _: None))
+    store().set(RECORD_KEY, record.model_dump(mode="json"))

@@ -7,7 +7,6 @@ from typing import Any, cast
 from inspect_ai._util.registry import (
     extract_named_params,
     has_registry_params,
-    is_model_dict,
     is_registry_object,
     registry_info,
     registry_log_name,
@@ -17,7 +16,7 @@ from inspect_ai._util.registry import (
     registry_value,
 )
 from inspect_ai.agent import Agent, AgentState
-from inspect_ai.model import ChatMessage, Model
+from inspect_ai.model import ChatMessage
 from inspect_ai.util import (
     Limit,
     LimitExceededError,
@@ -376,17 +375,6 @@ async def _run_member(
         # the hard stop
         return "cancelled", state
     return "submitted", state
-
-
-# The model a member is given, as its registry params or a factory's args name it.
-def member_model(record: Member) -> str | None:
-    params = registry_params(record.agent) if record.agent is not None else record.args
-    model = params.get("model")
-    if is_model_dict(model):
-        return str(model["model"])
-    if isinstance(model, str | Model):
-        return str(model)
-    return None
 
 
 def _status_for(error: LimitExceededError, lever: Lever) -> str:
