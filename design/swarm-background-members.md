@@ -114,7 +114,8 @@ sample task group (unchanged; background() lands here when the seam is unset)
         └── MemberBackground(contain=[*nodes, *caps])    ← inspect_swarm, one per member;
             │                                               sets inspect_ai's seam to itself
             ├── ExitStack: the member's nodes (lever, share, limits, time limit)
-            │   └── run(agent, input)                       ← the member's agent (top loop)
+            │   └── agent(state)                            ← the member's agent (top loop), on the
+            │                                                   runtime's kept AgentState
             └── tasks background() starts anywhere in the member:
                 deepagent children, custom workers
 ```
@@ -228,7 +229,10 @@ try:
                         state.messages = [msg.model_copy(update={"source": "input"}) for msg in input]
                         await member_span.enter_async_context(span(name, type="agent"))
                         state = await agent(state)    # the returned state, on a normal return
-                    status = "submitted"              # or unsubmitted, as M1-9
+                    outcome.state = state             # kept before the drain, which may raise
+                    # a node that stopped a bridged member whose cancellation had not arrived
+                    # wins over a normal return, as on main
+                    status = context.stop_cause or "submitted"   # or unsubmitted, as M1-9
                 except Exception as ex:
                     cap, owned, foreign = classify_errors(ex, caps, nodes)
                     if foreign is not None:
@@ -238,10 +242,11 @@ try:
         finally:
             # after the owner's exit, so its cancellations and their cleanup are counted
             outcome.background_started, outcome.background_cancelled = owner.started, owner.cancelled
-    ...                                               # status if not set: stop_cause / cancelled
+    ...                                               # status if not set (the agent was cancelled): stop_cause / cancelled
 finally:
     current_member.reset(token)
 return status, state                                  # run_member() passes both to end()
+# and if this raises, run_member() passes end() outcome.state when it is set, else the runtime's state
 ```
 
 - **Placement.** Inside `context.scope`, so the hard stop cancels the children with the member. Inside `tool_state_scope(name)` and the member ContextVar, so children keep the member's tool state and identity (they would anyway, by inheriting the context at dispatch). Around the node stack, with the `try` that classifies the agent's errors inside the owner, so the member's agent and every task it starts run under the owner, and the owner's task group is outside the cancel scope of the member's time limit. Sample limits are not in `contain`, so a child that reaches one ends the sample at once, as it would outside a swarm.
@@ -251,7 +256,7 @@ return status, state                                  # run_member() passes both
 
 ### The run record
 
-`run_member()` gains one parameter, `outcome: MemberOutcome`, a small mutable record on `MemberRun` with two fields, `background_started: int` and `background_cancelled: int`; the member's state stays where M1-5 put it (`MemberRun.agent_state`, passed in as `state` and handed back to `end`). The wrapper copies the counts in a synchronous `finally` around the whole owner block, so the copy runs after the owner's exit has cancelled and awaited what was left, and before `run_member()` calls `end`, on every path: a normal drain, a foreign error and the hard stop. `run_member()` keeps its shape on `main`: it receives the status and the state, or sets `errored` on an exception, and calls `end` in its `finally`, where `SwarmRun._end()` reads the counts from `outcome` and ends the member as in M1. The status is worked out when the agent returns and is final; the drain cannot change it, except that a foreign error from a child makes the member `errored`, as the same error from its agent does ([Statuses, ended, and the record](#statuses-ended-and-the-record)). A hard stop that cancels the member's scope while its agent runs gives `stop_cause` or `cancelled`, as `main` returns them; one that cancels only the drain leaves the agent's status.
+`run_member()` gains one parameter, `outcome: MemberOutcome`, a small mutable record on `MemberRun` that it passes on to `_run_member()`, with three fields: `state: AgentState | None`, the state the agent returned, set on a normal return before the drain, and `background_started: int` and `background_cancelled: int`. The member's state otherwise stays where M1-5 put it (`MemberRun.agent_state`, passed in as `state` and handed back to `end`). `outcome.state` exists because the drain or the owner's exit can raise a foreign error after the agent returned a replacement state: `run_member()` calls `end` with `outcome.state` when it is set and with the runtime's state when it is not, on every path, so the output the agent ended with survives its drain whether or not the drain raises, and an agent that raises leaves the runtime's state, holding any output it set in place. Setting it publishes nothing: the member ends, and its submission counts, only when `end` runs. The wrapper copies the counts in a synchronous `finally` around the whole owner block, so the copy runs after the owner's exit has cancelled and awaited what was left, and before `run_member()` calls `end`, on every path: a normal drain, a foreign error and the hard stop. `run_member()` otherwise keeps its shape on `main`: it receives the status and the state, or sets `errored` on an exception, and calls `end` in its `finally`, where `SwarmRun._end()` reads the counts from `outcome` and ends the member as in M1. The status is worked out when the agent returns and is final; the drain cannot change it, except that a foreign error from a child makes the member `errored`, as the same error from its agent does ([Statuses, ended, and the record](#statuses-ended-and-the-record)). A hard stop that cancels the member's scope while its agent runs gives `stop_cause` or `cancelled`, as `main` returns them; one that cancels only the drain leaves the agent's status.
 
 ### The drain at member end
 
@@ -439,7 +444,7 @@ Runtime tests on mockllm with scripted outputs and controlled tool latency (anyi
 - **Drain at member end** (the plan's required case, both outcomes): a `deepagent(background=True)` member submits while one child is in a tool call that finishes within grace and another in one that does not. The first finishes its call, is refused its next one and ends; the second is cancelled by the owner's exit and awaited. The member's status is `submitted`; its `MemberEnded`, `state == "ended"` and `MemberResult` come after both children's spans have ended, and `MemberResult.time` is that time; its ledger line's usage includes both children's completed calls; `background_started == 2`, `background_cancelled == 1`, `total_complete` is false. With grace long enough for both, `background_cancelled == 0` and no model event is errored. With `Budget.grace=0`, cancellation of both children is requested at once, and the member ends once their cleanup has been awaited.
 - **Environment after the drain**: a child's sandbox tool call that writes a file is in flight when the member submits; it completes within grace, and a scorer run after the swarm sees the file. A tool call held past grace is cancelled and counted in `background_cancelled`.
 - **A controller after a drain**: a controller shaped like Epoch's `until_proved` starts two members; member A submits while one of its children is held in a tool call. A's `MemberEnded` arrives when that child has finished (within grace); the controller then returns and member B's lever is closed. The test pins the delay as the drain's length.
-- **Output survives the stop** (round 8's B1): a member whose agent updates its state in place produces a nonempty output, then is stopped by its lever (an owned stop) and, in a second case, by the hard stop; its `MemberResult.output` is that last output, not empty. A factory error leaves no output.
+- **Output survives the stop** (round 8's B1): a member whose agent updates its state in place produces a nonempty output, then is stopped by its lever (an owned stop) and, in a second case, by the hard stop; its `MemberResult.output` is that last output, not empty. A factory error leaves no output. A member whose agent returns a replacement state and whose drain then raises a foreign error from a child is `errored` with the returned state's output.
 - **Member time limit** (a member `time_limit`): the agent is cancelled at the limit and ends `member_limit:time`; a child in a tool call is not cancelled with it, finishes within grace and is recorded; a child still running at the end of grace is cancelled.
 - **Custom limit in a child** (with whichever of M2-2 and M2-5 merges second): a child that raises `LimitExceededError("custom", ...)` with no source ends alone, its sibling and the member's agent continue, and the member submits.
 - **Soft stop** (the controller's `all_done`, and the time cap): children with calls in flight finish them, none is cancelled, every call is recorded.
