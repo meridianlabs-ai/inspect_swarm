@@ -3,20 +3,26 @@ from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 
 import anyio
 from anyio.abc import TaskGroup
-from inspect_ai.agent import Agent
-from inspect_ai.log import transcript
-from inspect_ai.model import ChatMessage, ChatMessageUser
-from inspect_ai.util import Limit, sample_limits
+from inspect_ai.agent import Agent, AgentState
+from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
+from inspect_ai.util import Limit, current_span_id, sample_limits
 
-from .._budget import Lever, MemberContext, SwarmNode, is_bridged
-from .._member import Member, classify_errors, member_nodes, run_member, unwrap
-
-MemberState = Literal["pending", "running", "ended"]
-"""A member's lifecycle: not started, running, or ended."""
+from .._budget import Budget, CostPair, Lever, MemberContext, SwarmNode, is_bridged
+from .._evidence import evidence, write_ledger
+from .._final import finalise, settle
+from .._ledger import LedgerInterval, MemberAccount
+from .._member import (
+    Member,
+    classify_errors,
+    member_nodes,
+    run_member,
+    unwrap,
+)
+from .._record import MemberResult, MemberState
 
 
 class MemberHandle(Protocol):
@@ -140,6 +146,10 @@ class MemberRun:
         self.role = record.role
         self.state: MemberState = "pending"
         self.status: str | None = None
+        # the state the member runs on, kept for its output however it ends; its
+        # conversation is built inside the member's limits
+        self.agent_state = AgentState(messages=[])
+        self.time: float | None = None
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
         self.context = MemberContext(
@@ -151,6 +161,25 @@ class MemberRun:
     def submitted(self) -> bool:
         return self.status == "submitted"
 
+    @property
+    def cancelled(self) -> bool:
+        # its agent loop was cancelled: the hard stop, the bridged branch, a member
+        # time limit, or a cancellation from outside the swarm
+        return self.context.scope.cancel_called or self.status in (
+            "cancelled",
+            "member_limit:time",
+        )
+
+    def result(self) -> MemberResult:
+        return MemberResult(
+            name=self.name,
+            role=self.role,
+            state=self.state,
+            status=self.status,
+            submitted=self.submitted,
+            time=self.time,
+        )
+
 
 # The runtime for one sample: the controller surface, member tasks and the stop
 # procedure. One is created for each run of the swarm.
@@ -159,11 +188,13 @@ class SwarmRun:
         self,
         records: Sequence[tuple[Member, str]],
         *,
+        state: AgentState,
         input: list[ChatMessage],
         preambles: dict[str, str],
         caps: list[Limit],
         time: float | None,
         grace: float,
+        budget: Budget,
         shares: Mapping[str, Sequence[Limit]] | None = None,
     ) -> None:
         shares = shares or {}
@@ -174,12 +205,18 @@ class SwarmRun:
             if isinstance(node, SwarmNode):
                 node.stop_swarm = self.stop
         self._by_name = {m.name: m for m in self._members}
-        self._input = input
+        self._state = state
+        self._input = list(input)
         self._preambles = preambles
         self._caps = caps
         self._time = time
         self._grace = grace
         self._runtime_lever = Lever(owner=None)
+        self._budget = budget
+        # the ledger's meters: the swarm meter around everything the swarm runs, and the
+        # final meter around its final step
+        self._swarm_meter = CostPair(owner=None, role="meter")
+        self._final_meter = CostPair(owner=None, role="meter")
         self._controller_scope = anyio.CancelScope()
         self._members_tg: TaskGroup | None = None
         self._member_ctx: contextvars.Context | None = None
@@ -188,6 +225,8 @@ class SwarmRun:
         self._iterating = False
         self._stopped = anyio.Event()
         self._effective_grace = grace
+        self._start = 0.0
+        self._span_id: str | None = None
         self.stop_reason: str | None = None
 
     # SwarmControl
@@ -221,6 +260,7 @@ class SwarmRun:
         )
         messages.append(ChatMessageUser(content=self._preambles[m.name]))
         m.state = "running"
+        self._settle()
         # from the saved context, so the member's lever is a child of the caps and never
         # of the runtime lever, whichever task starts it
         self._member_ctx.copy().run(
@@ -250,10 +290,16 @@ class SwarmRun:
     # the runtime
 
     async def run(self, controller: Callable[["SwarmControl"], Awaitable[str]]) -> None:
+        interval = LedgerInterval()
+        self._start = anyio.current_time()
+        # the swarm's span
+        self._span_id = current_span_id()
+        self._settle()
         error: Exception | None = None
+        ended = False
         try:
             with ExitStack() as caps:
-                for node in self._caps:
+                for node in [*self._swarm_meter.nodes, *self._caps]:
                     caps.enter_context(node)
                 async with anyio.create_task_group() as members_tg:
                     self._members_tg = members_tg
@@ -263,12 +309,46 @@ class SwarmRun:
                         if self._time is not None:
                             runtime_tg.start_soon(self._time_cap, self._time)
                         runtime_tg.start_soon(self._run_controller, controller)
+            ended = True
         except Exception as ex:
             # a foreign error from a member or the controller; the wrappers have
             # already removed the swarm's own leaves
             error = ex
+        finally:
+            write_ledger(
+                interval.ledger(
+                    budget=self._budget,
+                    caps=self._caps,
+                    time_cap=self._time,
+                    members=[
+                        MemberAccount(
+                            name=m.name,
+                            status=m.status,
+                            bridged=m.context.bridged,
+                            lever=m.lever,
+                            span_id=m.context.span_id,
+                            cancelled=m.cancelled,
+                        )
+                        for m in self._members
+                    ],
+                    runtime=self._runtime_lever,
+                    final=self._final_meter,
+                    swarm=self._swarm_meter,
+                    stop_reason=self.stop_reason,
+                    interrupted=not ended,
+                    final_cancelled=False,
+                )
+            )
         if error is not None:
             raise unwrap(error)
+        finalise(
+            self._state,
+            self._input,
+            self._results(),
+            self._outputs(),
+            span_id=self._span_id,
+            stop_reason=self.stop_reason,
+        )
 
     def stop(self, reason: str) -> None:
         # the first call wins; everything before the grace period is synchronous, so
@@ -317,23 +397,51 @@ class SwarmRun:
         self.stop(reason if reason in _TOPOLOGY_REASONS else f"controller:{reason}")
 
     async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
-        status = "cancelled"
-        try:
-            status = await run_member(
-                m.record, m.name, m.context, m.nodes, self._caps, input
-            )
-        except Exception:
-            status = "errored"
-            raise
-        finally:
+        def end(status: str, state: AgentState) -> None:
+            m.agent_state = state
             self._end(m, status)
+
+        await run_member(
+            m.record,
+            m.name,
+            m.context,
+            m.nodes,
+            self._caps,
+            input,
+            m.agent_state,
+            end,
+        )
 
     def _end(self, m: MemberRun, status: str) -> None:
         # the member counts as running until its event is queued
         m.state = "ended"
         m.status = status
+        m.time = anyio.current_time() - self._start
+        # in the member's span, unless it ended before entering it
+        evidence(
+            "result",
+            "member_result",
+            member=m.name,
+            span_id=m.context.span_id,
+            status=status,
+            time=m.time,
+        )
+        self._settle()
         self._queue.append(MemberEnded(m.name, status, m.submitted))
         self._notify()
+
+    # the record and the provisional answer, after each change
+    def _settle(self) -> None:
+        settle(self._state, self._results(), self._outputs(), provisional=True)
+
+    def _results(self) -> list[MemberResult]:
+        return [m.result() for m in self._members]
+
+    # the ended members' outputs, kept here rather than in the record
+    def _outputs(self) -> dict[str, ModelOutput]:
+        return {
+            m.name: m.agent_state.output for m in self._members if m.state == "ended"
+        }
 
     async def _time_cap(self, seconds: float) -> None:
         await anyio.sleep(seconds)
@@ -349,19 +457,6 @@ class SwarmRun:
             if m.state == "running":
                 m.context.scope.cancel()
         await self._until_quiet()
-        transcript().info(
-            {
-                "version": 1,
-                "type": "swarm",
-                "kind": "stopped",
-                "reason": self.stop_reason,
-                "members": [
-                    {"member": m.name, "state": m.state, "status": m.status}
-                    for m in self._members
-                ],
-            },
-            source="inspect_swarm",
-        )
         # ends the time cap's timer
         runtime_tg.cancel_scope.cancel()
 

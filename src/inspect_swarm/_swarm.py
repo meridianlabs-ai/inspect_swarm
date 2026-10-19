@@ -92,11 +92,13 @@ def swarm(
             )
         await SwarmRun(
             runs,
+            state=state,
             input=state.messages,
             preambles=preambles,
             caps=cap_nodes,
             time=caps.time,
             grace=resolved_budget.grace,
+            budget=resolved_budget,
             shares=share_nodes(resolved_budget, caps, [info.name for info in roster]),
         ).run(resolved_controller.run)
         return state
