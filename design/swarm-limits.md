@@ -323,8 +323,10 @@ Triggers:
 **Member wrapper and statuses.** The wrapper does not call `run()`. `run()` builds the member's `AgentState` from its input before it enters its limits (`src/inspect_ai/agent/_run.py:94`), so the input and preamble would be checked against the sample's message limit, not the member's; and it copies the input into a state of its own, so when an error escapes it the caller loses the agent's output (swarm-scoring.md's [Terms](swarm-scoring.md#terms)). So the wrapper enters the member's nodes itself, then builds the member's conversation on the `AgentState` the runtime keeps for the member, as `as_solver()` keeps one, opens the member's agent span and calls the agent on that state. Entered first, a member message limit replaces the sample's for that conversation from its first message, above or below it. Nothing catches the member's limit errors before the wrapper, and `run()` would in any case return a bare owned limit error but let a grouped one escape ([Limit trees](#limit-trees)), so the wrapper classifies every leaf itself. This is the wrapper as M1-4 and M1-5 built it (`src/inspect_swarm/_member.py`, `run_member()`), simplified:
 
 ```python
-async def run_member(m: MemberRun, input: list[ChatMessage], state: AgentState) -> str:
-    # `state` is the runtime's own (m.agent_state), so its output survives an escaping error
+async def run_member(m: MemberRun, input: list[ChatMessage]) -> str:
+    # the runtime's own state, kept on its record as as_solver() keeps one: when an error
+    # escapes the agent, the record keeps this state and the output the agent left in it
+    state = m.agent_state
     token = current_member.set(m.context)
     error: Exception | None = None
     try:
@@ -337,7 +339,7 @@ async def run_member(m: MemberRun, input: list[ChatMessage], state: AgentState) 
                 # the member's own copy of its input, as run() makes one, inside its limits
                 state.messages = [msg.model_copy(update={"source": "input"}) for msg in input]
                 async with span(m.name, type="agent"):  # held open in the code until errors are classified
-                    await agent(state)
+                    m.agent_state = await agent(state)  # on a normal return, the state the agent returned
     except Exception as ex:
         error = ex
     finally:
@@ -357,7 +359,7 @@ async def run_member(m: MemberRun, input: list[ChatMessage], state: AgentState) 
     return "submitted"  # unsubmitted from M1-9
 ```
 
-The runtime's task for the member records the returned status, or `errored` when the wrapper raises, and queues the member's `MemberEnded`.
+The runtime's task for the member records the returned status, or `errored` when the wrapper raises, and queues the member's `MemberEnded`; the member's output is `m.agent_state.output` either way. (The code hands the returned state back through the callback that ends the member, which stores it on the record; it has the same effect.)
 
 - `_source_in(e, ns)` is true for a `LimitExceededError` whose `source` is one of `ns`.
 - A group containing only the member's own limits (a member limit, its share, or its lever during a soft stop) gives the same status as the bare error would.
