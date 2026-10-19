@@ -8,12 +8,12 @@ This is the build plan for inspect_swarm across the merged designs. It is a plan
 
 There are two milestones (decision: Ransom, 2026-10-13):
 
-- **M1, ready for first internal usage.** A leaderless swarm over a shared sandbox, with full accounting: the `swarm()` API with registered controllers and channels, per-member tool state, a budget cap that stops members in an orderly way, a ledger of what was actually spent, the final answer `first`, with each member's submission status and time recorded, and evidence and metrics in the log. Existing task scorers score it unchanged. Two small inspect_ai pull requests land first: the registry types and the tool-state scope.
+- **M1, ready for first internal usage.** A leaderless swarm over a shared sandbox, with full accounting: the `swarm()` API with registered controllers and channels, per-member tool state, a budget cap that stops members in an orderly way, a ledger of what was actually spent, the final answer `first`, with each member's submission status and time recorded, and evidence and metrics in the log. Existing task scorers score it unchanged. Two small inspect_ai pull requests land first, the registry types and the tool-state scope; a third, the store-event switch, must be released before the runtime enters it, so that spans inside a swarm log no `StoreEvent`s (decision: Ransom, 2026-10-19).
 - **M2, ready for external usage.** What an external team needs to port its own agent-swarm experiment and gain from it, measured against Epoch's LeanOpenProblems swarm: a sandbox per member, background deepagent members, a shared-memory channel routed through a monitored bus, budget visibility for members, custom limits that end only the member and gate-check metrics, plus user docs, examples, an API stability statement and a first PyPI release. The port keeps its own scorer, so M2 adds no scoring beyond M1's.
 
 Direct messages between members and scoring beyond `first` (the result contract, per-member scores, `baseline()` and the comparisons with epochs) are not needed for that and are future work ([Decisions](#decisions), Ransom, 2026-10-14).
 
-Each milestone is a set of small pull requests. Most are in this repository; three are in inspect_ai, each a separate pull request with its own place in the dependency graph. Neither milestone needs a change in inspect_swe or inspect_sentinel. Everything else in the designs is future work, in any order.
+Each milestone is a set of small pull requests. Most are in this repository; four are in inspect_ai, each a separate pull request with its own place in the dependency graph. Neither milestone needs a change in inspect_swe or inspect_sentinel. Everything else in the designs is future work, in any order.
 
 ## Why
 
@@ -39,10 +39,10 @@ What the plan starts from, checked on 2026-10-13:
 
 - **No runtime code.** `src/inspect_swarm/` holds only `__init__.py` (exporting `__version__` and nothing else), `_version.py` and `py.typed`; `tests/` holds the scaffold's package test.
 - **The merged designs:** [swarm-overview.md](swarm-overview.md), [swarm.md](swarm.md), [swarm-api.md](swarm-api.md), [swarm-communication.md](swarm-communication.md) (with its optional push delivery), [swarm-limits.md](swarm-limits.md), [swarm-scoring.md](swarm-scoring.md), [swarm-lean-open-problems.md](swarm-lean-open-problems.md) and [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md).
-- **The inspect_ai prerequisites have not landed.** inspect_ai `main`'s `RegistryType` has no `swarm_controller` or `swarm_channel` (`src/inspect_ai/_util/registry.py`), and `inspect_ai.util` has no `tool_state_scope`. This repository's lockfile installs inspect_ai `0.3.278.dev1+gfccfb298e`; the latest inspect_ai release is 0.3.279 (2026-10-12).
+- **The inspect_ai prerequisites have not landed.** inspect_ai `main`'s `RegistryType` has no `swarm_controller` or `swarm_channel` (`src/inspect_ai/_util/registry.py`), and `inspect_ai.util` has no `tool_state_scope`. On 2026-10-19, `track_store_changes()` read no switch (`src/inspect_ai/log/_transcript.py:1104-1111`, at `5a2bafe9`). This repository's lockfile installs inspect_ai `0.3.278.dev1+gfccfb298e`; the latest inspect_ai release is 0.3.279 (2026-10-12).
 - **inspect_sentinel's dispatcher has reached inspect_ai `main`.** `src/inspect_ai/_sentinel/` (with `_dispatch.py`) is on `main`, with commits through 2026-10-12 (#5811, "sentinel monitors can watch every agent's model calls"). Its tool stages still do not run for bridged agents: `warn_sentinel_bridged()` (`src/inspect_ai/_sentinel/_context.py:57-64`, at `81c1668d3`) warns that bridged agents' tool calls are not monitored, only their model calls (inspect_ai#5759). So the bus's `policy=` hook is still needed for bridged sends ([Decisions](#decisions), item 5).
 - **The scaffold is still on Python 3.10.** `pyproject.toml` (`requires-python = ">=3.10"`, pyright `pythonVersion = "3.10"`), `AGENTS.md`, `CONTRIBUTING.md` and the CI matrix in `.github/workflows/build.yaml` (`["3.10", "3.14"]`) predate the 3.11 decision (decision: Ransom, 2026-10-07; [swarm.md Compatibility](swarm.md#compatibility-and-migration)).
-- **Releases are off.** `.github/workflows/release.yaml` has only `workflow_dispatch`; its comment says to restore the `push` trigger to cut 0.1.0. The `inspect-ai` dependency was a PyPI version floor (`>=0.3.281`, #25, 2026-10-16) until M1-4 (#27) moved it back to inspect_ai's git `main` for AI-2 (inspect_ai#5861, merged 2026-10-16 but in no release yet). That is temporary: once a release contains #5861 the dependency returns to an `inspect-ai>=X` floor at that release (decision: Ransom, 2026-10-16).
+- **Releases are off.** `.github/workflows/release.yaml` has only `workflow_dispatch`; its comment says to restore the `push` trigger to cut 0.1.0. The `inspect-ai` dependency was a PyPI version floor (`>=0.3.281`, #25, 2026-10-16) until M1-4 (#27) moved it back to inspect_ai's git `main` for AI-2 (inspect_ai#5861, merged 2026-10-16 but in no release yet). That is temporary: once a release contains #5861 the dependency returns to an `inspect-ai>=X` floor at that release (decision: Ransom, 2026-10-16). A release of inspect_swarm needs every inspect_ai change it uses in a PyPI release of inspect_ai (`pyproject.toml`, checked 2026-10-19).
 - **Sibling packages' layout for docs and examples.** inspect_sentinel and inspect_flow keep a Quarto site in `docs/` (`_quarto.yml`); inspect_sentinel keeps runnable `examples/`. This repository's `pyproject.toml` already excludes `docs/` from the wheel and from ruff.
 
 ## Milestones
@@ -59,7 +59,8 @@ M1 is a leaderless filesystem swarm with full accounting ([swarm.md Implementati
 - `InfoEvent` evidence, a named timeline per member, a recorded stop reason, metrics, harness-validity checks, and a simple critical path: the steps to the answer and the longest member's step count (decision: Ransom, 2026-10-14; [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics));
 - thin analysis helpers for realized-cost comparisons and λ fits;
 - three small items from [swarm-lean-open-problems.md](swarm-lean-open-problems.md#recommended-changes-to-our-designs): the `unsubmitted` status, the rejection of an integer `background`, and documentation that the default `memory()` is private to each member ([table](#where-the-deep-dives-milestone-items-land));
-- the two inspect_ai pull requests that land first: the registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09).
+- the two inspect_ai pull requests that land first: the registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09);
+- no `StoreEvent`s inside the swarm: the inspect_ai store-event switch (AI-7) and the runtime entering it (M1-14) (decision: Ransom, 2026-10-19; [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)).
 
 Done means: an internal user can run a leaderless swarm of `react()`, synchronous `deepagent()` or bridged members on an existing task, sweep member count and budget as task parameters, and compare arms on the ledger's realized cost, with the task's own scorers unchanged.
 
@@ -138,19 +139,22 @@ flowchart LR
   M1_9 --> M1_13
   AI3[AI-3 compact event, optional]
   AI4[AI-4 errored-event status, optional]
+  AI7[AI-7 store-event switch] --> M1_14[M1-14 store events off in the swarm]
+  M1_4 --> M1_14
+  M1_14 --> M1_13
 ```
 
 What can be built in parallel, in waves (each wave starts when its dependencies merge):
 
-1. AI-1, AI-2 and M1-0, all independent. The optional AI-3 and AI-4 can go at any point.
+1. AI-1, AI-2, AI-7 and M1-0, all independent. The optional AI-3 and AI-4 can go at any point.
 2. M1-1 (after AI-1 and M1-0) and M1-2 (after M1-0).
 3. M1-3.
 4. M1-4 (needs AI-2).
-5. M1-5, M1-6 and M1-8, in parallel.
+5. M1-5, M1-6 and M1-8, in parallel; M1-14 once a PyPI release contains AI-7.
 6. M1-7, M1-9, M1-10 and M1-12, in parallel.
 7. M1-11 and M1-13.
 
-The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13, with AI-2 needed by M1-4. Starting AI-2 in wave 1 keeps it off the critical path.
+The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13, with AI-2 needed by M1-4 and AI-7 by M1-14, which M1-13 waits for. Starting AI-2 and AI-7 in wave 1 keeps them off the critical path, as long as a release with AI-7 is out in time for M1-14 to merge before M1-7 does.
 
 ### inspect_ai
 
@@ -173,6 +177,12 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 **AI-4 (optional). A status code on errored model events.** Lets the ledger count a verified pre-inference rejection (an HTTP 429) as zero spend instead of unknown.
 - Depends on: nothing. Nothing in M1 depends on it.
 - Implements: the same open question; undecided.
+
+**AI-7. The store-event switch.** A context-scoped switch, a `ContextVar` with a context manager to enter it, that `track_store_changes()` and the checkpointing span (`SpanRotationScope`, when it snapshots the store for a span) read when a span is entered: spans entered inside it take no snapshots and log no `StoreEvent`, and spans entered before it diff as now. Exported from `inspect_ai.util`; the pull request settles the name, which the designs write as `suppress_store_events()` as a placeholder. A companion implement loop is building it (2026-10-19). It changes nothing outside the switch, and leaves the raising-span path and meridianlabs-ai/inspect_ai#589's general fix to their own pull requests ([swarm.md Not this design](swarm.md#not-this-design)).
+- Files: `src/inspect_ai/log/_transcript.py`, `src/inspect_ai/util/_span.py`, `src/inspect_ai/util/__init__.py`.
+- Tests: in inspect_ai's own suite: a span entered inside the switch logs no `StoreEvent`, nor do spans nested in it or tasks started inside it; a span entered before it logs the net change; the checkpointing span inside it logs none. No Docker.
+- Depends on: nothing. M1-14 needs it in a PyPI release.
+- Implements: [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics) (decision: Ransom, 2026-10-19).
 
 ### inspect_swarm
 
@@ -256,8 +266,14 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 
 **M1-13. README for internal users.** How to run a swarm on an existing task, the common configurations, and M1's documented restrictions: background members are rejected; tool state a setup solver prepared at the default instance is not carried into members, and tasks whose scorers read a member's tool state are unsupported ([swarm.md Compatibility](swarm.md#compatibility-and-migration)); the default `memory()` is private to each member and a shared board needs an explicit instance; the filesystem observation limit ([swarm.md Security](swarm.md#security)); the result record's store key `inspect_swarm:result` is owned by the runtime, task code must not write it, and a tool that reads it gives members a view of each other's results, a channel outside the bus ([swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records); decision: Ransom, 2026-10-14).
 - Files: `README.md`.
-- Depends on: M1-7, M1-8, M1-9 (so the text describes merged behaviour).
+- Depends on: M1-7, M1-8, M1-9, M1-14 (so the text describes merged behaviour).
 - Implements: the documentation parts of swarm.md's M1 and Lean Rec. 7's M1 part.
+
+**M1-14. No store events inside the swarm.** `SwarmRun.run()` enters AI-7's switch first, inside the swarm's span, so the cap nodes, the member and runtime task groups, the controller and finalisation run inside it, and the member context it copies (`self._member_ctx`) carries it into every member; always on, a swarm of one included, with no parameter. It waits for a PyPI release of inspect_ai containing both the tool-state scope and AI-7, because `src/` calls both. In `pyproject.toml` it replaces the git reference to inspect_ai `main` with `inspect-ai>=X` for that release if the reference is still there, or raises the existing floor to it otherwise, and updates `uv.lock`. M1-13's README says that a swarm's log has no `StoreEvent`s inside the swarm, only the swarm's net change; that a sample ended by an error, limit or cancellation escaping the swarm may log no `StoreEvent` of the swarm's writes, so `sample.store` is the record of the final store; and that members' `ToolEvent`s are the record of what they did.
+- Files: `src/inspect_swarm/_controller/_control.py`, `pyproject.toml`, `uv.lock`.
+- Tests: `tests/test_controller.py`: swarm.md's store-events runtime test, for a swarm of two whose members' tools write the store, for a swarm of one, and for a sample-level limit escaping the swarm, where `sample.store` keeps a member's write and no span strictly inside the swarm's span logs a `StoreEvent`. That case asserts nothing about the swarm's or the enclosing spans' `StoreEvent`s, so the upstream `try`/`finally` fix in `track_store_changes()` does not break it; today's missing diff on the raising path stays documented as an upstream limitation.
+- Depends on: M1-4, AI-7 in a PyPI release.
+- Implements: [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics) (decision: Ransom, 2026-10-19).
 
 ## M2 pull requests
 
@@ -394,7 +410,7 @@ None in M2, and none in M1.
 
 **M2-12. API statement, packaging and the first release.** The README and the package docstring state which API is supported and which is experimental, as decided ([Decisions](#decisions), item 6); classifiers move from "Development Status :: 1 - Planning"; `requires-python` stays at M1-0's 3.11; the `push` trigger is restored in `release.yaml`, so Release Please opens the 0.1.0 release pull request.
 - Files: `README.md`, `src/inspect_swarm/__init__.py`, `pyproject.toml`, `.github/workflows/release.yaml`.
-- Depends on: M2-11, and an inspect_ai PyPI release containing AI-1, AI-2 and AI-5 (the floor in `pyproject.toml` names a release, so the work that uses them cannot merge before it ships). Epoch's configs pin inspect_ai 0.3.273 ([Lean, What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)); the port moves them to that release.
+- Depends on: M2-11, and an inspect_ai PyPI release containing AI-1, AI-2, AI-5 and AI-7 (the floor in `pyproject.toml` names a release, so the work that uses them cannot merge before it ships). Epoch's configs pin inspect_ai 0.3.273 ([Lean, What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)); the port moves them to that release.
 - Implements: what an external release needs.
 
 ## Future work
@@ -449,8 +465,8 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 ## Compatibility and migration
 
 - **inspect_swarm** has no released API until M2-12; nothing in M1 or M2 before it is a compatibility concern. From M2-12, the API statement says what later releases keep.
-- **Eval logs.** M1 and M2 write only existing event types, store entries and message metadata, each payload carrying `version: 1`, as the deep dives specify. No log schema, generated TypeScript type or ts-mono change is in either milestone.
-- **inspect_ai.** AI-1 adds two literal values outside the log schema; AI-2 leaves default store keys and ordinary explicit instances unchanged outside a scope, while reserving instances that start with `@` and applying the skill tool's shared install checks everywhere ([swarm.md Members](swarm.md#members)); AI-5 changes nothing while its seam is unset, as D-2 confirms ([swarm-background-members.md Compatibility](swarm-background-members.md#compatibility-and-migration)). The optional AI-3 and AI-4 add observability without changing behaviour.
+- **Eval logs.** M1 and M2 write only existing event types, store entries and message metadata, each payload carrying `version: 1`, as the deep dives specify. From M1-14, spans inside a swarm log no `StoreEvent`s, and the swarm's span logs the net change ([swarm.md Compatibility](swarm.md#compatibility-and-migration)). No log schema, generated TypeScript type or ts-mono change is in either milestone.
+- **inspect_ai.** AI-1 adds two literal values outside the log schema; AI-2 leaves default store keys and ordinary explicit instances unchanged outside a scope, while reserving instances that start with `@` and applying the skill tool's shared install checks everywhere ([swarm.md Members](swarm.md#members)); AI-5 changes nothing while its seam is unset, as D-2 confirms ([swarm-background-members.md Compatibility](swarm-background-members.md#compatibility-and-migration)); AI-7 changes nothing outside its switch. The optional AI-3 and AI-4 add observability without changing behaviour.
 - **External users' inspect_ai versions.** A release of inspect_swarm requires an inspect_ai release with its prerequisites, so users pinned to older inspect_ai (Epoch: 0.3.273) must move.
 
 ## Security
@@ -469,7 +485,7 @@ Each pull request carries the tests listed with it, from its design's Testing se
 
 ## Decisions
 
-Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his words quoted), and one point settled from the code. [Open questions](#open-questions) holds the one still open.
+Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his words quoted), his decision of 2026-10-19 (item 11), and one point settled from the code. [Open questions](#open-questions) holds the one still open.
 
 1. **M1's final answer is `first` plus the per-member record.** The brief's "final-answer modes, the result contract" is read as M1 ([swarm-scoring.md Part 1](swarm-scoring.md#part-1-m1)). Ransom: "OQ1 - yes". With item 8, the result contract is future work rather than M2.
 2. **M2 has the bus without direct messages.** M2 has the bus core, binding, notices, communication evidence and the shared-memory channel; the `messages` channel and bridged members' bus tools are future work, and a swarm that gives a bridged member a bus channel is refused at construction (M2-6). Ransom: "OQ2 agree with the recommendation".
@@ -483,6 +499,8 @@ Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his wor
 9. **M1-10 reports "members stuck in loops" as a signal, not a verdict.** swarm.md lists the check among the harness-validity checks ([Observer, Analysis](swarm.md#observer-evidence-accounting-and-metrics)). Per member, the longest run of consecutive identical tool calls (same function and arguments) is reported as a metric, with no threshold fixed until there is data. Ransom: "OQ1 agree with recommendation".
 
 10. **The swarm writes no exposure or proposal events** (2026-10-15). Exposure came from ORBIT, where only ORBIT's own observer can see it, and the swarm's own uses are served by `read`; notices and injections carry their ids in metadata, which the swarm writes when it creates them. This supersedes the same day's decision to rest exposure on inspect_ai#5884, #5883 and #5882 and to mark exposure through an errored result inferred. Ransom: "yes, drop exposed and proposed, send it. Let the loops finish." On 2026-10-16, asked whether to add AI-6 so that read results also carry the ids in metadata, Ransom answered: "This is only needed by ORBIT? In that case it should be after M2." So M2 identifies a read by its `read` event and the fenced ids in its result text, and how a read result names its records for ORBIT's observer is the ORBIT port's choice, with stamping in `swarm_on_continue()` the leading option (Ransom: "I agree that c sounds most promising here, we can decide for sure once we start work."; [swarm-orbit.md P2](swarm-orbit.md#p2-bus-extensions)).
+
+11. **No `StoreEvent`s inside a swarm** (2026-10-19). The swarm enters an inspect_ai switch that turns span store tracking off, always, a swarm of one included; the swarm's span still logs the net change. Per-member stores were considered and not adopted for now, and meridianlabs-ai/inspect_ai#589's general fix is still wanted upstream but no longer a swarm dependency ([swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)). This adds AI-7 and M1-14.
 
 One more decision shapes this plan: the result record's store key is documented as owned by the runtime and readable by member code (Ransom: "yes, add the docs line"; M1-13, M2-11 and [swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records)).
 
