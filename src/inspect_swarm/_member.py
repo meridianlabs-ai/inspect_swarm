@@ -16,7 +16,7 @@ from inspect_ai._util.registry import (
     registry_value,
 )
 from inspect_ai.agent import Agent, AgentState
-from inspect_ai.model import ChatMessage
+from inspect_ai.model import ChatMessage, StopReason
 from inspect_ai.util import (
     Limit,
     LimitExceededError,
@@ -73,6 +73,9 @@ _DEEPAGENT = "inspect_ai/deepagent"
 
 # characters a tool-state scope name may not contain
 _RESERVED = "/#"
+
+# the stop reasons of a normal return that is not a submission
+_UNSUBMITTED: tuple[StopReason, ...] = ("content_filter", "model_length")
 
 
 class Member(BaseModel):
@@ -192,6 +195,8 @@ def member(
     Objects given to an agent are shared. Every member built from one record receives the same objects from `args`, and two built agents given the same tool object share it, across members and samples. Inspect's built-in tools keep their state in the sample store or the sandbox, so this matters only for a custom tool or helper that keeps state in its Python object (a counter, a cache, a client). To give each member its own, construct it inside a member builder, an `@agent` factory that builds the configured agent, and use the factory form.
 
     Tool state. Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member. An explicit `instance` is used as given: members, or the copies of one counted member, that name the same instance share its state, so a board shared on purpose is `memory(instance="board")`. The sample store itself is shared. State that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with `tool_state_instance()`. Built-in tool state that a setup solver prepared at the default instance before the swarm runs is not visible to the members.
+
+    Submissions. A member that returns normally has submitted, and its output is its answer, unless the output's stop reason is `content_filter` or `model_length`. That is how `react()` returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered.
 
     `deepagent()` members with background dispatch (`background=True` or an integer) are not supported yet and are refused. So are ACP agents, which wait for their caller to drive them rather than returning: a built one when `member()` is called, and a factory's when the member is built.
 
@@ -376,6 +381,10 @@ async def _run_member(
     if context.scope.cancelled_caught:
         # the hard stop
         return "cancelled", state
+    if not state.output.empty and state.output.stop_reason in _UNSUBMITTED:
+        # how react() returns after three refusals or a context overflow it could
+        # not recover from, rather than a submit
+        return "unsubmitted", state
     return "submitted", state
 
 

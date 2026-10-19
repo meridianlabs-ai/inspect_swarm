@@ -9,7 +9,7 @@ import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.exception import TerminateSampleError
-from inspect_ai.agent import Agent, AgentState, agent
+from inspect_ai.agent import Agent, AgentState, agent, react
 from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent
 from inspect_ai.log._samples import sample_active
@@ -381,6 +381,51 @@ async def test_the_swarms_own_errors_become_statuses(
     )
     assert stop.reason == ("swarm_cap" if expected == "swarm_cap" else "all_done")
     assert statuses(stop) == {"member": expected, "sibling": "submitted"}
+
+
+# The outputs a react() member's model gives, by how the member ends.
+def _react_outputs(end: str) -> list[ModelOutput]:
+    match end:
+        case "refusals":
+            return [
+                ModelOutput.from_content(
+                    "mockllm", "I can't help with that.", stop_reason="content_filter"
+                )
+                for _ in range(3)
+            ]
+        case "overflow":
+            return [ModelOutput.from_content("mockllm", "", stop_reason="model_length")]
+        case _:
+            return [ModelOutput.for_tool_call("mockllm", "submit", {"answer": "42"})]
+
+
+@pytest.mark.parametrize(
+    "end,expected,calls",
+    [
+        # react() gives up after three refusals in a row
+        ("refusals", "unsubmitted", 3),
+        # an overflow react() has no truncation or compaction to recover from
+        ("overflow", "unsubmitted", 1),
+        ("submit", "submitted", 1),
+    ],
+)
+def test_a_react_member_that_returns_without_a_submit_is_unsubmitted(
+    tmp_path: Path, end: str, expected: str, calls: int
+) -> None:
+    # react() runs only in a sample
+    script = Script(outputs=_react_outputs(end))
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            member(react(model=scripted_model(script)), name="member"), channels=[]
+        ),
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    assert log.samples is not None
+    [sample] = log.samples
+    assert script.calls == calls
+    [result] = SwarmResultRecord.model_validate(sample.store[RECORD_KEY]).members
+    assert result.status == expected
 
 
 @pytest.mark.anyio
