@@ -396,7 +396,7 @@ SwarmEvent = MemberEnded         # later work adds kinds (idle and woken members
 ```
 
 - **`start()`** schedules the member in the runtime's member task group, under `run()` in its own span with its limits, which the member wrapper enters before `run()` builds the member's conversation, so a member message limit applies from the first message ([swarm-limits.md](swarm-limits.md#stopping), "Member wrapper and statuses"), and returns at once. Its input is the given input, else the member record's `input` (the ORBIT deep dive's field), else the swarm's input, followed by the member's preamble: its name, role and roster size, and each channel's instructions ([Channels](#channels)). The preamble's wording is M1's prompt work. In M1 a member runs once: `start()` on a member whose state is not `pending` raises `RuntimeError`. `start()` also raises `RuntimeError` once the swarm is stopping ([Stopping](#controllers), below). A controller can meet that refusal only by resuming before the stop's cancellation reaches it (an event already queued); if the refusal then leaves `run`, the runtime treats it as the stop, not as the controller's error, and the controller ends as the cancellation would have ended it. The rest of `run`'s errors are classified as **Errors and outer stops** below says. Persistent members, later, add a wake operation.
-- **`events()`** yields events in order from swarm start, so none is lost between `start()` and iteration. A member counts as running until the runtime has taken its submission's verdict and queued its `MemberEnded`, so an asynchronous verifier still running when the last agent returns cannot be missed. The iterator ends when no member is running and nothing is queued; a member started later is reported by a new `events()` call. One iterator at a time: an iterator holds the events from its first step until it ends or is closed, and a second iterator's first step raises `RuntimeError` while one is open. `events()` therefore returns an `AsyncGenerator[SwarmEvent, None]`, not an `AsyncIterator`, so a controller that stops iterating early releases it with `aclose()` or by iterating inside `contextlib.aclosing()`; one abandoned without either stays open until Python finalises it, and until then another `events()` call raises. A controller tests an event's kind before reading its fields (`isinstance(event, MemberEnded)`), as every example below does: `SwarmEvent` becomes a union when later work adds idle and woken members (which a controller must not mistake for an ending) and quiescence (which has no `member`).
+- **`events()`** yields events in order from swarm start, so none is lost between `start()` and iteration. A member counts as running until the runtime has taken its submission's verdict and queued its `MemberEnded`, so an asynchronous verifier still running when the last agent returns cannot be missed. The iterator ends when no member is running and nothing is queued; a member started later is reported by a new `events()` call. One iterator at a time: an iterator holds the events from its first step until it ends or is closed, and a second iterator's first step raises `RuntimeError` while one is open. `events()` therefore returns an `AsyncGenerator[SwarmEvent, None]`, not an `AsyncIterator`, so a controller that stops iterating early releases it with `aclose()` or by iterating inside `contextlib.aclosing()`; one abandoned without either stays open until Python finalises it, and until then another iterator's first step raises. A controller tests an event's kind before reading its fields (`isinstance(event, MemberEnded)`), as every example below does: `SwarmEvent` becomes a union when later work adds idle and woken members (which a controller must not mistake for an ending) and quiescence (which has no `member`).
 - **Statuses.** `state` is the coarse lifecycle a controller schedules on. `status` and `MemberEnded.status` are the limits deep dive's closed set, unchanged: `submitted`, `unsubmitted`, `stopped` (soft stop), `share`, `member_limit:<type>`, `swarm_cap`, `cancelled`, `errored` ([swarm-limits.md](swarm-limits.md#stopping), "Member wrapper and statuses"). `submitted` is the scoring deep dive's notion of a submission, which a member stopped mid-work does not have.
 - **No member text.** Handles and events carry states, statuses, names chosen by the eval author and a verdict's pass flag and value, never a member's output, a message body or a verifier's explanation (scoring's `Verdict.explanation` is free text that may quote the answer or a judge model's words; it stays in the observer's result record). A controller therefore cannot pass one member's words into another's input, which would put model output in the user role (swarm.md, [Delivery](swarm.md#delivery-peer-messages-are-model-output)). Members read each other through channels' tools. ORBIT's scheduled mode adds conversation snapshots and trusted interventions to these handles for trusted policies; that is its deep dive's extension, argued there.
 - **Stopping.** Returning from `run` is a request to stop, not a cancellation. The runtime passes the returned reason to the limits deep dive's single stop procedure, `stop(reason)`: a soft stop through each running member's stop lever, a grace period of `Budget.grace` for in-flight calls to finish and be recorded, and a hard stop (cancellation) only for members still running after the grace ([swarm-limits.md](swarm-limits.md#stopping)). The swarm's own cap and time cap go through the same procedure (`swarm_cap`, `swarm_time`). The runtime orders every stop so that no member can start once it has begun:
@@ -624,9 +624,10 @@ def leaderless(final: FinalSpec | None = None, stop_on_verified: bool = False) -
     async def run(swarm: SwarmControl) -> StopReason:
         for m in swarm.members:
             swarm.start(m)
-        async for event in swarm.events():
-            if stop_on_verified and isinstance(event, MemberEnded) and event.verdict and event.verdict.passed:
-                return "verified"
+        async with contextlib.aclosing(swarm.events()) as events:   # released on the early return
+            async for event in events:
+                if stop_on_verified and isinstance(event, MemberEnded) and event.verdict and event.verdict.passed:
+                    return "verified"
         return "all_done"
 
     return Controller(run, final=final)
@@ -667,9 +668,10 @@ def coordinator(lead: str = "lead", final: FinalSpec | None = None) -> Controlle
     async def run(swarm: SwarmControl) -> StopReason:
         for m in swarm.members:
             swarm.start(m)
-        async for event in swarm.events():
-            if isinstance(event, MemberEnded) and event.member == lead:
-                return "lead_done"       # soft-stops the workers still running
+        async with contextlib.aclosing(swarm.events()) as events:   # released on the early return
+            async for event in events:
+                if isinstance(event, MemberEnded) and event.member == lead:
+                    return "lead_done"       # soft-stops the workers still running
         return "all_done"
 
     def check(roster: Sequence[MemberInfo]) -> None:
@@ -695,13 +697,14 @@ def escalate(first: str, final: FinalSpec | None = None) -> Controller:
 
     async def run(swarm: SwarmControl) -> StopReason:
         swarm.start(first)
-        async for event in swarm.events():
-            if isinstance(event, MemberEnded) and event.member == first:
-                if event.verdict is not None and event.verdict.passed:
-                    return "verified"
-                for m in swarm.members:
-                    if m.state == "pending":
-                        swarm.start(m)
+        async with contextlib.aclosing(swarm.events()) as events:   # released on the early return
+            async for event in events:
+                if isinstance(event, MemberEnded) and event.member == first:
+                    if event.verdict is not None and event.verdict.passed:
+                        return "verified"
+                    for m in swarm.members:
+                        if m.state == "pending":
+                            swarm.start(m)
         return "all_done"
 
     def check(roster: Sequence[MemberInfo]) -> None:
