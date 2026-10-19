@@ -217,11 +217,12 @@ The swarm never uses Inspect's own node classes for its stopping rules; it subcl
 
 The swarm meter, the cost cap, each lever, each cost share, the final meter and each re-created member cost limit are pairs. The token cap and token shares are single `_SwarmTokenNode`s with a token limit; a pair's token-tree node also meters tokens for the ledger. Unpriced calls add nothing to the accumulator and are counted separately, so a cost cap never meters them (the ledger reports them).
 
-Swarm nodes differ from Inspect's in three more ways:
+Swarm nodes differ from Inspect's in four more ways:
 
 - **Ownership.** Each has an owner: the swarm, or one member. The runtime recognises its own errors by `error.source` identity against the nodes it created, split into *shared* nodes (swarm meter, caps, runtime lever, final meter) and *member-owned* nodes (that member's lever, shares and re-created limits).
+- **Cap stop.** A swarm cap, when exceeded, first calls the runtime's `stop("swarm_cap")`, for a native or a bridged member and for the controller (`_budget.py`, `SwarmNode.exceeded`), and only then raises or cancels as below. So a native tool or handoff that consumes the cap's error still leaves the swarm stopping ([Stopping](#stopping), Triggers).
 - **Messages.** When exceeded for a native member they raise `LimitExceededError` as usual, with the kind's `type`, except the lever, which raises `type="custom"`. The message names the swarm and the reason ("Swarm cost cap reached", "Stopped by the swarm: verified answer"). They write no `SampleLimitEvent`, which the viewer would show as a sample limit; the runtime writes an `InfoEvent` instead ([Ledger](#the-ledger)).
-- **Bridged members.** A node exceeded while checking for a bridged member does not raise, because a raise in the sandbox service ends the sample ([Bridged generations](#bridged-generations)). It records why the member must stop and cancels that member's cancel scope synchronously; if the node is a swarm cap, it also calls the runtime's `stop("swarm_cap")`. The bridged agent's pending call is cancelled at its next await, before or just after dispatch.
+- **Bridged members.** A node exceeded while checking for a bridged member does not raise, because a raise in the sandbox service ends the sample ([Bridged generations](#bridged-generations)). It records why the member must stop and cancels that member's cancel scope synchronously; a swarm cap has already called the runtime's `stop("swarm_cap")` (Cap stop, above). The bridged agent's pending call is cancelled at its next await, before or just after dispatch.
 
 **Knowing a member is bridged.** A member is bridged from its first instruction, so the swarm decides before the member starts rather than inferring it from a generation (bridge compaction and filters run before the bridge's mark, [Bridged generations](#bridged-generations)):
 

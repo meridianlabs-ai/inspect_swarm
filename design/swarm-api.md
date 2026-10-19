@@ -615,6 +615,8 @@ swarm(
 The built-in it uses, as it is after M2. In M1 it has no parameters, starts every member and returns `all_done`:
 
 ```python
+import contextlib
+
 @swarm_controller
 def leaderless(final: FinalSpec | None = None, stop_on_verified: bool = False) -> Controller:
     """Start every member with the swarm's input; stop when all have ended."""
@@ -661,6 +663,8 @@ swarm(
 The controller, as it would be built in the coordinator-topologies work:
 
 ```python
+import contextlib
+
 @swarm_controller
 def coordinator(lead: str = "lead", final: FinalSpec | None = None) -> Controller:
     """Start everyone; the swarm is done when the lead ends."""
@@ -686,6 +690,7 @@ Workers start with the lead because the communication deep dive delivers only to
 **A user-defined controller** (after M2: it needs the scoring deep dive's verifier). Adaptive compute: run one cheap member alone, and start the rest only if its answer does not verify.
 
 ```python
+import contextlib
 from collections.abc import Sequence
 
 from inspect_swarm import Controller, MemberEnded, MemberInfo, StopReason, SwarmControl, swarm_controller
