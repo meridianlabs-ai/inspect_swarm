@@ -168,7 +168,7 @@ inspect_swe (`a54461e`) configures no Claude Code or Codex hooks: the only Claud
    sentinel tool stages see send_message / read_messages as ordinary tool calls
 ```
 
-Everything below is inspect_swarm code. Communication needs one inspect_ai change: the `swarm_channel` registry type that swarm-api.md lands before M1. M2's other inspect_ai change, a scoped owner for `background()`, is for background members.
+Everything below is inspect_swarm code. Communication needs one inspect_ai change: the `swarm_channel` registry type that swarm-api.md lands before M1. M2's other inspect_ai change, a private seam for where `background()` starts work, is for background members ([swarm-background-members.md](swarm-background-members.md)).
 
 ### Members and identity
 
@@ -509,7 +509,7 @@ The shared sandbox stays an **observed** channel. swarm-api.md's `filesystem()` 
 Built-in tools that keep per-sample state in the store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) share it between members that use the same `instance`. swarm.md gives each member its own state by default, through a tool-state scope the runtime enters for each member ([Members](swarm.md#members), [The sample store](swarm.md#the-sample-store)). What this design adds is how a shared instance relates to the bus:
 
 - **A shared instance is an observed channel**, like the filesystem. The eval author creates it by naming the same `instance` in two members' tools, or by giving a counted member's agent an explicit instance. No swarm tool carries the traffic, so `deliver()` never sees it, and storm controls, the policy hook, notices and evidence records do not apply.
-- **What is observable.** Each use is a native member's tool call, with a `ToolEvent` that sentinel's tool stages see. `StoreEvent`s do not show who wrote what, because concurrent member spans misattribute them (swarm.md, [Transcript and events](swarm.md#transcript-and-events)). The observation limit of [the filesystem channel](#the-filesystem-channel) applies: a shared `bash_session()` keeps running what one member started, and another member reads its output later.
+- **What is observable.** Each use is a native member's tool call, with a `ToolEvent` that sentinel's tool stages see. `StoreEvent`s do not show who wrote what: spans inside a swarm log none, and the swarm's span logs only the net change (decision: Ransom, 2026-10-19; swarm.md, [Store events](swarm.md#observer-evidence-accounting-and-metrics)). The observation limit of [the filesystem channel](#the-filesystem-channel) applies: a shared `bash_session()` keeps running what one member started, and another member reads its output later.
 - **Messages do not bound communication** here either: an arm meant to have messages as its only channel gives no two members a shared instance, as it needs filesystem isolation.
 - **Routing it through the bus in M2.** A shared memory becomes a channel whose writes are records, with evidence, storm controls and the policy hook: M2's first channel with records, whose own design settles the details ([swarm-memory-channel.md](swarm-memory-channel.md)) (decision: Ransom, 2026-10-14; [swarm-implementation-plan.md](swarm-implementation-plan.md#designs)). A shared instance outside that channel stays an observed channel, as above.
 - **What this design adds:** nothing at runtime.
@@ -822,7 +822,7 @@ The rest concern push delivery after M2.
 
 ## Compatibility and migration
 
-- **inspect_ai:** beyond the `swarm_controller` and `swarm_channel` registry types swarm-api.md lands before M1, communication needs nothing. M2's other inspect_ai change, a scoped owner for `background()`, is for background members. M2 uses private names (`current_agent_channel`, `AgentChannel`, `sample_active`), which the standing decision allows.
+- **inspect_ai:** beyond the `swarm_controller` and `swarm_channel` registry types swarm-api.md lands before M1, communication needs nothing. M2's other inspect_ai change, a private seam for where `background()` starts work, is for background members ([swarm-background-members.md](swarm-background-members.md)). M2 uses private names (`current_agent_channel`, `AgentChannel`, `sample_active`), which the standing decision allows.
 - **Eval logs:** only existing types. Evidence is versioned `InfoEvent`s; notices are `ChatMessageUser` with metadata. No new `source` value, event type or schema change, so old readers and viewers read swarm logs.
 - **inspect_sentinel:** none required. Its dispatcher is on inspect_ai `main`, so protocols on native members' channel tool calls work with no swarm code; the bus hook is unaffected.
 - **inspect_swe:** none; `bridged_tools` already exists on its Claude Code agent (swarm.md).

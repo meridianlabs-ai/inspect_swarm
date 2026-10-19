@@ -14,7 +14,14 @@ from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.model import Model, get_model
 from inspect_ai.util import Limit
 
-from ._budget import Budget, CostPair, SwarmTokenNode, check_cost_data, derive_caps
+from ._budget import (
+    Budget,
+    CostPair,
+    SwarmTokenNode,
+    check_cost_data,
+    derive_caps,
+    share_nodes,
+)
 from ._channel._channel import Channel
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
@@ -44,7 +51,6 @@ def swarm(
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
         ValueError: If member names collide, the same agent object is in two members, a channel is given twice, a name does not resolve, or the controller refuses the roster.
-        NotImplementedError: If `budget` divides the caps into shares (`split` other than `"pool"`).
     """
     records = _members(members)
     names = member_names(records)
@@ -60,11 +66,6 @@ def swarm(
     if resolved_controller.check is not None:
         resolved_controller.check(roster)
     resolved_budget = _budget(budget)
-    if resolved_budget.split != "pool":
-        # shares are milestone M1-8; until then a split would run as one pool
-        raise NotImplementedError(
-            f"swarm(): Budget.split={resolved_budget.split!r} is not supported yet. Use split='pool', where members share the caps."
-        )
     preambles = {
         info.name: _preamble(info, len(roster), resolved_channels) for info in roster
     }
@@ -98,6 +99,7 @@ def swarm(
             time=caps.time,
             grace=resolved_budget.grace,
             budget=resolved_budget,
+            shares=share_nodes(resolved_budget, caps, [info.name for info in roster]),
         ).run(resolved_controller.run)
         return state
 
