@@ -224,6 +224,12 @@ class SwarmRun:
         self._start = 0.0
         self._span_id: str | None = None
         self.stop_reason: str | None = None
+        # the sample's cause, when an error left a member or the controller under a
+        # cancellation from outside the swarm
+        self._outside: str | None = None
+        # an error has left a member or the controller, so the task group cancels the
+        # others
+        self._failed = False
 
     # SwarmControl
 
@@ -308,7 +314,7 @@ class SwarmRun:
                                 runtime_tg.start_soon(self._supervise, runtime_tg)
                                 if self._time is not None:
                                     runtime_tg.start_soon(self._time_cap, self._time)
-                                runtime_tg.start_soon(self._run_controller, controller)
+                                runtime_tg.start_soon(self._controller_task, controller)
                 except (Exception, BaseExceptionGroup) as ex:
                     # a foreign error from a member or the controller, or on trio a
                     # cancellation grouped with errors, which the wrappers do not
@@ -357,9 +363,8 @@ class SwarmRun:
                     runtime=self._runtime_lever,
                     final=self._final_meter,
                     swarm=self._swarm_meter,
-                    # a sample limit or the operator ended the swarm, even during a stop
-                    stop_reason=(None if ended else _exhaustion(error))
-                    or self.stop_reason,
+                    stop_reason=self.stop_reason,
+                    ended_by=None if ended else _exhaustion(error, self._outside),
                     interrupted=not ended,
                     # M1's final step does not await, so nothing can cancel it
                     final_cancelled=False,
@@ -382,6 +387,15 @@ class SwarmRun:
         self._runtime_lever.close(reason)
         self._effective_grace = self._grace_now()
         self._stopped.set()
+
+    async def _controller_task(
+        self, controller: Callable[["SwarmControl"], Awaitable[str]]
+    ) -> None:
+        try:
+            await self._run_controller(controller)
+        except BaseException as ex:
+            self._note(ex, self._controller_scope, [])
+            raise
 
     async def _run_controller(
         self, controller: Callable[["SwarmControl"], Awaitable[str]]
@@ -419,17 +433,39 @@ class SwarmRun:
             m.agent_state = state
             self._end(m, status)
 
-        await run_member(
-            m.record,
-            m.name,
-            m.context,
-            m.lever,
-            m.nodes,
-            self._caps,
-            input,
-            m.agent_state,
-            end,
-        )
+        try:
+            await run_member(
+                m.record,
+                m.name,
+                m.context,
+                m.lever,
+                m.nodes,
+                self._caps,
+                input,
+                m.agent_state,
+                end,
+            )
+        except BaseException as ex:
+            self._note(ex, m.context.scope, m.nodes)
+            raise
+
+    # Notes the sample's cause when an error leaving a member or the controller was
+    # raised under a cancellation the swarm had not requested (its stop, the member's
+    # time limit, or the task group's after an earlier error), so from outside, once
+    # the sample shows it. A cancellation the swarm requested first leaves it unnoted.
+    def _note(
+        self, error: BaseException, scope: anyio.CancelScope, nodes: Sequence[Limit]
+    ) -> None:
+        failed = self._failed
+        if _errors(error) is not None:
+            self._failed = True
+        if self._outside is not None or failed or scope.cancel_called:
+            return
+        # a member's time limit, the only node of its own that stays Inspect's
+        if any(_reached(node) for node in nodes if not isinstance(node, SwarmNode)):
+            return
+        if _raised_during(error):
+            self._outside = _sample_cause()
 
     def _end(self, m: MemberRun, status: str) -> None:
         # the member counts as running until its event is queued
@@ -516,13 +552,14 @@ class SwarmRun:
         self._changed = anyio.Event()
 
 
-# How a sample limit or the operator ended the swarm: from the foreign error it raised,
+# How a sample limit or the operator ended the swarm: from the foreign error it raised;
 # else from the sample, for a cancellation (a working limit or a limit reached in a
-# bridged member, an operator's interrupt, or the sample's time limit), including one
-# that a cleanup error raised under it hides. None for any other error or cancellation.
-def _exhaustion(error: BaseException | None) -> str | None:
-    limits = sample_limits()
+# bridged member, an operator's interrupt, or the sample's time limit); else the cause
+# noted for an error raised under the sample's cancellation, such as a cleanup error.
+# None for any other error or cancellation.
+def _exhaustion(error: BaseException | None, outside: str | None) -> str | None:
     if error is not None:
+        limits = sample_limits()
         roots = [
             limits.token,
             limits.cost,
@@ -534,40 +571,44 @@ def _exhaustion(error: BaseException | None) -> str | None:
         _, limit, _ = classify_errors(error, [], roots)
         if limit is not None:
             return f"sample_limit:{limit.type}"
-        if not _under_cancellation(error):
-            # an error of its own, though the sample's time may have run out meanwhile
-            return None
-    active = sample_active()
-    if active is not None and active.interrupt_action is not None:
-        return "operator"
-    if active is not None and active.limit_exceeded_error is not None:
-        return f"sample_limit:{active.limit_exceeded_error.type}"
-    time = limits.time
-    if time.limit is not None and time.usage >= time.limit:
-        return "sample_limit:time"
-    return None
+        if _errors(error) is not None:
+            # an error of its own, though the sample's time may have run out meanwhile;
+            # a cancellation beside it may have come after it, as trio delivers an
+            # expired deadline once a crash reaches a task group
+            return outside
+    return _sample_cause()
 
 
-# Whether an error is a cancellation, or holds an error raised while one propagated. A
-# cancellation beside an error in a group may have come after it, as trio delivers an
-# expired deadline once a crash reaches a task group.
-def _under_cancellation(error: BaseException) -> bool:
-    cancelled = anyio.get_cancelled_exc_class()
+# An error without its cancellations, or None when it has nothing else.
+def _errors(error: BaseException) -> BaseException | None:
     group = (
         cast(BaseExceptionGroup[BaseException], error)
         if isinstance(error, BaseExceptionGroup)
         else BaseExceptionGroup("swarm", [error])
     )
-    _, errors = group.split(cancelled)
-    if errors is None:
-        return True
-    during, _ = errors.split(
-        lambda e: not isinstance(e, BaseExceptionGroup) and _raised_during(e, cancelled)
-    )
-    return during is not None
+    return group.split(anyio.get_cancelled_exc_class())[1]
 
 
-def _raised_during(error: BaseException, cancelled: type[BaseException]) -> bool:
+# The cause the sample shows for a cancellation from outside the swarm, or None.
+def _sample_cause() -> str | None:
+    active = sample_active()
+    if active is not None and active.interrupt_action is not None:
+        return "operator"
+    if active is not None and active.limit_exceeded_error is not None:
+        return f"sample_limit:{active.limit_exceeded_error.type}"
+    if _reached(sample_limits().time):
+        return "sample_limit:time"
+    return None
+
+
+def _reached(node: Limit) -> bool:
+    return node.limit is not None and node.usage >= node.limit
+
+
+# Whether an error, or a group or leaf within it, was raised while a cancellation
+# propagated. A cancellation that is itself a leaf is beside the errors, not under them.
+def _raised_during(error: BaseException) -> bool:
+    cancelled = anyio.get_cancelled_exc_class()
     seen: set[int] = set()
     context = error.__context__
     while context is not None and id(context) not in seen:
@@ -575,4 +616,7 @@ def _raised_during(error: BaseException, cancelled: type[BaseException]) -> bool
             return True
         seen.add(id(context))
         context = context.__context__
+    if isinstance(error, BaseExceptionGroup):
+        group = cast(BaseExceptionGroup[BaseException], error)
+        return any(_raised_during(e) for e in group.exceptions)
     return False
