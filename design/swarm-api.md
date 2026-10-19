@@ -165,7 +165,7 @@ deepagent's `Subagent` is a plain dataclass built by `subagent()` (`src/inspect_
 | Members | `members=` | built agents, or `member(agent, ...)` and `member(factory, args=..., ...)` records; one or a list | none: a member's agent or factory is already a registered `@agent` |
 | Channels | `channels=` | channel names or `@swarm_channel` objects | `swarm_channel` (new) |
 | Controller | `controller=` | a controller name or a `@swarm_controller` object | `swarm_controller` (new) |
-| Observer | none; from M2, `policy=` sets its bus hook | always on | none |
+| Observer | none; after M2, `policy=` may set its bus hook | always on | none |
 
 Two arguments are not components: `budget=` (the swarm-wide cap; the limits deep dive's `Budget`) and, after M2, `result=` (the task's result contract; the scoring deep dive's `ResultSpec`). M2 adds `policy=` (the communication deep dive's bus hook, a setting of the observer's interception point; [Observer](#observer)).
 
@@ -214,7 +214,7 @@ swarm(
 - member names, after `count` expansion and the numbering of repeated default names, are unique;
 - each channel name appears at most once;
 - names resolve ([Resolution](#resolving-names));
-- (after M2) `result` is a `ResultSpec` or `None`, and (from M2) `policy` a callable or `None`; the string a raw-solver replay passes for either raises `TypeError` ([Logging and replay](#logging-and-replay));
+- (after M2) `result` is a `ResultSpec` or `None`, and (after M2, if the bus hook is a setting) `policy` a callable or `None`; the string a raw-solver replay passes for either raises `TypeError` ([Logging and replay](#logging-and-replay));
 - the controller's `check` accepts the roster, and (after M2) the controller's `final` is valid for `result` (the scoring deep dive's validation rules, applied to the controller's chain).
 
 ### Controller and runtime
@@ -449,7 +449,7 @@ The observer is what the swarm records and where monitors attach: evidence event
 |---|---|---|---|
 | Evidence events, the ledger and its coverage rules, metrics, the per-member result record | Fixed | inspect_swarm (versioned) | No |
 | What the result record can hold (after M2): verdicts and a comparable answer form exist only when the task's result contract supplies a verifier and an answer key | The task's result contract, `swarm(result=)` | The swarm's arguments, in the task | Yes, where the controller uses them: its `final` chain (`verify`, `vote`) and `stop_on_verified` |
-| The bus hook: continue, modify, reject or terminate each sanctioned record (M2) | `swarm(policy=...)`, until the communication deep dive replaces it with sentinel protocols (its open question 1) | The swarm's arguments, in the task | Yes |
+| The bus hook: continue, modify, reject or terminate each sanctioned record (after M2; in M2 sentinel monitors the channel tools) | `swarm(policy=...)` or a sentinel adapter (the communication deep dive's open question 1) | The swarm's arguments, in the task | Yes |
 | Live monitors and protocols (tool calls, including sends and reads) | inspect_sentinel's `@monitor` and `@protocol`, through `Task(sentinel=...)` or `eval(sentinel=...)` / `eval_set(sentinel=...)` (inspect_ai `feature/sentinel`, `src/inspect_ai/_eval/task/task.py:107`) | The task, or eval options | Yes: a protocol can reject, modify or terminate |
 | Scores: the task's headline score and per-member scores | The task's `@scorer`s ([Scores](#scores-the-task-scores-the-observer-records)) | The task | Not through the swarm, which never calls a scorer. But a member may: a retrying agent's in-loop scoring uses the task's scorers ([Scores](#scores-the-task-scores-the-observer-records)) |
 | Post-hoc labels (coordination failures, message storms) | Scout `@scanner`s over the logs | A Scout scan job, outside the eval | No |

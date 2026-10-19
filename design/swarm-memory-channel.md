@@ -78,7 +78,7 @@ All in `src/inspect_ai/tool/_tools/_memory.py`.
 
 [swarm-communication.md](swarm-communication.md) designs, and M2-6 and M2-7 build:
 
-- `Record` with `channel`, `kind`, `origin`, `sender`, `to`, `recipients`, `payload`, `op`, `sender_span_id` and `tool_span_id` ([Records and the bus](swarm-communication.md#records-and-the-bus)); `Bus.deliver()` with step 0 (bind, resolve addresses, `validate()`), step 1 (the policy, the only `await`), step 2 (liveness and storm checks), step 3 (`sent` evidence) and step 4 (`apply()`, `delivered`), with steps 2 to 4 synchronous.
+- `Record` with `channel`, `kind`, `sender`, `to`, `recipients`, `payload`, `op`, `sender_span_id` and `tool_span_id` ([Records and the bus](swarm-communication.md#records-and-the-bus)); `Bus.deliver()` with step 0 (bind, resolve addresses, `validate()`), step 1 (the policy, the only `await`), step 2 (liveness and storm checks), step 3 (`sent` evidence) and step 4 (`apply()`, `delivered`), with steps 2 to 4 synchronous.
 - `Channel.name`, `prefix`, `check(roster)` and `open(run)`, and a per-run `ChannelState` with `tools()`, `validate()`, `apply()`, `notice_lines()` and `quiescent()`; compare-and-swap described as `apply()` failing the send when the version differs ([How channels plug into the bus](swarm-communication.md#how-channels-plug-into-the-bus)).
 - The binding rule: `swarm_tools()` binds the member to the first agent channel it is resolved in, returns no tools in any other agent channel, and notices go only to that loop; D-1 decides whether the shared memory changes this ([Members and identity](swarm-communication.md#members-and-identity)).
 - The shared fence, marker removal for `<peer_message`, notices with fixed templates and swarm-assigned ids, and `read` evidence ([Fencing](swarm-communication.md#fencing), [Notices](swarm-communication.md#notices), [Evidence and provenance](swarm-communication.md#evidence-and-provenance)). The post-hoc `exposed` evidence the merged design relied on was dropped in #23 ([swarm-communication.md Alternatives considered](swarm-communication.md#alternatives-considered)).
@@ -181,7 +181,7 @@ Every write gives each file it touches a new version and makes the writing loop'
 
 Each write is one `Record` ([swarm-communication.md Records and the bus](swarm-communication.md#records-and-the-bus)):
 
-- `channel="shared_memory"`, `kind` the command (`"create"`, `"str_replace"`, `"insert"`, `"delete"`, `"rename"`), `origin="member"`, `sender` the member from the ContextVar, `via="tool"`, `wake=False`, `reply_to=None`.
+- `channel="shared_memory"`, `kind` the command (`"create"`, `"str_replace"`, `"insert"`, `"delete"`, `"rename"`), `sender` the member from the ContextVar, `wake=False`, `reply_to=None`. M2's `Record` has no `origin` or `via`; they come back with internal records and bridged bus tools ([Records and the bus](swarm-communication.md#records-and-the-bus)).
 - `to=()` and `recipients=()`: a board write is a change to shared state, not a delivery, so it has no addresses ([Changes to the bus](#changes-to-the-bus)).
 - `sender_span_id` is the writing loop's agent span and `tool_span_id` the tool span the write ran in; together they attribute the write to the member and to the loop that made it.
 - `payload` is the text the model wrote that enters the board: `file_text` for create, `new_str` for str_replace, `insert_text` for insert, empty for delete and rename. It is what the policy's `modify` replaces, and it is cleaned of fence markers before it is stored or recorded.

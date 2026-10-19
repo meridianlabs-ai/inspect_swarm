@@ -23,7 +23,6 @@ from ._budget import (
     is_bridged,
     share_nodes,
 )
-from ._bus._policy import CommPolicy
 from ._channel._channel import Channel
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
@@ -38,7 +37,6 @@ def swarm(
     controller: str | Controller = "leaderless",
     channels: str | Channel | Sequence[str | Channel] = ("filesystem",),
     budget: Budget = Budget(),  # noqa: B008
-    policy: CommPolicy | None = None,
 ) -> Agent:
     """A swarm of agents working on one sample.
 
@@ -47,13 +45,12 @@ def swarm(
         controller: How the swarm runs: who starts, when and with what input, and when the swarm is done. A name resolves to a registered controller with its default parameters.
         channels: How members share information. A name resolves to a registered channel with its default parameters. `[]` means none: members get no channel instructions, though a shared sandbox is still shared.
         budget: The swarm-wide cap.
-        policy: A check the bus runs on each record a channel delivers, before it is delivered: it can let the record through, change its payload, reject it or end the sample. The log records it by name only, so a task that varies it takes it from a task argument or sets it inside a registered swarm builder.
 
     Returns:
         The swarm, as an agent.
 
     Raises:
-        TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, an argument has the wrong type, or `policy` is a string, as a replay from the log passes it.
+        TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
         ValueError: If member names collide, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, or a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet).
     """
     records = _members(members)
@@ -70,7 +67,6 @@ def swarm(
     if resolved_controller.check is not None:
         resolved_controller.check(roster)
     _check_bus_channels(resolved_channels, records, names, roster)
-    resolved_policy = _policy(policy)
     resolved_budget = _budget(budget)
     preambles = {
         info.name: _preamble(info, len(roster), resolved_channels) for info in roster
@@ -107,7 +103,6 @@ def swarm(
             budget=resolved_budget,
             shares=share_nodes(resolved_budget, caps, [info.name for info in roster]),
             channels=resolved_channels,
-            policy=resolved_policy,
         ).run(resolved_controller.run)
         return state
 
@@ -261,19 +256,6 @@ def _check_bus_channels(
             raise ValueError(
                 f"swarm(): member {record_names[0]!r} is bridged, and bridged members cannot use bus channels such as {registry_info(bus_channels[0]).name} yet. Leave the channel out, or the member."
             )
-
-
-def _policy(policy: object) -> CommPolicy | None:
-    if isinstance(policy, str):
-        # a callable is logged by its name, which a replay from the log passes back
-        raise TypeError(
-            f"policy= got the string {policy!r}: a policy cannot be rebuilt from a log; rebuild the swarm through its task or a registered builder."
-        )
-    if policy is not None and not callable(policy):
-        raise TypeError(
-            f"policy= must be an async function or None, got a {type(policy).__name__}."
-        )
-    return cast(CommPolicy | None, policy)
 
 
 def _budget(budget: object) -> Budget:

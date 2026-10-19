@@ -1,12 +1,9 @@
 import json
-import logging
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import anyio
-from inspect_ai._util.exception import TerminateSampleError
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
 from inspect_ai.tool import ToolError
@@ -17,14 +14,11 @@ from .._budget import MemberContext, current_member
 from .._channel._channel import Channel, ChannelRun, ChannelState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_sent
-from ._policy import CommDecision, CommPolicy
 from ._record import Draft, FrozenJson, Record, freeze_json, thaw_json
 from ._storm import Storm
 
 if TYPE_CHECKING:
     from .._controller._control import MemberHandle
-
-logger = logging.getLogger(__name__)
 
 _STOPPING = "the swarm is stopping; nothing more is delivered."
 
@@ -49,16 +43,13 @@ class Bus:
         members: Sequence["MemberHandle"],
         contexts: Mapping[str, MemberContext],
         channels: Sequence[Channel],
-        policy: CommPolicy | None,
     ) -> None:
         self._members = list(members)
         self._by_name = {m.name: m for m in self._members}
         # the context the runtime runs each member in, which its descendants inherit;
         # a member of another run with the same name has a context of its own
         self._contexts = dict(contexts)
-        self._policy = policy
         self._stopping = False
-        self._records: list[Record] = []
         self._seq = 0
         self._ids: dict[str, int] = {}
         self._states: dict[str, ChannelState] = {}
@@ -92,24 +83,6 @@ class Bus:
         # the first act of the swarm's stop: records not yet committed are refused
         self._stopping = True
 
-    # SwarmView
-
-    @property
-    def members(self) -> Sequence["MemberHandle"]:
-        return list(self._members)
-
-    def member(self, name: str) -> "MemberHandle":
-        try:
-            return self._by_name[name]
-        except KeyError:
-            raise KeyError(
-                f"No member named {name!r}; the members are {', '.join(self._by_name)}."
-            ) from None
-
-    @property
-    def records(self) -> Sequence[Record]:
-        return tuple(self._records)
-
     async def deliver(self, draft: Draft) -> Delivery:
         # step 0: bind and resolve, before a record exists
         context = self._sender()
@@ -125,7 +98,6 @@ class Bus:
             id=f"{self._prefixes[draft.channel]}-{number}",
             channel=draft.channel,
             kind=draft.kind,
-            origin="member",
             sender=sender,
             to=draft.to,
             recipients=recipients,
@@ -135,7 +107,6 @@ class Bus:
             op=None if draft.op is None else _frozen_op(draft),
             wake=False,
             reply_to=None,
-            via="tool",
             sender_span_id=current_agent_span_id(),
             tool_span_id=current_span_id(),
         )
@@ -143,56 +114,8 @@ class Bus:
         # the id is given once the record exists, so that a refusal above skips none
         self._ids[draft.channel] = number
 
-        # step 1: the policy, the only await
-        decision: CommDecision | None = None
-        original: str | None = None
-        if self._policy is not None:
-            try:
-                decision = await self._policy(record, self)
-            except anyio.get_cancelled_exc_class():
-                # a stop's hard cancellation, or the sender's own: the attempt reached
-                # the bus, so it is evidenced, with no decision
-                comm_sent(
-                    member_span,
-                    record,
-                    None,
-                    None,
-                    ("cancelled", f"the {record.kind} was cancelled during the policy"),
-                )
-                raise
-            except Exception as ex:
-                # a limit its model calls reached, or an error of its own: raised as it
-                # is, after the attempt's evidence
-                comm_sent(
-                    member_span,
-                    record,
-                    None,
-                    None,
-                    ("policy_error", f"the swarm's policy raised {type(ex).__name__}"),
-                )
-                raise
-        if decision is not None:
-            if decision.action == "modify":
-                assert decision.payload is not None
-                original = record.payload
-                record = replace(record, payload=decision.payload)
-            elif decision.action in ("reject", "terminate"):
-                reason = decision.message or (
-                    f"the swarm's policy rejected this {record.kind}"
-                    if decision.action == "reject"
-                    else f"the swarm's policy ended the sample at {record.id}"
-                )
-                comm_sent(member_span, record, decision, original, ("policy", reason))
-                if decision.action == "reject":
-                    raise ToolError(reason)
-                raise TerminateSampleError(reason)
-            elif decision.action == "escalate":
-                # as sentinel's root does: there is nobody to escalate to
-                logger.warning(
-                    f"The swarm's policy escalated {record.id}, and nothing handles an escalation; it is delivered."
-                )
-
-        # steps 2 to 4 run with no await, so nothing changes between check and commit
+        # step 1, the bus hook, is later work; steps 2 to 4 follow step 0 with no await,
+        # so nothing changes between check and commit
         storm = self._storms[record.channel]
         rejection = (
             self._liveness(record) or _unencodable(record) or storm.check(record)
@@ -201,20 +124,19 @@ class Bus:
             try:
                 state.admit(record)
             except ToolError as ex:
-                comm_sent(member_span, record, decision, original, ("admit", str(ex)))
+                comm_sent(member_span, record, ("admit", str(ex)))
                 raise
         if rejection is not None:
-            comm_sent(member_span, record, decision, original, rejection)
+            comm_sent(member_span, record, rejection)
             raise ToolError(rejection[1])
 
         # step 3: evidence
-        comm_sent(member_span, record, decision, original, None)
+        comm_sent(member_span, record, None)
 
         # step 4: commit and apply
         self._seq += 1
         notify, result = state.apply(record)
         storm.commit(record)
-        self._records.append(record)
         comm_delivered(member_span, record, self._seq, notify, result)
         return Delivery(record, self._seq, list(notify), result)
 
@@ -254,15 +176,14 @@ class Bus:
         return tuple(recipients)
 
     def _liveness(self, record: Record) -> tuple[str, str] | None:
-        # the sender or a recipient may have ended, or a stop begun, during the policy
-        if self._stopping:
-            return ("liveness", _STOPPING)
-        for name in (record.sender, *record.recipients):
-            if self._by_name[name].state != "running":
-                return (
-                    "liveness",
-                    f"{name} ended before the {record.kind} was delivered.",
-                )
+        # step 0 checked the recipients and the stopping flag, and nothing has awaited
+        # since; the sender is checked here, with evidence, since a task it left behind
+        # can still run in its context after it ends
+        if self._by_name[record.sender].state != "running":
+            return (
+                "liveness",
+                f"{record.sender} has ended, so its {record.kind} was not delivered.",
+            )
         return None
 
 

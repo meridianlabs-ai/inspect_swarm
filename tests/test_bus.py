@@ -1,15 +1,13 @@
 import json
-import logging
 from collections import UserDict
-from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
 import anyio
 import pytest
-from inspect_ai._util.exception import TerminateSampleError
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.agent import Agent, AgentState, agent, run
 from inspect_ai.event import InfoEvent, SpanBeginEvent
@@ -17,24 +15,19 @@ from inspect_ai.log import EvalSample
 from inspect_ai.log._condense import condense_sample
 from inspect_ai.log._recorders.eval import _parse_sample_data
 from inspect_ai.log._transcript import Transcript
-from inspect_ai.model import ChatMessageUser
 from inspect_ai.tool import Tool, ToolError
-from inspect_ai.util import token_limit
 from pydantic import JsonValue
 
 from inspect_swarm import (
-    Budget,
     Channel,
     ChannelRun,
     ChannelState,
-    CommDecision,
     Controller,
     MemberInfo,
     MemberState,
     Record,
     StopReason,
     SwarmControl,
-    SwarmView,
     member,
     swarm,
     swarm_channel,
@@ -45,7 +38,7 @@ from inspect_swarm._bus._bus import Bus, Delivery, current_bus
 from inspect_swarm._bus._record import Draft, thaw_json
 from inspect_swarm._bus._storm import StormControls
 
-from .swarm_runtime import evidence, run_swarm, sample, scripted_model, statuses
+from .swarm_runtime import evidence, run_swarm, sample
 
 
 class _BoardState:
@@ -167,21 +160,25 @@ class _Member:
 MEMBERS = ("w-1", "w-2", "w-3")
 
 
+class _TestBus(Bus):
+    # the stand-in members, for `_send`
+    stand_ins: dict[str, _Member]
+
+
 def _bus(
-    policy: Any = None,
     *,
     channels: Sequence[Channel] | None = None,
     states: Mapping[str, MemberState] | None = None,
-) -> tuple[Bus, dict[str, _Member]]:
+) -> tuple[_TestBus, dict[str, _Member]]:
     members = {
         name: _Member(name, (states or {}).get(name, "running")) for name in MEMBERS
     }
-    bus = Bus(
+    bus = _TestBus(
         list(members.values()),
         {name: m.context for name, m in members.items()},
         channels or [_Board()],
-        policy,
     )
+    bus.stand_ins = members
     return bus, members
 
 
@@ -195,7 +192,7 @@ def _as(context: MemberContext | None) -> Generator[None]:
 
 
 async def _send(
-    bus: Bus,
+    bus: _TestBus,
     sender: str = "w-1",
     *,
     channel: str = "board",
@@ -203,9 +200,7 @@ async def _send(
     payload: str = "",
     op: dict[str, JsonValue] | None = None,
 ) -> Delivery:
-    member = bus.member(sender)
-    assert isinstance(member, _Member)
-    with _as(member.context):
+    with _as(bus.stand_ins[sender].context):
         return await bus.deliver(Draft(channel, "note", to, payload, op))
 
 
@@ -247,15 +242,13 @@ async def test_a_record_is_applied_once_with_its_evidence(
     )
     assert (delivery.seq, delivery.notify) == (1, recipients)
     assert _board(bus).applied == [record]
-    assert bus.records == (record,)
     sent, delivered = _comm(transcript)
     assert sent["kind"] == "sent"
     assert sent["member"] == "w-1"
     assert sent["record"]["to"] == list(to)
     assert sent["record"]["recipients"] == recipients
     assert sent["record"]["op"] == {"n": 1}
-    assert (sent["decision"], sent["rejected"]) == (None, None)
-    assert "original_payload" not in sent
+    assert sent["rejected"] is None
     assert delivered == {
         "version": 1,
         "type": "comm",
@@ -295,24 +288,19 @@ async def test_a_record_is_applied_once_with_its_evidence(
         ),
     ],
 )
-async def test_a_refusal_before_the_policy_leaves_no_record(
+async def test_a_refusal_at_step_0_leaves_no_record(
     draft: dict[str, Any],
     states: dict[str, MemberState],
     stopping: bool,
     error: str,
 ) -> None:
-    seen: list[Record] = []
-
-    async def policy(record: Record, view: SwarmView) -> None:
-        seen.append(record)
-
-    bus, _ = _bus(policy, states=states)
+    bus, _ = _bus(states=states)
     if stopping:
         bus.close()
     async with sample() as transcript:
         with pytest.raises(ToolError, match=error):
             await _send(bus, **draft)
-    assert (seen, _comm(transcript), _board(bus).applied) == ([], [], [])
+    assert (_comm(transcript), _board(bus).applied) == ([], [])
     if not stopping:
         # no id was given
         delivery = await _send(bus)
@@ -321,116 +309,19 @@ async def test_a_refusal_before_the_policy_leaves_no_record(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "decision,applied,error",
+    "payload,error",
     [
-        pytest.param(None, "hello", None, id="none"),
-        pytest.param(CommDecision("continue"), "hello", None, id="continue"),
+        pytest.param("a" * 8000, None, id="ascii-at-limit"),
+        pytest.param("😀" * 2000, None, id="four-byte-at-limit"),
         pytest.param(
-            CommDecision("modify", payload="safe", explanation="redacted"),
-            "safe",
-            None,
-            id="modify",
-        ),
-        pytest.param(CommDecision("escalate"), "hello", None, id="escalate"),
-        pytest.param(
-            CommDecision("reject", message="no thanks"),
-            None,
-            (ToolError, "no thanks"),
-            id="reject",
-        ),
-        pytest.param(
-            CommDecision("reject"),
-            None,
-            (ToolError, "the swarm's policy rejected this note"),
-            id="reject-default",
-        ),
-        pytest.param(
-            CommDecision("terminate", message="off topic"),
-            None,
-            (TerminateSampleError, "off topic"),
-            id="terminate",
+            "😀" * 8000, "note is 32000 bytes; the limit is 8000", id="emoji-over"
         ),
     ],
 )
-async def test_the_policy_decides_with_the_resolved_record(
-    decision: CommDecision | None,
-    applied: str | None,
-    error: tuple[type[Exception], str] | None,
-    caplog: pytest.LogCaptureFixture,
+async def test_max_bytes_counts_utf8_bytes_of_the_payload(
+    payload: str, error: str | None
 ) -> None:
-    seen: list[tuple[Record, MemberState, int]] = []
-
-    async def policy(record: Record, view: SwarmView) -> CommDecision | None:
-        seen.append((record, view.member("w-2").state, len(view.records)))
-        return decision
-
-    bus, _ = _bus(policy)
-    async with sample() as transcript:
-        if error is None:
-            await _send(bus, to=("w-2",), payload="hello")
-        else:
-            with pytest.raises(error[0], match=error[1]):
-                await _send(bus, to=("w-2",), payload="hello")
-    [(record, state, records)] = seen
-    assert (record.id, record.recipients, record.payload) == ("b-1", ("w-2",), "hello")
-    assert (state, records) == ("running", 0)
-    assert [r.payload for r in _board(bus).applied] == (
-        [] if applied is None else [applied]
-    )
-    events = _comm(transcript)
-    sent = events[0]
-    assert sent["record"]["payload"] == (applied or "hello")
-    assert sent["decision"] == (
-        None
-        if decision is None
-        else {"action": decision.action, "explanation": decision.explanation}
-    )
-    if error is None:
-        assert sent["rejected"] is None
-        assert [e["kind"] for e in events] == ["sent", "delivered"]
-    else:
-        assert sent["rejected"] == {"control": "policy", "reason": error[1]}
-        assert [e["kind"] for e in events] == ["sent"]
-    if applied == "safe":
-        assert sent["original_payload"] == "hello"
-    escalated = [r for r in caplog.records if "escalated b-1" in r.getMessage()]
-    assert len(escalated) == (
-        1 if decision is not None and decision.action == "escalate" else 0
-    )
-    assert all(r.levelno == logging.WARNING for r in escalated)
-
-
-def test_a_modify_decision_needs_a_payload() -> None:
-    with pytest.raises(ValueError, match="a modify decision needs a payload"):
-        CommDecision("modify")
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    "payload,policy_payload,error",
-    [
-        pytest.param("a" * 8000, None, None, id="ascii-at-limit"),
-        pytest.param("😀" * 2000, None, None, id="four-byte-at-limit"),
-        pytest.param(
-            "😀" * 8000, None, "note is 32000 bytes; the limit is 8000", id="emoji-over"
-        ),
-        pytest.param(
-            "short",
-            "a" * 8001,
-            "note is 8001 bytes; the limit is 8000",
-            id="modified-over",
-        ),
-    ],
-)
-async def test_max_bytes_counts_utf8_bytes_of_the_payload_as_delivered(
-    payload: str, policy_payload: str | None, error: str | None
-) -> None:
-    async def policy(record: Record, view: SwarmView) -> CommDecision | None:
-        if policy_payload is None:
-            return None
-        return CommDecision("modify", payload=policy_payload)
-
-    bus, _ = _bus(policy, channels=[_Board(StormControls(max_bytes=8000))])
+    bus, _ = _bus(channels=[_Board(StormControls(max_bytes=8000))])
     async with sample() as transcript:
         if error is None:
             await _send(bus, payload=payload)
@@ -486,125 +377,30 @@ def test_storm_controls_refuse_an_invalid_rate(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("modified", [False, True])
-async def test_a_payload_that_is_not_valid_text_is_refused_with_evidence(
-    modified: bool,
-) -> None:
-    async def policy(record: Record, view: SwarmView) -> CommDecision | None:
-        return CommDecision("modify", payload="a\ud800") if modified else None
-
+async def test_a_payload_that_is_not_valid_text_is_refused_with_evidence() -> None:
     # a lone surrogate, which a model's JSON tool arguments can carry
-    payload = "fine" if modified else "a\ud800"
-    bus, _ = _bus(policy, channels=[_Board(StormControls(max_bytes=100))])
+    bus, _ = _bus(channels=[_Board(StormControls(max_bytes=100))])
     reason = "the note is not valid text: it has an unpaired surrogate at character 1"
     async with sample() as transcript:
         with pytest.raises(ToolError, match=reason):
-            await _send(bus, payload=payload)
+            await _send(bus, payload="a\ud800")
     assert _board(bus).applied == []
     [sent] = _comm(transcript)
     assert sent["rejected"] == {"control": "payload", "reason": reason}
 
 
-@asynccontextmanager
-async def _held(
-    bus: Bus, entered: anyio.Event, **draft: Any
-) -> AsyncGenerator[list[Any]]:
-    # a send whose policy is running while the body runs
-    outcome: list[Any] = []
-
-    async def send() -> None:
-        try:
-            outcome.append(await _send(bus, **draft))
-        except ToolError as ex:
-            outcome.append(ex)
-
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(send)
-        await entered.wait()
-        yield outcome
-
-
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "during,reason",
-    [
-        ("recipient-ends", "w-2 ended before the note was delivered."),
-        ("sender-ends", "w-1 ended before the note was delivered."),
-        ("stop-begins", "the swarm is stopping; nothing more is delivered."),
-    ],
-)
-async def test_liveness_is_rechecked_after_the_policy_for_every_party(
-    during: str, reason: str
-) -> None:
-    entered, release = anyio.Event(), anyio.Event()
-
-    async def policy(record: Record, view: SwarmView) -> None:
-        entered.set()
-        await release.wait()
-
-    bus, members = _bus(policy)
+async def test_a_sender_that_has_ended_is_refused_with_evidence() -> None:
+    # a task a member left behind still runs in its context after it ends
+    bus, members = _bus()
+    members["w-1"].state = "ended"
+    reason = "w-1 has ended, so its note was not delivered."
     async with sample() as transcript:
-        async with _held(bus, entered, to=("w-2", "w-3")) as outcome:
-            if during == "stop-begins":
-                bus.close()
-            else:
-                members["w-2" if during == "recipient-ends" else "w-1"].state = "ended"
-            release.set()
-    [error] = outcome
-    assert isinstance(error, ToolError) and error.message == reason
-    # all or nothing: w-3, still running, gets nothing either
+        with pytest.raises(ToolError, match=reason):
+            await _send(bus, to=("w-2", "w-3"))
     assert _board(bus).applied == []
     [sent] = _comm(transcript)
     assert sent["rejected"] == {"control": "liveness", "reason": reason}
-
-
-@pytest.mark.anyio
-async def test_concurrent_records_cannot_both_take_the_last_slot() -> None:
-    async def policy(record: Record, view: SwarmView) -> None:
-        await anyio.sleep(0)
-
-    bus, _ = _bus(policy, channels=[_Board(capacity=1)])
-    outcomes: list[Any] = []
-
-    async def send(sender: str) -> None:
-        try:
-            outcomes.append(await _send(bus, sender))
-        except ToolError as ex:
-            outcomes.append(ex)
-
-    async with sample() as transcript:
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(send, "w-1")
-            tg.start_soon(send, "w-2")
-    assert sorted(type(o).__name__ for o in outcomes) == ["Delivery", "ToolError"]
-    # the refused record left the state as it was
-    assert len(_board(bus).applied) == 1
-    sent = [e for e in _comm(transcript) if e["kind"] == "sent"]
-    assert sorted(str(e["rejected"]) for e in sent) == sorted(
-        ["None", str({"control": "admit", "reason": "the board is full"})]
-    )
-
-
-@pytest.mark.anyio
-async def test_seq_is_the_commit_order_when_policies_finish_out_of_id_order() -> None:
-    first_held, second_done = anyio.Event(), anyio.Event()
-
-    async def policy(record: Record, view: SwarmView) -> None:
-        if record.id == "b-1":
-            first_held.set()
-            await second_done.wait()
-
-    bus, _ = _bus(policy)
-    async with sample() as transcript:
-        async with _held(bus, first_held, payload="first") as outcome:
-            await _send(bus, "w-2", payload="second")
-            second_done.set()
-    [first] = outcome
-    assert (first.record.id, first.seq) == ("b-1", 2)
-    assert [r.id for r in bus.records] == ["b-2", "b-1"]
-    assert [r.payload for r in _board(bus).applied] == ["second", "first"]
-    delivered = [e for e in _comm(transcript) if e["kind"] == "delivered"]
-    assert [(e["record"], e["seq"]) for e in delivered] == [("b-2", 1), ("b-1", 2)]
 
 
 @pytest.mark.anyio
@@ -612,16 +408,11 @@ async def test_seq_is_the_commit_order_when_policies_finish_out_of_id_order() ->
 async def test_only_the_runs_own_members_can_deliver(same_name: bool) -> None:
     # outside any member, or in another run's member of the same name
     context = MemberContext("w-1", bridged=False) if same_name else None
-    seen: list[Record] = []
-
-    async def policy(record: Record, view: SwarmView) -> None:
-        seen.append(record)
-
-    bus, _ = _bus(policy)
+    bus, _ = _bus()
     async with sample() as transcript:
         with _as(context), pytest.raises(RuntimeError, match="outside a member"):
             await bus.deliver(Draft("board", "note"))
-    assert (seen, _comm(transcript), _board(bus).applied) == ([], [], [])
+    assert (_comm(transcript), _board(bus).applied) == ([], [])
 
 
 def _set_path(op: Any, path: str) -> None:
@@ -630,43 +421,19 @@ def _set_path(op: Any, path: str) -> None:
 
 @pytest.mark.anyio
 async def test_a_record_keeps_the_operation_data_it_was_sent_with() -> None:
-    entered, release = anyio.Event(), anyio.Event()
-    kept: list[Record] = []
-    refused: list[str] = []
-
-    def mutate(op: Any, where: str) -> None:
-        try:
-            _set_path(op, "/changed")
-        except TypeError:
-            refused.append(where)
-
-    async def policy(record: Record, view: SwarmView) -> None:
-        if record.id == "b-1":
-            kept.append(record)
-            mutate(record.op, "policy argument")
-            entered.set()
-            await release.wait()
-        else:
-            mutate(view.records[0].op, "history")
-
     op: dict[str, JsonValue] = {"files": [{"file": "f-1", "path": "/a"}]}
     original = {"files": [{"file": "f-1", "path": "/a"}]}
-    bus, _ = _bus(policy)
+    bus, _ = _bus()
     async with sample() as transcript:
-        async with _held(bus, entered, op=op) as outcome:
-            # the tool's own dict changes while the policy runs
-            _set_path(op, "/b")
-            release.set()
-        [delivery] = outcome
-        _set_path(op, "/c")
-        mutate(kept[0].op, "retained argument")
-        mutate(delivery.record.op, "delivery")
-        await _send(bus, "w-2")
-    assert refused == ["policy argument", "retained argument", "delivery", "history"]
-    for record in (kept[0], delivery.record, bus.records[0], _board(bus).applied[0]):
+        delivery = await _send(bus, op=op)
+    # the tool's own dict changes after the send, and the delivered record cannot
+    _set_path(op, "/b")
+    with pytest.raises(TypeError):
+        _set_path(delivery.record.op, "/c")
+    for record in (delivery.record, _board(bus).applied[0]):
         assert record.op is not None and thaw_json(record.op) == original
-    sent = [e for e in _comm(transcript) if e["kind"] == "sent"]
-    assert sent[0]["record"]["op"] == original
+    sent, _ = _comm(transcript)
+    assert sent["record"]["op"] == original
 
 
 @pytest.mark.anyio
@@ -689,7 +456,7 @@ async def test_operation_data_other_than_dicts_and_lists_is_refused(
     async with sample() as transcript:
         with pytest.raises(TypeError, match=f"op must be JSON data; it holds a {held}"):
             await _send(bus, op=op)
-    assert (bus.records, _board(bus).applied, _comm(transcript)) == ((), [], [])
+    assert (_board(bus).applied, _comm(transcript)) == ([], [])
     assert (await _send(bus)).record.id == "b-1"
 
 
@@ -750,7 +517,7 @@ async def test_operation_data_commits_only_if_the_log_reads_it_back_as_sent(
         if refusal is not None:
             with pytest.raises(ToolError, match=refusal):
                 await _send(bus, op=op)
-            assert (bus.records, _board(bus).applied, _comm(transcript)) == ((), [], [])
+            assert (_board(bus).applied, _comm(transcript)) == ([], [])
         else:
             await _send(bus, op=op)
     # written and read as the eval log writes and reads a sample
@@ -780,38 +547,27 @@ async def test_operation_data_commits_only_if_the_log_reads_it_back_as_sent(
 
 
 @pytest.mark.anyio
-async def test_record_ids_count_per_channel_from_one() -> None:
+async def test_record_ids_count_per_channel_and_seq_per_run() -> None:
     bus, _ = _bus(channels=[_Board(), _Notes()])
-    ids = [
-        (await _send(bus, channel=channel)).record.id
-        for channel in ("board", "notes", "board")
+    deliveries = [
+        await _send(bus, channel=channel) for channel in ("board", "notes", "board")
     ]
-    assert ids == ["b-1", "n-1", "b-2"]
-    assert [r.id for r in bus.records] == ids
+    assert [(d.record.id, d.seq) for d in deliveries] == [
+        ("b-1", 1),
+        ("n-1", 2),
+        ("b-2", 3),
+    ]
 
 
 # Swarm tests: the runtime opens the channels and closes the bus
 
 
 @agent
-def bus_user(
-    buses: list[Bus],
-    send: bool = False,
-    outcomes: list[str] | None = None,
-) -> Agent:
+def bus_user(buses: list[Bus]) -> Agent:
     async def execute(state: AgentState) -> AgentState:
         bus = current_bus.get()
         assert bus is not None
         buses.append(bus)
-        if send:
-            for _ in range(2):
-                try:
-                    await bus.deliver(Draft(channel="board", kind="note"))
-                    message = "delivered"
-                except ToolError as ex:
-                    message = ex.message
-                assert outcomes is not None
-                outcomes.append(message)
         return state
 
     return execute
@@ -945,24 +701,33 @@ async def test_comm_evidence_names_the_members_span_and_the_record_the_loops(
     assert spans[loop_span] == ("bus_test_child" if nested else "w")
 
 
-@pytest.mark.anyio
-async def test_a_stop_refuses_records_whose_policy_was_running_and_later_ones() -> None:
-    entered = anyio.Event()
-
-    async def policy(record: Record, view: SwarmView) -> None:
-        entered.set()
+@agent
+def bus_test_late_sender(buses: list[Bus], outcomes: list[str]) -> Agent:
+    # sends once the swarm has begun to stop, while it still runs in the grace period
+    async def execute(state: AgentState) -> AgentState:
         bus = current_bus.get()
         assert bus is not None
-        # the controller's return closes the bus
+        buses.append(bus)
         with anyio.fail_after(5):
             while not bus.stopping:
                 await anyio.sleep(0.01)
+        for _ in range(2):
+            try:
+                await bus.deliver(Draft(channel="board", kind="note"))
+                outcomes.append("delivered")
+            except ToolError as ex:
+                outcomes.append(ex.message)
+        return state
 
-    @swarm_controller(name="bus_test_stop_while_held")
-    def stop_while_held() -> Controller:
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_stop_refuses_records_from_members_still_running() -> None:
+    @swarm_controller(name="bus_test_start_and_return")
+    def start_and_return() -> Controller:
         async def run(control: SwarmControl) -> StopReason:
             control.start("w")
-            await entered.wait()
             return "all_done"
 
         return Controller(run)
@@ -972,105 +737,19 @@ async def test_a_stop_refuses_records_whose_policy_was_running_and_later_ones() 
     outcome = await run_swarm(
         swarm(
             member(
-                bus_user,
-                args={"buses": buses, "send": True, "outcomes": outcomes},
+                bus_test_late_sender,
+                args={"buses": buses, "outcomes": outcomes},
                 name="w",
             ),
-            controller=stop_while_held(),
+            controller=start_and_return(),
             channels=["bus_test_board"],
-            policy=policy,
         )
     )
     assert outcome.reason == "all_done"
     assert outcomes == ["the swarm is stopping; nothing more is delivered."] * 2
     [bus] = buses
-    assert bus.records == ()
-
-
-@pytest.mark.anyio
-async def test_an_attempt_cancelled_during_the_policy_is_evidenced() -> None:
-    entered = anyio.Event()
-
-    async def policy(record: Record, view: SwarmView) -> None:
-        entered.set()
-        await anyio.sleep_forever()
-
-    @swarm_controller(name="bus_test_stop_once_entered")
-    def stop_once_entered() -> Controller:
-        async def run(control: SwarmControl) -> StopReason:
-            control.start("w")
-            await entered.wait()
-            return "all_done"
-
-        return Controller(run)
-
-    buses: list[Bus] = []
-    outcomes: list[str] = []
-    agent = swarm(
-        member(
-            bus_user,
-            args={"buses": buses, "send": True, "outcomes": outcomes},
-            name="w",
-        ),
-        controller=stop_once_entered(),
-        channels=["bus_test_board"],
-        budget=Budget(grace=0),
-        policy=policy,
-    )
-    async with sample() as transcript:
-        await agent(AgentState(messages=[ChatMessageUser(content="task")]))
-    # the hard stop cancelled the member in its policy
-    assert outcomes == []
-    [bus] = buses
-    assert (bus.records, _board(bus).applied) == ((), [])
-    [sent] = _comm(transcript)
-    assert sent["record"]["id"] == "b-1"
-    assert sent["decision"] is None
-    assert sent["rejected"] == {
-        "control": "cancelled",
-        "reason": "the note was cancelled during the policy",
-    }
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    "limit,status",
-    [("swarm", "swarm_cap"), ("member", "member_limit:token")],
-)
-async def test_a_limit_the_policys_model_reaches_is_evidenced(
-    limit: str, status: str
-) -> None:
-    model = scripted_model()
-
-    async def policy(record: Record, view: SwarmView) -> None:
-        # a model-backed check, whose call is the member's
-        await model.generate("is this note safe?")
-
-    buses: list[Bus] = []
-    outcomes: list[str] = []
-    agent = swarm(
-        member(
-            bus_user,
-            args={"buses": buses, "send": True, "outcomes": outcomes},
-            name="w",
-            limits=[token_limit(1)] if limit == "member" else None,
-        ),
-        channels=["bus_test_board"],
-        budget=Budget(tokens=1) if limit == "swarm" else Budget(),
-        policy=policy,
-    )
-    outcome = await run_swarm(agent)
-    assert statuses(outcome) == {"w": status}
-    assert outcomes == []
-    [bus] = buses
-    assert (bus.records, _board(bus).applied) == ((), [])
-    [sent] = _comm(outcome.transcript)
-    assert sent["record"]["id"] == "b-1"
-    assert sent["decision"] is None
-    assert sent["rejected"] == {
-        "control": "policy_error",
-        "reason": "the swarm's policy raised LimitExceededError",
-    }
+    assert _board(bus).applied == []
+    assert _comm(outcome.transcript) == []
 
 
 @agent(name="inspect_swe/bus_test_cli")

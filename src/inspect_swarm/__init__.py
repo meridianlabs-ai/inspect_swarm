@@ -4,7 +4,6 @@ Experimental and under development; the API may change.
 """
 
 from ._budget import Budget
-from ._bus._policy import CommDecision, CommPolicy, SwarmView
 from ._bus._record import Record
 from ._channel._channel import Channel, ChannelRun, ChannelState, swarm_channel
 from ._channel.filesystem import filesystem
@@ -36,8 +35,6 @@ __all__ = [
     "Channel",
     "ChannelRun",
     "ChannelState",
-    "CommDecision",
-    "CommPolicy",
     "Controller",
     "Member",
     "MemberEnded",
@@ -48,7 +45,6 @@ __all__ = [
     "StopReason",
     "SwarmControl",
     "SwarmEvent",
-    "SwarmView",
     "__version__",
     "filesystem",
     "leaderless",

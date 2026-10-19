@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal, TypeAlias, cast
+from typing import TypeAlias, cast
 
 from pydantic import JsonValue
 
@@ -21,11 +21,11 @@ FrozenJson: TypeAlias = (
 class Record:
     """One communication through the bus: a message, a write, a claim.
 
-    A channel's tool hands the bus a `Draft`; the bus makes the record, binding the sender and resolving the addresses, and gives it to the policy and the channel.
+    A channel's tool hands the bus a `Draft`; the bus makes the record, binding the sender and resolving the addresses, and gives it to the channel.
     """
 
     id: str
-    """The record's id, the channel's prefix and a per-run number (`"w-14"`). Ids are given before the policy runs, so they are attempt ids: the order records changed channel state in is their commit sequence number, `seq` in the `delivered` evidence."""
+    """The record's id, the channel's prefix and a per-channel number (`"w-14"`). Every attempt that passes the bus's first checks gets one, refused or not, so the ids of delivered records can skip numbers; `seq` in the `delivered` evidence numbers what the run delivered, across its channels."""
 
     channel: str
     """The name of the channel the record is for."""
@@ -33,11 +33,8 @@ class Record:
     kind: str
     """What the record does, in the channel's terms (`"message"`, `"create"`)."""
 
-    origin: Literal["member", "swarm"]
-    """Who made it: a member, or the swarm itself."""
-
     sender: str
-    """The sending member's name, bound by the runtime, never taken from model output; `"swarm"` for the swarm's own records."""
+    """The sending member's name, bound by the runtime, never taken from model output."""
 
     to: tuple[str, ...]
     """The addresses as written. `()` for an unaddressed record, such as a write to shared state, which reaches nobody directly."""
@@ -49,19 +46,16 @@ class Record:
     """Resolved names the channel's routes dropped."""
 
     payload: str
-    """The text the record carries. A policy's `modify` replaces it."""
+    """The text the record carries."""
 
     op: Mapping[str, FrozenJson] | None
-    """The channel's operation data, if any, as JSON that cannot be changed: objects are read-only mappings and arrays are tuples. A record is shared by the policy, the channel and the bus's history, so none of them can change what the others see."""
+    """The channel's operation data, if any, as JSON that cannot be changed: objects are read-only mappings and arrays are tuples. A record is shared by the channel and the sender's tool, so neither can change what the other sees."""
 
     wake: bool
     """Whether the record ends a recipient's wait."""
 
     reply_to: str | None
     """The id of a record this one answers."""
-
-    via: Literal["tool", "bridge", "internal"]
-    """How the record reached the bus."""
 
     sender_span_id: str | None
     """The sender's agent span."""

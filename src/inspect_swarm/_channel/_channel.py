@@ -81,7 +81,7 @@ class ChannelRun:
 class ChannelState(Protocol):
     """A channel's state in one run of the swarm, which only the bus changes.
 
-    The bus calls `validate()` before the policy runs, then `admit()` and `apply()` with no `await` between them, so `admit()` sees the state that `apply()` changes.
+    The bus calls `validate()`, `admit()` and `apply()` with no `await` between them, so `admit()` sees the state that `apply()` changes.
     """
 
     def tools(self) -> list[Tool]:
@@ -89,7 +89,7 @@ class ChannelState(Protocol):
         ...
 
     def validate(self, record: Record) -> None:
-        """Check a record's payload and operation data, before the policy runs.
+        """Check a record's payload and operation data, before the record gets an id.
 
         Args:
             record: The record.
@@ -100,10 +100,10 @@ class ChannelState(Protocol):
         ...
 
     def admit(self, record: Record) -> None:
-        """Check a record against the state as it is now, after the policy and the storm controls.
+        """Check a record against the state as it is now, after the storm controls.
 
         Args:
-            record: The record, with any payload the policy gave it.
+            record: The record.
 
         Raises:
             ToolError: If the state refuses the record. The refusal is in the record's `sent` evidence.

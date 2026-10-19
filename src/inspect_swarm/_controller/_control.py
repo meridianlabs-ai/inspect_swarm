@@ -25,7 +25,6 @@ from .._member import (
 from .._record import MemberResult, MemberState
 
 if TYPE_CHECKING:
-    from .._bus._policy import CommPolicy
     from .._channel._channel import Channel
 
 
@@ -201,7 +200,6 @@ class SwarmRun:
         budget: Budget,
         shares: Mapping[str, Sequence[Limit]] | None = None,
         channels: Sequence["Channel"] = (),
-        policy: "CommPolicy | None" = None,
     ) -> None:
         # deferred: the bus imports the channels, which import this module's package
         from .._bus._bus import Bus
@@ -215,7 +213,6 @@ class SwarmRun:
             self._members,
             {m.name: m.context for m in self._members},
             channels,
-            policy,
         )
         for node in caps:
             if isinstance(node, SwarmNode):

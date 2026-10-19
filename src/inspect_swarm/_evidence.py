@@ -5,7 +5,6 @@ from inspect_ai.log import transcript
 from inspect_ai.util import store
 from pydantic import JsonValue
 
-from ._bus._policy import CommDecision
 from ._bus._record import Record, thaw_json
 from ._ledger import SwarmLedger
 
@@ -44,32 +43,20 @@ def evidence(
 
 
 def comm_sent(
-    span_id: str | None,
-    record: Record,
-    decision: CommDecision | None,
-    original_payload: str | None,
-    rejected: tuple[str, str] | None,
+    span_id: str | None, record: Record, rejected: tuple[str, str] | None
 ) -> None:
     # every attempt that reached the bus, rejected or not; `rejected` is the control
     # that refused it and the reason the sender got
-    fields: dict[str, JsonValue] = {
-        "record": _record(record),
-        "decision": None
-        if decision is None
-        else {"action": decision.action, "explanation": decision.explanation},
-        "rejected": None
-        if rejected is None
-        else {"control": rejected[0], "reason": rejected[1]},
-    }
-    if original_payload is not None:
-        fields["original_payload"] = original_payload
     evidence(
         "comm",
         "sent",
         member=record.sender,
         span_id=span_id,
         channel=record.channel,
-        **fields,
+        record=_record(record),
+        rejected=None
+        if rejected is None
+        else {"control": rejected[0], "reason": rejected[1]},
     )
 
 
@@ -100,7 +87,6 @@ def _record(record: Record) -> dict[str, JsonValue]:
         "id": record.id,
         "channel": record.channel,
         "kind": record.kind,
-        "origin": record.origin,
         "sender": record.sender,
         "to": list(record.to),
         "recipients": list(record.recipients),
@@ -109,7 +95,6 @@ def _record(record: Record) -> dict[str, JsonValue]:
         "op": None if record.op is None else thaw_json(record.op),
         "wake": record.wake,
         "reply_to": record.reply_to,
-        "via": record.via,
         "sender_span_id": record.sender_span_id,
         "tool_span_id": record.tool_span_id,
     }

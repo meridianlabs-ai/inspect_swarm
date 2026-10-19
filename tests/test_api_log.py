@@ -26,13 +26,10 @@ from inspect_ai.util import (
 )
 
 from inspect_swarm import (
-    CommDecision,
     Controller,
     Member,
-    Record,
     StopReason,
     SwarmControl,
-    SwarmView,
     member,
     swarm,
     swarm_controller,
@@ -266,20 +263,3 @@ def _cap_arm(cap: Any) -> Any:
 def test_eval_set_arms_are_distinct(arm: Callable[[Any], Any], a: Any, b: Any) -> None:
     assert _identifier(arm(a)) == _identifier(arm(a))
     assert _identifier(arm(a)) != _identifier(arm(b))
-
-
-async def log_test_policy(record: Record, view: SwarmView) -> CommDecision | None:
-    return None
-
-
-def test_a_policy_is_logged_by_name_and_refused_on_replay() -> None:
-    original = swarm(
-        react(prompt="a"),
-        controller=log_test_controller(),
-        channels=[],
-        policy=log_test_policy,
-    )
-    params = registry_params(original)
-    assert params["policy"] == "log_test_policy"
-    with pytest.raises(TypeError, match="a policy cannot be rebuilt from a log"):
-        create_registry_object("agent", registry_info(original).name, params)
