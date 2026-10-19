@@ -1,9 +1,11 @@
+import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
-from inspect_ai.event import Event, ModelEvent, SpanBeginEvent
+from inspect_ai.event import Event, ModelEvent, SpanBeginEvent, ToolEvent
 from inspect_ai.log._samples import sample_active
 from inspect_ai.log._transcript import transcript
 from inspect_ai.model import ModelAPI, ModelUsage
@@ -155,15 +157,34 @@ class CallRecord:
     # retries inside the call, by the provider's client
     retries: int
     usage: ModelUsage | None
+    # when the event was first reported: for a call's last attempt, after the call
+    # waited for a connection and made its earlier attempts
+    reported: datetime
+    # when the call began, before its wait, once it has completed; until then as
+    # reported
+    timestamp: datetime
+    # set only when the call completed
+    completed: datetime | None
 
 
-# The spans and model events the transcript reports during the swarm's interval, kept
-# as they happen rather than read back from the history: a bounded transcript serializes
-# an event at its last update, which can come before Inspect prices its usage.
+# A tool event as it last stood.
+@dataclass(frozen=True)
+class ToolRecord:
+    span_id: str | None
+    function: str
+    # as canonical JSON, so that equal arguments compare equal whatever their key order
+    arguments: str
+
+
+# The spans, model events and tool events the transcript reports during the swarm's
+# interval, kept as they happen rather than read back from the history: a bounded
+# transcript serializes an event at its last update, which can come before Inspect
+# prices its usage. Tool events are kept in the order they began.
 class EventLog:
     def __init__(self) -> None:
         self.parents: dict[str, str | None] = {}
         self.calls: dict[str, CallRecord] = {}
+        self.tools: dict[str, ToolRecord] = {}
 
     def __call__(self, event: Event) -> None:
         if isinstance(event, SpanBeginEvent):
@@ -171,6 +192,7 @@ class EventLog:
         elif isinstance(event, ModelEvent):
             # the transcript gives every event a uuid before it reports it
             assert event.uuid is not None
+            previous = self.calls.get(event.uuid)
             self.calls[event.uuid] = CallRecord(
                 span_id=event.span_id,
                 cache_read=event.cache == "read",
@@ -178,6 +200,18 @@ class EventLog:
                 pending=bool(event.pending),
                 retries=event.retries or 0,
                 usage=event.output.usage,
+                reported=event.timestamp if previous is None else previous.reported,
+                timestamp=event.timestamp,
+                completed=event.completed,
+            )
+        elif isinstance(event, ToolEvent):
+            assert event.uuid is not None
+            self.tools[event.uuid] = ToolRecord(
+                span_id=event.span_id,
+                function=event.function,
+                arguments=json.dumps(
+                    event.arguments, sort_keys=True, separators=(",", ":")
+                ),
             )
 
 
@@ -204,6 +238,14 @@ class LedgerInterval:
         }
         self._resumed = sample_resumed()
 
+    @property
+    def events(self) -> EventLog:
+        return self._events
+
+    # where the spans of the interval lie, given the spans of the members that entered one
+    def places(self, member_spans: Mapping[str, str]) -> "SpanPlaces":
+        return SpanPlaces(self._events.parents, self._span_id, member_spans)
+
     def ledger(
         self,
         *,
@@ -223,8 +265,7 @@ class LedgerInterval:
         self._unsubscribe()
         calls, member_calls = count_calls(
             self._events,
-            self._span_id,
-            {m.name: m.span_id for m in members if m.span_id is not None},
+            self.places({m.name: m.span_id for m in members if m.span_id is not None}),
         )
         delta, unpriced_models, cost_scale = _usage_delta(
             self._start_usage, _usage_snapshot()
@@ -294,38 +335,45 @@ class LedgerInterval:
         )
 
 
-# Counts the model events in the swarm's span tree, and those in each member's spans.
-# With no swarm span (the swarm called outside any span), every event counts.
-def count_calls(
-    events: EventLog, swarm_span: str | None, member_spans: Mapping[str, str]
-) -> tuple[Calls, dict[str, Calls]]:
-    owners = {span: name for name, span in member_spans.items()}
-    parents = events.parents
-    places: dict[str | None, tuple[bool, str | None]] = {}
+# Where each span lies: whether it is in the swarm's tree, and the member whose spans
+# hold it. With no swarm span (the swarm called outside any span), every span is in it.
+class SpanPlaces:
+    def __init__(
+        self,
+        parents: Mapping[str, str | None],
+        swarm_span: str | None,
+        member_spans: Mapping[str, str],
+    ) -> None:
+        self._parents = parents
+        self._swarm_span = swarm_span
+        self._owners = {span: name for name, span in member_spans.items()}
+        self._places: dict[str | None, tuple[bool, str | None]] = {}
 
-    def place(span: str | None) -> tuple[bool, str | None]:
-        # whether a span is in the swarm's tree, and the member whose spans hold it
-        if span not in places:
-            if span is None or span == swarm_span:
-                found = (swarm_span is None or span == swarm_span, None)
-            elif span in owners:
-                found = (place(parents.get(span))[0], owners[span])
-            elif span in parents:
-                found = place(parents[span])
+    def __call__(self, span: str | None) -> tuple[bool, str | None]:
+        if span not in self._places:
+            if span is None or span == self._swarm_span:
+                found = (self._swarm_span is None or span == self._swarm_span, None)
+            elif span in self._owners:
+                found = (self(self._parents.get(span))[0], self._owners[span])
+            elif span in self._parents:
+                found = self(self._parents[span])
             else:
                 # begun before the swarm started, and not the swarm's span
-                found = (swarm_span is None, None)
-            places[span] = found
-        return places[span]
+                found = (self._swarm_span is None, None)
+            self._places[span] = found
+        return self._places[span]
 
+
+# Counts the model events in the swarm's span tree, and those in each member's spans.
+def count_calls(events: EventLog, places: SpanPlaces) -> tuple[Calls, dict[str, Calls]]:
     total = Calls()
-    per_member = {name: Calls() for name in member_spans}
+    per_member: dict[str, Calls] = {}
     for call in events.calls.values():
-        inside, member = place(call.span_id)
+        inside, member = places(call.span_id)
         if inside:
             total.count(call)
         if member is not None:
-            per_member[member].count(call)
+            per_member.setdefault(member, Calls()).count(call)
     return total, per_member
 
 

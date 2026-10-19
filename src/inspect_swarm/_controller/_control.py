@@ -13,7 +13,7 @@ from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
 from inspect_ai.util import Limit, current_span_id, sample_limits
 
 from .._budget import Budget, CostPair, Lever, MemberContext, SwarmNode, is_bridged
-from .._evidence import evidence, write_ledger
+from .._evidence import add_timelines, evidence, write_ledger, write_metrics
 from .._final import finalise, settle
 from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
@@ -22,6 +22,7 @@ from .._member import (
     member_nodes,
     run_member,
 )
+from .._metrics import MemberTimes, swarm_metrics
 from .._record import MemberResult, MemberState
 
 
@@ -149,6 +150,8 @@ class MemberRun:
         # the state the member runs on, kept for its output however it ends; its
         # conversation is built inside the member's limits
         self.agent_state = AgentState(messages=[])
+        # swarm times of its start and its end
+        self.started: float | None = None
         self.time: float | None = None
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
@@ -260,6 +263,7 @@ class SwarmRun:
         )
         messages.append(ChatMessageUser(content=self._preambles[m.name]))
         m.state = "running"
+        m.started = anyio.current_time() - self._start
         self._settle()
         # from the saved context, so the member's lever is a child of the caps and never
         # of the runtime lever, whichever task starts it
@@ -342,32 +346,48 @@ class SwarmRun:
         finally:
             # synchronous, so that it runs under cancellation too; the provisional
             # answer is already written, as each change to the record writes it
-            write_ledger(
-                interval.ledger(
-                    budget=self._budget,
-                    caps=self._caps,
-                    time_cap=self._time,
-                    members=[
-                        MemberAccount(
-                            name=m.name,
-                            status=m.status,
-                            bridged=m.context.bridged,
-                            lever=m.lever,
-                            span_id=m.context.span_id,
-                            cancelled=m.cancelled,
-                        )
-                        for m in self._members
-                    ],
-                    runtime=self._runtime_lever,
-                    final=self._final_meter,
-                    swarm=self._swarm_meter,
-                    stop_reason=self.stop_reason,
-                    ended_by=None if ended else _exhaustion(error),
-                    interrupted=not ended,
-                    # M1's final step does not await, so nothing can cancel it
-                    final_cancelled=False,
+            wall_clock = anyio.current_time() - self._start
+            ledger = interval.ledger(
+                budget=self._budget,
+                caps=self._caps,
+                time_cap=self._time,
+                members=[
+                    MemberAccount(
+                        name=m.name,
+                        status=m.status,
+                        bridged=m.context.bridged,
+                        lever=m.lever,
+                        span_id=m.context.span_id,
+                        cancelled=m.cancelled,
+                    )
+                    for m in self._members
+                ],
+                runtime=self._runtime_lever,
+                final=self._final_meter,
+                swarm=self._swarm_meter,
+                stop_reason=self.stop_reason,
+                ended_by=None if ended else _exhaustion(error),
+                interrupted=not ended,
+                # M1's final step does not await, so nothing can cancel it
+                final_cancelled=False,
+            )
+            write_ledger(ledger)
+            spans = {
+                m.name: m.context.span_id
+                for m in self._members
+                if m.context.span_id is not None
+            }
+            places = interval.places(spans)
+            write_metrics(
+                swarm_metrics(
+                    ledger,
+                    interval.events,
+                    places,
+                    [MemberTimes(m.name, m.started, m.time) for m in self._members],
+                    wall_clock,
                 )
             )
+            add_timelines(places, list(spans))
         if error is not None:
             raise error
 

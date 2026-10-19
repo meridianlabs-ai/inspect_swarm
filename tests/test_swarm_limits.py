@@ -804,7 +804,7 @@ async def test_the_ledger_is_written_after_the_final_step() -> None:
         and e.source == "inspect_swarm"
         and isinstance(e.data, dict)
     ]
-    assert kinds[-2:] == ["final", "ledger"]
+    assert kinds[-3:] == ["final", "ledger", "metrics"]
 
 
 @tool

@@ -11,6 +11,7 @@ from inspect_ai._util.registry import (
     registry_unqualified_name,
 )
 from inspect_ai.agent import Agent, AgentState, agent
+from inspect_ai.log import transcript
 from inspect_ai.model import Model, get_model
 from inspect_ai.util import Limit
 
@@ -76,6 +77,7 @@ def swarm(
     ]
 
     async def execute(state: AgentState) -> AgentState:
+        _check_timelines([info.name for info in roster])
         caps = derive_caps(resolved_budget, len(roster))
         if caps.cost is not None:
             models = [_model(record) for record in records]
@@ -104,6 +106,15 @@ def swarm(
         return state
 
     return execute
+
+
+def _check_timelines(names: Sequence[str]) -> None:
+    # each member's timeline is named after it, and a sample's timeline names are unique
+    taken = [t.name for t in transcript().timelines if t.name in names]
+    if taken:
+        raise ValueError(
+            f"The sample already has a timeline named {', '.join(repr(n) for n in taken)}, and each swarm member's timeline is named after the member, as when two swarms with the same member names run in one sample. Give the members other names with member(..., name=...)."
+        )
 
 
 def _preamble(member: MemberInfo, size: int, channels: Sequence[Channel]) -> str:
