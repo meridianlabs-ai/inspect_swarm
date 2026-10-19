@@ -124,7 +124,7 @@ M1's runtime always selects the final answer with `first` (decision: Ransom, 202
 
 ### What the swarm records
 
-The runtime keeps one record in the sample store under the key `inspect_swarm.result`, as `model_dump(mode="json")` of:
+The runtime keeps one record in the sample store under the key `inspect_swarm:result`, as `model_dump(mode="json")` of:
 
 ```python
 # src/inspect_swarm/_record.py
@@ -152,7 +152,7 @@ class SwarmResultRecord(BaseModel):
   - An outer limit that ends the sample early therefore leaves an accurate record with `provisional: true`.
   - Members the controller never started stay `pending` in the final record, which is how the evidence records them as not started.
 - **Why the store.** It is in the store, not only in events, because re-scoring rebuilds `TaskState.store` and nothing else from the run (`src/inspect_ai/_eval/score.py:461-475`). Part 2's scorers read it from there.
-- **Owned by the runtime, readable by member code.** Only the runtime writes `inspect_swarm.result`; task code (tools, member builders, controllers, scorers, Sentinel protocols) must not write it. Every member's Python code shares the sample's one store, so it can read the record while the swarm runs. Models cannot reach the store themselves, and built-in tools read only their own namespaces, but a tool written to read this key gives the members that call it a view of each other's results: a channel between members outside the bus, with none of its fencing or evidence. In M1 that view is each peer's state, status and time, not its output; Part 2's record adds outputs ([What the record adds](#what-the-record-adds)). The user docs say so (decision: Ransom, 2026-10-14).
+- **Owned by the runtime, readable by member code.** Only the runtime writes `inspect_swarm:result`; task code (tools, member builders, controllers, scorers, Sentinel protocols) must not write it. Every member's Python code shares the sample's one store, so it can read the record while the swarm runs. Models cannot reach the store themselves, and built-in tools read only their own namespaces, but a tool written to read this key gives the members that call it a view of each other's results: a channel between members outside the bus, with none of its fencing or evidence. In M1 that view is each peer's state, status and time, not its output; Part 2's record adds outputs ([What the record adds](#what-the-record-adds)). The user docs say so (decision: Ransom, 2026-10-14).
 - **Evidence events.** Each member's end and the final selection also produce an evidence `InfoEvent` with `source="inspect_swarm"` and the payload shape swarm-communication.md uses for its own evidence:
   - `version: 1`, `type: "result"`, and `kind` one of `member_result` or `final`;
   - the common fields `member` and `span_id` (the swarm's span for `final`).
@@ -564,7 +564,7 @@ The scorer `member_scores(scorer, result, ...)` builds works in six steps.
 1. **Skips in-loop scoring.** If `state.completed` is `False`, it returns `None` at once. Final scoring and re-scoring both have `completed=True`.
    - `score()` drops `None` results, so in-loop callers see exactly the task scorer's feedback and call count they saw before. The callers are `react(attempts=...)`, `basic_agent`, the human agent's `/score` and the inspect_swe attempt loops.
    - During the solve the wrapper never runs the inner scorer, touches the sandbox or reads a half-written record.
-2. **Reads the members.** It reads them from the `inspect_swarm.result` record when it exists. Otherwise (a plain agent, not `baseline()`) it treats the sample's `output` as one started member named `solver` with status unknown, and computes its answer key, which is a pure function. It never runs the verifier.
+2. **Reads the members.** It reads them from the `inspect_swarm:result` record when it exists. Otherwise (a plain agent, not `baseline()`) it treats the sample's `output` as one started member named `solver` with status unknown, and computes its answer key, which is a pure function. It never runs the verifier.
 3. **Checks the contract.** If `result.kind` is not `"answer"`, or the record's kind differs from `result.kind`, it returns `best_member` and `mean_member` as NaN with `reason` saying why: `"artifact_without_member_artifacts"`, `"kind_mismatch"` or `"kind_not_declared"`. An M1 record, which has no kind, gives `"kind_not_declared"`. Shared-artifact tasks with member artifacts are handled [below](#shared-artifact-tasks-and-per-member-artifacts).
 4. **Grades each member, in roster order.** A member that never started (state `pending`) gets the outcome **not started**: no value, reason `"not_started"`, and the scorer is not called. It ran nothing, so it is neither a failure nor unavailable. Every other member gets one of three outcomes:
    - **Empty.** No output, or a completion that is empty after stripping whitespace: value `empty_value` (default 0.0), reason `"empty_output"`, and the scorer is not called.
@@ -763,7 +763,7 @@ class SwarmResultRecord(BaseModel):   # adds, with the cost boundary
 | Where | What |
 |---|---|
 | Sample `output` and last assistant message | The final answer, the chosen member's own `ModelOutput`; message metadata names the mode and member (M1) |
-| Sample `store["inspect_swarm.result"]` | The record: every member's state, status and time, and the final selection (M1); outputs, keys, verdicts, the chain's details and `final_verdict` (Part 2) |
+| Sample `store["inspect_swarm:result"]` | The record: every member's state, status and time, and the final selection (M1); outputs, keys, verdicts, the chain's details and `final_verdict` (Part 2) |
 | Transcript | `InfoEvent`s of kinds `member_result` and `final` (M1) and `verdict` (Part 2), with source `inspect_swarm`, at the time they happened; `member_scores`' per-member spans under the scorer span |
 | Sample scores | The task's scorer (final@k, or team@k for artifact tasks); the task's member scorer with `best_member` and `mean_member`, per-member detail in its metadata |
 | Eval results | One `EvalScore` per task scorer and reducer; the member scorer contributes `best_member` and `mean_member` as separate `EvalScore`s with `scored_samples` and `unscored_samples` counts |

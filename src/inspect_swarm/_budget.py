@@ -3,6 +3,7 @@ import math
 from collections.abc import Callable, Sequence, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import Literal
 
 import anyio
@@ -51,7 +52,7 @@ class Budget(BaseModel):
     """Fraction of each sample limit held back when a cap is derived."""
 
     split: Literal["pool", "equal"] | tuple[float, ...] = "pool"
-    """How the cost and token caps are divided between members: one shared pool, equal shares, or one weight per member in roster order."""
+    """How the cost and token caps are divided between members: one shared pool, equal shares, or one weight per member in roster order. A member that uses up its share stops, and its unused share is not given to the others."""
 
     grace: float = 120.0
     """Seconds members are given to finish in-flight work after a stop."""
@@ -179,6 +180,62 @@ def _check_explicit(kind: str, cap: float, sample: Limit) -> None:
         )
 
 
+def share_nodes(
+    budget: Budget, caps: Caps, names: Sequence[str]
+) -> dict[str, list[Limit]]:
+    # each member's share of the cost and token caps, as the nodes its wrapper enters
+    # below its lever; a pool has none. Run at swarm start, after derive_caps().
+    if budget.split == "pool":
+        return {}
+    if caps.cost is None and caps.tokens is None:
+        raise ValueError(
+            f"Budget.split={budget.split!r} divides the swarm's cost and token caps, but the swarm has neither. Set a cost or token limit on the sample or in the Budget, or use split='pool'."
+        )
+    weights = [1.0] * len(names) if budget.split == "equal" else list(budget.split)
+    assert len(weights) == len(names)
+    # each member's fraction of the caps, exact: large weights neither overflow nor
+    # round a share away
+    total = sum(Fraction(w) for w in weights)
+    fractions = [Fraction(w) / total for w in weights]
+    costs = None if caps.cost is None else _cost_shares(caps.cost, fractions)
+    tokens = None if caps.tokens is None else _token_shares(caps.tokens, fractions)
+    shares: dict[str, list[Limit]] = {}
+    for i, name in enumerate(names):
+        nodes: list[Limit] = []
+        if costs is not None:
+            nodes.extend(CostPair(costs[i], owner=name, role="share").nodes)
+        if tokens is not None:
+            nodes.append(
+                SwarmTokenNode(tokens[i], caps.token_type, owner=name, role="share")
+            )
+        shares[name] = nodes
+    return shares
+
+
+def _cost_shares(cap: float, fractions: Sequence[Fraction]) -> list[float]:
+    shares = [float(Fraction(cap) * f) for f in fractions]
+    if 0 in shares:
+        raise ValueError(
+            f"Budget.split gives a member a cost share of zero: its weight is too small a fraction of the total to divide the swarm's cost cap of ${cap:,}. Use weights closer together."
+        )
+    return shares
+
+
+def _token_shares(cap: int, fractions: Sequence[Fraction]) -> list[int]:
+    # whole shares that sum to the cap: each member's floor, then one token at a time to
+    # the largest fractional parts, ties by roster order
+    exact = [cap * f for f in fractions]
+    shares = [math.floor(x) for x in exact]
+    by_fraction = sorted(range(len(exact)), key=lambda i: (shares[i] - exact[i], i))
+    for i in by_fraction[: cap - sum(shares)]:
+        shares[i] += 1
+    if 0 in shares:
+        raise ValueError(
+            f"The swarm's token cap of {cap:,} is too small to split between its {len(fractions)} members: a member's share would be zero tokens. Raise the token cap, or use split='pool'."
+        )
+    return shares
+
+
 def check_cost_data(
     models: Sequence[str | Model], *, built: Set[str] = frozenset()
 ) -> None:
@@ -267,7 +324,7 @@ class SwarmNode(Limit):
         if member is not None and member.bridged:
             # a raise here would reach the sandbox service and end the sample
             if member.stop_cause is None:
-                member.stop_cause = self._stop_cause(type)
+                member.stop_cause = self.stop_cause(type)
             member.scope.cancel()
             return
         raise LimitExceededError(
@@ -278,7 +335,8 @@ class SwarmNode(Limit):
             source=self,
         )
 
-    def _stop_cause(self, type: _LimitType) -> str:
+    def stop_cause(self, type: str) -> str:
+        # the member status this node gives when it stops a member
         match self.role:
             case "cap" | "meter":
                 return "swarm_cap"

@@ -21,6 +21,7 @@ from ._budget import (
     check_cost_data,
     derive_caps,
     is_bridged,
+    share_nodes,
 )
 from ._bus._policy import CommPolicy
 from ._channel._channel import Channel
@@ -54,7 +55,6 @@ def swarm(
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, an argument has the wrong type, or `policy` is a string, as a replay from the log passes it.
         ValueError: If member names collide, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, or a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet).
-        NotImplementedError: If `budget` divides the caps into shares (`split` other than `"pool"`).
     """
     records = _members(members)
     names = member_names(records)
@@ -72,11 +72,6 @@ def swarm(
     _check_bus_channels(resolved_channels, records, names, roster)
     resolved_policy = _policy(policy)
     resolved_budget = _budget(budget)
-    if resolved_budget.split != "pool":
-        # shares are milestone M1-8; until then a split would run as one pool
-        raise NotImplementedError(
-            f"swarm(): Budget.split={resolved_budget.split!r} is not supported yet. Use split='pool', where members share the caps."
-        )
     preambles = {
         info.name: _preamble(info, len(roster), resolved_channels) for info in roster
     }
@@ -109,6 +104,8 @@ def swarm(
             caps=cap_nodes,
             time=caps.time,
             grace=resolved_budget.grace,
+            budget=resolved_budget,
+            shares=share_nodes(resolved_budget, caps, [info.name for info in roster]),
             channels=resolved_channels,
             policy=resolved_policy,
         ).run(resolved_controller.run)

@@ -168,6 +168,7 @@ async def test_a_woken_iterator_keeps_the_event_that_woke_it() -> None:
             caps=[],
             time=None,
             grace=0,
+            budget=Budget(),
         )
         [m] = run._members
         m.state = "running"
