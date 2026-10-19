@@ -98,7 +98,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 | Repository | What |
 |---|---|
 | **inspect_swarm** | `swarm()`, controller, members, budget and ledger, bus and channels, evidence, metrics, scorers, prompts, Scout scanners |
-| **inspect_ai** | Only where needed: the `swarm_controller` and `swarm_channel` registry types (before M1), a tool-state scope for members (before M1), a scoped owner for `background()` (M2), clean `react()` re-entry, per-span usage, a `Steer` agent-channel item (only for optional urgent messages after M2) |
+| **inspect_ai** | Only where needed: the `swarm_controller` and `swarm_channel` registry types (before M1), a tool-state scope for members (before M1), a switch that turns span `StoreEvent`s off inside a swarm (M1; decision: Ransom, 2026-10-19), a scoped owner for `background()` (M2), clean `react()` re-entry, per-span usage, a `Steer` agent-channel item (only for optional urgent messages after M2) |
 | **inspect_swe** | Enabling and mapping Codex multi-agent v2 and Claude Code agent teams |
 | **inspect_sentinel** | Monitors and protocols |
 | **ORBIT-like packages** | Scenarios, attacks, defenses |
