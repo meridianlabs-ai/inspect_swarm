@@ -644,6 +644,41 @@ def test_a_sample_limit_leaves_the_ledger_and_the_provisional_answer(
     ]
 
 
+@agent
+def cleanup_crash() -> Agent:
+    # works until cancelled, and its cleanup then fails
+    async def execute(state: AgentState) -> AgentState:
+        try:
+            await anyio.sleep_forever()
+        finally:
+            raise RuntimeError("cleanup failed")
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_cleanup_error_does_not_hide_the_sample_limit_that_ended_the_swarm() -> (
+    None
+):
+    ledgers: list[SwarmLedger] = []
+    # bare on asyncio, grouped with the cancellation on trio
+    with pytest.raises(BaseException) as raised:
+        async with sample(time=0.05):
+            try:
+                await swarm(
+                    member(cleanup_crash()),
+                    channels=[],
+                    # a time cap above the sample's limit, which ends the swarm first
+                    budget=Budget(time=60),
+                )(AgentState(messages=[ChatMessageUser(content="task")]))
+            finally:
+                ledgers.append(_ledger())
+    # the cleanup error still propagates
+    assert "cleanup failed" in [str(e) for e in _leaves(raised.value)]
+    [ledger] = ledgers
+    assert (ledger.stop_reason, ledger.interrupted) == ("sample_limit:time", True)
+
+
 def test_the_swarms_messages_stay_within_a_small_sample_message_limit(
     tmp_path: Path,
 ) -> None:

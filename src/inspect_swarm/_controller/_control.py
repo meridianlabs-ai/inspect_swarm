@@ -515,9 +515,9 @@ class SwarmRun:
 
 
 # How a sample limit or the operator ended the swarm: from the foreign error it raised,
-# else, for a cancellation, from the sample (a working limit or a limit reached in a
-# bridged member, an operator's interrupt, or the sample's time limit). None for any
-# other error or cancellation.
+# else from the sample, for a cancellation (a working limit or a limit reached in a
+# bridged member, an operator's interrupt, or the sample's time limit), which a cleanup
+# error raised under it can hide. None for any other error or cancellation.
 def _exhaustion(error: Exception | None) -> str | None:
     limits = sample_limits()
     if error is not None:
@@ -530,7 +530,8 @@ def _exhaustion(error: Exception | None) -> str | None:
             limits.time,
         ]
         _, limit, _ = classify_errors(error, [], roots)
-        return f"sample_limit:{limit.type}" if limit is not None else None
+        if limit is not None:
+            return f"sample_limit:{limit.type}"
     active = sample_active()
     if active is not None and active.interrupt_action is not None:
         return "operator"
