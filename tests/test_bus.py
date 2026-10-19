@@ -1,8 +1,10 @@
 import json
 import logging
+from collections import UserDict
 from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 import anyio
@@ -711,15 +713,45 @@ def _nested(shape: str, depth: int) -> JsonValue:
     return value
 
 
+def _deep_op(form: str, depth: int) -> Mapping[str, Any]:
+    # an op of `depth` levels, counting the op itself: plain containers, or other
+    # mappings at the root or below it
+    inner: Any = _nested("object" if form in _MAPPINGS else form, depth - 1)
+    if form == "proxy":
+        return MappingProxyType({"k": inner})
+    if form == "userdict":
+        return UserDict({"k": inner})
+    if form == "nested-proxy":
+        return {"k": MappingProxyType(inner)}
+    return {"k": inner}
+
+
+_MAPPINGS = ("proxy", "userdict", "nested-proxy")
+
+
 @pytest.mark.anyio
-@pytest.mark.parametrize("shape", ["array", "object", "mixed"])
-@pytest.mark.parametrize("depth", [100, 101, 251])
+@pytest.mark.parametrize(
+    "form,depth",
+    [
+        *[
+            (shape, d)
+            for shape in ("array", "object", "mixed")
+            for d in (100, 101, 251)
+        ],
+        ("proxy", 100),
+        ("proxy", 101),
+        ("proxy", 1100),
+        ("userdict", 251),
+        ("nested-proxy", 100),
+        ("nested-proxy", 251),
+    ],
+)
 async def test_operation_data_nested_too_deep_is_refused_before_evidence(
-    shape: str, depth: int
+    form: str, depth: int
 ) -> None:
     # as deep as Inspect takes a tool call's arguments; deeper would be cut short in
     # the log, or stop it being written
-    op: dict[str, JsonValue] = {"k": _nested(shape, depth - 1)}
+    op = _deep_op(form, depth)
     bus, _ = _bus()
     async with sample() as transcript:
         if depth > 100:

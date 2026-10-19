@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import anyio
 from inspect_ai._util.exception import TerminateSampleError
-from inspect_ai._util.json import exceeds_max_depth
 from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
 from inspect_ai.tool import ToolError
 from inspect_ai.util._span import current_agent_span_id, current_span_id
@@ -270,15 +269,16 @@ def _frozen_op(draft: Draft) -> Mapping[str, FrozenJson]:
     # tool call's arguments would be cut short in the log or stop it being written, and
     # a lone surrogate from model output would be rewritten in the log, or stop the log
     # being written when it is in a key
-    if exceeds_max_depth(draft.op, MAX_TOOL_CALL_ARGUMENTS_DEPTH):
-        raise ToolError(
-            f"the {draft.kind}'s operation data is nested more than {MAX_TOOL_CALL_ARGUMENTS_DEPTH} levels deep"
-        )
     try:
-        frozen = freeze_json(draft.op)
+        frozen = freeze_json(draft.op, MAX_TOOL_CALL_ARGUMENTS_DEPTH)
     except UnicodeEncodeError as ex:
+        # before ValueError, which it subclasses
         raise ToolError(
             f"the {draft.kind} is not valid text: its operation data has a string with an unpaired surrogate at character {ex.start}"
+        ) from None
+    except ValueError:
+        raise ToolError(
+            f"the {draft.kind}'s operation data is nested more than {MAX_TOOL_CALL_ARGUMENTS_DEPTH} levels deep"
         ) from None
     assert isinstance(frozen, Mapping)
     return frozen
