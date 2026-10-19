@@ -1,3 +1,4 @@
+import json
 import logging
 from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
@@ -7,6 +8,7 @@ from typing import Any
 import anyio
 import pytest
 from inspect_ai._util.exception import TerminateSampleError
+from inspect_ai._util.json import to_json_safe
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.event import InfoEvent
 from inspect_ai.log._transcript import Transcript
@@ -669,6 +671,48 @@ async def test_operation_data_that_is_not_json_is_refused() -> None:
     with pytest.raises(TypeError, match="op must be JSON data; it holds a set"):
         await _send(bus, op=op)
     assert _board(bus).applied == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "op",
+    [
+        {"text": "a\ud800"},
+        {"files": [{"path": "f\udc00"}]},
+        {"files": [{"\ud800": "f"}]},
+    ],
+    ids=["value", "nested", "key"],
+)
+async def test_operation_text_that_is_not_valid_is_refused_before_evidence(
+    op: dict[str, JsonValue],
+) -> None:
+    # a lone surrogate, which a model's JSON tool arguments can carry, would be
+    # rewritten by the log's serializer, or stop it when it is in a key
+    bus, _ = _bus()
+    async with sample() as transcript:
+        with pytest.raises(ToolError, match="operation data has a string with an"):
+            await _send(bus, op=op)
+    assert (bus.records, _board(bus).applied, _comm(transcript)) == ((), [], [])
+    # what was written can be logged
+    json.loads(to_json_safe(transcript.events))
+    assert (await _send(bus)).record.id == "b-1"
+
+
+@pytest.mark.anyio
+async def test_operation_text_survives_the_log() -> None:
+    op: dict[str, JsonValue] = {"text": "café 🙂", "files": [{"päth": "日本"}]}
+    bus, _ = _bus()
+    async with sample() as transcript:
+        await _send(bus, op=op)
+    [sent] = [
+        e
+        for e in transcript.events
+        if isinstance(e, InfoEvent)
+        and isinstance(e.data, dict)
+        and e.data.get("kind") == "sent"
+    ]
+    logged = json.loads(to_json_safe(sent))
+    assert logged["data"]["record"]["op"] == op
 
 
 @pytest.mark.anyio

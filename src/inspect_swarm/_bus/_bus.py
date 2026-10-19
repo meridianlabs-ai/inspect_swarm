@@ -126,7 +126,7 @@ class Bus:
             routed_out=(),
             payload=draft.payload,
             # detached from the tool's own dict, and read-only at every depth
-            op=None if draft.op is None else _frozen_op(draft.op),
+            op=None if draft.op is None else _frozen_op(draft),
             wake=False,
             reply_to=None,
             via="tool",
@@ -258,8 +258,15 @@ class Bus:
         return None
 
 
-def _frozen_op(op: Mapping[str, JsonValue]) -> Mapping[str, FrozenJson]:
-    frozen = freeze_json(op)
+def _frozen_op(draft: Draft) -> Mapping[str, FrozenJson]:
+    # refused here, before any evidence: a lone surrogate from model output would be
+    # rewritten in the log, or stop the log being written when it is in a key
+    try:
+        frozen = freeze_json(draft.op)
+    except UnicodeEncodeError as ex:
+        raise ToolError(
+            f"the {draft.kind} is not valid text: its operation data has a string with an unpaired surrogate at character {ex.start}"
+        ) from None
     assert isinstance(frozen, Mapping)
     return frozen
 

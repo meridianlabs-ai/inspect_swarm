@@ -271,13 +271,15 @@ class Record:
     recipients: tuple[str, ...]   # member names they resolved to at send time, after routes
     routed_out: tuple[str, ...]   # resolved names the channel's routes dropped; () without routes
     payload: str                  # text only; may be empty where the channel allows
-    op: Mapping[str, JsonValue] | None  # channel operation data (later channels); None for messages
+    op: Mapping[str, FrozenJson] | None  # channel operation data (later channels); None for messages
     wake: bool
     reply_to: str | None          # causation: a record id the sender has sent or read
     via: Literal["tool", "bridge", "internal"]
     sender_span_id: str | None    # the sender's agent span
     tool_span_id: str | None      # the tool span the call ran in; None via the bridge or internal
 ```
+
+`op` is JSON that cannot be changed: objects are read-only mappings and arrays are tuples, so the policy, the channel and the bus's history can share one record. Evidence holds it as plain JSON. A channel compares arrays as tuples: M2-8's `op["files"]` arrives as a tuple, not a list. A string or key in it that is not valid UTF-8 is refused at step 0 (decision: Ransom, 2026-10-19).
 
 **Records in model input.** The swarm writes evidence only as things happen: `sent`, `delivered`, `notified` and `read`. It does not decide afterwards whether a model saw a record. Each swarm message that reaches a model is tied to its records like this:
 
@@ -318,7 +320,7 @@ Bus rules, not Inspect limits; they never raise `LimitExceededError`, and they d
 | `rate` per sender | 20 sends per 60 s, sliding window on `anyio.current_time()` | reject: "rate limit: retry in N s" |
 | `dedupe` | an identical payload from the same sender to a recipient that still has it unread | reject: "duplicate of unread m-9" |
 
-The cap is in bytes because Inspect truncates tool output by UTF-8 bytes, and every accepted message must fit in one read ([Direct messages](#direct-messages)). A broadcast counts once against the sender's rate and once against each recipient's inbox. Loop detection beyond these (Magentic-One's stall counter, Strands' unique-senders rule) stays a later option, as swarm.md says. The bus counts each control's rejections per member for the metrics in swarm.md.
+The cap is in bytes because Inspect truncates tool output by UTF-8 bytes, and every accepted message must fit in one read ([Direct messages](#direct-messages)). A broadcast counts once against the sender's rate and once against each recipient's inbox. Loop detection beyond these (Magentic-One's stall counter, Strands' unique-senders rule) stays a later option, as swarm.md says. The bus counts each control's rejections per member for the metrics in swarm.md. The bus reads a channel's controls from `Channel.storm`, which the channel's factory sets from its parameters (decision: Ransom, 2026-10-19).
 
 ### Direct messages
 
@@ -453,7 +455,7 @@ CommPolicy = Callable[[Record, SwarmView], Awaitable[CommDecision | None]]
 
 | Kind | When | Where written | Fields beyond the common ones |
 |---|---|---|---|
-| `sent` | step 3, every attempt that reached the bus | sender's tool span (or agent span via the bridge) | full record; `decision` (policy action, explanation); `storm` (control and reason, if rejected); `original_payload` when modified |
+| `sent` | step 3, every attempt that reached the bus | sender's tool span (or agent span via the bridge) | full record; `decision` (policy action, explanation); `rejected` (`control` and `reason` when the attempt was refused or failed; control is `policy`, `liveness`, `payload`, `max_bytes`, `rate`, `admit`, `cancelled` or `policy_error`; `null` on a commit); `original_payload` when modified |
 | `delivered` | step 4 | same span | record id, recipients, `seq` (the commit sequence number), the result `apply()` returned |
 | `notified` | a notice is added | recipient's agent span | notice id, the notice message's id, record ids |
 | `read` | `read_messages` returns | reader's tool span | read id, record ids, reader, `tool_span_id`, through which the result message's tool call id is found ([Records in model input](#records-and-the-bus)) |
