@@ -398,7 +398,7 @@ class Meter(BaseModel):
 class Calls(BaseModel):        # counted from ModelEvents
     calls: int                 # completed, non-cache model calls
     cache_replays: int         # events with cache="read": charged zero
-    errored: int               # attempts that ended in an error, cancellation included: usage unknown
+    errored: int               # attempts that ended in an error, cancellation included, and retries inside a call: usage unknown
     no_usage: int              # completed with output but no usage
     unpriced: int              # completed with usage whose total_cost is None
 
@@ -449,6 +449,7 @@ Sources and coverage:
   - The token-tree node's own per-call count (`unpriced_calls_recorded`, taken in `record()` before aggregation) and `unpriced_models` (models whose sample delta has tokens but no cost) are kept as cross-checks.
   - **Errored and usage-less calls:**
     - `errored` counts every non-cache attempt whose event ended with an `error`. That includes Inspect's cancellation (`_model.py:1666-1674`), attempt and stream-idle timeouts (`_model.py:1641-1650`), transport and SDK timeouts, errors after streaming began (`src/inspect_ai/model/_openai.py:1562-1569` handles an SDK error after HTTP 200), and provider error responses, whether or not a retry later succeeded (`_model.py:1652-1657`).
+    - It also counts the requests a provider's client retried inside one call, which Inspect's HTTP hooks add to the event's `retries` (`log/_samples.py:781-786`). Each retry follows a failed request, and the event keeps the usage of only the last one.
     - None of these records usage, and the event keeps only an error string, not a status code (`event/_model.py:126`). So the ledger cannot tell a request the provider rejected before inference from one it ran and billed, and counts every errored attempt as unknown expenditure. There is no zero-spend exception, not even for rate-limit (HTTP 429) rejections.
     - A refusal at Inspect's own pre-dispatch check is not counted: it is raised before the event exists (`_model.py:1568-1570`) and sends nothing.
     - `no_usage` counts events completed with output but no usage (`_model.py:1733-1736`).

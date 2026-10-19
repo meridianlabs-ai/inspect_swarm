@@ -46,7 +46,8 @@ class Calls(BaseModel):
     calls: int = 0
     # events with cache="read": charged zero
     cache_replays: int = 0
-    # attempts that ended in an error, cancellation included: usage unknown
+    # attempts that ended in an error, cancellation included, and the requests a
+    # provider's client retried inside one call: usage unknown
     errored: int = 0
     # completed with output but no usage
     no_usage: int = 0
@@ -56,7 +57,10 @@ class Calls(BaseModel):
     def count(self, call: "CallRecord") -> None:
         if call.cache_read:
             self.cache_replays += 1
-        elif call.errored or call.pending:
+            return
+        # each retry follows a failed request whose usage the event does not keep
+        self.errored += call.retries
+        if call.errored or call.pending:
             # an event still pending once the swarm has drained never completed
             self.errored += 1
         else:
@@ -144,6 +148,8 @@ class CallRecord:
     cache_read: bool
     errored: bool
     pending: bool
+    # retries inside the call, by the provider's client
+    retries: int
     usage: ModelUsage | None
 
 
@@ -166,6 +172,7 @@ class EventLog:
                 cache_read=event.cache == "read",
                 errored=event.error is not None,
                 pending=bool(event.pending),
+                retries=event.retries or 0,
                 usage=event.output.usage,
             )
 

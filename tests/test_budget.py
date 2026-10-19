@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 import anyio
+import httpx
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai._eval.evalset import task_identifier
@@ -33,6 +34,7 @@ from inspect_ai.model import (
     ChatMessageUser,
     GenerateConfig,
     Model,
+    ModelCall,
     ModelCost,
     ModelInfo,
     ModelOutput,
@@ -44,6 +46,9 @@ from inspect_ai.model import (
 )
 from inspect_ai.model._providers.mockllm import (  # pyright: ignore[reportMissingTypeStubs]
     MockLLM,
+)
+from inspect_ai.model._providers.util.hooks import (  # pyright: ignore[reportMissingTypeStubs]
+    HttpxHooks,
 )
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.tool import Tool, ToolChoice, ToolInfo, tool
@@ -1104,6 +1109,46 @@ def _retrying_model(script: Script, cost: float) -> Model:
     return _api_model(Retrying, script, cost)
 
 
+def _client_retrying_model(calls: Sequence[list[int]], cost: float) -> Model:
+    # each call sends the next list's HTTP statuses through Inspect's HTTP hooks, as a
+    # provider's client retries inside one call, and fails unless the last is 200;
+    # Inspect retries a failed call
+    pending = list(calls)
+
+    class ClientRetrying(MockLLM):
+        async def generate(
+            self,
+            input: list[ChatMessage],
+            tools: list[ToolInfo],
+            tool_choice: ToolChoice,
+            config: GenerateConfig,
+        ) -> ModelOutput | tuple[ModelOutput, ModelCall]:
+            statuses = pending.pop(0)
+            responses = iter(statuses)
+            transport = httpx.MockTransport(lambda _: httpx.Response(next(responses)))
+            async with httpx.AsyncClient(transport=transport) as client:
+                hooks = HttpxHooks(client, api=self)
+                status = 0
+                with hooks.request() as request_id:
+                    for _ in statuses:
+                        response = await client.post(
+                            "https://provider.test/generate",
+                            headers={HttpxHooks.REQUEST_ID_HEADER: request_id},
+                        )
+                        status = response.status_code
+            if status != 200:
+                raise RuntimeError("provider: retries exhausted")
+            return await super().generate(input, tools, tool_choice, config)
+
+        def should_retry(self, ex: Exception) -> bool:
+            return True
+
+        def retry_wait(self) -> WaitBaseT | None:
+            return wait_none()
+
+    return _api_model(ClientRetrying, Script(), cost)
+
+
 def _rated_model(
     outputs: Sequence[ModelOutput], *, input_call: float, output_call: float
 ) -> Model:
@@ -1558,6 +1603,30 @@ async def test_ledger_a_recovered_error_clears_total_complete() -> None:
     assert m.status == "submitted"
     assert m.calls == Calls(calls=1, errored=1)
     assert not ledger.total_complete
+
+
+@pytest.mark.parametrize(
+    ("calls", "expected"),
+    [
+        # a failed request, then a successful one, in one call
+        pytest.param([[500, 200]], Calls(calls=1, errored=1), id="then-success"),
+        # a call whose client gave up after two failed requests, then Inspect's retry
+        pytest.param([[500, 500], [200]], Calls(calls=1, errored=2), id="then-failure"),
+    ],
+)
+@pytest.mark.anyio
+async def test_ledger_counts_requests_a_client_retried_inside_a_call(
+    calls: list[list[int]], expected: Calls
+) -> None:
+    gc.collect()
+    model = _client_retrying_model(calls, cost=1.0)
+    ledger = await _ledger(swarm(generator(model), channels=[]))
+    [m] = ledger.members
+    assert m.status == "submitted"
+    assert m.calls == expected
+    assert ledger.calls == expected
+    assert not ledger.total_complete
+    assert not ledger.attribution_complete
 
 
 @pytest.mark.anyio
