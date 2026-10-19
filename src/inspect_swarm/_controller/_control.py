@@ -291,7 +291,7 @@ class SwarmRun:
         # the swarm's span
         self._span_id = current_span_id()
         self._settle()
-        error: Exception | None = None
+        error: BaseException | None = None
         ended = False
         try:
             with ExitStack() as meter:
@@ -309,11 +309,13 @@ class SwarmRun:
                                 if self._time is not None:
                                     runtime_tg.start_soon(self._time_cap, self._time)
                                 runtime_tg.start_soon(self._run_controller, controller)
-                except Exception as ex:
-                    # a foreign error from a member or the controller. The wrappers have
-                    # removed the swarm's own leaves; they are removed again here, so
-                    # that none reaches the runner as the sample's limit. Only the
-                    # swarm's own leaves would leave nothing to raise.
+                except (Exception, BaseExceptionGroup) as ex:
+                    # a foreign error from a member or the controller, or on trio a
+                    # cancellation grouped with errors, which the wrappers do not
+                    # catch. The swarm's own leaves are removed here, so that none
+                    # reaches the runner as the sample's limit; a cancellation stays,
+                    # and skips the final step. Only the swarm's own leaves would leave
+                    # nothing to raise.
                     _, _, error = classify_errors(ex, self._nodes(), [])
                 if error is None:
                     # the final step, outside the caps: only the sample's limits apply
@@ -516,9 +518,9 @@ class SwarmRun:
 
 # How a sample limit or the operator ended the swarm: from the foreign error it raised,
 # else from the sample, for a cancellation (a working limit or a limit reached in a
-# bridged member, an operator's interrupt, or the sample's time limit), which a cleanup
-# error raised under it can hide. None for any other error or cancellation.
-def _exhaustion(error: Exception | None) -> str | None:
+# bridged member, an operator's interrupt, or the sample's time limit), including one
+# that a cleanup error raised under it hides. None for any other error or cancellation.
+def _exhaustion(error: BaseException | None) -> str | None:
     limits = sample_limits()
     if error is not None:
         roots = [
@@ -532,6 +534,9 @@ def _exhaustion(error: Exception | None) -> str | None:
         _, limit, _ = classify_errors(error, [], roots)
         if limit is not None:
             return f"sample_limit:{limit.type}"
+        if not _under_cancellation(error):
+            # an error of its own, though the sample's time may have run out meanwhile
+            return None
     active = sample_active()
     if active is not None and active.interrupt_action is not None:
         return "operator"
@@ -541,3 +546,33 @@ def _exhaustion(error: Exception | None) -> str | None:
     if time.limit is not None and time.usage >= time.limit:
         return "sample_limit:time"
     return None
+
+
+# Whether an error is a cancellation, or holds an error raised while one propagated. A
+# cancellation beside an error in a group may have come after it, as trio delivers an
+# expired deadline once a crash reaches a task group.
+def _under_cancellation(error: BaseException) -> bool:
+    cancelled = anyio.get_cancelled_exc_class()
+    group = (
+        cast(BaseExceptionGroup[BaseException], error)
+        if isinstance(error, BaseExceptionGroup)
+        else BaseExceptionGroup("swarm", [error])
+    )
+    _, errors = group.split(cancelled)
+    if errors is None:
+        return True
+    during, _ = errors.split(
+        lambda e: not isinstance(e, BaseExceptionGroup) and _raised_during(e, cancelled)
+    )
+    return during is not None
+
+
+def _raised_during(error: BaseException, cancelled: type[BaseException]) -> bool:
+    seen: set[int] = set()
+    context = error.__context__
+    while context is not None and id(context) not in seen:
+        if isinstance(context, cancelled):
+            return True
+        seen.add(id(context))
+        context = context.__context__
+    return False

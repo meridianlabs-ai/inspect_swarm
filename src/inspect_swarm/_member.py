@@ -385,14 +385,15 @@ def _status_for(error: LimitExceededError, lever: Lever) -> str:
 
 # Splits an error from a member or the controller into its leaves: whether any is from
 # one of the swarm's caps, the first from the caller's own nodes, and the rest, which is
-# foreign: a single leaf bare, several as a group.
+# foreign: a single leaf bare, several as a group. A cancellation in the group, as trio
+# keeps one beside errors, stays in the rest.
 def classify_errors(
-    error: Exception, caps: Sequence[Limit], own: Sequence[Limit]
-) -> tuple[bool, LimitExceededError | None, Exception | None]:
+    error: BaseException, caps: Sequence[Limit], own: Sequence[Limit]
+) -> tuple[bool, LimitExceededError | None, BaseException | None]:
     group = (
-        cast(ExceptionGroup[Exception], error)
-        if isinstance(error, ExceptionGroup)
-        else ExceptionGroup("swarm", [error])
+        cast(BaseExceptionGroup[BaseException], error)
+        if isinstance(error, BaseExceptionGroup)
+        else BaseExceptionGroup("swarm", [error])
     )
     cap_errors, rest = group.split(lambda e: _source_in(e, caps))
     owned, foreign = (
@@ -408,12 +409,12 @@ def classify_errors(
 
 
 # A group with a single leaf as that leaf, as collect() raises it; others unchanged.
-def unwrap(error: Exception) -> Exception:
-    if isinstance(error, ExceptionGroup):
-        leaves = _leaves(cast(ExceptionGroup[Exception], error))
+def unwrap(error: BaseException) -> BaseException:
+    if isinstance(error, BaseExceptionGroup):
+        leaves = _leaves(cast(BaseExceptionGroup[BaseException], error))
         if len(leaves) == 1:
             return leaves[0]
-    return cast(Exception, error)
+    return cast(BaseException, error)
 
 
 def _source_in(error: BaseException, nodes: Sequence[Limit]) -> bool:
@@ -422,11 +423,11 @@ def _source_in(error: BaseException, nodes: Sequence[Limit]) -> bool:
     )
 
 
-def _leaves(group: BaseExceptionGroup[Exception]) -> list[Exception]:
-    leaves: list[Exception] = []
+def _leaves(group: BaseExceptionGroup[BaseException]) -> list[BaseException]:
+    leaves: list[BaseException] = []
     for ex in group.exceptions:
         if isinstance(ex, BaseExceptionGroup):
-            leaves.extend(_leaves(ex))
+            leaves.extend(_leaves(cast(BaseExceptionGroup[BaseException], ex)))
         else:
             leaves.append(ex)
     return leaves

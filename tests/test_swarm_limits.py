@@ -1,3 +1,4 @@
+import time
 from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from pathlib import Path
@@ -48,7 +49,7 @@ from inspect_swarm import (
     swarm,
     swarm_controller,
 )
-from inspect_swarm._budget import CostPair
+from inspect_swarm._budget import CostPair, SwarmNode
 from inspect_swarm._controller._control import SwarmRun
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import SwarmLedger
@@ -677,6 +678,97 @@ async def test_a_cleanup_error_does_not_hide_the_sample_limit_that_ended_the_swa
     assert "cleanup failed" in [str(e) for e in _leaves(raised.value)]
     [ledger] = ledgers
     assert (ledger.stop_reason, ledger.interrupted) == ("sample_limit:time", True)
+
+
+@agent
+def limited_cleanup(model: Model) -> Agent:
+    # reaches its own limit in one task, still cleaning up when the sample's time limit
+    # cancels it, while another task's cleanup fails
+    async def execute(state: AgentState) -> AgentState:
+        async def limited() -> None:
+            try:
+                await model.generate(state.messages)
+            finally:
+                with anyio.CancelScope(shield=True):
+                    await anyio.sleep(0.05)
+
+        async def failing_cleanup() -> None:
+            try:
+                await anyio.sleep_forever()
+            finally:
+                raise RuntimeError("cleanup failed")
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(limited)
+            tg.start_soon(failing_cleanup)
+            await anyio.sleep_forever()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_cancellation_grouped_with_errors_loses_the_swarms_leaves() -> None:
+    # on trio the cancellation stays in the member's group, which its wrapper does not
+    # catch, so the runtime removes the member's limit
+    ledgers: list[SwarmLedger] = []
+    with pytest.raises(BaseException) as raised:
+        async with sample(time=0.01):
+            try:
+                await swarm(
+                    member(
+                        limited_cleanup(scripted_model()),
+                        limits=[token_limit(1)],
+                    ),
+                    channels=[],
+                    budget=Budget(time=60),
+                )(AgentState(messages=[ChatMessageUser(content="task")]))
+            finally:
+                ledgers.append(_ledger())
+    leaves = _leaves(raised.value)
+    assert "cleanup failed" in [str(e) for e in leaves]
+    assert not [
+        e
+        for e in leaves
+        if isinstance(e, LimitExceededError) and isinstance(e.source, SwarmNode)
+    ]
+    [ledger] = ledgers
+    assert ledger.stop_reason == "sample_limit:time"
+
+
+@agent
+def blocking_crash() -> Agent:
+    # blocks past the sample's time limit without awaiting, then fails
+    async def execute(state: AgentState) -> AgentState:
+        time.sleep(0.03)
+        raise RuntimeError("crashed")
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_crash_after_the_samples_time_ran_out_is_not_its_time_limit() -> None:
+    async def run_members(control: SwarmControl) -> StopReason:
+        # never stops the swarm, so only the crash can end it
+        control.start(control.members[0])
+        await anyio.sleep_forever()
+        raise AssertionError("unreachable")
+
+    ledgers: list[SwarmLedger] = []
+    with pytest.raises(BaseException) as raised:
+        async with sample(time=0.01):
+            try:
+                await swarm(
+                    blocking_crash(),
+                    controller=_controller(run_members, "limits_test_blocking_crash"),
+                    channels=[],
+                    budget=Budget(time=60),
+                )(AgentState(messages=[ChatMessageUser(content="task")]))
+            finally:
+                ledgers.append(_ledger())
+    assert "crashed" in [str(e) for e in _leaves(raised.value)]
+    [ledger] = ledgers
+    assert (ledger.stop_reason, ledger.interrupted) == (None, True)
 
 
 def test_the_swarms_messages_stay_within_a_small_sample_message_limit(
