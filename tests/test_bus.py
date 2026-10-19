@@ -38,7 +38,7 @@ from inspect_swarm._bus._bus import Bus, Delivery, current_bus
 from inspect_swarm._bus._record import Draft, thaw_json
 from inspect_swarm._bus._storm import StormControls
 
-from .swarm_runtime import run_swarm, sample, scripted_model, statuses, stopped
+from .swarm_runtime import run_swarm, sample, scripted_model, statuses
 
 
 class _BoardState:
@@ -814,7 +814,7 @@ async def test_a_stop_refuses_records_whose_policy_was_running_and_later_ones() 
 
     buses: list[Bus] = []
     outcomes: list[str] = []
-    stop = await run_swarm(
+    outcome = await run_swarm(
         swarm(
             member(
                 bus_user,
@@ -826,7 +826,7 @@ async def test_a_stop_refuses_records_whose_policy_was_running_and_later_ones() 
             policy=policy,
         )
     )
-    assert stop["reason"] == "all_done"
+    assert outcome.reason == "all_done"
     assert outcomes == ["the swarm is stopping; nothing more is delivered."] * 2
     [bus] = buses
     assert bus.records == ()
@@ -904,13 +904,12 @@ async def test_a_limit_the_policys_model_reaches_is_evidenced(
         budget=Budget(tokens=1) if limit == "swarm" else Budget(),
         policy=policy,
     )
-    async with sample() as transcript:
-        await agent(AgentState(messages=[ChatMessageUser(content="task")]))
-    assert statuses(stopped(transcript)) == {"w": status}
+    outcome = await run_swarm(agent)
+    assert statuses(outcome) == {"w": status}
     assert outcomes == []
     [bus] = buses
     assert (bus.records, _board(bus).applied) == ((), [])
-    [sent] = _comm(transcript)
+    [sent] = _comm(outcome.transcript)
     assert sent["record"]["id"] == "b-1"
     assert sent["decision"] is None
     assert sent["rejected"] == {

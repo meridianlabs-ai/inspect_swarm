@@ -1,7 +1,7 @@
 import inspect
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import AsyncExitStack, ExitStack
 from typing import Any, cast
 
 from inspect_ai._util.registry import (
@@ -15,13 +15,15 @@ from inspect_ai._util.registry import (
     registry_unqualified_name,
     registry_value,
 )
-from inspect_ai.agent import Agent, run
+from inspect_ai.agent import Agent, AgentState
 from inspect_ai.model import ChatMessage
 from inspect_ai.util import (
     Limit,
     LimitExceededError,
     cost_limit,
+    current_span_id,
     message_limit,
+    span,
     time_limit,
     token_limit,
     tool_state_scope,
@@ -35,6 +37,7 @@ from inspect_ai.util._limit import (
     _TurnLimit,  # pyright: ignore[reportPrivateUsage]
     _WorkingLimit,  # pyright: ignore[reportPrivateUsage]
 )
+from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -285,10 +288,14 @@ def member_nodes(record: Member, name: str) -> tuple[Lever, list[Limit]]:
     return lever, nodes
 
 
-# The member wrapper. Runs the member in its tool-state scope and cancel scope, under
-# its nodes and the swarm's caps, and returns its status. No error whose source is a
+# The member wrapper. Runs the member on `state` with `input` as its conversation, in
+# its tool-state scope, cancel scope and agent span, under its nodes and the swarm's
+# caps, then calls `end` with its status and the state the agent returned, inside the
+# member's span when the span was entered. The caller keeps `state`, as as_solver()
+# does, for the output of a member that does not return. No error whose source is a
 # swarm node leaves it: a cap becomes a stop of the swarm, and the member's own nodes a
-# status. Anything else (a foreign error) is raised, without the swarm's leaves.
+# status. Anything else (a foreign error) is raised, without the swarm's leaves, after
+# `end` with `errored`; a cancellation from outside ends the member as `cancelled`.
 async def run_member(
     record: Member,
     name: str,
@@ -297,20 +304,55 @@ async def run_member(
     nodes: list[Limit],
     caps: Sequence[Limit],
     input: list[ChatMessage],
-) -> str:
+    state: AgentState,
+    end: Callable[[str, AgentState], None],
+) -> None:
+    status = "cancelled"
+    # holds the member's span open after its limits and cancel scope have exited, so
+    # that their errors are classified inside it
+    async with AsyncExitStack() as member_span:
+        try:
+            status, state = await _run_member(
+                record, name, context, lever, nodes, caps, input, state, member_span
+            )
+        except Exception:
+            status = "errored"
+            raise
+        finally:
+            end(status, state)
+
+
+async def _run_member(
+    record: Member,
+    name: str,
+    context: MemberContext,
+    lever: Lever,
+    nodes: list[Limit],
+    caps: Sequence[Limit],
+    input: list[ChatMessage],
+    state: AgentState,
+    member_span: AsyncExitStack,
+) -> tuple[str, AgentState]:
     token = current_member.set(context)
     error: Exception | None = None
     try:
         with tool_state_scope(name), context.scope:
             agent = build_member(record)
-            # entered here rather than by run(), which builds the member's conversation
-            # before entering its limits: a member message limit replaces the
-            # sample's for that conversation from its first message. Errors from
-            # these nodes are classified below, as run() would have caught them.
+            # entered before the member's conversation is built, as run() does not: a
+            # member message limit replaces the sample's for that conversation from its
+            # first message. Errors from these nodes are classified below.
             with ExitStack() as entered:
                 for node in nodes:
                     entered.enter_context(node)
-                await run(agent, input, name=name)
+                # the member's own copy of its input, as run() makes one
+                state.messages = [
+                    message.model_copy(update={"source": "input"}) for message in input
+                ]
+                # entered inside the member's limits and cancel scope, as run() enters
+                # it, since a span-id provider may await
+                await member_span.enter_async_context(span(name, type=AGENT_SPAN_TYPE))
+                context.span_id = current_span_id()
+                state = await agent(state)
     except Exception as ex:
         error = ex
     finally:
@@ -322,17 +364,17 @@ async def run_member(
             raise foreign
         if cap:
             # the cap began the swarm's stop when it was reached
-            return "swarm_cap"
+            return "swarm_cap", state
         assert owned is not None
-        return _status_for(owned, lever)
+        return _status_for(owned, lever), state
     if context.stop_cause is not None:
         # a node that stopped a bridged member, whose cancellation may not have been
         # delivered when its last call was the one that stopped it
-        return context.stop_cause
+        return context.stop_cause, state
     if context.scope.cancelled_caught:
         # the hard stop
-        return "cancelled"
-    return "submitted"
+        return "cancelled", state
+    return "submitted", state
 
 
 def _status_for(error: LimitExceededError, lever: Lever) -> str:

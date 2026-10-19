@@ -7,8 +7,35 @@ from pydantic import JsonValue
 from ._bus._policy import CommDecision
 from ._bus._record import Record, thaw_json
 
-# Communication evidence: an InfoEvent for each record that reached the bus (`sent`) and
-# for each one it delivered (`delivered`), written in the span the channel's tool runs in.
+
+# The swarm's evidence: an InfoEvent with source "inspect_swarm" whose payload has the
+# format version, the evidence type and kind, a member and a span id. A member's result
+# names the member and is written in its span; the final event names the chosen member
+# (None without one) and is written in the swarm's span. Never member text.
+def evidence(
+    type: str,
+    kind: str,
+    *,
+    member: str | None,
+    span_id: str | None,
+    **fields: JsonValue,
+) -> None:
+    transcript().info(
+        {
+            "version": 1,
+            "type": type,
+            "kind": kind,
+            "member": member,
+            "span_id": span_id,
+            **fields,
+        },
+        source="inspect_swarm",
+    )
+
+
+# Communication evidence: a `comm` event for each record that reached the bus (`sent`)
+# and for each one it delivered (`delivered`), written in the span the channel's tool
+# runs in. It names the sender and holds the record's payload.
 
 
 def comm_sent(
@@ -19,8 +46,7 @@ def comm_sent(
 ) -> None:
     # every attempt that reached the bus, rejected or not; `rejected` is the control
     # that refused it and the reason the sender got
-    data: dict[str, JsonValue] = {
-        **_comm("sent", record),
+    fields: dict[str, JsonValue] = {
         "record": _record(record),
         "decision": None
         if decision is None
@@ -30,8 +56,15 @@ def comm_sent(
         else {"control": rejected[0], "reason": rejected[1]},
     }
     if original_payload is not None:
-        data["original_payload"] = original_payload
-    transcript().info(data, source="inspect_swarm")
+        fields["original_payload"] = original_payload
+    evidence(
+        "comm",
+        "sent",
+        member=record.sender,
+        span_id=record.sender_span_id,
+        channel=record.channel,
+        **fields,
+    )
 
 
 def comm_delivered(
@@ -40,29 +73,19 @@ def comm_delivered(
     notify: list[str],
     result: Mapping[str, JsonValue] | None,
 ) -> None:
-    transcript().info(
-        {
-            **_comm("delivered", record),
-            "record": record.id,
-            "recipients": list(record.recipients),
-            "seq": seq,
-            "notify": list(notify),
-            # a copy: the channel keeps its own
-            "result": None if result is None else copy.deepcopy(dict(result)),
-        },
-        source="inspect_swarm",
+    evidence(
+        "comm",
+        "delivered",
+        member=record.sender,
+        span_id=record.sender_span_id,
+        channel=record.channel,
+        record=record.id,
+        recipients=list(record.recipients),
+        seq=seq,
+        notify=list(notify),
+        # a copy: the channel keeps its own
+        result=None if result is None else copy.deepcopy(dict(result)),
     )
-
-
-def _comm(kind: str, record: Record) -> dict[str, JsonValue]:
-    return {
-        "version": 1,
-        "type": "comm",
-        "kind": kind,
-        "channel": record.channel,
-        "member": record.sender,
-        "span_id": record.sender_span_id,
-    }
 
 
 def _record(record: Record) -> dict[str, JsonValue]:

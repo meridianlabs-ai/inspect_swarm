@@ -11,7 +11,7 @@ A swarm is scored the way any agent is. It is the task's solver, so the task's o
 - The swarm's answer is the first submission: the member that submitted earliest wins, and a tie goes to the member listed first. Answer scorers such as `match()` or a model grader read it as they read any agent's output.
 - Tasks scored on the environment, such as a repository the members edited together, are scored on the shared sandbox after every member has stopped.
 - If a limit ends the sample early, a submission already made still counts. If no member submitted, the output is empty, rather than one member's unfinished work.
-- The swarm records what each member did (its state, whether and when it submitted, its output) and which answer it chose and why, so analyses can look past the single score.
+- The swarm records what each member did (its state and status, whether and when it submitted) and which answer it chose and why, so analyses can look past the single score.
 - Sample usage includes the scorers' model calls, as in every Inspect eval, so arms are compared with grading included.
 
 **After M2, optionally:**
@@ -50,7 +50,7 @@ Code references are to inspect_ai `main` at `215cf087` (2026-10-08) and inspect_
 
 ### Why M1 needs little from scoring
 
-Existing scorers keep working with the swarm as the agent. A swarm, like any solver, must return an answer in `TaskState.output` and leave the shared sandbox in the state its members made. M1 adds one thing beyond that: a record of what each member submitted, which swarm.md's M1 requires.
+Existing scorers keep working with the swarm as the agent. A swarm, like any solver, must return an answer in `TaskState.output` and leave the shared sandbox in the state its members made. M1 adds one thing beyond that: a record of whether and when each member submitted, which swarm.md's M1 requires.
 
 - **Existing scorers work unchanged.** `swarm()` is an `@agent` that a task uses as its solver, through `as_solver()`. Inspect runs the task's scorers after the solver, on the same `TaskState`, inside the sample's sandbox context ([Where scoring runs](#where-scoring-runs)).
   - An answer scorer (`match()`, `expression_equivalence()`, `model_graded_qa()`) reads `TaskState.output`, which holds the swarm's final answer.
@@ -131,11 +131,9 @@ The runtime keeps one record in the sample store under the key `inspect_swarm.re
 class MemberResult(BaseModel):
     name: str                         # roster name after count expansion, chosen by the eval author
     role: str | None
-    model: str | None
     state: MemberState                # swarm-api.md: "pending", "running" or "ended"
     status: str | None                # the limits deep dive's status once ended, else None
     submitted: bool                   # status == "submitted"
-    output: ModelOutput | None        # member output (see Terms); None while pending
     time: float | None                # swarm time when the member stopped
 
 class FinalRecord(BaseModel):
@@ -150,17 +148,17 @@ class SwarmResultRecord(BaseModel):
     final: FinalRecord
 ```
 
-- **When it is written.** The runtime writes the record when the swarm starts, with every roster member `pending` and a provisional final record with `reason="no_submissions"`. It updates the record when a member starts, when one ends (adding its status and output) and when the provisional answer changes. It finalises the record after the stop procedure.
+- **When it is written.** The runtime writes the record when the swarm starts, with every roster member `pending` and a provisional final record with `reason="no_submissions"`. It updates the record when a member starts, when one ends (adding its status and time) and when the provisional answer changes. It finalises the record after the stop procedure.
   - An outer limit that ends the sample early therefore leaves an accurate record with `provisional: true`.
   - Members the controller never started stay `pending` in the final record, which is how the evidence records them as not started.
 - **Why the store.** It is in the store, not only in events, because re-scoring rebuilds `TaskState.store` and nothing else from the run (`src/inspect_ai/_eval/score.py:461-475`). Part 2's scorers read it from there.
-- **Owned by the runtime, readable by member code.** Only the runtime writes `inspect_swarm.result`; task code (tools, member builders, controllers, scorers, Sentinel protocols) must not write it. Every member's Python code shares the sample's one store, so it can read the record while the swarm runs, and the record holds each ended member's status and output. Models cannot reach the store themselves, and built-in tools read only their own namespaces, but a tool written to read this key gives the members that call it a view of each other's results: a channel between members outside the bus, with none of its fencing or evidence. The user docs say so (decision: Ransom, 2026-10-14).
+- **Owned by the runtime, readable by member code.** Only the runtime writes `inspect_swarm.result`; task code (tools, member builders, controllers, scorers, Sentinel protocols) must not write it. Every member's Python code shares the sample's one store, so it can read the record while the swarm runs. Models cannot reach the store themselves, and built-in tools read only their own namespaces, but a tool written to read this key gives the members that call it a view of each other's results: a channel between members outside the bus, with none of its fencing or evidence. In M1 that view is each peer's state, status and time, not its output; Part 2's record adds outputs ([What the record adds](#what-the-record-adds)). The user docs say so (decision: Ransom, 2026-10-14).
 - **Evidence events.** Each member's end and the final selection also produce an evidence `InfoEvent` with `source="inspect_swarm"` and the payload shape swarm-communication.md uses for its own evidence:
   - `version: 1`, `type: "result"`, and `kind` one of `member_result` or `final`;
   - the common fields `member` and `span_id` (the swarm's span for `final`).
 
   Each event is written inside the member's span or the swarm's span. The events put the result in the transcript at the time it happened; the store record is what scorers read. The payload format is the Observer's ([Observer](swarm.md#observer-evidence-accounting-and-metrics)). This design adds the `result` type, as the communication design adds `comm`.
-- **Outputs are stored once.** Outputs can be long (code), so they are stored only in the record. Evidence events carry the member name and status, not the text.
+- **No outputs in M1.** Nothing in M1 reads a member's output from the record. `first` uses `submitted` and `time`, and the chosen member's output reaches the returned `AgentState`, `TaskState.output` and the sample's logged output on its own; the runtime holds the members' outputs in memory. Inspect copies each store change into every span open at the time, so writing whole outputs as members end would grow the log roughly with the square of the member count (meridianlabs-ai/inspect_ai#589). Part 2 adds them ([What the record adds](#what-the-record-adds)) (decision: Ransom, 2026-10-19). Evidence events carry the member name and status, not the text.
 - **Additive later.** Part 2 adds optional fields to these models ([What the record adds](#what-the-record-adds)). `version` stays 1, because no existing field changes meaning, and an M1 record reads as the record of a swarm without a result contract.
 
 ### Comparisons in M1
@@ -199,7 +197,6 @@ All tests use mockllm with scripted outputs, need no network or Docker, and run 
 - **Finalisation.** A member that submits during grace is selected only when nothing earlier was submitted. The final record has `provisional: false`, and the `final` event is written.
 - **The record.**
   - It is written at start with every member `pending` and updated on each start and end.
-  - A member's output is kept after the member's own limit, and after a hard stop for an agent that updates its state in place.
   - Statuses are the limits deep dive's, and `submitted` is true only for `submitted`.
   - A controller that starts only some members leaves the rest `pending`.
   - The `member_result` and `final` events carry `version`, `type`, `kind`, `member` and `span_id`, and no member text.
@@ -440,6 +437,7 @@ Part 2 adds optional fields to M1's record ([What the swarm records](#what-the-s
 
 ```python
 class MemberResult(BaseModel):        # adds
+    output: ModelOutput | None        # member output (see Terms) once ended; None before
     answer_key: str | None            # result.answer_key(output.completion), when defined
     verdict: Verdict | None           # verifier result for a submission, when a verifier exists
     verdict_time: float | None        # swarm time when the verdict was taken
@@ -456,7 +454,8 @@ class SwarmResultRecord(BaseModel):   # adds
     final_verdict: Verdict | None     # artifact kind: verifier on the drained environment
 ```
 
-- **When they are written.** The runtime adds a member's key and verdict when its submission is recorded and verified, and the chain fields when the provisional answer or the final selection changes.
+- **Why `output` comes here.** `member_scores` scores each member's output, and re-scoring rebuilds only the store, so both read outputs from the record. M1 needs neither ([No outputs in M1](#what-the-swarm-records)). Its tests: an output is kept after the member's own limit, and after a hard stop for an agent that updates its state in place.
+- **When they are written.** The runtime adds a member's output when it ends, and its key and verdict when its submission is recorded and verified, and the chain fields when the provisional answer or the final selection changes.
 - **The `verdict` event.** Each verdict also produces an evidence event of kind `verdict`, alongside M1's `member_result` and `final`.
 - **The cost boundary**, when it is built, adds `solve_usage`, `solve_role_usage` and `solve_exit` ([The cost boundary](#the-cost-boundary-deferred)).
 
@@ -764,7 +763,7 @@ class SwarmResultRecord(BaseModel):   # adds, with the cost boundary
 | Where | What |
 |---|---|
 | Sample `output` and last assistant message | The final answer, the chosen member's own `ModelOutput`; message metadata names the mode and member (M1) |
-| Sample `store["inspect_swarm.result"]` | The record: every member's output, state, status and time, and the final selection (M1); keys, verdicts, the chain's details and `final_verdict` (Part 2) |
+| Sample `store["inspect_swarm.result"]` | The record: every member's state, status and time, and the final selection (M1); outputs, keys, verdicts, the chain's details and `final_verdict` (Part 2) |
 | Transcript | `InfoEvent`s of kinds `member_result` and `final` (M1) and `verdict` (Part 2), with source `inspect_swarm`, at the time they happened; `member_scores`' per-member spans under the scorer span |
 | Sample scores | The task's scorer (final@k, or team@k for artifact tasks); the task's member scorer with `best_member` and `mean_member`, per-member detail in its metadata |
 | Eval results | One `EvalScore` per task scorer and reducer; the member scorer contributes `best_member` and `mean_member` as separate `EvalScore`s with `scored_samples` and `unscored_samples` counts |
@@ -982,8 +981,9 @@ Running baselines as a swarm of one records the same evidence at run time under 
 Untrusted input reaching the new code:
 
 - **Member outputs are model output.**
-  - In M1 they reach only the record, the evidence events (as member names and statuses, without text) and the returned output, exactly as a single agent's output reaches the task state. No harness-composed prompt contains member text in M1.
+  - In M1 they reach only the returned output, exactly as a single agent's output reaches the task state. The record and the evidence events hold member names and statuses, without text. No harness-composed prompt contains member text in M1.
   - After M2 they also reach:
+    - the record, as each member's `output`;
     - `answer_key`, task code that must accept any text and return `None` rather than raise on unparseable input;
     - the verifier, which may execute the answer (code) and must do so only inside the sandbox;
     - the member scorer, as they would from a single agent, and only after the solve (`completed=True`);
