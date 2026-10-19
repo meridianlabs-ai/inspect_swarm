@@ -15,6 +15,7 @@ from inspect_ai.agent import Agent, AgentState, agent, run
 from inspect_ai.event import InfoEvent, SpanBeginEvent
 from inspect_ai.log import EvalSample
 from inspect_ai.log._condense import condense_sample
+from inspect_ai.log._recorders.eval import _parse_sample_data
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import ChatMessageUser
 from inspect_ai.tool import Tool, ToolError
@@ -200,7 +201,7 @@ async def _send(
     channel: str = "board",
     to: tuple[str, ...] = (),
     payload: str = "",
-    op: Mapping[str, JsonValue] | None = None,
+    op: dict[str, JsonValue] | None = None,
 ) -> Delivery:
     member = bus.member(sender)
     assert isinstance(member, _Member)
@@ -669,36 +670,26 @@ async def test_a_record_keeps_the_operation_data_it_was_sent_with() -> None:
 
 
 @pytest.mark.anyio
-async def test_operation_data_that_is_not_json_is_refused() -> None:
-    bus, _ = _bus()
-    op: Any = {"files": {"f-1", "f-2"}}
-    with pytest.raises(TypeError, match="op must be JSON data; it holds a set"):
-        await _send(bus, op=op)
-    assert _board(bus).applied == []
-
-
-@pytest.mark.anyio
 @pytest.mark.parametrize(
-    "op",
+    "op,held",
     [
-        {"text": "a\ud800"},
-        {"files": [{"path": "f\udc00"}]},
-        {"files": [{"\ud800": "f"}]},
+        ({"files": {"f-1", "f-2"}}, "set"),
+        ({"files": ("f-1", "f-2")}, "tuple"),
+        ({"files": MappingProxyType({"f-1": "/a"})}, "mappingproxy"),
+        ({"files": UserDict({"f-1": "/a"})}, "UserDict"),
+        (MappingProxyType({"files": []}), "mappingproxy"),
     ],
-    ids=["value", "nested", "key"],
+    ids=["set", "tuple", "proxy", "userdict", "root-proxy"],
 )
-async def test_operation_text_that_is_not_valid_is_refused_before_evidence(
-    op: dict[str, JsonValue],
+async def test_operation_data_other_than_dicts_and_lists_is_refused(
+    op: Any, held: str
 ) -> None:
-    # a lone surrogate, which a model's JSON tool arguments can carry, would be
-    # rewritten by the log's serializer, or stop it when it is in a key
+    # a channel's tool builds the op from plain JSON, so anything else is its bug
     bus, _ = _bus()
     async with sample() as transcript:
-        with pytest.raises(ToolError, match="operation data has a string with an"):
+        with pytest.raises(TypeError, match=f"op must be JSON data; it holds a {held}"):
             await _send(bus, op=op)
     assert (bus.records, _board(bus).applied, _comm(transcript)) == ((), [], [])
-    # what was written can be logged
-    json.loads(to_json_safe(transcript.events))
     assert (await _send(bus)).record.id == "b-1"
 
 
@@ -713,84 +704,79 @@ def _nested(shape: str, depth: int) -> JsonValue:
     return value
 
 
-def _deep_op(form: str, depth: int) -> Mapping[str, Any]:
-    # an op of `depth` levels, counting the op itself: plain containers, or other
-    # mappings at the root or below it
-    inner: Any = _nested("object" if form in _MAPPINGS else form, depth - 1)
-    if form == "proxy":
-        return MappingProxyType({"k": inner})
-    if form == "userdict":
-        return UserDict({"k": inner})
-    if form == "nested-proxy":
-        return {"k": MappingProxyType(inner)}
-    return {"k": inner}
-
-
-_MAPPINGS = ("proxy", "userdict", "nested-proxy")
+_NOT_LOGGED = "operation data can't be logged as sent"
+_TOO_DEEP = "nested more than 100 levels deep"
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "form,depth",
+    "op,refusal",
     [
-        *[
-            (shape, d)
-            for shape in ("array", "object", "mixed")
-            for d in (100, 101, 251)
-        ],
-        ("proxy", 100),
-        ("proxy", 101),
-        ("proxy", 1100),
-        ("userdict", 251),
-        ("nested-proxy", 100),
-        ("nested-proxy", 251),
+        ({"text": "café 🙂", "files": [{"päth": "日本"}]}, None),
+        ({"n": 10**4299, "m": -(10**4299)}, None),
+        ({"n": float("nan"), "m": float("inf")}, None),
+        ({"k": _nested("mixed", 99)}, None),
+        ({"text": "a\ud800"}, _NOT_LOGGED),
+        ({"files": [{"path": "f\udc00"}]}, _NOT_LOGGED),
+        ({"files": [{"\ud800": "f"}]}, _NOT_LOGGED),
+        ({"n": 10**4300}, _NOT_LOGGED),
+        ({"n": -(10**4300)}, _NOT_LOGGED),
+        ({"files": [{"size": 10**4300}]}, _NOT_LOGGED),
+        ({"k": _nested("array", 100)}, _TOO_DEEP),
+        ({"k": _nested("object", 100)}, _TOO_DEEP),
+        ({"k": _nested("mixed", 1099)}, _TOO_DEEP),
+    ],
+    ids=[
+        "unicode",
+        "int-4300-digits",
+        "nan",
+        "depth-100",
+        "surrogate-value",
+        "surrogate-nested",
+        "surrogate-key",
+        "int-4301-digits",
+        "negative-int-4301-digits",
+        "nested-int-4301-digits",
+        "depth-101-array",
+        "depth-101-object",
+        "depth-1100",
     ],
 )
-async def test_operation_data_nested_too_deep_is_refused_before_evidence(
-    form: str, depth: int
+async def test_operation_data_commits_only_if_the_log_reads_it_back_as_sent(
+    op: dict[str, JsonValue], refusal: str | None
 ) -> None:
-    # as deep as Inspect takes a tool call's arguments; deeper would be cut short in
-    # the log, or stop it being written
-    op = _deep_op(form, depth)
     bus, _ = _bus()
     async with sample() as transcript:
-        if depth > 100:
-            with pytest.raises(ToolError, match="nested more than 100 levels deep"):
+        if refusal is not None:
+            with pytest.raises(ToolError, match=refusal):
                 await _send(bus, op=op)
-            assert (bus.records, _board(bus).applied) == ((), [])
+            assert (bus.records, _board(bus).applied, _comm(transcript)) == ((), [], [])
         else:
             await _send(bus, op=op)
-    sample_log = condense_sample(
-        EvalSample(id=1, epoch=1, input="", target="", events=list(transcript.events))
+    # written and read as the eval log writes and reads a sample
+    read = _parse_sample_data(
+        to_json_safe(
+            condense_sample(
+                EvalSample(
+                    id=1, epoch=1, input="", target="", events=list(transcript.events)
+                )
+            )
+        )
     )
-    logged = json.loads(to_json_safe(sample_log))
     sent = [
-        e["data"]
-        for e in logged["events"]
-        if e["event"] == "info" and e["data"].get("kind") == "sent"
-    ]
-    if depth > 100:
-        assert sent == []
-        assert (await _send(bus)).record.id == "b-1"
-    else:
-        assert [e["record"]["op"] for e in sent] == [op]
-
-
-@pytest.mark.anyio
-async def test_operation_text_survives_the_log() -> None:
-    op: dict[str, JsonValue] = {"text": "café 🙂", "files": [{"päth": "日本"}]}
-    bus, _ = _bus()
-    async with sample() as transcript:
-        await _send(bus, op=op)
-    [sent] = [
-        e
-        for e in transcript.events
+        e.data["record"]
+        for e in read.events
         if isinstance(e, InfoEvent)
         and isinstance(e.data, dict)
         and e.data.get("kind") == "sent"
+        and isinstance(e.data["record"], dict)
     ]
-    logged = json.loads(to_json_safe(sent))
-    assert logged["data"]["record"]["op"] == op
+    if refusal is not None:
+        assert sent == []
+        assert (await _send(bus)).record.id == "b-1"
+    else:
+        # as JSON text, so that NaN matches itself
+        assert [json.dumps(r["op"]) for r in sent] == [json.dumps(op)]
 
 
 @pytest.mark.anyio

@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, TypeAlias, cast
@@ -79,36 +79,30 @@ class Draft:
     kind: str
     to: tuple[str, ...] = ()
     payload: str = ""
-    op: Mapping[str, JsonValue] | None = None
+    op: dict[str, JsonValue] | None = None
 
 
-# A record's operation data, detached from the draft's and read-only at every depth. A
-# string or key UTF-8 cannot encode raises `UnicodeEncodeError`: the log would not
-# keep it as sent. A container nested more than `max_depth` levels deep, counting the
-# outermost as 1, raises `ValueError` before anything inside it is visited.
+# A record's operation data, detached from the draft's and read-only at every depth.
+# Only plain dicts and lists are taken: a channel's tool builds the op, so any other
+# container is the channel's bug. A container nested more than `max_depth` levels
+# deep, counting the outermost as 1, raises `ValueError` before anything inside it is
+# visited.
 def freeze_json(value: object, max_depth: int) -> FrozenJson:
     def freeze(value: object, depth: int) -> FrozenJson:
-        if isinstance(value, Mapping | list | tuple) and depth > max_depth:
+        if isinstance(value, dict | list) and depth > max_depth:
             raise ValueError(f"nested more than {max_depth} levels deep")
-        if isinstance(value, Mapping):
-            items = cast(Mapping[object, object], value).items()
+        if isinstance(value, dict):
             frozen: dict[str, FrozenJson] = {}
-            for key, item in items:
+            for key, item in cast(dict[object, object], value).items():
                 if not isinstance(key, str):
                     raise TypeError(
                         f"A record's op must be JSON data; it has the key {key!r}."
                     )
-                key.encode("utf-8")
                 frozen[key] = freeze(item, depth + 1)
             return MappingProxyType(frozen)
-        if isinstance(value, list | tuple):
-            return tuple(
-                freeze(item, depth + 1) for item in cast(Sequence[object], value)
-            )
-        if isinstance(value, str):
-            value.encode("utf-8")
-            return value
-        if value is None or isinstance(value, int | float | bool):
+        if isinstance(value, list):
+            return tuple(freeze(item, depth + 1) for item in cast(list[object], value))
+        if value is None or isinstance(value, str | int | float | bool):
             return value
         raise TypeError(
             f"A record's op must be JSON data; it holds a {type(value).__name__}."

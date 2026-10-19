@@ -1,3 +1,4 @@
+import json
 import logging
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
@@ -6,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import anyio
 from inspect_ai._util.exception import TerminateSampleError
+from inspect_ai._util.json import to_json_safe
 from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
 from inspect_ai.tool import ToolError
 from inspect_ai.util._span import current_agent_span_id, current_span_id
@@ -16,7 +18,7 @@ from .._channel._channel import Channel, ChannelRun, ChannelState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_sent
 from ._policy import CommDecision, CommPolicy
-from ._record import Draft, FrozenJson, Record, freeze_json
+from ._record import Draft, FrozenJson, Record, freeze_json, thaw_json
 from ._storm import Storm
 
 if TYPE_CHECKING:
@@ -266,22 +268,29 @@ class Bus:
 
 def _frozen_op(draft: Draft) -> Mapping[str, FrozenJson]:
     # refused here, before any evidence: data nested deeper than Inspect takes in a
-    # tool call's arguments would be cut short in the log or stop it being written, and
-    # a lone surrogate from model output would be rewritten in the log, or stop the log
-    # being written when it is in a key
+    # tool call's arguments would be cut short in the log, and data the log cannot
+    # write and read back as sent (a lone surrogate, an integer too long to read) would
+    # be changed in it or stop it being read
     try:
         frozen = freeze_json(draft.op, MAX_TOOL_CALL_ARGUMENTS_DEPTH)
-    except UnicodeEncodeError as ex:
-        # before ValueError, which it subclasses
-        raise ToolError(
-            f"the {draft.kind} is not valid text: its operation data has a string with an unpaired surrogate at character {ex.start}"
-        ) from None
     except ValueError:
         raise ToolError(
             f"the {draft.kind}'s operation data is nested more than {MAX_TOOL_CALL_ARGUMENTS_DEPTH} levels deep"
         ) from None
     assert isinstance(frozen, Mapping)
+    if not _logged_as_sent(thaw_json(frozen)):
+        raise ToolError(f"the {draft.kind}'s operation data can't be logged as sent")
     return frozen
+
+
+def _logged_as_sent(op: JsonValue) -> bool:
+    # the log's own round trip, Inspect's writer and a JSON reader; compared as JSON
+    # text, so that NaN, which the reader takes, matches itself
+    try:
+        read = json.loads(to_json_safe(op))
+        return json.dumps(read) == json.dumps(op)
+    except ValueError:
+        return False
 
 
 def _unencodable(record: Record) -> tuple[str, str] | None:
