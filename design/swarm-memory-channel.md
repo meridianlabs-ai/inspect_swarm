@@ -83,7 +83,7 @@ All in `src/inspect_ai/tool/_tools/_memory.py`.
 - The binding rule: `swarm_tools()` binds the member to the first agent channel it is resolved in, returns no tools in any other agent channel, and notices go only to that loop; D-1 decides whether the shared memory changes this ([Members and identity](swarm-communication.md#members-and-identity)).
 - The shared fence, marker removal for `<peer_message`, notices with fixed templates and swarm-assigned ids, and `read` evidence ([Fencing](swarm-communication.md#fencing), [Notices](swarm-communication.md#notices), [Evidence and provenance](swarm-communication.md#evidence-and-provenance)). The post-hoc `exposed` evidence the merged design relied on was dropped in #23 ([swarm-communication.md Alternatives considered](swarm-communication.md#alternatives-considered)).
 
-None of the bus is built yet; the inspect_ai registry types it needs are on `main` (`src/inspect_ai/_util/registry.py:62-63`), and the tool-state scope (AI-2) is not.
+None of the bus is built yet; the inspect_ai registry types it needs are on `main` (`src/inspect_ai/_util/registry.py:62-63`), and so, since 2026-10-16, is the tool-state scope (AI-2, inspect_ai#5861), which M1-4 uses: a member `w-1`'s default `memory()` resolves to the instance `"@w-1"` (`"@outer/w-1"` when the swarm itself runs inside a scope `outer`) ([swarm.md Members](swarm.md#members)).
 
 ## Design
 

@@ -1,5 +1,5 @@
 from contextlib import nullcontext
-from typing import Any, Literal
+from typing import Any
 from uuid import uuid4
 
 import anyio
@@ -343,6 +343,9 @@ def tool_loop(model: Model) -> Agent:
         (generator, [], Budget(tokens=TOKENS_PER_CALL), "swarm_cap"),
         (grouped, [], Budget(tokens=TOKENS_PER_CALL), "swarm_cap"),
         (tool_loop, [], Budget(tokens=TOKENS_PER_CALL), "swarm_cap"),
+        # the member's share, grouped and after a tool error, below the cap
+        (grouped, [], Budget(tokens=4 * TOKENS_PER_CALL, split="equal"), "share"),
+        (tool_loop, [], Budget(tokens=4 * TOKENS_PER_CALL, split="equal"), "share"),
     ],
 )
 async def test_the_swarms_own_errors_become_statuses(
@@ -648,17 +651,99 @@ async def test_the_cost_check_refuses_a_model_argument_it_cannot_price(
         assert statuses(stop) == {"delegator": "submitted"}
 
 
-@pytest.mark.parametrize("split", ["pool", "equal", (1.0, 2.0)])
-def test_shares_are_refused_until_they_are_supported(
-    split: Literal["pool", "equal"] | tuple[float, ...],
+# ---------------------------------------------------------------------------
+# Splits
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "budget, sample_tokens, calls",
+    [
+        # 100 tokens each
+        (Budget(tokens=6 * TOKENS_PER_CALL, split="equal"), None, (1, 2, 2)),
+        # the same cap derived from the sample's token limit
+        (Budget(reserve=0.0, split="equal"), 6 * TOKENS_PER_CALL, (1, 2, 2)),
+        # 100, 100 and 200 tokens
+        (Budget(tokens=8 * TOKENS_PER_CALL, split=(1, 1, 2)), None, (1, 2, 4)),
+        # $2, $2 and $8, at $1 a call
+        (Budget(cost=12.0, split=(1, 1, 4)), None, (1, 2, 8)),
+        # the same with weights large enough to overflow cap * weight
+        (Budget(cost=12.0, split=(2.0**1020, 2.0**1020, 2.0**1022)), None, (1, 2, 8)),
+    ],
+)
+async def test_members_stop_on_their_own_shares(
+    budget: Budget, sample_tokens: int | None, calls: tuple[int, int, int]
+) -> None:
+    # "quitter" answers after one call and leaves the rest of its share unused; the
+    # spenders generate until stopped, and neither gets what quitter left
+    names = ["quitter", "spender-1", "spender-2"]
+    scripts = [Script() for _ in names]
+    stop = await run_swarm(
+        swarm(
+            [
+                member(
+                    generator(
+                        scripted_model(script, cost=1.0),
+                        calls=1 if name == "quitter" else None,
+                    ),
+                    name=name,
+                )
+                for name, script in zip(names, scripts, strict=True)
+            ],
+            channels=[],
+            budget=budget,
+        ),
+        tokens=sample_tokens,
+    )
+    assert stop.reason == "all_done"
+    assert statuses(stop) == {
+        "quitter": "submitted",
+        "spender-1": "share",
+        "spender-2": "share",
+    }
+    assert tuple(script.calls for script in scripts) == calls
+
+
+@pytest.mark.anyio
+async def test_the_swarm_cap_wins_over_a_share_reached_at_the_same_check() -> None:
+    # two members, each with half the cap; the second reaches its share and the cap
+    # together, and the cap stops the swarm
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+            async for _ in control.events():
+                pass
+        return "all_done"
+
+    stop = await run_swarm(
+        swarm(
+            member(generator, args={"model": scripted_model(), "calls": None}, count=2),
+            controller=_controller(run, "limits_test_staged_shares"),
+            channels=[],
+            budget=Budget(tokens=4 * TOKENS_PER_CALL, split="equal"),
+        )
+    )
+    assert stop.reason == "swarm_cap"
+    assert statuses(stop) == {"generator-1": "share", "generator-2": "swarm_cap"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "budget, match",
+    [
+        # the sample has no cost or token limit to derive a cap from
+        (Budget(split="equal"), "neither"),
+        (Budget(tokens=1, split="equal"), "token cap of 1 .* 2 members"),
+        (Budget(tokens=300, split=(1, 2, 3)), "3 weights but the swarm has 2 members"),
+    ],
+)
+async def test_a_split_the_swarm_cannot_make_is_refused_at_start(
+    budget: Budget, match: str
 ) -> None:
     members = member(generator, args={"model": scripted_model()}, count=2)
-    budget = Budget(tokens=300, split=split)
-    if split == "pool":
-        swarm(members, channels=[], budget=budget)
-    else:
-        with pytest.raises(NotImplementedError, match="Budget.split"):
-            swarm(members, channels=[], budget=budget)
+    agent_swarm = swarm(members, channels=[], budget=budget)
+    with pytest.raises(ValueError, match=match):
+        await run_swarm(agent_swarm)
 
 
 @agent
@@ -713,6 +798,8 @@ async def test_a_member_declared_bridged_is_cancelled_at_its_first_compaction(
             "member_limit:token",
             id="member-limit",
         ),
+        # a 30-token share each, below the 60-token cap
+        pytest.param([], Budget(tokens=60, split="equal"), "share", id="share"),
         pytest.param([], Budget(), "submitted", id="control"),
     ],
 )
@@ -730,9 +817,14 @@ async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
             pass
         return "all_done"
 
+    # a split needs a second member, which is never started
+    sibling = [member(sleeper(), name="sibling")] if budget.split != "pool" else []
     stop = await run_swarm(
         swarm(
-            member(generator(scripted_model()), bridged=True, limits=limits),
+            [
+                member(generator(scripted_model()), bridged=True, limits=limits),
+                *sibling,
+            ],
             controller=_controller(
                 run, f"limits_test_last_call_{expected.replace(':', '_')}"
             ),
@@ -740,6 +832,6 @@ async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
             budget=budget,
         )
     )
-    assert statuses(stop) == {"generator": expected}
+    assert statuses(stop) == {"generator": expected} | {m.name: None for m in sibling}
     [handle] = handles
     assert (handle.status, handle.submitted) == (expected, expected == "submitted")
