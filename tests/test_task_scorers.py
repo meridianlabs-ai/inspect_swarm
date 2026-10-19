@@ -32,7 +32,7 @@ from inspect_swarm import (
     swarm_controller,
 )
 
-from .swarm_runtime import Script, generator, scripted_model
+from .swarm_runtime import Script, generator, output, scripted_model
 
 
 def _controller(run: Any, name: str) -> Controller:
@@ -91,7 +91,7 @@ def test_a_model_grader_sees_only_the_final_answer(tmp_path: Path) -> None:
 
     def grade(input: list[ChatMessage]) -> ModelOutput:
         prompts.append("\n".join(message.text for message in input))
-        return ModelOutput.from_content("mockllm", "GRADE: C")
+        return output("GRADE: C")
 
     log = _eval(
         Task(

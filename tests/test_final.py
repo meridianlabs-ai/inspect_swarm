@@ -39,6 +39,7 @@ from .swarm_runtime import (
     evidence,
     final,
     generator,
+    output,
     run_swarm,
     sample,
     scripted_model,
@@ -434,7 +435,7 @@ async def test_a_member_blocked_entering_its_span_is_hard_stopped() -> None:
 @pytest.mark.anyio
 async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> None:
     secret = "SECRET-ANSWER-1729"
-    model = scripted_model(Script(outputs=[ModelOutput.from_content("m", secret)]))
+    model = scripted_model(Script(outputs=[output(secret)]))
     busy = Script()
 
     async def run(control: SwarmControl) -> StopReason:
