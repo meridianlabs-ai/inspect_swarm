@@ -311,7 +311,7 @@ def test_an_answer_finalisation_cannot_fit_ends_the_sample_on_its_message_limit(
     assert log.samples is not None
     [sample] = log.samples
     assert sample.limit is not None and sample.limit.type == "message"
-    assert sample.output.completion.endswith("42")
+    assert sample.output.completion == "42"
     record = SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
     [a] = record.members
     assert (a.state, a.status) == ("ended", "submitted")
