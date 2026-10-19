@@ -9,8 +9,10 @@ import anyio
 import pytest
 from inspect_ai._util.exception import TerminateSampleError
 from inspect_ai._util.json import to_json_safe
-from inspect_ai.agent import Agent, AgentState, agent
-from inspect_ai.event import InfoEvent
+from inspect_ai.agent import Agent, AgentState, agent, run
+from inspect_ai.event import InfoEvent, SpanBeginEvent
+from inspect_ai.log import EvalSample
+from inspect_ai.log._condense import condense_sample
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import ChatMessageUser
 from inspect_ai.tool import Tool, ToolError
@@ -40,7 +42,7 @@ from inspect_swarm._bus._bus import Bus, Delivery, current_bus
 from inspect_swarm._bus._record import Draft, thaw_json
 from inspect_swarm._bus._storm import StormControls
 
-from .swarm_runtime import run_swarm, sample, scripted_model, statuses
+from .swarm_runtime import evidence, run_swarm, sample, scripted_model, statuses
 
 
 class _BoardState:
@@ -698,6 +700,50 @@ async def test_operation_text_that_is_not_valid_is_refused_before_evidence(
     assert (await _send(bus)).record.id == "b-1"
 
 
+def _nested(shape: str, depth: int) -> JsonValue:
+    # `depth` levels of containers around a leaf
+    value: JsonValue = "leaf"
+    for level in range(depth):
+        if shape == "array" or (shape == "mixed" and level % 2):
+            value = [value]
+        else:
+            value = {"k": value}
+    return value
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("shape", ["array", "object", "mixed"])
+@pytest.mark.parametrize("depth", [100, 101, 251])
+async def test_operation_data_nested_too_deep_is_refused_before_evidence(
+    shape: str, depth: int
+) -> None:
+    # as deep as Inspect takes a tool call's arguments; deeper would be cut short in
+    # the log, or stop it being written
+    op: dict[str, JsonValue] = {"k": _nested(shape, depth - 1)}
+    bus, _ = _bus()
+    async with sample() as transcript:
+        if depth > 100:
+            with pytest.raises(ToolError, match="nested more than 100 levels deep"):
+                await _send(bus, op=op)
+            assert (bus.records, _board(bus).applied) == ((), [])
+        else:
+            await _send(bus, op=op)
+    sample_log = condense_sample(
+        EvalSample(id=1, epoch=1, input="", target="", events=list(transcript.events))
+    )
+    logged = json.loads(to_json_safe(sample_log))
+    sent = [
+        e["data"]
+        for e in logged["events"]
+        if e["event"] == "info" and e["data"].get("kind") == "sent"
+    ]
+    if depth > 100:
+        assert sent == []
+        assert (await _send(bus)).record.id == "b-1"
+    else:
+        assert [e["record"]["op"] for e in sent] == [op]
+
+
 @pytest.mark.anyio
 async def test_operation_text_survives_the_log() -> None:
     op: dict[str, JsonValue] = {"text": "café 🙂", "files": [{"päth": "日本"}]}
@@ -832,6 +878,53 @@ async def test_a_member_of_another_run_with_the_same_name_cannot_deliver() -> No
         side: [r.payload for r in _board(bus).applied] for side, bus in buses.items()
     }
     assert applied == {"a": ["a", "a's child"], "b": []}
+
+
+@agent
+def bus_test_child() -> Agent:
+    async def execute(state: AgentState) -> AgentState:
+        bus = current_bus.get()
+        assert bus is not None
+        await bus.deliver(Draft("board", "note", payload="from the child"))
+        return state
+
+    return execute
+
+
+@agent
+def bus_test_parent(nested: bool) -> Agent:
+    async def execute(state: AgentState) -> AgentState:
+        if nested:
+            await run(bus_test_child(), "go")
+        else:
+            await bus_test_child()(state)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("nested", [False, True], ids=["member", "descendant"])
+async def test_comm_evidence_names_the_members_span_and_the_record_the_loops(
+    nested: bool,
+) -> None:
+    outcome = await run_swarm(
+        swarm(
+            member(bus_test_parent, args={"nested": nested}, name="w"),
+            channels=["bus_test_board"],
+        )
+    )
+    spans = {
+        e.id: e.name for e in outcome.transcript.events if isinstance(e, SpanBeginEvent)
+    }
+    [result] = evidence(outcome.transcript, "member_result")
+    member_span = result["span_id"]
+    assert spans[member_span] == "w"
+    sent, delivered = _comm(outcome.transcript)
+    assert (sent["span_id"], delivered["span_id"]) == (member_span, member_span)
+    assert (sent["member"], delivered["member"]) == ("w", "w")
+    loop_span = sent["record"]["sender_span_id"]
+    assert spans[loop_span] == ("bus_test_child" if nested else "w")
 
 
 @pytest.mark.anyio

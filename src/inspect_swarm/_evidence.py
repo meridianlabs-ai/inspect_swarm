@@ -35,10 +35,12 @@ def evidence(
 
 # Communication evidence: a `comm` event for each record that reached the bus (`sent`)
 # and for each one it delivered (`delivered`), written in the span the channel's tool
-# runs in. It names the sender and holds the record's payload.
+# runs in. Its `member` and `span_id` are the sender's and the sender's member span,
+# even from a member's descendant; the record keeps the writing loop's span.
 
 
 def comm_sent(
+    span_id: str | None,
     record: Record,
     decision: CommDecision | None,
     original_payload: str | None,
@@ -61,13 +63,14 @@ def comm_sent(
         "comm",
         "sent",
         member=record.sender,
-        span_id=record.sender_span_id,
+        span_id=span_id,
         channel=record.channel,
         **fields,
     )
 
 
 def comm_delivered(
+    span_id: str | None,
     record: Record,
     seq: int,
     notify: list[str],
@@ -77,7 +80,7 @@ def comm_delivered(
         "comm",
         "delivered",
         member=record.sender,
-        span_id=record.sender_span_id,
+        span_id=span_id,
         channel=record.channel,
         record=record.id,
         recipients=list(record.recipients),

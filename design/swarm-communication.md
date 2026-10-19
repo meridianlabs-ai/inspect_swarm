@@ -279,7 +279,7 @@ class Record:
     tool_span_id: str | None      # the tool span the call ran in; None via the bridge or internal
 ```
 
-`op` is JSON that cannot be changed: objects are read-only mappings and arrays are tuples, so the policy, the channel and the bus's history can share one record. Evidence holds it as plain JSON. A channel compares arrays as tuples: M2-8's `op["files"]` arrives as a tuple, not a list. A string or key in it that is not valid UTF-8 is refused at step 0 (decision: Ransom, 2026-10-19).
+`op` is JSON that cannot be changed: objects are read-only mappings and arrays are tuples, so the policy, the channel and the bus's history can share one record. Evidence holds it as plain JSON. A channel compares arrays as tuples: M2-8's `op["files"]` arrives as a tuple, not a list. A string or key in it that is not valid UTF-8 is refused at step 0 (decision: Ransom, 2026-10-19), as is data nested more than 100 levels deep, the limit Inspect puts on a tool call's arguments.
 
 **Records in model input.** The swarm writes evidence only as things happen: `sent`, `delivered`, `notified` and `read`. It does not decide afterwards whether a model saw a record. Each swarm message that reaches a model is tied to its records like this:
 

@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 import anyio
 from inspect_ai._util.exception import TerminateSampleError
+from inspect_ai._util.json import exceeds_max_depth
+from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
 from inspect_ai.tool import ToolError
 from inspect_ai.util._span import current_agent_span_id, current_span_id
 from pydantic import JsonValue
@@ -109,7 +111,10 @@ class Bus:
 
     async def deliver(self, draft: Draft) -> Delivery:
         # step 0: bind and resolve, before a record exists
-        sender = self._sender()
+        context = self._sender()
+        sender = context.name
+        # the member's own span, for the evidence; the record keeps the writing loop's
+        member_span = context.span_id
         if self._stopping:
             raise ToolError(_STOPPING)
         state = self._state(draft.channel)
@@ -147,6 +152,7 @@ class Bus:
                 # a stop's hard cancellation, or the sender's own: the attempt reached
                 # the bus, so it is evidenced, with no decision
                 comm_sent(
+                    member_span,
                     record,
                     None,
                     None,
@@ -157,6 +163,7 @@ class Bus:
                 # a limit its model calls reached, or an error of its own: raised as it
                 # is, after the attempt's evidence
                 comm_sent(
+                    member_span,
                     record,
                     None,
                     None,
@@ -174,7 +181,7 @@ class Bus:
                     if decision.action == "reject"
                     else f"the swarm's policy ended the sample at {record.id}"
                 )
-                comm_sent(record, decision, original, ("policy", reason))
+                comm_sent(member_span, record, decision, original, ("policy", reason))
                 if decision.action == "reject":
                     raise ToolError(reason)
                 raise TerminateSampleError(reason)
@@ -193,30 +200,30 @@ class Bus:
             try:
                 state.admit(record)
             except ToolError as ex:
-                comm_sent(record, decision, original, ("admit", str(ex)))
+                comm_sent(member_span, record, decision, original, ("admit", str(ex)))
                 raise
         if rejection is not None:
-            comm_sent(record, decision, original, rejection)
+            comm_sent(member_span, record, decision, original, rejection)
             raise ToolError(rejection[1])
 
         # step 3: evidence
-        comm_sent(record, decision, original, None)
+        comm_sent(member_span, record, decision, original, None)
 
         # step 4: commit and apply
         self._seq += 1
         notify, result = state.apply(record)
         storm.commit(record)
         self._records.append(record)
-        comm_delivered(record, self._seq, notify, result)
+        comm_delivered(member_span, record, self._seq, notify, result)
         return Delivery(record, self._seq, list(notify), result)
 
-    def _sender(self) -> str:
+    def _sender(self) -> MemberContext:
         context = current_member.get()
         if context is None or self._contexts.get(context.name) is not context:
             raise RuntimeError(
                 "Bus.deliver() was called outside a member of this swarm; channel tools deliver records for the member that calls them."
             )
-        return context.name
+        return context
 
     def _state(self, channel: str) -> ChannelState:
         try:
@@ -259,8 +266,14 @@ class Bus:
 
 
 def _frozen_op(draft: Draft) -> Mapping[str, FrozenJson]:
-    # refused here, before any evidence: a lone surrogate from model output would be
-    # rewritten in the log, or stop the log being written when it is in a key
+    # refused here, before any evidence: data nested deeper than Inspect takes in a
+    # tool call's arguments would be cut short in the log or stop it being written, and
+    # a lone surrogate from model output would be rewritten in the log, or stop the log
+    # being written when it is in a key
+    if exceeds_max_depth(draft.op, MAX_TOOL_CALL_ARGUMENTS_DEPTH):
+        raise ToolError(
+            f"the {draft.kind}'s operation data is nested more than {MAX_TOOL_CALL_ARGUMENTS_DEPTH} levels deep"
+        )
     try:
         frozen = freeze_json(draft.op)
     except UnicodeEncodeError as ex:
