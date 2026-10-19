@@ -262,7 +262,7 @@ Every sanctioned communication is a `Record`, built by a channel's tool and hand
 ```python
 @dataclass(frozen=True)
 class Record:
-    id: str                       # "m-14": channel prefix + per-swarm sequence; deterministic; an attempt id, not the commit order
+    id: str                       # "m-14": channel prefix + a counter per channel in one run; deterministic; an attempt id, not the run-wide commit `seq`
     channel: str                  # the channel state's name: "messages" (later "notes", "tasks", "board")
     kind: str                     # "message" (later "note", "claim", "post", ...)
     sender: str                   # member name from the member ContextVar
