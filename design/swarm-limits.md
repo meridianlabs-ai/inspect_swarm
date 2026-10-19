@@ -272,7 +272,7 @@ This keeps the sample's own nodes untouched: a sample limit reached inside a bri
 | message | no | yes | no | Per conversation. A node above members has no meaning. |
 | working | no | rejected (`ValueError`) | no | Never enforced below the sample, and collapses under contention. |
 
-- **Member limits** come from `member(agent_or_factory, limits=[...])`, a field of swarm-api.md's `Member` record, which logs each limit by kind and value (with the metering type, for tokens) and rebuilds it with the matching Inspect factory on replay ([swarm-api.md](swarm-api.md#members)). `member()` raises `ValueError` for a `working_limit`. The runtime reads each object's value (and metering type, for tokens) and creates fresh nodes from them on every invocation, which the member wrapper enters before `run()` builds the member's conversation ([Stopping](#stopping), "Member wrapper and statuses"): a pair for cost; a `_SwarmTokenNode`, `_SwarmTurnNode` or `_SwarmMessageNode` for tokens, turns and messages; and a new Inspect `time_limit(value)` for time. The time limit keeps its cancel-scope semantics, so it stops a bridged member without going through the sandbox service.
+- **Member limits** come from `member(agent_or_factory, limits=[...])`, a field of swarm-api.md's `Member` record, which logs each limit by kind and value (with the metering type, for tokens) and rebuilds it with the matching Inspect factory on replay ([swarm-api.md](swarm-api.md#members)). `member()` raises `ValueError` for a `working_limit`. The runtime reads each object's value (and metering type, for tokens) and creates fresh nodes from them on every invocation, which the member wrapper enters before it builds the member's conversation ([Stopping](#stopping), "Member wrapper and statuses"): a pair for cost; a `_SwarmTokenNode`, `_SwarmTurnNode` or `_SwarmMessageNode` for tokens, turns and messages; and a new Inspect `time_limit(value)` for time. The time limit keeps its cancel-scope semantics, so it stops a bridged member without going through the sandbox service.
 - **The task's objects are never entered.** Limits are single-use ([Limit trees](#limit-trees)), so entering the task's objects would fail on a second member from `member(..., count=k)`, on the next sample, or on a second invocation. Re-creating them per invocation is what deepagent does for its subagents.
 
 ### Splits
@@ -320,20 +320,24 @@ Triggers:
 - **The time cap** is a timer task in the runtime's task group, not an Inspect `time_limit`. It calls `stop("swarm_time")`, so the time cap gets the same soft stop. The sample's own time limit stays a hard stop around everything.
 - **Controller stops.** A controller requests a stop by returning from its `run` with a reason: `all_done` (the built-in `leaderless` in M1), after M2 `verified`, later `quiescence`, or its own `controller:<reason>` ([swarm-api.md](swarm-api.md#controllers)).
 
-**Member wrapper and statuses.** The wrapper enters the member's nodes itself, around `run()`, rather than passing them as `run(limits=...)`: `run()` builds the member's `AgentState` from its input before it enters its limits (`src/inspect_ai/agent/_run.py:94`), so the input and preamble would be checked against the sample's message limit, not the member's. Entered first, a member message limit replaces the sample's for that conversation from its first message, above or below it. `run()` then catches none of the member's limit errors, and `run()` would in any case return a bare owned limit error but let a grouped one escape ([Limit trees](#limit-trees)), so the wrapper classifies every leaf itself. This is M1-4's wrapper (`src/inspect_swarm/_member.py`, `run_member()`):
+**Member wrapper and statuses.** The wrapper does not call `run()`. `run()` builds the member's `AgentState` from its input before it enters its limits (`src/inspect_ai/agent/_run.py:94`), so the input and preamble would be checked against the sample's message limit, not the member's; and it copies the input into a state of its own, so when an error escapes it the caller loses the agent's output (swarm-scoring.md's [Terms](swarm-scoring.md#terms)). So the wrapper enters the member's nodes itself, then builds the member's conversation on the `AgentState` the runtime keeps for the member, as `as_solver()` keeps one, opens the member's agent span and calls the agent on that state. Entered first, a member message limit replaces the sample's for that conversation from its first message, above or below it. Nothing catches the member's limit errors before the wrapper, and `run()` would in any case return a bare owned limit error but let a grouped one escape ([Limit trees](#limit-trees)), so the wrapper classifies every leaf itself. This is the wrapper as M1-4 and M1-5 built it (`src/inspect_swarm/_member.py`, `run_member()`), simplified:
 
 ```python
-async def run_member(m: MemberRun, input: list[ChatMessage]) -> str:
+async def run_member(m: MemberRun, input: list[ChatMessage], state: AgentState) -> str:
+    # `state` is the runtime's own (m.agent_state), so its output survives an escaping error
     token = current_member.set(m.context)
     error: Exception | None = None
     try:
-        # tool_state_scope: swarm.md's per-member tool state; output kept as swarm-scoring.md says
+        # tool_state_scope: swarm.md's per-member tool state
         with tool_state_scope(m.name), m.context.scope:
             agent = build_member(m.record)  # the built agent, or the factory's agent built in this scope (swarm-api.md, the member contract)
             with ExitStack() as entered:
                 for node in m.nodes:  # lever, re-created member limits (shares from M1-8): fresh per run
                     entered.enter_context(node)
-                await run(agent, input, name=m.name)
+                # the member's own copy of its input, as run() makes one, inside its limits
+                state.messages = [msg.model_copy(update={"source": "input"}) for msg in input]
+                async with span(m.name, type="agent"):  # held open in the code until errors are classified
+                    await agent(state)
     except Exception as ex:
         error = ex
     finally:
