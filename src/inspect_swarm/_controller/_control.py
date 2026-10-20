@@ -10,7 +10,12 @@ from anyio.abc import TaskGroup
 from inspect_ai.agent import Agent, AgentState
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
-from inspect_ai.util import Limit, current_span_id, sample_limits
+from inspect_ai.util import (
+    Limit,
+    current_span_id,
+    sample_limits,
+    suspend_store_events,
+)
 
 from .._budget import Budget, CostPair, Lever, MemberContext, SwarmNode, is_bridged
 from .._evidence import MemberTimelines, evidence, write_ledger, write_metrics
@@ -319,7 +324,9 @@ class SwarmRun:
         bus_token = current_bus.set(self.bus)
         ended = False
         try:
-            with ExitStack() as meter:
+            # first: spans inside the swarm, members' included, log no StoreEvent;
+            # the swarm's span, entered before, logs the net change
+            with suspend_store_events(), ExitStack() as meter:
                 for node in self._swarm_meter.nodes:
                     meter.enter_context(node)
                 try:

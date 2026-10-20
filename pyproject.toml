@@ -15,11 +15,11 @@ classifiers = [
     "Development Status :: 1 - Planning",
 ]
 dependencies = [
-    # Temporarily inspect_ai's `main`: the runtime needs tool_state_scope()
-    # (UKGovernmentBEIS/inspect_ai#5861), which no release has yet. Go back to
-    # a released `inspect-ai>=X` floor once one does (decision: Ransom,
-    # 2026-10-16).
-    "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",
+    # inspect_swarm tracks inspect_ai's `main` and moves to a released
+    # `inspect-ai>=X` floor only for its own PyPI release (decision: Ransom,
+    # 2026-10-20). Temporarily the branch of UKGovernmentBEIS/inspect_ai#5960
+    # for suspend_store_events(); back to `main` once that merges.
+    "inspect-ai @ git+https://github.com/meridianlabs-ai/inspect_ai@task-add-a-context-scoped-switch-that-turns-o",
 ]
 
 [project.urls]
