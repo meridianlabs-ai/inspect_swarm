@@ -291,8 +291,11 @@ class MemberContext:
     @property
     def delivery_effective(self) -> Literal["notify", "poll"]:
         # a bridged member has no react() hook to give notices; no M2 channel has a
-        # mode of its own, so the default is notify
-        return "poll" if self.bridged else self.delivery or "notify"
+        # mode of its own, so the default is notify. A native member found bridged
+        # late (a bridged descendant) keeps its own loop's hook, and its mode.
+        if self.bridged and not self.bridged_late:
+            return "poll"
+        return self.delivery or "notify"
 
 
 current_member: ContextVar[MemberContext | None] = ContextVar(

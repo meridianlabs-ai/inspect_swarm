@@ -12,6 +12,7 @@ from inspect_ai.agent import (
     general,
     react,
 )
+from inspect_ai.agent._bridge.util import bridge_model_generate
 from inspect_ai.agent._channel import current_agent_channel
 from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent, SpanBeginEvent
@@ -39,7 +40,7 @@ from inspect_swarm import (
     swarm_channel,
     swarm_tools,
 )
-from inspect_swarm._budget import current_member
+from inspect_swarm._budget import SwarmTurnNode, current_member
 from inspect_swarm._bus._bus import Bus
 from inspect_swarm._bus._record import Draft
 from inspect_swarm._bus._storm import StormControls
@@ -224,20 +225,22 @@ async def test_a_subagent_gets_only_member_reach_tools_and_writes_as_the_member(
 
     sent = _sent(log)
     assert [
-        (s["channel"], s["record"]["payload"], s["member"], s["nested"], s["rejected"])
+        (
+            s["channel"],
+            s["record"]["payload"],
+            s["member"],
+            s["nested"],
+            s["rejected"] and s["rejected"]["control"],
+        )
         for s in sent
     ] == [
         ("member", "parent", "w", False, None),
         ("member", "child", "w", True, None),
-        (
-            "member",
-            "child again",
-            "w",
-            True,
-            {"control": "rate", "reason": "rate limit: retry in 3600 s"},
-        ),
+        ("member", "child again", "w", True, "rate"),
         ("loop", "parent after the child", "w", False, None),
     ]
+    # the remaining window depends on how long the run took to get there
+    assert re.fullmatch(r"rate limit: retry in \d+ s", sent[2]["rejected"]["reason"])
     # each write names the loop that made it
     assert log.samples is not None
     spans = {
@@ -308,13 +311,26 @@ async def test_outside_a_swarm_there_are_no_swarm_tools() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "delivery,bridged,effective",
+    "delivery,bridged,descendant,effective",
     [
-        pytest.param(None, False, "notify", id="default"),
-        pytest.param("poll", False, "poll", id="poll"),
-        pytest.param("notify", True, "poll", id="bridged"),
+        pytest.param(None, False, False, "notify", id="default"),
+        pytest.param("poll", False, False, "poll", id="poll"),
+        pytest.param("notify", True, False, "poll", id="bridged"),
+        pytest.param("notify", False, True, "notify", id="bridged-descendant"),
     ],
 )
-async def test_effective_delivery(delivery: Any, bridged: bool, effective: str) -> None:
+async def test_effective_delivery(
+    delivery: Any, bridged: bool, descendant: bool, effective: str
+) -> None:
     run = MemberRun(member(react(), delivery=delivery, bridged=bridged), "w", ())
+    if descendant:
+        # a bridged descendant's generation, checked by one of the member's nodes,
+        # finds the member bridged for its budget's sake
+        token = current_member.set(run.context)
+        try:
+            with bridge_model_generate():
+                SwarmTurnNode(None, owner="w").detect_bridge()
+        finally:
+            current_member.reset(token)
+        assert run.context.bridged
     assert run.context.delivery_effective == effective
