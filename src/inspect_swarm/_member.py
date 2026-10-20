@@ -2,7 +2,7 @@ import inspect
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, ExitStack
-from typing import Any, cast
+from typing import Any, assert_never, cast
 
 from inspect_ai._util.registry import (
     extract_named_params,
@@ -73,9 +73,6 @@ _DEEPAGENT = "inspect_ai/deepagent"
 
 # characters a tool-state scope name may not contain
 _RESERVED = "/#"
-
-# the stop reasons of a normal return that is not a submission
-_UNSUBMITTED: tuple[StopReason, ...] = ("content_filter", "model_length")
 
 
 class Member(BaseModel):
@@ -381,11 +378,21 @@ async def _run_member(
     if context.scope.cancelled_caught:
         # the hard stop
         return "cancelled", state
-    if not state.output.empty and state.output.stop_reason in _UNSUBMITTED:
-        # how react() returns after three refusals or a context overflow it could
-        # not recover from, rather than a submit
-        return "unsubmitted", state
-    return "submitted", state
+    if state.output.empty:
+        return "submitted", state
+    return _return_status(state.output.stop_reason), state
+
+
+def _return_status(stop_reason: StopReason) -> str:
+    # a normal return is a submission unless its output stopped the way react() does
+    # after three refusals or a context overflow it could not recover from
+    match stop_reason:
+        case "content_filter" | "model_length":
+            return "unsubmitted"
+        case "stop" | "tool_calls" | "max_tokens" | "unknown":
+            return "submitted"
+        case _:
+            assert_never(stop_reason)
 
 
 def _status_for(error: LimitExceededError) -> str:
