@@ -5,6 +5,7 @@ Experimental and under development; the API may change.
 
 from ._budget import Budget
 from ._bus._record import Record
+from ._bus._tools import swarm_tools
 from ._channel._channel import Channel, ChannelRun, ChannelState, swarm_channel
 from ._channel.filesystem import filesystem
 from ._controller._control import (
@@ -52,4 +53,5 @@ __all__ = [
     "swarm",
     "swarm_channel",
     "swarm_controller",
+    "swarm_tools",
 ]

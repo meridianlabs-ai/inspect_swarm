@@ -9,7 +9,7 @@ from typing import Literal
 import anyio
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import is_registry_object, registry_info
-from inspect_ai.agent import Agent
+from inspect_ai.agent import Agent, AgentChannel
 from inspect_ai.agent._bridge.util import in_bridge_model_generate
 from inspect_ai.model import Model, ModelUsage
 from inspect_ai.model._model_info import (
@@ -269,17 +269,33 @@ def is_bridged(agent: Agent, bridged: bool | None) -> bool:
     )
 
 
-# What a node needs to know about the member it is checking for. The member wrapper sets
-# `current_member`, runs the member inside `scope` and records its span in `span_id`.
+# What a node, and the bus and its tools, need to know about the member they act for.
+# The member wrapper sets `current_member`, runs the member inside `scope` and records
+# its span in `span_id`.
 @dataclass(eq=False)
 class MemberContext:
     name: str
     bridged: bool
+    # the member's configured delivery mode; None for the default
+    delivery: Literal["notify", "poll"] | None = None
     scope: anyio.CancelScope = field(default_factory=anyio.CancelScope)
     stop_cause: str | None = None
     span_id: str | None = None
     # counted as native, but found bridged at its first marked bridge generation
     bridged_late: bool = False
+    # the agent channel of the member's own loop, bound by swarm_tools() where it is
+    # first resolved, and whether ACP was bound to that channel then
+    loop: AgentChannel | None = None
+    acp_bound: bool | None = None
+
+    @property
+    def delivery_effective(self) -> Literal["notify", "poll"]:
+        # a bridged member has no react() hook to give notices; no M2 channel has a
+        # mode of its own, so the default is notify. A native member found bridged
+        # late (a bridged descendant) keeps its own loop's hook, and its mode.
+        if self.bridged and not self.bridged_late:
+            return "poll"
+        return self.delivery or "notify"
 
 
 current_member: ContextVar[MemberContext | None] = ContextVar(

@@ -72,6 +72,7 @@ def _record(**fields: Any) -> dict[str, Any]:
         "count": 1,
         "limits": [],
         "bridged": None,
+        "delivery": None,
         **fields,
     }
 
@@ -112,7 +113,7 @@ def _agent_tool(name: str) -> dict[str, Any]:
                 react(prompt="a"),
                 member(deepagent, args={"tools": [bash(), python()]}, count=2),
                 member(react(prompt="b"), name="lead", role="coordinator"),
-                member(never_built),
+                member(never_built, delivery="poll"),
             ],
             [
                 _agent_dict("react", prompt="a"),
@@ -126,7 +127,11 @@ def _agent_tool(name: str) -> dict[str, Any]:
                     name="lead",
                     role="coordinator",
                 ),
-                _record(factory="inspect_swarm/log_test_never_built", args={}),
+                _record(
+                    factory="inspect_swarm/log_test_never_built",
+                    args={},
+                    delivery="poll",
+                ),
             ],
             id="mixed-list",
         ),
@@ -164,7 +169,7 @@ def test_factory_args_log_as_the_built_agents_params() -> None:
                 react(prompt="a"),
                 member(deepagent, args={"tools": [bash(), python()]}, count=2),
                 member(react(prompt="b"), name="lead"),
-                member(never_built),
+                member(never_built, delivery="poll"),
             ],
             id="mixed-list",
         ),
@@ -252,12 +257,17 @@ def _cap_arm(cap: Any) -> Any:
     return member(react(prompt="a"), limits=[cost_limit(cap)])
 
 
+def _delivery_arm(delivery: Any) -> Any:
+    return member(react(prompt="a"), delivery=delivery)
+
+
 @pytest.mark.parametrize(
     "arm,a,b",
     [
         pytest.param(_built_arm, "a", "b", id="built-agent-params"),
         pytest.param(_factory_arm, "a", "b", id="factory-args"),
         pytest.param(_cap_arm, 0.5, 1.5, id="limit-cap"),
+        pytest.param(_delivery_arm, "notify", "poll", id="delivery"),
     ],
 )
 def test_eval_set_arms_are_distinct(arm: Callable[[Any], Any], a: Any, b: Any) -> None:
