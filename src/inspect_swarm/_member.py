@@ -342,6 +342,7 @@ async def _run_member(
 ) -> tuple[str, AgentState]:
     token = current_member.set(context)
     error: Exception | None = None
+    cancelled: BaseExceptionGroup[BaseException] | None = None
     try:
         with tool_state_scope(name), context.scope:
             agent = build_member(record)
@@ -362,9 +363,18 @@ async def _run_member(
                 state = await agent(state)
     except Exception as ex:
         error = ex
+    except BaseExceptionGroup as ex:
+        cancelled = ex
     finally:
         current_member.reset(token)
 
+    if cancelled is not None:
+        # on trio a cancellation grouped with errors, which the runtime catches: it
+        # removes the swarm's leaves but cannot tell the agent's stop of itself, so that
+        # is removed here, and the cancellation stays
+        _, rest = cancelled.split(_self_stop)
+        assert rest is not None
+        raise rest
     if error is not None:
         cap, owned, foreign = classify_errors(error, caps, nodes, self_stops=True)
         if foreign is not None:

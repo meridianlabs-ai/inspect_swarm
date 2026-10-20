@@ -558,9 +558,11 @@ def test_a_member_that_stops_itself_ends_alone_and_is_never_chosen(
     assert sample.output.completion.endswith("42")
 
 
-# Errors an agent can raise that end it with a custom limit, by kind.
+# Limit errors an agent can raise itself, by kind.
 _CUSTOM: dict[str, Callable[[], Exception]] = {
     "self_stop": _self_stop,
+    # sourceless, but not custom
+    "sourceless_token": lambda: LimitExceededError("token", value=1, limit=1),
     # a source the swarm does not own
     "sourced": lambda: LimitExceededError(
         "custom", value=1, limit=1, source=token_limit(1)
@@ -617,6 +619,7 @@ async def test_a_member_that_stops_itself_ends_member_limit_custom(
         # only the foreign leaf, bare
         ("mixed", RuntimeError, None),
         ("sourced", LimitExceededError, "custom"),
+        ("sourceless_token", LimitExceededError, "token"),
         ("sample_limit", LimitExceededError, "token"),
     ],
 )
@@ -883,12 +886,16 @@ async def test_a_cancellation_the_sample_does_not_explain_records_an_unknown_end
 
 
 @agent
-def limited_cleanup(model: Model, owned: list[LimitExceededError]) -> Agent:
-    # reaches its own limit in one task, still cleaning up when the sample's time limit
-    # cancels it, while another task's cleanup fails
+def limited_cleanup(
+    model: Model, owned: list[LimitExceededError], self_stop: bool = False
+) -> Agent:
+    # reaches its own limit (or stops itself) in one task, still cleaning up when the
+    # sample's time limit cancels it, while another task's cleanup fails
     async def execute(state: AgentState) -> AgentState:
         async def limited() -> None:
             try:
+                if self_stop:
+                    raise _self_stop()
                 await model.generate(state.messages)
             except LimitExceededError as ex:
                 owned.append(ex)
@@ -917,30 +924,29 @@ def limited_cleanup(model: Model, owned: list[LimitExceededError]) -> Agent:
 
 
 @pytest.mark.anyio
-async def test_a_cancellation_grouped_with_errors_loses_the_swarms_leaves() -> None:
-    # on trio the cancellation stays in the member's group, which its wrapper does not
-    # catch, so the runtime removes the member's limit
+@pytest.mark.parametrize("self_stop", [False, True])
+async def test_a_cancellation_grouped_with_errors_loses_the_swarms_leaves(
+    self_stop: bool,
+) -> None:
+    # on trio the cancellation stays in the member's group: the runtime removes the
+    # member's limit, and the wrapper the agent's stop of itself
     owned: list[LimitExceededError] = []
     with pytest.raises(BaseException) as raised:
         async with sample(time=0.2):
             await swarm(
                 member(
-                    limited_cleanup(scripted_model(), owned),
-                    limits=[token_limit(1)],
+                    limited_cleanup(scripted_model(), owned, self_stop=self_stop),
+                    limits=[] if self_stop else [token_limit(1)],
                 ),
                 channels=[],
                 budget=Budget(time=60),
             )(AgentState(messages=[ChatMessageUser(content="task")]))
-    # the member's limit was raised before the sample's time limit
+    # the member's limit or stop was raised before the sample's time limit
     [limit] = owned
-    assert isinstance(limit.source, SwarmNode)
+    assert (limit.source is None) if self_stop else isinstance(limit.source, SwarmNode)
     leaves = _leaves(raised.value)
     assert "cleanup failed" in [str(e) for e in leaves]
-    assert not [
-        e
-        for e in leaves
-        if isinstance(e, LimitExceededError) and isinstance(e.source, SwarmNode)
-    ]
+    assert all(e is not limit for e in leaves)
 
 
 def test_the_swarms_messages_stay_within_a_small_sample_message_limit(
