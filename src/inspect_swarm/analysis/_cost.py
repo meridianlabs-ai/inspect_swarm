@@ -2,6 +2,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from inspect_ai.analysis._dataframe.evals.extract import eval_log_location
+from inspect_ai.analysis._dataframe.samples.extract import auto_sample_id
 from inspect_ai.analysis._dataframe.util import LogPaths, resolve_logs
 from inspect_ai.log import EvalLog, EvalSample, read_eval_log
 from inspect_ai.model import ModelUsage
@@ -95,21 +96,30 @@ def sample_costs(logs: LogPaths | EvalLog | Sequence[EvalLog]) -> list[SampleCos
         logs: Log files, directories of logs, or logs already read.
 
     Returns:
-        One row per sample, in log order.
+        One row per sample, in log order. A sample in more than one of `logs` (a log passed twice, or a log and its directory) gets one row, as in `samples_df()`.
 
     Raises:
         ValueError: When a ledger does not validate (a version other than 1, for one).
     """
     rows: list[SampleCost] = []
+    seen: set[str] = set()
     for entry in resolve_logs(logs):
-        log = (
-            read_eval_log(entry, exclude_fields=_EXCLUDE_FIELDS)
-            if isinstance(entry, str)
-            else entry
-        )
+        if isinstance(entry, str):
+            log = read_eval_log(entry, exclude_fields=_EXCLUDE_FIELDS)
+        elif not entry.samples and entry.location:
+            # a log read header only (as eval_set() returns them) has its samples on
+            # disk, where samples_df() reads them too
+            log = read_eval_log(entry.location, exclude_fields=_EXCLUDE_FIELDS)
+        else:
+            log = entry
         location = eval_log_location(log)
         for sample in log.samples or []:
-            rows.append(_sample_cost(log, location, sample))
+            # samples_df()'s key, so that a log passed twice (or a file and its
+            # directory) gives one row per sample, as there
+            key = sample.uuid or auto_sample_id(log.eval.eval_id, sample)
+            if key not in seen:
+                seen.add(key)
+                rows.append(_sample_cost(log, location, sample))
     return rows
 
 

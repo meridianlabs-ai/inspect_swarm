@@ -630,7 +630,7 @@ Each quantity is defined once and paired with the one it is fairly compared with
 
 | Quantity | Arm | Definition | Uses the target to select? | Computed by |
 |---|---|---|---|---|
-| **final@k** | swarm of k | Answer tasks: the task's scorer on the swarm's final answer, `empty_value` when there is none. Artifact tasks: the task's scorer on the drained environment, whatever the final text | No | the task's scorer; the helper applies the empty rule to answer tasks only |
+| **final@k** | swarm of k | Answer tasks: the task's scorer on the swarm's final answer, `empty_value` when there is none. Artifact tasks: the task's scorer on the drained environment, whatever the final text | No | the task's scorer; the user's analysis applies the empty rule to answer tasks only |
 | **team@k** | swarm of k | Answer tasks: `best_member`. Artifact tasks: the shared environment's score, equal to final@k | Answer: yes. Artifact: no | `member_scores`; the task's scorer |
 | **mean member** | swarm of k | `mean_member` | No | `member_scores` |
 | **pass@k** | n ≥ k epochs of `baseline()` | P(at least one of k attempts correct), binary values, without replacement | Yes | Inspect `pass_at(k)` on the oracle value source (below) |
@@ -651,7 +651,7 @@ Each `AttemptRow` carries `result_kind`, which fixes the source by this rule.
 team@k follows Test-Time Communication's usage: "a game counts as solved if any of the k agents clears all levels", while on Terminal-Bench "team@2 contributes one shared final state". The fair pairs are:
 
 - **team@k against pass@k or best@k.** Both pick the best of k outputs with knowledge of the target, read from the same oracle value source. They measure whether communication raises the capability present in k agents.
-- **final@k against select@k, and against single.** Both apply a rule that does not see the target, scored by the task's scorer, with the same empty rule.
+- **final@k against select@k, and against single.** Both apply a rule that does not see the target, scored by the task's scorer, with the same empty rule. `select_at_k` applies it to its subsets; for final@k and single the user's analysis applies it, counting a missing final answer as `empty_value` in answer tasks.
   - They measure what a deployed swarm returns against what k independent attempts with the same selection rule, or one bigger attempt, return.
   - The gap team@k − final@k is what the final step loses.
 - **Artifact tasks.** team@k is already non-oracle (one environment). Comparing it with pass@k, as Test-Time Communication does, favours the epochs arm. The non-oracle comparison is select@k with the verifier on each attempt's environment.
@@ -691,7 +691,7 @@ class Attempt:
     final_verdict: Verdict | None     # artifact tasks: verifier on the drained environment
 ```
 
-**The pool** for a sample is its epochs with a final record and a non-NaN `final_value`; others are excluded and counted. With fewer than k attempts in the pool, the sample's select@k is NaN (unscored), as for `pass_at`.
+**The pool** for a sample is its epochs with a final record and a non-NaN `final_value`; others are left out of it. With fewer than k attempts in the pool, the sample's select@k is NaN (unscored), as for `pass_at`.
 
 **One subset (answer tasks).**
 
@@ -707,10 +707,10 @@ class Attempt:
   - `verify` uses each attempt's `final_verdict`, the verifier on its drained environment, which is what the swarm arm's own environment check corresponds to;
   - `vote` uses the answer keys of submitted attempts, when the task defines a key;
   - `first` takes the attempt with the earliest stop time;
-- the helper appends `first` to the chain if it is not already last, so every subset selects an environment, as the swarm arm always has one. A strict chain therefore has no artifact analogue, and the helper says so in its output when the swarm arm used one;
+- the helper appends `first` to the chain if it is not already last, so every subset selects an environment, as the swarm arm always has one. A strict chain therefore has no artifact analogue, which a comparison with a swarm arm that used one should say;
 - `empty_value` is never used for artifact tasks.
 
-**The sample's select@k** is the mean over all C(n′, k) subsets of its pool when that is at most 10,000, otherwise over 10,000 subsets sampled with a fixed seed recorded in the output. The helper also reports, per sample, the fraction of subsets that produced no answer.
+**The sample's select@k** is the mean over all C(n′, k) subsets of its pool when that is at most `max_subsets` (10,000 by default), otherwise over `max_subsets` subsets sampled with the given `seed`.
 
 **Time** is the record's swarm time, never `EvalSample.working_time`, which includes scoring and excludes waiting ([Usage and timing](#usage-and-timing-during-scoring)). Every `baseline()` attempt starts its swarm clock at zero, so "first" means the shortest time to submit.
 
@@ -738,7 +738,7 @@ class SwarmResultRecord(BaseModel):   # adds, with the cost boundary
 - **Coverage.** Sample usage already counts native compaction and excludes response-cache replays, so it is complete where model events are not. The ledger's unknown-cost rules still apply to it: calls cancelled in flight, unpriced models.
 - **Placement.** The snapshot covers everything up to the swarm's exit, so the swarm must be the task's last solver step. `swarm()` would document this, because a later solver step's usage would land after the boundary.
 - **Scoring usage** is the sample total minus `solve_usage`, reported separately per arm, so the cost of per-member scoring is visible.
-- **Samples without a boundary.** A plain agent without `baseline()`, or a sample that failed before the swarm started, has no `solve_usage`. The helper keeps its total under a separate name, `sample_total_usage`, never as solve usage. It excludes the sample from every solve-cost comparison and reports the number excluded per arm. Its scores are still reported.
+- **Samples without a boundary.** A plain agent without `baseline()`, or a sample that failed before the swarm started, has no `solve_usage`. `attempt_rows` keeps its total under a separate name, `sample_total_usage`, never as solve usage, and flags the row `no_solve_usage`. The user's analysis leaves such samples out of solve-cost comparisons and reports how many it left out per arm. Their scores are still reported.
 - **The ledger.** The limits deep dive's ledger would take arm totals from `solve_usage`, follow the same exclusion, and join on (log, sample id, epoch).
 
 ### Re-scoring

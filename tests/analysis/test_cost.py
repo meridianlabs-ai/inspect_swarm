@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from inspect_ai.log import (
     EvalLog,
     EvalSample,
     EvalSpec,
+    read_eval_log,
     write_eval_log,
 )
 from inspect_ai.model import ModelUsage
@@ -167,6 +169,30 @@ def test_sample_costs_read_realized_cost_and_the_ledger(tmp_path: Path) -> None:
             unpriced_models=[],
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    "logs",
+    [
+        # what eval_set() returns: logs read header only, their samples on disk
+        pytest.param(
+            lambda path: read_eval_log(str(path), header_only=True), id="header"
+        ),
+        pytest.param(
+            lambda path: [read_eval_log(str(path), header_only=True)], id="headers"
+        ),
+        # a sample passed twice gets one row, as in samples_df()
+        pytest.param(lambda path: [read_eval_log(str(path))] * 2, id="log-twice"),
+        pytest.param(lambda path: [str(path.parent), str(path)], id="dir-and-file"),
+    ],
+)
+def test_sample_costs_read_each_stored_sample_once(
+    tmp_path: Path, logs: Callable[[Path], Any]
+) -> None:
+    path = tmp_path / "arm.eval"
+    write_eval_log(_log([_sample(1, {"a": _priced(1.0)}, _ledger())]), str(path))
+    assert sample_costs(logs(path)) == sample_costs(str(path))
+    assert len(sample_costs(str(path))) == 1
 
 
 def test_sample_costs_report_why_a_cost_is_a_lower_bound() -> None:
