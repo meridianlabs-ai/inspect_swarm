@@ -7,6 +7,11 @@ from inspect_ai.util import Limit, LimitExceededError, background, token_limit
 from inspect_ai.util._background import background_target
 
 from inspect_swarm._background import MemberBackground
+from inspect_swarm._budget import MemberContext
+
+
+def _member() -> MemberContext:
+    return MemberContext("m", bridged=False)
 
 
 def _limit_error(source: Limit | None) -> Callable[[], Awaitable[None]]:
@@ -32,7 +37,7 @@ async def test_the_owner_runs_background_work_and_cancels_what_is_left() -> None
         finally:
             cleaned.append(True)
 
-    owner = MemberBackground(contain=[])
+    owner = MemberBackground(_member(), contain=[])
     async with owner:
         assert background_target.get() is owner
         # at once with none running
@@ -81,7 +86,7 @@ async def test_a_limit_from_a_contained_node_ends_only_its_task(
         await anyio.sleep(0.05)
         sibling_done.set()
 
-    owner = MemberBackground(contain=[member_node])
+    owner = MemberBackground(_member(), contain=[member_node])
     with pytest.raises(LimitExceededError) if raised else nullcontext():
         async with owner:
             background(_limit_error(source))
@@ -95,7 +100,7 @@ async def test_a_limit_from_a_contained_node_ends_only_its_task(
 
 @pytest.mark.anyio
 async def test_a_tasks_error_cancels_the_block_and_its_siblings() -> None:
-    owner = MemberBackground(contain=[])
+    owner = MemberBackground(_member(), contain=[])
 
     async def fails() -> None:
         await anyio.sleep(0.01)
@@ -116,16 +121,39 @@ async def test_two_task_errors_are_raised_as_a_group() -> None:
         raise RuntimeError(message)
 
     with pytest.raises(ExceptionGroup) as info:
-        async with MemberBackground(contain=[]):
+        async with MemberBackground(_member(), contain=[]):
             background(fails, "one")
             background(fails, "two")
             await anyio.sleep_forever()
     assert sorted(str(e) for e in info.value.exceptions) == ["one", "two"]
 
 
+async def _caused(where: str) -> None:
+    async def fails() -> None:
+        try:
+            raise ValueError("original")
+        except ValueError as ex:
+            raise RuntimeError("wrapped") from ex
+
+    async with MemberBackground(_member(), contain=[]):
+        if where == "body":
+            await fails()
+        background(fails)
+        await anyio.sleep_forever()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("where", ["body", "task"])
+async def test_an_error_keeps_its_cause(where: str) -> None:
+    with pytest.raises(RuntimeError, match="wrapped") as info:
+        await _caused(where)
+    assert isinstance(info.value.__cause__, ValueError)
+    assert str(info.value.__cause__) == "original"
+
+
 @pytest.mark.anyio
 async def test_the_blocks_own_error_cancels_the_tasks_and_is_raised_bare() -> None:
-    owner = MemberBackground(contain=[])
+    owner = MemberBackground(_member(), contain=[])
     with pytest.raises(ValueError, match="block failed"):
         async with owner:
             background(anyio.sleep_forever)
@@ -138,7 +166,7 @@ async def test_the_blocks_own_error_cancels_the_tasks_and_is_raised_bare() -> No
 @pytest.mark.anyio
 async def test_a_cancellation_from_outside_is_reraised() -> None:
     reached_after = False
-    owner = MemberBackground(contain=[])
+    owner = MemberBackground(_member(), contain=[])
     with anyio.CancelScope() as scope:
         async with owner:
             background(anyio.sleep_forever)
@@ -165,7 +193,7 @@ async def test_a_shielded_cleanup_holds_the_block_until_it_ends() -> None:
                 await anyio.sleep(0.05)
             cleaned = True
 
-    async with MemberBackground(contain=[]):
+    async with MemberBackground(_member(), contain=[]):
         background(shielded)
         await anyio.sleep(0.01)
     assert cleaned
@@ -235,7 +263,7 @@ async def _by_nothing(owner: MemberBackground) -> None:
 async def test_cancelled_counts_each_cancelled_task_once(
     scenario: Callable[[MemberBackground], Awaitable[None]], cancelled: int
 ) -> None:
-    owner = MemberBackground(contain=[])
+    owner = MemberBackground(_member(), contain=[])
     await scenario(owner)
     assert owner.running == 0
     assert owner.cancelled == cancelled

@@ -9,6 +9,7 @@ import anyio
 import pytest
 from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent, deepagent, general
+from inspect_ai.agent._bridge.util import bridge_model_generate
 from inspect_ai.dataset import Sample
 from inspect_ai.event import (
     InfoEvent,
@@ -550,6 +551,41 @@ async def test_background_work_started_by_a_factory_is_refused() -> None:
         [line] = _written_ledger(transcript).members
     assert line.status == "errored"
     assert (line.background_started, line.background_cancelled) == (1, 1)
+
+
+async def _bridged_call(model: Model) -> None:
+    # a generation the agent bridge serves, as for a bridged subagent
+    with bridge_model_generate():
+        await model.generate([ChatMessageUser(content="bridged")])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "detected"])
+async def test_bridge_use_and_background_work_are_refused(declared: bool) -> None:
+    log: list[str] = []
+    model = scripted_model()
+    agent = spawner(
+        model,
+        [_Child("child", [_sleep(3600)])],
+        log,
+        # bridge use found after the child was started
+        steps=[] if declared else [lambda: _bridged_call(model)],
+    )
+    async with sample() as transcript:
+        with pytest.raises(RuntimeError, match="uses the agent bridge and background"):
+            await swarm(
+                member(agent, name="x", bridged=declared),
+                channels=[],
+                budget=Budget(grace=0.1),
+            )(AgentState(messages=[ChatMessageUser(content="task")]))
+        [line] = _written_ledger(transcript).members
+    assert line.status == "errored"
+    # a declared member starts none; a detected one has its child cancelled, not
+    # stopped by a limit
+    assert log == ([] if declared else ["child cancelled"])
+    assert (line.background_started, line.background_cancelled) == (
+        (0, 0) if declared else (1, 1)
+    )
 
 
 # ---------------------------------------------------------------------------

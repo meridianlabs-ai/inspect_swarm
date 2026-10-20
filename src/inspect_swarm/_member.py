@@ -200,7 +200,7 @@ def member(
 
     Submissions. A member that returns normally has submitted, and its output is its answer, unless the output's stop reason is `content_filter` or `model_length`. That is how `react()` returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered.
 
-    Background work belongs to the member. Work its agent starts with `background()`, such as `deepagent(background=...)` subagents, spends through the member's limits and share, and is the member's in the ledger. When the member's agent returns, the swarm stops the background work from starting model calls, gives it the swarm's grace period to finish calls and tool calls in flight, and cancels what is left. The member ends after that, with the status its agent ended with; `Budget.grace=0` cancels background work at once. A member time limit bounds its agent only: after the agent returns, its background work gets the grace period too, and the cancelled work's cleanup is awaited. Background work must be started by the agent while it runs; a factory that starts it while building the agent makes the member `errored`. Work started outside `background()` (an `asyncio` task, a process left running in the sandbox) is not stopped.
+    Background work belongs to the member. Work its agent starts with `background()`, such as `deepagent(background=...)` subagents, spends through the member's limits and share, and is the member's in the ledger. When the member's agent returns, the swarm stops the background work from starting model calls, gives it the swarm's grace period to finish calls and tool calls in flight, and cancels what is left. The member ends after that, with the status its agent ended with; `Budget.grace=0` cancels background work at once. A member time limit bounds its agent only: after the agent returns, its background work gets the grace period too, and the cancelled work's cleanup is awaited. Background work must be started by the agent while it runs; a factory that starts it while building the agent makes the member `errored`. Work started outside `background()` (an `asyncio` task, a process left running in the sandbox) is not stopped. Bridged members cannot have background work: `background()` raises in a member declared or found bridged, and a member that uses the agent bridge after starting background work (through a bridged subagent, for example) is cancelled and ends `errored`.
 
     ACP agents, which wait for their caller to drive them rather than returning, are refused: a built one when `member()` is called, and a factory's when the member is built.
 
@@ -382,7 +382,7 @@ async def _run_member(
             # inside the member's scopes, so the hard stop cancels its background work
             # and that work keeps the member's tool state; outside its nodes, so a
             # member time limit cancels only the agent
-            owner = MemberBackground(contain=[*nodes, *caps])
+            owner = MemberBackground(context, contain=[*nodes, *caps])
             try:
                 async with owner:
                     foreign: BaseException | None = None
@@ -428,6 +428,9 @@ async def _run_member(
                 # after the owner has ended its work, so its cancellations are counted
                 outcome.background_started = owner.started
                 outcome.background_cancelled = owner.cancelled
+        if context.refusal is not None:
+            # bridge use found after the member started background work
+            raise context.refusal
     finally:
         current_member.reset(token)
 

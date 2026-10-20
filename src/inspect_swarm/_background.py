@@ -8,6 +8,8 @@ from anyio.abc import TaskGroup
 from inspect_ai.util import Limit, LimitExceededError
 from inspect_ai.util._background import BackgroundTarget, background_target
 
+from ._budget import MemberContext, bridged_background_error
+
 PosArgsT = TypeVarTuple("PosArgsT")
 
 
@@ -16,9 +18,11 @@ PosArgsT = TypeVarTuple("PosArgsT")
 # still running and waits for them. A task that raises a bare limit error from one of
 # `contain` (the member's nodes and the swarm's caps) ends alone; any other error from
 # a task cancels the block and the other tasks and is raised from it, as from the
-# sample's task group.
+# sample's task group. A bridged member's nodes cancel the whole member rather than
+# raise, so the owner refuses background work in a member found bridged.
 class MemberBackground:
-    def __init__(self, contain: Sequence[Limit]) -> None:
+    def __init__(self, member: MemberContext, contain: Sequence[Limit]) -> None:
+        self._member = member
         self._contain = list(contain)
         # tasks background() has started in this owner
         self.started = 0
@@ -47,16 +51,19 @@ class MemberBackground:
         assert self._tg is not None and self._token is not None
         background_target.reset(self._token)
         self._tg.cancel_scope.cancel()
+        single: BaseException | None = None
         try:
             await self._tg.__aexit__(exc_type, exc, tb)
         except BaseExceptionGroup as ex:
             # a task group wraps whatever ends it: one exception is raised bare
-            group = ex
-            if len(group.exceptions) == 1:
-                raise group.exceptions[0] from None
-            raise
+            if len(ex.exceptions) != 1:
+                raise
+            single = ex.exceptions[0]
         finally:
             self._ended = True
+        if single is not None:
+            # outside the handler, so the exception keeps its own cause and context
+            raise single
         # the group's own cancel would absorb a cancellation from outside (the hard
         # stop) that reached the block; keep it
         if isinstance(exc, anyio.get_cancelled_exc_class()):
@@ -72,6 +79,10 @@ class MemberBackground:
             raise RuntimeError(
                 "background(): the member's background work has ended, so no new background work can start."
             )
+        if self._member.bridged:
+            raise bridged_background_error(self._member.name)
+        # bridge use found from now on is refused
+        self._member.background = True
         self._tg.start_soon(self._run, func, args)
         self.started += 1
         self.running += 1
