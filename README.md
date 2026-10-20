@@ -217,7 +217,7 @@ or, in a uv project:
 uv add "pandas>=2.1.0" "pyarrow>=10.0.1"
 ```
 
-Then:
+This example uses a task with a scorer named `match`. Replace `score_match` with your task's score column (`score_<scorer name>`):
 
 ```python
 from inspect_ai.analysis import SampleSummary, samples_df
