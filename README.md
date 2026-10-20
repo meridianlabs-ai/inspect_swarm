@@ -203,7 +203,7 @@ A member's `state` is `pending` (never started), `running` or `ended`. `time` is
 When the swarm ends it writes two more store entries, each also logged as an `InfoEvent` with source `inspect_swarm`:
 
 - `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, the controller and the final step, model calls that errored or reported no usage, unpriced models, what stopped the swarm, and whether the sample resumed from a checkpoint.
-- `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members with no completed model call (`never_acted`), counts of completed model calls for the chosen member (`steps_to_answer`) and the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member. These call counts include cache replays and exclude failed or cancelled attempts.
+- `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members with no completed model call (`never_acted`), counts of completed model calls for the chosen member (`steps_to_answer`) and the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member (`null` for a bridged member, see [Restrictions](#restrictions)). These call counts include cache replays and exclude failed or cancelled attempts.
 
 `inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`. `samples_df()` needs pandas and pyarrow, which neither install above includes:
 
@@ -235,7 +235,7 @@ df.groupby("log")[["score", "swarm_cost"]].mean()
 
 ## Logs and the store
 
-Spans inside a swarm log no `StoreEvent`s. The swarm's span logs the net change to the store, which says what changed but not which member changed it. Members' `ToolEvent`s are the record of what they did.
+Spans inside a swarm log no `StoreEvent`s. The swarm's span logs the net change to the store, which says what changed but not which member changed it. Members' `ToolEvent`s are the record of what they did, except for bridged members ([Restrictions](#restrictions)).
 
 If an error, limit or cancellation escapes the swarm and ends the sample, the log may have no `StoreEvent` for the swarm's writes. `sample.store` is always the record of the final store.
 
@@ -246,6 +246,7 @@ If an error, limit or cancellation escapes the swarm and ends the sample, the lo
   - Tool state that a setup solver prepared at the default instance is not carried into the members. They start with fresh state.
   - Tasks whose scorers read a member's tool state from the store are not supported. The keys inside a member's scope differ from the default ones.
 - **Memory is private by default.** The default `memory()`, and `deepagent()`'s memory, is private to each member. For a board members share, give the tool an explicit instance, as in `react(tools=[memory(instance="board")])`. A shared instance is a channel between members outside the swarm's channels: members' `ToolEvent`s record its use, and nothing else does.
+- **Bridged members leave no tool events.** A bridged member runs a CLI agent in the sandbox through Inspect's agent bridge. `inspect_swe` agents count as bridged by default; pass `member(..., bridged=True)` for other agents that use the bridge. The CLI's own tool calls do not emit Inspect `ToolEvent`s, so the tool-event evidence described here does not cover them, and `longest_identical_tool_run` is `null` for bridged members.
 - **Shared files are observed, not audited.** Tool calls are evidence that members may have communicated through the filesystem, not a complete record. Processes a member starts in the sandbox can read and write files between logged tool calls, and after the member has ended. An experiment that attributes communication to the filesystem must state this limit, or add its own instrumentation, such as filesystem snapshots or audit logs in the sandbox.
 - **The result record belongs to the swarm.** Only the swarm writes `inspect_swarm:result`. Task code (tools, member builders, controllers, scorers) must not write it. Any member's code can read it while the swarm runs, so a tool that reads it gives members a view of each other's state, status and time. That is a channel between members outside the swarm's channels, and the swarm records no evidence of it.
 
