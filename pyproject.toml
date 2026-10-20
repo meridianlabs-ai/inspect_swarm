@@ -46,6 +46,9 @@ dev = [
     "anyio>=4.0",
     # async tests run on both anyio backends (tests/conftest.py)
     "trio",
+    # inspect_ai.analysis.samples_df(), through which the analysis tests read
+    "pandas>=2.1.0",
+    "pyarrow>=10.0.1",
 ]
 dist = ["twine", "build"]
 

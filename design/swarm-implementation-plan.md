@@ -57,7 +57,7 @@ M1 is a leaderless filesystem swarm with full accounting ([swarm.md Implementati
 - the budget: swarm nodes, `Budget` with derived caps, member limits, the soft stop with grace, recovery from the swarm's own cap only, the final step and the provisional answer, the ledger, and splits ([swarm-limits.md](swarm-limits.md#implementation-plan), all five steps);
 - the final answer `first`, the provisional answer and the per-member result record ([swarm-scoring.md Part 1](swarm-scoring.md#implementation-plan-for-m1)); this is how the brief's "final-answer modes, the result contract" is read (decision: Ransom, 2026-10-14);
 - `InfoEvent` evidence, a named timeline per member, a recorded stop reason, metrics, harness-validity checks, and a simple critical path: the steps to the answer and the longest member's step count (decision: Ransom, 2026-10-14; [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics));
-- an analysis helper, `sample_costs()`, that reads each sample's realized cost and ledger data for joining with Inspect's dataframes;
+- `SwarmColumns`, columns for Inspect's `samples_df()` with each sample's realized cost and ledger data;
 - three small items from [swarm-lean-open-problems.md](swarm-lean-open-problems.md#recommended-changes-to-our-designs): the `unsubmitted` status, the rejection of an integer `background`, and documentation that the default `memory()` is private to each member ([table](#where-the-deep-dives-milestone-items-land));
 - the two inspect_ai pull requests that land first: the registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09);
 - no `StoreEvent`s inside the swarm: the inspect_ai store-event switch (AI-7) and the runtime entering it (M1-14) (decision: Ransom, 2026-10-19; [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)).
@@ -131,7 +131,7 @@ flowchart LR
   M1_5 --> M1_9[M1-9 unsubmitted status]
   M1_5 --> M1_10[M1-10 evidence and metrics]
   M1_6 --> M1_10
-  M1_6 --> M1_12[M1-12 analysis helper]
+  M1_6 --> M1_12[M1-12 analysis columns]
   M1_5 --> M1_11[M1-11 critical path]
   M1_10 --> M1_11
   M1_7 --> M1_13[M1-13 README for internal users]
@@ -258,11 +258,11 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 - Depends on: M1-5 (the selected member), M1-10 (the metrics module and the ledger lines it reads). No separate design.
 - Implements: swarm.md Observer, "critical-path steps" ("Settling it is part of M1's metrics work").
 
-**M1-12. Analysis helper.** `sample_costs()` reads each sample's realized cost and what the swarm's ledger says about it (roster size, caps, `resumed`, completeness and why a cost is a lower bound) from a set of logs, as rows that join to Inspect's `samples_df()` on `log`, `id` and `epoch`. Comparing arms and fitting λ (Ord's method) over agent count × per-agent budget are the user's own dataframe work over those rows: helpers that deal with swarm-specific data belong in inspect_swarm, generic statistics and aggregation do not (decision: Ransom, 2026-10-20).
-- Files: `src/inspect_swarm/analysis/__init__.py`, `src/inspect_swarm/analysis/_cost.py`.
-- Tests: `tests/analysis/`, on synthetic logs with known answers.
+**M1-12. Analysis columns.** `SwarmColumns`, a list of `SampleColumn`s for Inspect's `samples_df()`, gives each sample's realized cost and what the swarm's ledger says about it (roster size, caps, `resumed`, completeness and the call counts that make a cost a lower bound), so `samples_df(logs, columns=SampleSummary + SwarmColumns)` has scores and swarm cost in one dataframe. Comparing arms and fitting λ (Ord's method) over agent count × per-agent budget are the user's own dataframe work over it: helpers that deal with swarm-specific data belong in inspect_swarm, generic statistics and aggregation do not (decision: Ransom, 2026-10-20).
+- Files: `src/inspect_swarm/analysis/__init__.py`, `src/inspect_swarm/analysis/_columns.py`.
+- Tests: `tests/analysis/`, through `samples_df()` on written logs with known answers.
 - Depends on: M1-6 (the ledger's format).
-- Implements: [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics) ("Analysis", first bullet) and its Testing ("The analysis helper").
+- Implements: [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics) ("Analysis", first bullet) and its Testing ("The analysis columns").
 
 **M1-13. README for internal users.** How to run a swarm on an existing task, the common configurations, and M1's documented restrictions: background members are rejected; tool state a setup solver prepared at the default instance is not carried into members, and tasks whose scorers read a member's tool state are unsupported ([swarm.md Compatibility](swarm.md#compatibility-and-migration)); the default `memory()` is private to each member and a shared board needs an explicit instance; the filesystem observation limit ([swarm.md Security](swarm.md#security)); the result record's store key `inspect_swarm:result` is owned by the runtime, task code must not write it, and a tool that reads it gives members a view of each other's results, a channel outside the bus ([swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records); decision: Ransom, 2026-10-14).
 - Files: `README.md`.

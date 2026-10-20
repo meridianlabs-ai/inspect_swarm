@@ -776,7 +776,7 @@ Inspect applies every epoch reducer to every scorer and key. An epochs arm with 
 
 ### The analysis helper
 
-`inspect_swarm.analysis` adds two scoring helpers beside M1's `sample_costs()`. Each reads or replays what only the swarm records. Means over samples, estimators and comparisons across arms are the user's own dataframe work (decision: Ransom, 2026-10-20; [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics)):
+`inspect_swarm.analysis` adds two scoring helpers beside M1's `SwarmColumns`. Each reads or replays what only the swarm records. Means over samples, estimators and comparisons across arms are the user's own dataframe work (decision: Ransom, 2026-10-20; [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics)):
 
 ```python
 def attempt_rows(logs: Sequence[str | EvalLog], *, scorer: str, member_scorer: str) -> list[AttemptRow]: ...
@@ -792,7 +792,7 @@ def select_at_k(rows: Sequence[AttemptRow], k: int, chain: Sequence[str], *, emp
   - `sample_total_usage`;
   - the flag `target_assisted`.
 
-  With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons. `sample_costs()` rows, with the ledger's realized cost, join on the same (log, sample id, epoch).
+  With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons. `samples_df()` with M1's `SwarmColumns`, which has the ledger's realized cost, joins on the same (log, sample id, epoch).
 - **From rows to attempts.** `select_at_k` takes one sample's rows from a baseline arm (its epochs), builds one `Attempt` per row, and returns that sample's select@k:
   - `epoch`;
   - `submitted`, `time`, `answer_key` and `verdict` from the row's single member: its status `submitted`, its end time, its key, its run-time verdict;
