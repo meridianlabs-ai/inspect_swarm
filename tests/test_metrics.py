@@ -651,3 +651,54 @@ def test_gate_checks(
         assert 0 < result.first_pass_time <= result.time
     else:
         assert result.first_pass_time is None
+
+
+def test_records_written_before_gate_checks_load() -> None:
+    # version-1 records as written before the gate fields
+    metrics = SwarmMetrics.model_validate(
+        {
+            "version": 1,
+            "tokens": 10,
+            "cost": 0.0,
+            "wall_clock": 1.0,
+            "members": [
+                {
+                    "name": "a",
+                    "tokens": 10,
+                    "cost": 0.0,
+                    "running_time": 1.0,
+                    "longest_identical_tool_run": 1,
+                }
+            ],
+            "never_acted": [],
+            "steps_to_answer": 1,
+            "longest_member_steps": 1,
+        }
+    )
+    record = SwarmResultRecord.model_validate(
+        {
+            "version": 1,
+            "members": [
+                {
+                    "name": "a",
+                    "role": None,
+                    "state": "ended",
+                    "status": "submitted",
+                    "submitted": True,
+                    "time": 1.0,
+                }
+            ],
+            "final": {
+                "mode": "first",
+                "member": "a",
+                "reason": None,
+                "provisional": False,
+            },
+        }
+    )
+    for gates in [metrics.members[0], record.members[0]]:
+        assert (gates.gate_checks, gates.gate_passes, gates.first_pass_time) == (
+            0,
+            0,
+            None,
+        )

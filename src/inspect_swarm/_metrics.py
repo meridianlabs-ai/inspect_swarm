@@ -25,10 +25,13 @@ class MemberMetrics(BaseModel):
     # bridged member, whose tool calls leave no tool events.
     longest_identical_tool_run: int | None
     # gate checks (`GateChecks`): the in-loop checks of the member's own submissions,
-    # those that passed, and the swarm time of the first that passed
-    gate_checks: int
-    gate_passes: int
-    first_pass_time: float | None
+    # those that passed, and the swarm time of the first that passed. Passes assume
+    # react()'s default score_value converter, value_to_float(), so a member with its
+    # own converter can record passes that differ from its own gate. The defaults load
+    # metrics written before these fields.
+    gate_checks: int = 0
+    gate_passes: int = 0
+    first_pass_time: float | None = None
 
 
 # The swarm's metrics for one run, written once, when the swarm ends, as an InfoEvent
@@ -73,7 +76,8 @@ class MemberTimes:
 # own, not a subagent's; the task's other scorers' events for the same submission are
 # not checks. A pass is a check whose value is 1.0 under Inspect's default
 # value_to_float(), react()'s default score_value; a member that sets its own
-# score_value is read by the default too. react() does not score the submission that
+# score_value is read by the default too, so its passes can differ from its own gate
+# (decision: Ransom, 2026-10-20). react() does not score the submission that
 # uses up its last attempt, and an agent that checks submissions without score() makes
 # no checks.
 @dataclass(frozen=True)

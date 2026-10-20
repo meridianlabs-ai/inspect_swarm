@@ -34,10 +34,10 @@ class MemberResult(BaseModel):
     """How many of the member's own submissions were checked in its loop, as `react()` checks them with `attempts`: intermediate scores from the task's first scorer, made in the member's own agent span and not a subagent's. Set when the member ends."""
 
     gate_passes: int = 0
-    """How many of those checks passed: a score of 1.0 under Inspect's default `value_to_float()`, which is `react()`'s default `score_value`. Set when the member ends."""
+    """How many of those checks passed: a score of 1.0 under Inspect's default `value_to_float()`, which is `react()`'s default `score_value`. Passes assume that default converter, so a member with its own `score_value` can record passes that differ from its own gate. Set when the member ends."""
 
     first_pass_time: float | None = None
-    """Swarm time of the member's first passing check; `None` without one."""
+    """Swarm time of the member's first passing check; `None` without one. A pass assumes the default `value_to_float()` converter, as for `gate_passes`."""
 
 
 class FinalRecord(BaseModel):
