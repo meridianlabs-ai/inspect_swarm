@@ -26,12 +26,14 @@ from inspect_ai.util import store
 from inspect_swarm import SwarmControl, member, swarm
 from inspect_swarm._evidence import METRICS_KEY
 from inspect_swarm._metrics import SwarmMetrics
+from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
     Script,
     controller,
     generator,
+    output,
     run_swarm,
     sample,
     scripted_model,
@@ -254,6 +256,126 @@ async def test_a_bridged_members_tool_run_is_unknown() -> None:
     )
     [metrics] = _metrics(outcome.transcript).members
     assert metrics.longest_identical_tool_run is None
+
+
+# ---------------------------------------------------------------------------
+# critical path
+
+
+def _stepper(calls: int, delay: float, submits: bool) -> Agent:
+    # `calls` calls of `delay` seconds each; the last is filtered unless it submits
+    last = (
+        output()
+        if submits
+        else ModelOutput.from_content("mockllm", "no", stop_reason="content_filter")
+    )
+    script = Script([*(output() for _ in range(calls - 1)), last], delay=delay)
+    return generator(scripted_model(script), calls=calls)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "a,b,submits,answer,steps_to_answer,longest",
+    [
+        # a submits first, with fewer steps than b
+        pytest.param((2, 0.0), (4, 0.05), True, "a", 2, 4, id="first-is-shortest"),
+        # b submits first, with more steps than a
+        pytest.param((1, 0.3), (3, 0.0), True, "b", 3, 3, id="first-is-longest"),
+        pytest.param((2, 0.0), (3, 0.0), False, None, None, 3, id="no-submission"),
+    ],
+)
+async def test_steps_to_answer_and_longest_member_steps(
+    a: tuple[int, float],
+    b: tuple[int, float],
+    submits: bool,
+    answer: str | None,
+    steps_to_answer: int | None,
+    longest: int,
+) -> None:
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(_stepper(*a, submits), name="a"),
+                member(_stepper(*b, submits), name="b"),
+            ],
+            channels=[],
+        )
+    )
+    assert outcome.record.final.member == answer
+    metrics = _metrics(outcome.transcript)
+    assert metrics.steps_to_answer == steps_to_answer
+    assert metrics.longest_member_steps == longest
+
+
+@agent
+def concurrent(model: Model) -> Agent:
+    """Replay a cached call, then make two calls at once."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate("same", cache=True)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(model.generate, "x")
+            tg.start_soon(model.generate, "y")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_cache_replays_and_concurrent_calls_are_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("INSPECT_CACHE_DIR", str(tmp_path))
+    model = scripted_model()
+    async with sample() as t:
+        # warms the cache, so that the member's first call is a replay
+        await model.generate("same", cache=True)
+        await swarm(member(concurrent(model), name="c"), channels=[])(
+            AgentState(messages=[])
+        )
+        metrics = _metrics(t)
+        assert (metrics.steps_to_answer, metrics.longest_member_steps) == (3, 3)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ending", ["error", "cancel"])
+async def test_an_interrupted_swarm_counts_its_provisional_answer(ending: str) -> None:
+    # a submits after two calls; then the controller raises, or cancels an outer
+    # scope, while b still waits, so the swarm never finalises
+    outer = anyio.CancelScope()
+
+    async def run(control: SwarmControl) -> str:
+        control.start("a")
+        control.start("b")
+        async for event in control.events():
+            if event.member == "a":
+                break
+        if ending == "error":
+            raise RuntimeError("controller-failure")
+        outer.cancel()
+        await anyio.sleep(3600)
+        return "unreachable"
+
+    async with sample() as t:
+        agent = swarm(
+            [
+                member(_stepper(2, 0.0, True), name="a"),
+                member(sleeper(), name="b"),
+            ],
+            controller=controller(run, f"interrupted-{uuid4().hex}"),
+            channels=[],
+        )
+        with outer:
+            if ending == "error":
+                with pytest.raises(RuntimeError, match="controller-failure"):
+                    await agent(AgentState(messages=[]))
+            else:
+                await agent(AgentState(messages=[]))
+        assert outer.cancelled_caught is (ending == "cancel")
+        record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+        assert (record.final.member, record.final.provisional) == ("a", True)
+        metrics = _metrics(t)
+        assert (metrics.steps_to_answer, metrics.longest_member_steps) == (2, 2)
 
 
 # ---------------------------------------------------------------------------

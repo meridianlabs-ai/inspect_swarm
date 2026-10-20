@@ -23,7 +23,7 @@ from .._budget import (
     is_bridged,
 )
 from .._evidence import MemberTimelines, evidence, write_ledger, write_metrics
-from .._final import finalise, settle
+from .._final import finalise, first, settle
 from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
     Member,
@@ -168,7 +168,9 @@ class MemberRun:
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
         self.context = MemberContext(
-            name, bridged=is_bridged(cast(Agent, agent), record.bridged)
+            name,
+            bridged=is_bridged(cast(Agent, agent), record.bridged),
+            delivery=record.delivery,
         )
         self.lever, self.nodes = member_nodes(record, name, share)
 
@@ -418,6 +420,8 @@ class SwarmRun:
                 if m.context.span_id is not None
             }
             places = interval.places(spans)
+            # the record's answer, final or provisional
+            chosen = first(self._results())
             write_metrics(
                 swarm_metrics(
                     ledger,
@@ -425,6 +429,7 @@ class SwarmRun:
                     places,
                     [MemberTimes(m.name, m.started, m.time) for m in self._members],
                     wall_clock,
+                    chosen.name if chosen is not None else None,
                 )
             )
             timelines.fill(places)
