@@ -1,3 +1,4 @@
+import re
 from dataclasses import astuple
 from typing import Any
 from uuid import uuid4
@@ -18,6 +19,7 @@ from inspect_swarm import (
     swarm_budget,
     swarm_resources,
 )
+from inspect_swarm._budget import MemberContext, current_member
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import SwarmLedger
 
@@ -154,13 +156,20 @@ async def test_swarm_resources_reports_the_budget_as_text() -> None:
         Budget(cost=8.0, tokens=f"output:{20 * T}", time=600.0, split=(1, 3))
     )
     _, text = seen["b"]
-    assert text.splitlines() == [
+    *lines, time = text.splitlines()
+    assert lines == [
         "Cost: the swarm has used $3.0000 of its cap of $8.0000; $5.0000 left.",
         "Cost, your share: you have used $2.0000 of $6.0000; $4.0000 left.",
         "Tokens (output): the swarm has used 150 of its cap of 1,000; 850 left.",
         "Tokens (output), your share: you have used 100 of 750; 650 left.",
-        "Time: the swarm has used 0 seconds of its cap of 600 seconds; 600 seconds left.",
     ]
+    # elapsed time depends on the runner, so only its shape and sum are fixed
+    match = re.fullmatch(
+        r"Time: the swarm has used (\d+) seconds of its cap of 600 seconds; (\d+) seconds left\.",
+        time,
+    )
+    assert match is not None
+    assert abs(int(match[1]) + int(match[2]) - 600) <= 1
 
 
 @pytest.mark.anyio
@@ -169,6 +178,35 @@ async def test_swarm_resources_without_caps() -> None:
     view, text = seen["a"]
     assert (view.cost, view.tokens, view.time) == (None, None, None)
     assert text == "The swarm has no cost, token or time cap."
+
+
+@pytest.mark.anyio
+async def test_swarm_budget_gives_no_share_outside_the_runs_own_members() -> None:
+    # the controller has no member; another run's member of the same name has its own
+    # context, and must not read this run's share
+    views: list[SwarmBudget] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        for context in (None, MemberContext("a", bridged=False)):
+            token = current_member.set(context)
+            try:
+                views.append(swarm_budget())
+            finally:
+                current_member.reset(token)
+        return "all_done"
+
+    agent_swarm = swarm(
+        [
+            member(generator(scripted_model(), calls=0), name="a"),
+            member(generator(scripted_model(), calls=0), name="b"),
+        ],
+        controller=controller(run, f"tools_test_{uuid4().hex}"),
+        channels=[],
+        budget=Budget(tokens=100, split="equal"),
+    )
+    async with sample():
+        await agent_swarm(AgentState(messages=[ChatMessageUser(content="task")]))
+    assert [view.tokens for view in views] == [BudgetUsage(100, 0)] * 2
 
 
 def test_swarm_budget_outside_a_swarm_raises() -> None:
