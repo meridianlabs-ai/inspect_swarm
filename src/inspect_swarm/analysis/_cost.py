@@ -205,7 +205,7 @@ def fit_lambda(arms: Sequence[ArmCost]) -> LambdaFit:
         The fit.
 
     Raises:
-        ValueError: When an arm has no ledger, no samples in its means or no positive cost, the arms do not vary both agent count and per-agent cost independently, or the score does not change with per-agent cost.
+        ValueError: When an arm has no ledger, no samples in its means, a score or cost that is not finite, or no positive cost, the arms do not vary both agent count and per-agent cost independently, or the score does not change with per-agent cost.
     """
     points: list[tuple[float, float, float]] = []
     for arm in arms:
@@ -215,6 +215,10 @@ def fit_lambda(arms: Sequence[ArmCost]) -> LambdaFit:
             )
         if arm.score is None or arm.cost is None:
             raise ValueError(f"Arm {arm.arm} has no scored samples.")
+        if not math.isfinite(arm.score) or not math.isfinite(arm.cost):
+            raise ValueError(
+                f"Arm {arm.arm} has a mean score of {arm.score} and a realized cost of {arm.cost}; the fit needs finite values."
+            )
         if arm.cost <= 0:
             raise ValueError(
                 f"Arm {arm.arm} has a realized cost of {arm.cost}; the fit needs a positive cost."
@@ -247,7 +251,7 @@ def fit_lambda(arms: Sequence[ArmCost]) -> LambdaFit:
     agents = (szy * sxx - sxy * sxz) / det
     # the score change the slope predicts across the arms' per-agent costs
     effect = abs(slope) * (max(p[0] for p in points) - min(p[0] for p in points))
-    if effect <= _ZERO * max(1.0, max(abs(p[2]) for p in points)):
+    if effect <= _ZERO * max(abs(p[2]) for p in points):
         raise ValueError(
             "The score does not change with per-agent cost, so λ is undefined."
         )

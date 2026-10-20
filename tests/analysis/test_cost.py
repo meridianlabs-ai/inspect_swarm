@@ -259,11 +259,15 @@ def test_arm_costs_compare_arms_on_realized_cost() -> None:
     assert all(a.cost_limit == 8.0 for a in arms)
 
 
-@pytest.mark.parametrize("lam", [0.48, 1.0])
-def test_fit_lambda_recovers_a_known_lambda(lam: float) -> None:
+@pytest.mark.parametrize(
+    ("lam", "scale"),
+    # a score in small units is the same fit
+    [(0.48, 1.0), (1.0, 1.0), (0.48, 1e-10)],
+)
+def test_fit_lambda_recovers_a_known_lambda(lam: float, scale: float) -> None:
     # Ord's grid: agent count k and per-agent cost b, total cost k * b, with scores on
     # the model's iso-performance surface
-    intercept, slope = 0.2, 0.05
+    intercept, slope = 0.2 * scale, 0.05 * scale
     logs = [
         _log(
             [
@@ -281,8 +285,8 @@ def test_fit_lambda_recovers_a_known_lambda(lam: float) -> None:
     ]
     fit = fit_lambda(arm_costs(sample_costs(logs)))
     assert fit.lambda_ == pytest.approx(lam)
-    assert fit.slope == pytest.approx(slope)
-    assert fit.intercept == pytest.approx(intercept)
+    assert fit.slope / scale == pytest.approx(slope / scale)
+    assert fit.intercept / scale == pytest.approx(intercept / scale)
     assert (fit.arms, fit.complete) == (16, True)
 
 
@@ -312,6 +316,21 @@ def _grid(score: Callable[[int, float], float]) -> list[ArmCost]:
     ]
 
 
+def _scored(score: float) -> list[ArmCost]:
+    # independent arms (agent count, cost, score), read from logs
+    return arm_costs(
+        sample_costs(
+            [
+                _log(
+                    [_sample(1, {"a": _priced(cost)}, {"s": s}, _ledger(members=k))],
+                    task_args={"k": k, "cost": cost},
+                )
+                for k, cost, s in ((1, 1.0, 0.2), (1, 2.0, score), (2, 2.0, 0.3))
+            ]
+        )
+    )
+
+
 @pytest.mark.parametrize(
     ("arms", "error"),
     [
@@ -333,6 +352,11 @@ def _grid(score: Callable[[int, float], float]) -> list[ArmCost]:
         # the same, where roundoff leaves a slope that is not exactly zero
         (_grid(lambda k, b: 0.2), "λ is undefined"),
         (_grid(lambda k, b: 0.2 + 0.05 * math.log(k)), "λ is undefined"),
+        # a scorer may return an infinite score, which reaches the arm's mean
+        (_scored(math.inf), "finite"),
+        (_scored(-math.inf), "finite"),
+        ([_arm(1, 1.0), _arm(1, 2.0, math.nan), _arm(2, 2.0)], "finite"),
+        ([_arm(1, 1.0), _arm(1, math.inf), _arm(2, 2.0)], "finite"),
     ],
 )
 def test_fit_lambda_refuses_what_it_cannot_fit(arms: list[ArmCost], error: str) -> None:
