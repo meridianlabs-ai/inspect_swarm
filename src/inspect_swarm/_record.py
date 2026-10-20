@@ -30,6 +30,15 @@ class MemberResult(BaseModel):
     time: float | None
     """Swarm time (seconds from the swarm's start) when the member ended; `None` until then."""
 
+    gate_checks: int = 0
+    """How many of the member's own submissions were checked in its loop, as `react()` checks them with `attempts`: intermediate scores from the task's first scorer, made in the member's own agent span and not a subagent's. Set when the member ends."""
+
+    gate_passes: int = 0
+    """How many of those checks passed: a score of 1.0 under Inspect's default `value_to_float()`, which is `react()`'s default `score_value`. Set when the member ends."""
+
+    first_pass_time: float | None = None
+    """Swarm time of the member's first passing check; `None` without one."""
+
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""

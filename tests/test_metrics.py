@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -6,7 +6,7 @@ from uuid import uuid4
 import anyio
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
-from inspect_ai.agent import Agent, AgentState, agent, run
+from inspect_ai.agent import Agent, AgentState, agent, react, run
 from inspect_ai.dataset import Sample
 from inspect_ai.event import (
     InfoEvent,
@@ -20,6 +20,17 @@ from inspect_ai.log import transcript
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import Model, ModelOutput
 from inspect_ai.model._call_tools import execute_tools
+from inspect_ai.scorer import (
+    CORRECT,
+    Score,
+    Scorer,
+    Target,
+    accuracy,
+    includes,
+    match,
+    scorer,
+)
+from inspect_ai.solver import TaskState
 from inspect_ai.tool import Tool, tool
 from inspect_ai.util import store
 
@@ -541,3 +552,102 @@ async def test_a_member_name_taken_while_the_swarm_runs_is_refused_there(
         [timeline] = t.timelines
         assert timeline.name == "a"
         assert len(_model_events(timeline.root)) == 1
+
+
+# ---------------------------------------------------------------------------
+# gate checks
+
+
+@pytest.fixture(params=["asyncio", "trio"])
+def eval_backend(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run the test's evals on each async backend."""
+    monkeypatch.setenv("INSPECT_ASYNC_BACKEND", str(request.param))
+
+
+def _submitter(*answers: str) -> Model:
+    return scripted_model(
+        Script(
+            [
+                ModelOutput.for_tool_call("mockllm", "submit", {"answer": answer})
+                for answer in answers
+            ]
+        )
+    )
+
+
+@scorer(metrics=[accuracy()])
+def always_correct() -> Scorer:
+    async def score(state: TaskState, target: Target) -> Score:
+        return Score(value=CORRECT)
+
+    return score
+
+
+@agent
+def checking_subagent(model: Model) -> Agent:
+    """Run a `react()` agent with attempts as a subagent."""
+
+    async def execute(state: AgentState) -> AgentState:
+        return await run(react(model=model, attempts=3), state.messages)
+
+    return execute
+
+
+@pytest.mark.usefixtures("eval_backend")
+@pytest.mark.parametrize(
+    "agent,scorers,checks,passes",
+    [
+        # failing then passing submissions
+        (lambda: react(model=_submitter("41", "42"), attempts=3), [match()], 2, 1),
+        # one submission under two task scorers is one check
+        (
+            lambda: react(model=_submitter("42"), attempts=3),
+            [match(), includes()],
+            1,
+            1,
+        ),
+        # only the first scorer's pass counts; the last attempt is not scored
+        (
+            lambda: react(model=_submitter("41", "41"), attempts=2),
+            [match(), always_correct()],
+            1,
+            0,
+        ),
+        # a subagent's checks are not its member's
+        (lambda: checking_subagent(_submitter("41", "42")), [match()], 0, 0),
+        # no in-loop scoring
+        (lambda: generator(scripted_model()), [match()], 0, 0),
+    ],
+)
+def test_gate_checks(
+    tmp_path: Path,
+    agent: Callable[[], Agent],
+    scorers: list[Scorer],
+    checks: int,
+    passes: int,
+) -> None:
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="What is the answer?", target="42")],
+            solver=swarm(member(agent(), name="a"), channels=[]),
+            scorer=scorers,
+        ),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success" and log.samples is not None, log.error
+    [sample_log] = log.samples
+    [metrics] = SwarmMetrics.model_validate(sample_log.store[METRICS_KEY]).members
+    [result] = SwarmResultRecord.model_validate(sample_log.store[RECORD_KEY]).members
+    assert (metrics.gate_checks, metrics.gate_passes) == (checks, passes)
+    assert (result.gate_checks, result.gate_passes) == (checks, passes)
+    assert result.first_pass_time == metrics.first_pass_time
+    if passes:
+        # the pass ended the member's loop
+        assert result.time is not None and result.first_pass_time is not None
+        assert 0 < result.first_pass_time <= result.time
+    else:
+        assert result.first_pass_time is None

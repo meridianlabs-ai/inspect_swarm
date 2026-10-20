@@ -99,7 +99,7 @@ In inspect_ai unless noted.
   - For `react()` that is a submit; for a bridged agent it is the agent returning.
   - A member that ended with any other status (stopped, its own or the swarm's limit, cancelled, errored) has an output but no submission.
   - A member with background work ends after its drain (M2-5). A foreign error from one of its background children during the drain makes it `errored`, even when its agent had submitted, so that submission never enters the provisional answer, which holds only ended members' submissions ([swarm-background-members.md Statuses, ended, and the record](swarm-background-members.md#statuses-ended-and-the-record)).
-  - Each member submits at most once in M1, because a member runs once and `react()`'s internal attempts are not visible outside it.
+  - Each member submits at most once in M1, because a member runs once and `react()`'s internal attempts are not visible outside it. From M2 a member's own retries are visible and counted as gate checks: each submission `react()` checks with the task's first scorer, in the member's own agent span, is one (`gate_checks`, `gate_passes` and `first_pass_time` on `MemberResult` and in the metrics; [swarm-lean-open-problems.md Recommendation 5](swarm-lean-open-problems.md#5-m2-gate-checks-as-metrics)). The submission is still the member's output when it ends.
 - **Not started.** A member the controller never started stays `pending`. It has no output and no submission.
 - **Final answer.** What the swarm returns as its `AgentState.output`.
 - **Swarm time.** Seconds on the runtime's clock (`anyio.current_time()`) from the swarm's start. Every ordering by time, in the swarm and in the analysis, uses it.
