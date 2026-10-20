@@ -1,4 +1,3 @@
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -171,28 +170,23 @@ def test_sample_costs_read_realized_cost_and_the_ledger(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    "logs",
-    [
+def _stored_inputs(path: Path) -> dict[str, Any]:
+    return {
         # what eval_set() returns: logs read header only, their samples on disk
-        pytest.param(
-            lambda path: read_eval_log(str(path), header_only=True), id="header"
-        ),
-        pytest.param(
-            lambda path: [read_eval_log(str(path), header_only=True)], id="headers"
-        ),
+        "header": read_eval_log(str(path), header_only=True),
+        "headers": [read_eval_log(str(path), header_only=True)],
         # a sample passed twice gets one row, as in samples_df()
-        pytest.param(lambda path: [read_eval_log(str(path))] * 2, id="log-twice"),
-        pytest.param(lambda path: [str(path.parent), str(path)], id="dir-and-file"),
-    ],
-)
-def test_sample_costs_read_each_stored_sample_once(
-    tmp_path: Path, logs: Callable[[Path], Any]
-) -> None:
+        "log-twice": [read_eval_log(str(path))] * 2,
+        "dir-and-file": [str(path.parent), str(path)],
+    }
+
+
+@pytest.mark.parametrize("case", ["header", "headers", "log-twice", "dir-and-file"])
+def test_sample_costs_read_each_stored_sample_once(tmp_path: Path, case: str) -> None:
     path = tmp_path / "arm.eval"
     write_eval_log(_log([_sample(1, {"a": _priced(1.0)}, _ledger())]), str(path))
-    assert sample_costs(logs(path)) == sample_costs(str(path))
-    assert len(sample_costs(str(path))) == 1
+    [row] = sample_costs(str(path))
+    assert sample_costs(_stored_inputs(path)[case]) == [row]
 
 
 def test_sample_costs_report_why_a_cost_is_a_lower_bound() -> None:
