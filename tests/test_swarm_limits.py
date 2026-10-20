@@ -1392,11 +1392,14 @@ async def test_a_member_declared_bridged_is_cancelled_at_its_first_compaction(
         pytest.param([], Budget(), "submitted", id="control"),
     ],
 )
+@pytest.mark.parametrize("self_stop", [False, True])
 async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
-    limits: list[Limit], budget: Budget, expected: str
+    limits: list[Limit], budget: Budget, expected: str, self_stop: bool
 ) -> None:
-    # the node cancels the member rather than raising, and the member returns before
-    # the cancellation reaches it
+    # the node cancels the member rather than raising, and the member returns, or stops
+    # itself, before the cancellation reaches it; the node's cause is kept
+    if self_stop and expected == "submitted":
+        expected = "member_limit:custom"
     handles: list[MemberHandle] = []
 
     async def run(control: SwarmControl) -> StopReason:
@@ -1411,11 +1414,19 @@ async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
     stop = await run_swarm(
         swarm(
             [
-                member(generator(scripted_model()), bridged=True, limits=limits),
+                member(
+                    stopper(scripted_model(), "self_stop")
+                    if self_stop
+                    else generator(scripted_model()),
+                    name="generator",
+                    bridged=True,
+                    limits=limits,
+                ),
                 *sibling,
             ],
             controller=_controller(
-                run, f"limits_test_last_call_{expected.replace(':', '_')}"
+                run,
+                f"limits_test_last_call_{expected.replace(':', '_')}_{self_stop}",
             ),
             channels=[],
             budget=budget,

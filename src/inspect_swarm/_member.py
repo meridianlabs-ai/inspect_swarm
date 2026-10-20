@@ -386,12 +386,13 @@ async def _run_member(
             return "swarm_cap", state
         assert owned is not None
         return _status_for(owned), state
-    if stopped:
-        return "member_limit:custom", state
     if context.stop_cause is not None:
         # a node that stopped a bridged member, whose cancellation may not have been
-        # delivered when its last call was the one that stopped it
+        # delivered when its last call was the one that stopped it, even if the agent
+        # then stopped itself
         return context.stop_cause, state
+    if stopped:
+        return "member_limit:custom", state
     if context.scope.cancelled_caught:
         # the hard stop
         return "cancelled", state
