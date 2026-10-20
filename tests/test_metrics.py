@@ -33,10 +33,12 @@ from inspect_ai.scorer import (
 from inspect_ai.solver import TaskState
 from inspect_ai.tool import Tool, tool
 from inspect_ai.util import store
+from inspect_ai.util._span import AGENT_SPAN_TYPE
 
 from inspect_swarm import SwarmControl, member, swarm
 from inspect_swarm._evidence import METRICS_KEY
-from inspect_swarm._metrics import SwarmMetrics
+from inspect_swarm._ledger import EventLog, ScoreRecord
+from inspect_swarm._metrics import GateChecks, SwarmMetrics, gate_checks
 from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
 
 from .swarm_runtime import (
@@ -651,6 +653,18 @@ def test_gate_checks(
         assert 0 < result.first_pass_time <= result.time
     else:
         assert result.first_pass_time is None
+
+
+def test_first_pass_time_is_the_passing_checks() -> None:
+    events = EventLog()
+    events(SpanBeginEvent(id="member", name="a", type=AGENT_SPAN_TYPE))
+    events(SpanBeginEvent(id="scoring", name="score", parent_id="member"))
+    events.scores += [
+        ScoreRecord(span_id="scoring", scorer="match", value="I", time=11.0),
+        ScoreRecord(span_id="scoring", scorer="match", value="C", time=13.0),
+        ScoreRecord(span_id="scoring", scorer="match", value="C", time=17.0),
+    ]
+    assert gate_checks(events, "member", "match", start=10.0) == GateChecks(3, 2, 3.0)
 
 
 def test_records_written_before_gate_checks_load() -> None:
