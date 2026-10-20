@@ -363,6 +363,13 @@ async def test_timelines_and_metrics_are_written_when_a_cancellation_ends_the_sw
         assert [timeline.name for timeline in t.timelines] == ["spender"]
 
 
+@pytest.mark.parametrize("name", ["init", "solvers", "scorers"])
+def test_a_member_named_like_a_sample_phase_is_refused(name: str) -> None:
+    # Inspect's timelines read spans with these names as the sample's phases
+    with pytest.raises(ValueError, match=f"a member is named '{name}'"):
+        swarm(member(generator(scripted_model()), name=name), channels=[])
+
+
 @pytest.mark.anyio
 async def test_a_member_name_taken_by_a_timeline_is_refused() -> None:
     async with sample():

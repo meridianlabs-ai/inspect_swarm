@@ -4,7 +4,8 @@ Experimental and under development; the API may change.
 """
 
 from ._budget import Budget
-from ._channel._channel import Channel, swarm_channel
+from ._bus._record import Record
+from ._channel._channel import Channel, ChannelRun, ChannelState, swarm_channel
 from ._channel.filesystem import filesystem
 from ._controller._control import (
     MemberEnded,
@@ -32,12 +33,15 @@ except ImportError:
 __all__ = [
     "Budget",
     "Channel",
+    "ChannelRun",
+    "ChannelState",
     "Controller",
     "Member",
     "MemberEnded",
     "MemberHandle",
     "MemberInfo",
     "MemberState",
+    "Record",
     "StopReason",
     "SwarmControl",
     "SwarmEvent",

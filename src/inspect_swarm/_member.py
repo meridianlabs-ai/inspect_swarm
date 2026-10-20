@@ -2,7 +2,7 @@ import inspect
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, ExitStack
-from typing import Any, cast
+from typing import Any, assert_never, cast
 
 from inspect_ai._util.registry import (
     extract_named_params,
@@ -16,7 +16,7 @@ from inspect_ai._util.registry import (
     registry_value,
 )
 from inspect_ai.agent import Agent, AgentState
-from inspect_ai.model import ChatMessage
+from inspect_ai.model import ChatMessage, StopReason
 from inspect_ai.util import (
     Limit,
     LimitExceededError,
@@ -193,6 +193,8 @@ def member(
 
     Tool state. Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member. An explicit `instance` is used as given: members, or the copies of one counted member, that name the same instance share its state, so a board shared on purpose is `memory(instance="board")`. The sample store itself is shared. State that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with `tool_state_instance()`. Built-in tool state that a setup solver prepared at the default instance before the swarm runs is not visible to the members.
 
+    Submissions. A member that returns normally has submitted, and its output is its answer, unless the output's stop reason is `content_filter` or `model_length`. That is how `react()` returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered.
+
     `deepagent()` members with background dispatch (`background=True` or an integer) are not supported yet and are refused. So are ACP agents, which wait for their caller to drive them rather than returning: a built one when `member()` is called, and a factory's when the member is built.
 
     Args:
@@ -202,7 +204,7 @@ def member(
         role: The member's role, given to the controller and in the member's preamble.
         count: How many members this record stands for. Above 1 needs a factory.
         limits: The member's own token, cost, turn, message or time limits.
-        bridged: Whether the agent is bridged (runs a CLI in the sandbox through Inspect's agent bridge). `None` counts inspect_swe's agents as bridged and others as native. Pass `True` for any other bridged agent: the swarm stops a bridged member by cancelling it, because a limit error raised inside the bridge would end the sample, and it must know before the member's first model request.
+        bridged: Whether the agent is bridged (runs a CLI in the sandbox through Inspect's agent bridge). `None` counts inspect_swe's agents as bridged and others as native. Pass `True` for any other bridged agent: the swarm stops a bridged member by cancelling it, because a limit error raised inside the bridge would end the sample, and it must know before the member's first model request. Bridged members cannot use channels with tools and records yet, and `swarm()` refuses one beside such a channel. A bridged agent that is not declared and not in the `inspect_swe/` namespace is not refused: it cannot reach those channels' tools, so it runs without them. Pass `True` to have it refused instead.
 
     Returns:
         The member record.
@@ -376,7 +378,21 @@ async def _run_member(
     if context.scope.cancelled_caught:
         # the hard stop
         return "cancelled", state
-    return "submitted", state
+    if state.output.empty:
+        return "submitted", state
+    return _return_status(state.output.stop_reason), state
+
+
+def _return_status(stop_reason: StopReason) -> str:
+    # a normal return is a submission unless its output stopped the way react() does
+    # after three refusals or a context overflow it could not recover from
+    match stop_reason:
+        case "content_filter" | "model_length":
+            return "unsubmitted"
+        case "stop" | "tool_calls" | "max_tokens" | "unknown":
+            return "submitted"
+        case _:
+            assert_never(stop_reason)
 
 
 def _status_for(error: LimitExceededError) -> str:

@@ -3,7 +3,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import anyio
 from anyio.abc import TaskGroup
@@ -24,6 +24,9 @@ from .._member import (
 )
 from .._metrics import MemberTimes, swarm_metrics
 from .._record import MemberResult, MemberState
+
+if TYPE_CHECKING:
+    from .._channel._channel import Channel
 
 
 class MemberHandle(Protocol):
@@ -46,7 +49,7 @@ class MemberHandle(Protocol):
 
     @property
     def status(self) -> str | None:
-        """How the member ended, once it has: `submitted`, `stopped`, `share`, `member_limit:<type>`, `swarm_cap`, `cancelled` or `errored`."""
+        """How the member ended, once it has: `submitted`, `unsubmitted`, `stopped`, `share`, `member_limit:<type>`, `swarm_cap`, `cancelled` or `errored`."""
         ...
 
     @property
@@ -199,11 +202,21 @@ class SwarmRun:
         grace: float,
         budget: Budget,
         shares: Mapping[str, Sequence[Limit]] | None = None,
+        channels: Sequence["Channel"] = (),
     ) -> None:
+        # deferred: the bus imports the channels, which import this module's package
+        from .._bus._bus import Bus
+
         shares = shares or {}
         self._members = [
             MemberRun(record, name, shares.get(name, ())) for record, name in records
         ]
+        # the channel states open here, before any member starts
+        self.bus = Bus(
+            self._members,
+            {m.name: m.context for m in self._members},
+            channels,
+        )
         for node in caps:
             if isinstance(node, SwarmNode):
                 node.stop_swarm = self.stop
@@ -294,6 +307,8 @@ class SwarmRun:
     # the runtime
 
     async def run(self, controller: Callable[["SwarmControl"], Awaitable[str]]) -> None:
+        from .._bus._bus import current_bus
+
         timelines = MemberTimelines([m.name for m in self._members])
         interval = LedgerInterval()
         self._start = anyio.current_time()
@@ -301,6 +316,7 @@ class SwarmRun:
         self._span_id = current_span_id()
         self._settle()
         error: BaseException | None = None
+        bus_token = current_bus.set(self.bus)
         ended = False
         try:
             with ExitStack() as meter:
@@ -389,6 +405,8 @@ class SwarmRun:
                 )
             )
             timelines.fill(places)
+            # last, so that the bus is current through the final step and the ledger
+            current_bus.reset(bus_token)
         if error is not None:
             raise error
 
@@ -397,6 +415,8 @@ class SwarmRun:
         # no member can start once a stop has begun
         if self.stop_reason is not None:
             return
+        # first, so that no record commits once a stop has begun
+        self.bus.close()
         self.stop_reason = reason
         # a no-op when the controller has returned
         self._controller_scope.cancel()

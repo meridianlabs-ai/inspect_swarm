@@ -20,6 +20,7 @@ from ._budget import (
     SwarmTokenNode,
     check_cost_data,
     derive_caps,
+    is_bridged,
     share_nodes,
 )
 from ._channel._channel import Channel
@@ -39,7 +40,7 @@ def swarm(
 ) -> Agent:
     """A swarm of agents working on one sample.
 
-    Each member gets a timeline in the sample named after it, so member names must be unique across the swarm runs and other timelines in a sample. To run swarms more than once in one sample, build them with distinct member names.
+    Each member gets a timeline in the sample named after it, so member names must be unique across the swarm runs and other timelines in a sample. To run swarms more than once in one sample, build them with distinct member names. A member may not be named `init`, `solvers` or `scorers`: Inspect's timelines read spans with those names as the sample's phases.
 
     Args:
         members: The roster: built agents or `member()` records. A bare agent is `member(agent)`. A factory-form `member()` may stand for several members (`count`).
@@ -52,11 +53,12 @@ def swarm(
 
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
-        ValueError: If member names collide, the same agent object is in two members, a channel is given twice, a name does not resolve, or the controller refuses the roster; or, when the returned agent runs, if the sample already has a timeline named after one of its members.
+        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, or a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet); or, when the returned agent runs, if the sample already has a timeline named after one of its members.
     """
     records = _members(members)
     names = member_names(records)
     _check_distinct_agents(records, names)
+    _check_phase_names(names)
     roster = [
         MemberInfo(name=name, role=record.role)
         for record, record_names in zip(records, names, strict=True)
@@ -67,6 +69,7 @@ def swarm(
     resolved_controller = resolve("swarm_controller", controller)
     if resolved_controller.check is not None:
         resolved_controller.check(roster)
+    _check_bus_channels(resolved_channels, records, names, roster)
     resolved_budget = _budget(budget)
     preambles = {
         info.name: _preamble(info, len(roster), resolved_channels) for info in roster
@@ -102,6 +105,7 @@ def swarm(
             grace=resolved_budget.grace,
             budget=resolved_budget,
             shares=share_nodes(resolved_budget, caps, [info.name for info in roster]),
+            channels=resolved_channels,
         ).run(resolved_controller.run)
         return state
 
@@ -192,6 +196,18 @@ def _member(item: object) -> Member:
     )
 
 
+# span names Inspect's timeline_build() reads as the sample's phases, wherever they are
+_PHASE_NAMES = ("init", "solvers", "scorers")
+
+
+def _check_phase_names(names: Sequence[list[str]]) -> None:
+    for name in (name for record_names in names for name in record_names):
+        if name in _PHASE_NAMES:
+            raise ValueError(
+                f"members=: a member is named {name!r}, which Inspect's timelines read as a phase of the sample, so the member's timeline would lose its agents. Give the member another name with member(..., name=...)."
+            )
+
+
 def _check_distinct_agents(
     records: Sequence[Member], names: Sequence[list[str]]
 ) -> None:
@@ -218,6 +234,43 @@ def _channels(channels: str | Channel | Sequence[str | Channel]) -> list[Channel
             f"channels=: each channel may be given once; {', '.join(duplicates)} is given more than once."
         )
     return resolved
+
+
+def _check_bus_channels(
+    channels: Sequence[Channel],
+    records: Sequence[Member],
+    names: Sequence[list[str]],
+    roster: Sequence[MemberInfo],
+) -> None:
+    # channels with records must not collide, and bridged members have no way to their
+    # tools yet
+    for channel in channels:
+        if (channel.name is None) != (channel.prefix is None):
+            raise ValueError(
+                f"channels=: {registry_info(channel).name} must set both a record name and a record prefix, or neither."
+            )
+    for field in ("name", "prefix"):
+        seen: dict[str, str] = {}
+        for channel in channels:
+            value = getattr(channel, field)
+            if value is None:
+                continue
+            other = seen.setdefault(value, registry_info(channel).name)
+            if other != registry_info(channel).name:
+                raise ValueError(
+                    f"channels=: {other} and {registry_info(channel).name} both have the record {field} {value!r}, so their records would collide."
+                )
+    for channel in channels:
+        channel.check(roster)
+    bus_channels = [c for c in channels if c.name is not None]
+    if not bus_channels:
+        return
+    for record, record_names in zip(records, names, strict=True):
+        agent = record.agent if record.agent is not None else record.factory
+        if is_bridged(cast(Agent, agent), record.bridged):
+            raise ValueError(
+                f"swarm(): member {record_names[0]!r} is bridged, and bridged members cannot use bus channels such as {registry_info(bus_channels[0]).name} yet. Leave the channel out, or the member."
+            )
 
 
 def _budget(budget: object) -> Budget:
