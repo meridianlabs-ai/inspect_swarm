@@ -29,7 +29,7 @@ A deeper dive on one topic of [swarm.md](swarm.md): how a swarm's results are sc
 - **[Part 2: after M2](#part-2-after-m2-optional)** is optional follow-up work, in any order with the rest of swarm.md's menu:
   - the task's result contract;
   - the verify, vote, first chain, with verifiers and `synthesize`;
-  - per-member scores (team@k, mean member) and `best_at(k)`;
+  - per-member scores (team@k, mean member);
   - baselines as a swarm of one, select@k and the analysis helper;
   - per-member artifacts;
   - the deferred solve/scoring cost boundary.
@@ -55,7 +55,7 @@ Existing scorers keep working with the swarm as the agent. A swarm, like any sol
 - **Existing scorers work unchanged.** `swarm()` is an `@agent` that a task uses as its solver, through `as_solver()`. Inspect runs the task's scorers after the solver, on the same `TaskState`, inside the sample's sandbox context ([Where scoring runs](#where-scoring-runs)).
   - An answer scorer (`match()`, `expression_equivalence()`, `model_graded_qa()`) reads `TaskState.output`, which holds the swarm's final answer.
   - A shared-artifact scorer (SWE-bench's) reads the environment the drained swarm left.
-  - Neither needs to know that the solver was a swarm. Nothing in Part 2 is needed for this: not per-member scores, team@k, `best_at`, `baseline()`, select@k or the analysis helper.
+  - Neither needs to know that the solver was a swarm. Nothing in Part 2 is needed for this: not per-member scores, team@k, `baseline()`, select@k or the analysis helper.
 - **Sample usage includes scoring, in every Inspect eval.** `EvalSample.model_usage` is `sample_model_usage()` read when the sample is logged, after scoring (`src/inspect_ai/_eval/task/run.py:3476`), so a model-graded scorer's calls are in it. A spike confirmed it. A solver that made no model call, scored by `model_graded_qa` on mockllm, gave the sample 223 tokens of `model_usage`, all of them the grader's.
   - Every arm grades its own output in the same way: a swarm arm and a single-agent arm grade once per sample, and an epochs arm once per epoch, as epochs always do.
   - M1 compares arms on sample usage with grading included, as existing Inspect evals do. It does not separate solve usage from scoring usage (decision: Ransom, 2026-10-08).
@@ -173,7 +173,7 @@ class SwarmResultRecord(BaseModel):
   - It records the same evidence and returns an empty output when its member does not submit, where a plain agent is scored on its last output.
   - Part 2's `baseline()` only names this configuration; M1 needs no helper.
 - **Cost** is the ledger's realized cost (the limits deep dive), taken from sample usage, which includes grading ([above](#why-m1-needs-little-from-scoring)).
-- **What M1 does not provide.** team@k, mean member, best@k on graded scores and select@k all need Part 2.
+- **What M1 does not provide.** team@k, mean member and select@k need Part 2. best@k on graded scores is computed in the user's analysis from per-epoch values in `samples_df()` ([Comparison quantities](#comparison-quantities)).
 
 ### What M1 leaves out of the merged API
 
@@ -222,8 +222,7 @@ One PR, after swarm-api.md's steps 2 to 4 (registry plumbing, `Member` and the `
 Everything in this part is optional follow-up work after M2, in any order with the rest of swarm.md's menu (decision: Ransom, 2026-10-08). It keeps the detail it was designed with, so whoever builds a piece needs no further decision except [Open question 1](#open-questions), which only the chain needs. Its parts depend on each other as follows:
 
 - The result contract comes first. The chain's `verify` and `vote` need it, `synthesize` needs the chain, and `member_scores` needs the contract.
-- `best_at(k)` is a reducer and depends on nothing else.
-- select@k and `compare_arms` need the record's additions, `baseline()` and `member_scores`.
+- `attempt_rows` and select@k need the record's additions, `baseline()` and `member_scores`.
 - Per-member artifacts extend `member_scores`.
 - The cost boundary matters once `member_scores` runs a model-graded scorer in arms compared on cost.
 
@@ -250,7 +249,7 @@ Goals:
 - Every member's result, and the run-time evidence selection needs, recorded in the sample, so scorers and the analysis read the same facts during the eval and after re-scoring.
 - Baseline arms that produce the same record as the swarm arm, so comparisons use one clock and one eligibility rule.
 - A precise final-answer chain with the decided default (verify, else vote, else first) and an explicit `synthesize`.
-- Named, defined comparison quantities (final@k, team@k, mean member, pass@k, best@k, select@k), each paired with its fair counterpart, and the code that computes each.
+- Named, defined comparison quantities (final@k, team@k, mean member, pass@k, best@k, select@k), each paired with its fair counterpart, and what computes each.
 - Per-member scores in shared-artifact tasks when, and only when, the task provides per-member artifacts.
 - Scores that appear in logs and eval sets as ordinary Inspect scores and metrics, needing no viewer or schema change.
 
@@ -415,7 +414,7 @@ def frontier_math(arm: str = "swarm", k: int = 4, budget: float = 40.0) -> Task:
         dataset=...,
         solver=solver,
         scorer=[expression_equivalence(), frontier_math_members()],
-        epochs=Epochs(k, ["mean", pass_at(k), best_at(k)]) if arm == "epochs" else 1,
+        epochs=Epochs(k, ["mean", pass_at(k)]) if arm == "epochs" else 1,
         cost_limit=budget / k if arm == "epochs" else budget,
     )
 ```
@@ -631,11 +630,11 @@ Each quantity is defined once and paired with the one it is fairly compared with
 
 | Quantity | Arm | Definition | Uses the target to select? | Computed by |
 |---|---|---|---|---|
-| **final@k** | swarm of k | Answer tasks: the task's scorer on the swarm's final answer, `empty_value` when there is none. Artifact tasks: the task's scorer on the drained environment, whatever the final text | No | the task's scorer; the helper applies the empty rule to answer tasks only |
+| **final@k** | swarm of k | Answer tasks: the task's scorer on the swarm's final answer, `empty_value` when there is none. Artifact tasks: the task's scorer on the drained environment, whatever the final text | No | the task's scorer; the user's analysis applies the empty rule to answer tasks only |
 | **team@k** | swarm of k | Answer tasks: `best_member`. Artifact tasks: the shared environment's score, equal to final@k | Answer: yes. Artifact: no | `member_scores`; the task's scorer |
 | **mean member** | swarm of k | `mean_member` | No | `member_scores` |
 | **pass@k** | n ≥ k epochs of `baseline()` | P(at least one of k attempts correct), binary values, without replacement | Yes | Inspect `pass_at(k)` on the oracle value source (below) |
-| **best@k** | n ≥ k epochs of `baseline()` | E[max over k attempts], graded values, without replacement | Yes | inspect_swarm `best_at(k)` on the oracle value source (below) |
+| **best@k** | n ≥ k epochs of `baseline()` | E[max over k attempts], graded values, without replacement | Yes | the user's analysis, from the per-epoch values of the oracle value source (below) |
 | **select@k** | n ≥ k epochs of `baseline()` | The swarm's chain applied to k independent attempts | No | `inspect_swarm.analysis` |
 | **single** | one `baseline()` attempt at the full budget | As final@k | No | as final@k |
 
@@ -644,15 +643,15 @@ Each quantity is defined once and paired with the one it is fairly compared with
 - **Answer tasks:** the member scorer's `best_member`. In a `baseline()` arm each epoch has one member, so its `best_member` is that attempt's value under the same scorer that `member_scores` uses in the swarm arm (possibly an answer-only adapter).
 - **Artifact tasks:** the task's own scorer, the environment score.
   - Without `member_artifacts`, `best_member` is NaN in every arm, and Inspect's reducers drop NaN epochs (`reducer.py:195-205`). An artifact pass@k read from `best_member` would always be NaN.
-  - team@k for artifact tasks is the swarm's environment score, so the baseline side reads the same scorer. pass@k and best@k are the reducers' values on the task scorer, which the example's `Epochs(...)` already computes for every scorer.
+  - team@k for artifact tasks is the swarm's environment score, so the baseline side reads the same scorer. pass@k is the reducer's value on the task scorer, which the example's `Epochs(...)` already computes for every scorer, and best@k is computed from the same scorer's per-epoch values.
   - With `member_artifacts`, `best_member` adds per-member artifact grades, but the oracle comparison still uses the environment score on both sides.
 
-`compare_arms` applies this rule from the rows' `result_kind`, so a user never picks the source by hand.
+Each `AttemptRow` carries `result_kind`, which fixes the source by this rule.
 
 team@k follows Test-Time Communication's usage: "a game counts as solved if any of the k agents clears all levels", while on Terminal-Bench "team@2 contributes one shared final state". The fair pairs are:
 
 - **team@k against pass@k or best@k.** Both pick the best of k outputs with knowledge of the target, read from the same oracle value source. They measure whether communication raises the capability present in k agents.
-- **final@k against select@k, and against single.** Both apply a rule that does not see the target, scored by the task's scorer, with the same empty rule.
+- **final@k against select@k, and against single.** Both apply a rule that does not see the target, scored by the task's scorer, with the same empty rule. `select_at_k` applies it to its subsets; for final@k and single the user's analysis applies it, counting a missing final answer as `empty_value` in answer tasks.
   - They measure what a deployed swarm returns against what k independent attempts with the same selection rule, or one bigger attempt, return.
   - The gap team@k − final@k is what the final step loses.
 - **Artifact tasks.** team@k is already non-oracle (one environment). Comparing it with pass@k, as Test-Time Communication does, favours the epochs arm. The non-oracle comparison is select@k with the verifier on each attempt's environment.
@@ -670,17 +669,9 @@ Two things the merged designs add to what these quantities mean:
   - Per-member scores measure what each member submitted, which is team@k's meaning ("any of the k agents"), not what it derived alone. `vote` counts a copied answer as that member's vote.
   - The communication evidence (`read`, and the record ids on read results in model input, [Evidence and provenance](swarm-communication.md#evidence-and-provenance)) lets analysis tell the cases apart. The record and the scorers need no change for it.
 
-### `best_at(k)`: best of k from n epochs
+### best@k on graded scores
 
-```python
-@score_reducer
-def best_at(k: int, value_to_float: ValueToFloat = value_to_float()) -> ScoreReducer: ...
-```
-
-- **The estimator.** It is the unbiased without-replacement estimator of the expected maximum of k of the n scored epochs. With the n values sorted ascending as v₁ ≤ … ≤ vₙ, best@k = Σᵢ₌ₖⁿ vᵢ · C(i−1, k−1) / C(n, k).
-- **Checked.** For binary values it equals `pass_at(k)`. A script checked both properties: against brute-force enumeration of all k-subsets for 200 random cases (n ≤ 8, graded values), and against Inspect's `pass_at(k)` on binary values.
-- **NaN.** NaN epochs are dropped first. If fewer than k remain, the result is NaN, as for `pass_at` (`reducer.py:181-186`).
-- **Dict and list values.** Dict values are reduced per key and list values per index, following Inspect's reducer helpers.
+inspect_swarm does not ship a best-of-k reducer: it is generic statistics, not swarm data (decision: Ransom, 2026-10-20). A general best-of-k reducer would be an inspect_ai addition beside `pass_at(k)`, if wanted ([Not this design](#not-this-design)). Until then best@k is computed in the user's analysis from the per-epoch values in `samples_df()`, with the unbiased without-replacement estimator of the expected maximum of k of the n scored epochs: with the n values sorted ascending as v₁ ≤ … ≤ vₙ, best@k = Σᵢ₌ₖⁿ vᵢ · C(i−1, k−1) / C(n, k). For binary values it equals `pass_at(k)`.
 
 ### select@k: the selection rule on independent attempts
 
@@ -700,7 +691,7 @@ class Attempt:
     final_verdict: Verdict | None     # artifact tasks: verifier on the drained environment
 ```
 
-**The pool** for a sample is its epochs with a final record and a non-NaN `final_value`; others are excluded and counted. With fewer than k attempts in the pool, the sample's select@k is NaN (unscored), as for `pass_at`.
+**The pool** for a sample is its epochs with a final record and a non-NaN `final_value`; others are left out of it. With fewer than k attempts in the pool, the sample's select@k is NaN (unscored), as for `pass_at`.
 
 **One subset (answer tasks).**
 
@@ -716,10 +707,10 @@ class Attempt:
   - `verify` uses each attempt's `final_verdict`, the verifier on its drained environment, which is what the swarm arm's own environment check corresponds to;
   - `vote` uses the answer keys of submitted attempts, when the task defines a key;
   - `first` takes the attempt with the earliest stop time;
-- the helper appends `first` to the chain if it is not already last, so every subset selects an environment, as the swarm arm always has one. A strict chain therefore has no artifact analogue, and the helper says so in its output when the swarm arm used one;
+- the helper appends `first` to the chain if it is not already last, so every subset selects an environment, as the swarm arm always has one. A strict chain therefore has no artifact analogue, which a comparison with a swarm arm that used one should say;
 - `empty_value` is never used for artifact tasks.
 
-**The sample's select@k** is the mean over all C(n′, k) subsets of its pool when that is at most 10,000, otherwise over 10,000 subsets sampled with a fixed seed recorded in the output. The helper also reports, per sample, the fraction of subsets that produced no answer.
+**The sample's select@k** is the mean over all C(n′, k) subsets of its pool when that is at most `max_subsets` (10,000 by default), otherwise over `max_subsets` subsets sampled with the given `seed`.
 
 **Time** is the record's swarm time, never `EvalSample.working_time`, which includes scoring and excludes waiting ([Usage and timing](#usage-and-timing-during-scoring)). Every `baseline()` attempt starts its swarm clock at zero, so "first" means the shortest time to submit.
 
@@ -747,7 +738,7 @@ class SwarmResultRecord(BaseModel):   # adds, with the cost boundary
 - **Coverage.** Sample usage already counts native compaction and excludes response-cache replays, so it is complete where model events are not. The ledger's unknown-cost rules still apply to it: calls cancelled in flight, unpriced models.
 - **Placement.** The snapshot covers everything up to the swarm's exit, so the swarm must be the task's last solver step. `swarm()` would document this, because a later solver step's usage would land after the boundary.
 - **Scoring usage** is the sample total minus `solve_usage`, reported separately per arm, so the cost of per-member scoring is visible.
-- **Samples without a boundary.** A plain agent without `baseline()`, or a sample that failed before the swarm started, has no `solve_usage`. The helper keeps its total under a separate name, `sample_total_usage`, never as solve usage. It excludes the sample from every solve-cost comparison and reports the number excluded per arm. Its scores are still reported.
+- **Samples without a boundary.** A plain agent without `baseline()`, or a sample that failed before the swarm started, has no `solve_usage`. `attempt_rows` keeps its total under a separate name, `sample_total_usage`, never as solve usage, and flags the row `no_solve_usage`. The user's analysis leaves such samples out of solve-cost comparisons and reports how many it left out per arm. Their scores are still reported.
 - **The ledger.** The limits deep dive's ledger would take arm totals from `solve_usage`, follow the same exclusion, and join on (log, sample id, epoch).
 
 ### Re-scoring
@@ -772,7 +763,7 @@ class SwarmResultRecord(BaseModel):   # adds, with the cost boundary
 
 Nothing here needs a new event type, schema change or viewer change. The viewer shows the store, `InfoEvent`s and dict scores generically.
 
-Inspect applies every epoch reducer to every scorer and key. An epochs arm with `["mean", pass_at(k), best_at(k)]` therefore also shows, for example, `pass_at` of `mean_member`. Those cells are well defined but not meaningful; the analysis helper selects the cells that are.
+Inspect applies every epoch reducer to every scorer and key. An epochs arm with `["mean", pass_at(k)]` therefore also shows, for example, `pass_at` of `mean_member`. Those cells are well defined but not meaningful; the user's analysis selects the cells that are.
 
 ### How it appears in eval sets
 
@@ -785,13 +776,11 @@ Inspect applies every epoch reducer to every scorer and key. An epochs arm with 
 
 ### The analysis helper
 
-`inspect_swarm.analysis` adds the scoring part of swarm.md's "thin analysis helpers", in two layers:
+`inspect_swarm.analysis` adds two scoring helpers beside M1's `SwarmColumns`. Each reads or replays what only the swarm records. Means over samples, estimators and comparisons across arms are the user's own dataframe work (decision: Ransom, 2026-10-20; [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics)):
 
 ```python
 def attempt_rows(logs: Sequence[str | EvalLog], *, scorer: str, member_scorer: str) -> list[AttemptRow]: ...
-def compare_arms(rows: Sequence[AttemptRow], *, k: int, chain: Sequence[str] | None = None, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> list[ArmScores]: ...
-def best_at_k(values: Sequence[float], k: int) -> float: ...
-def select_at_k(attempts: Sequence[Attempt], k: int, chain: Sequence[str], *, kind: ResultKind, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> float: ...
+def select_at_k(rows: Sequence[AttemptRow], k: int, chain: Sequence[str], *, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> float: ...
 ```
 
 - **`AttemptRow`**: one per (log, sample id, epoch). It holds:
@@ -803,22 +792,17 @@ def select_at_k(attempts: Sequence[Attempt], k: int, chain: Sequence[str], *, ki
   - `sample_total_usage`;
   - the flag `target_assisted`.
 
-  With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons. The ledger and the limits deep dive's curves join on (log, sample id, epoch).
-- **`ArmScores`**: one per arm. It holds:
-  - the arm's labels, `arm_kind` (swarm or baseline), `result_kind`, and k or n;
-  - each quantity of [Comparison quantities](#comparison-quantities) that applies to the arm, as a mean over samples with its count of scored samples and of excluded samples.
-
-  `chain` defaults to the chain recorded in the swarm arm's records.
-- **From rows to attempts.** For a baseline arm, `compare_arms` builds one `Attempt` per row:
+  With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons. `samples_df()` with M1's `SwarmColumns`, which has the ledger's realized cost, joins on the same (log, sample id, epoch).
+- **From rows to attempts.** `select_at_k` takes one sample's rows from a baseline arm (its epochs), builds one `Attempt` per row, and returns that sample's select@k:
   - `epoch`;
   - `submitted`, `time`, `answer_key` and `verdict` from the row's single member: its status `submitted`, its end time, its key, its run-time verdict;
   - `final_value` from the task scorer's value;
   - `final_verdict` from the row's `final_verdict`.
 
-  It passes the arm's `result_kind` to `select_at_k` as `kind`.
+  The rows' `result_kind` is the `kind` select@k follows.
   - The run-time verdict and `final_verdict` are kept apart, because the environment can change between a member's submission check and the drain. Artifact `verify` reads only `final_verdict`. Nothing derives a verdict from `final_value`, which would select with the target.
-  - An arm whose rows disagree on `result_kind`, or whose `result_kind` differs from the swarm arm it is compared with, is an error naming the logs.
-- **Target-assisted samples.** `target_assisted` is set when the solve phase contains `ScoreEvent(intermediate=True)`: an agent consulted the task's scorer with the target in the loop (for example `react(attempts=...)`). In a swarm that feedback can be shared with peers, so the helper reports those samples separately.
+  - Rows that disagree on `result_kind` are an error naming the logs.
+- **Target-assisted samples.** `target_assisted` is set when the solve phase contains `ScoreEvent(intermediate=True)`: an agent consulted the task's scorer with the target in the loop (for example `react(attempts=...)`). In a swarm that feedback can be shared with peers, so the rows flag those samples for the user's analysis to report separately.
 
 ### Testing after M2
 
@@ -860,19 +844,18 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
   - In a fresh process, default scorer resolution (`resolve_scorers()` then `score()`, as `inspect score` does) rebuilds the task's member-scorer factory and reproduces its scores for a sandbox-free answer scorer.
   - Programmatic re-scoring with freshly built scorers does the same.
   - A sandbox-dependent scorer raises `ProcessLookupError`.
-- **`best_at(k)`** against brute-force enumeration (a table of small cases), equality with `pass_at(k)` on binary values, NaN with fewer than k scored epochs, and dict values per key.
 - **`select_at_k`** for answer tasks, against a reference built from the runtime selector:
   - exact enumeration on small pools, and the seeded sample above 10,000 subsets;
   - unsubmitted attempts never selected, and subsets with no answer valued at `empty_value`;
   - pools smaller than k giving NaN;
   - `first` by record time, unchanged when the grader's duration is varied.
 - **Artifact oracle source.** Take an artifact task with no `member_artifacts`, run as `baseline()` epochs with environment scores `[0, 1]`.
-  - The task scorer gives pass@2 = 1 and a valued best@2, while `best_member` is NaN.
-  - `compare_arms` reports those values for the baseline, and the environment score as team@k for the swarm arm.
-- **Rows to attempts, end to end.** From written logs through `attempt_rows` and `compare_arms`:
+  - Inspect's `pass_at(2)` on the task scorer gives 1, while `best_member` is NaN.
+  - `attempt_rows` gives each row the environment score and `result_kind="artifact"`, so the source rule reads a valued column.
+- **Rows to attempts, end to end.** From written logs through `attempt_rows` and `select_at_k`:
   - an artifact baseline whose run-time verdict passed but whose `final_verdict` failed (and the reverse) is selected by `final_verdict` only;
   - `result_kind` survives into `select_at_k`;
-  - mismatched kinds across arms raise.
+  - rows that disagree on `result_kind` raise.
 - **Artifact results ignore answer text.** Use an artifact-shaped scorer, which scores the environment and ignores the completion.
   - A passing environment and an empty final output give final@k and team@k 1, not `empty_value`.
   - A member with an empty completion and a passing materialized artifact is graded 1.
@@ -910,10 +893,10 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
    - The fence code in `src/inspect_swarm/_fence.py`, shared with the shared-memory channel's reads (M2-8).
    - Tests extend `tests/test_final.py`; `tests/test_fence.py`.
 4. **Scorers and baselines.**
-   - `src/inspect_swarm/scorer/__init__.py`, `scorer/_member_scores.py` (`member_scores` and `MEMBER_METRICS`; answer kind; artifact kind returns unavailable) and `scorer/_best_at.py`.
+   - `src/inspect_swarm/scorer/__init__.py`, `scorer/_member_scores.py` (`member_scores` and `MEMBER_METRICS`; answer kind; artifact kind returns unavailable).
    - `baseline()` in `_swarm.py`.
    - Tests in `tests/scorer/`, including the re-scoring test with a task-file factory, and the `member_scores` case of `tests/test_scoring_loop.py`.
-5. **Analysis.** `src/inspect_swarm/analysis/__init__.py` and `analysis/_scores.py`: `attempt_rows`, `compare_arms`, `best_at_k`, `select_at_k` and the target-assisted flag. Tests on synthetic logs in `tests/analysis/`.
+5. **Analysis.** `src/inspect_swarm/analysis/__init__.py` and `analysis/_scores.py`: `attempt_rows`, `select_at_k` and the target-assisted flag. Tests on synthetic logs in `tests/analysis/`.
 6. **Per-member artifacts for shared-artifact tasks.** `member_artifacts` in `member_scores`, and a worked SWE-bench-shaped example layout in the docs.
 7. **The cost boundary**, if wanted. The snapshot fields, and the solve/scoring split in the analysis.
 
@@ -945,7 +928,7 @@ Running baselines as a swarm of one records the same evidence at run time under 
 - Inspect would apply the reducer to every other scorer too;
 - the subset estimator with sampling does not fit a reducer.
 
-`best_at(k)` is a closed form on values alone, so it is a reducer; select@k is in the helper.
+best@k is a closed form on values alone, so it would be a reducer (an inspect_ai addition beside `pass_at(k)`, if wanted); select@k is in the helper.
 
 **Voting with Inspect's `mode`/`majority` reducers.** They vote on correctness values, not on answers. Rejected.
 
@@ -970,7 +953,7 @@ Running baselines as a swarm of one records the same evidence at run time under 
 - **inspect_swarm** has no released API; everything here is new. Python 3.11+ as decided.
 - **Eval logs.** Only existing structures are used: a store key, `InfoEvent`s, a message metadata key, and from Part 2 scores with dict values and metadata. Old readers and the viewer show them generically. The store record and the `InfoEvent` payloads carry `version: 1`. Part 2's record fields are optional additions under the same version.
 - **Logged parameters across versions.** When Part 2 adds `result=` to `swarm()` and `final`/`stop_on_verified` to `leaderless()`, logged plan params gain those keys. A run's `task_identifier()` can then differ between inspect_swarm versions for the same task, as it can for any solver that gains a parameter. Arms in one eval set run one installed inspect_swarm, so they are unaffected.
-- **Names** (`member_scores`, `MEMBER_METRICS`, `best_member`, `mean_member`, `best_at`, `baseline`) become an interface the analysis and users' notebooks depend on once released; changing them later is a breaking change. The member scorer's own name is the task's.
+- **Names** (`member_scores`, `MEMBER_METRICS`, `best_member`, `mean_member`, `baseline`) become an interface the analysis and users' notebooks depend on once released; changing them later is a breaking change. The member scorer's own name is the task's.
 - **inspect_ai.** No change beyond swarm-api.md's two registry types.
   - M1 uses the store, `transcript().info` and the member wrapper's reference to its `AgentState`.
   - Part 2 adds public scorer and reducer APIs and `registry_value()` for the `Synthesize` model field. If the cost boundary is built, it also uses `sample_model_usage()` and `sample_role_usage()`, which are private and which inspect_swarm may use.
@@ -1013,7 +996,7 @@ Untrusted input reaching the new code:
 
 ## Not this design
 
-- **`best_at(k)` in inspect_ai.** It generalises `pass_at(k)` to graded scores and belongs beside it; propose it upstream once it has been used here.
+- **A best-of-k reducer in inspect_ai.** It would generalise `pass_at(k)` to graded scores and belong beside it, if wanted. inspect_swarm does not ship one (decision: Ransom, 2026-10-20).
 - **Per-scorer epoch reducers** (inspect_ai). Today every reducer applies to every scorer and key, which fills logs with meaningless cells such as `pass_at` of `mean_member`.
 - **A no-recovery option for Frontier-CS's scorer** (inspect_evals), so swarm tasks need no adapter.
 - **Re-scoring with a sandbox.** Inspect cannot re-score sandbox scorers; snapshots of the final environment would be needed.

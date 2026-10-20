@@ -1,8 +1,8 @@
 import inspect
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import AsyncExitStack, ExitStack
-from typing import Any, Literal, assert_never, cast
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import AsyncExitStack, ExitStack, contextmanager
+from typing import Any, Literal, TypeVar, assert_never, cast, overload
 
 from inspect_ai._util.registry import (
     extract_named_params,
@@ -20,9 +20,11 @@ from inspect_ai.model import ChatMessage, StopReason
 from inspect_ai.util import (
     Limit,
     LimitExceededError,
+    SandboxEnvironment,
     cost_limit,
     current_span_id,
     message_limit,
+    sandbox_default,
     span,
     time_limit,
     token_limit,
@@ -36,6 +38,10 @@ from inspect_ai.util._limit import (
     _TokenLimit,  # pyright: ignore[reportPrivateUsage]
     _TurnLimit,  # pyright: ignore[reportPrivateUsage]
     _WorkingLimit,  # pyright: ignore[reportPrivateUsage]
+)
+from inspect_ai.util._sandbox.context import (
+    sandbox_environments_context_var,  # pyright: ignore[reportPrivateUsage]
+    sandbox_with_environments_context_var,  # pyright: ignore[reportPrivateUsage]
 )
 from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import (
@@ -74,6 +80,9 @@ _DEEPAGENT = "inspect_ai/deepagent"
 # characters a tool-state scope name may not contain
 _RESERVED = "/#"
 
+# the member's name in a sandbox name
+_MEMBER_FIELD = "{member}"
+
 
 class Member(BaseModel):
     """A swarm member: a built agent, or a registered `@agent` factory and its arguments.
@@ -109,6 +118,12 @@ class Member(BaseModel):
 
     delivery: Literal["notify", "poll"] | None = None
     """The member's configured delivery mode: `notify` or `poll`. `None` selects `notify`. It is logged but does not yet add notices or change the member's conversation."""
+
+    sandbox: str | None = None
+    """The member's own sandbox environment, where `{member}` stands for the member's name. `None` shares the sample's sandbox."""
+
+    visible_sandboxes: list[str] = []
+    """Other sandbox environments the member can reach by name, such as a shared service. Only with `sandbox`."""
 
     @field_validator("factory", mode="before")
     @classmethod
@@ -156,6 +171,7 @@ class Member(BaseModel):
             raise TypeError("member(): give an agent or a factory.")
         for limit in self.limits:
             _limit_kind(limit)
+        _check_sandbox(self.sandbox, self.visible_sandboxes)
         return self
 
     @model_serializer
@@ -174,6 +190,8 @@ class Member(BaseModel):
         data["limits"] = [_limit_dict(limit) for limit in self.limits]
         data["bridged"] = self.bridged
         data["delivery"] = self.delivery
+        data["sandbox"] = self.sandbox
+        data["visible_sandboxes"] = list(self.visible_sandboxes)
         return data
 
 
@@ -187,6 +205,8 @@ def member(
     limits: Sequence[Limit] | None = None,
     bridged: bool | None = None,
     delivery: Literal["notify", "poll"] | None = None,
+    sandbox: str | None = None,
+    visible_sandboxes: Sequence[str] = (),
 ) -> Member:
     """A swarm member, with a name, role, limits or count.
 
@@ -200,6 +220,12 @@ def member(
 
     Submissions. A member that returns normally has submitted, and its output is its answer, unless the output's stop reason is `content_filter` or `model_length`. That is how `react()` returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered.
 
+    Stopping itself. An agent that raises `LimitExceededError("custom", ...)` with no `source` to stop itself ends only its member, with status `member_limit:custom`; the other members continue and the swarm never chooses its output as the answer. This holds when the error is raised in a task group inside the agent, too.
+
+    Sandboxes. Members share the sample's sandbox by default. With `sandbox`, a member works in its own: the swarm makes that environment the member's default, so `sandbox()` in its tools returns it, and hides the sample's other environments from the member except those in `visible_sandboxes`, such as a shared service. Tools that choose a sandbox without a name, such as `text_editor()`, `bash_session()` and the agent bridge, use the member's own; a visible service is reached only by name. `sandbox="{member}"` gives each copy of a counted member the environment named after it: `member(factory, name="agent", count=2, sandbox="{member}")` runs `agent-1` and `agent-2` in the environments of those names. The sample's sandbox configuration provides the environments (for Docker, a compose service for each), and the swarm checks that they exist when it starts. When one member has its own sandbox, every member must have one, no two the same, and the `filesystem` channel, which describes a shared sandbox, cannot be used. A service in `visible_sandboxes` is reachable from any of the member's tools that take a sandbox name, so list only services every member may use.
+
+    Scoring with member sandboxes. The task's scorers run after the swarm, outside every member, where `sandbox()` is `default`. A scorer that grades the members' work names each member's sandbox itself, as in `sandbox("agent-1")`, and the `sandbox` field of each member in the swarm's result record says which member used which.
+
     `deepagent()` members with background dispatch (`background=True` or an integer) are not supported yet and are refused. So are ACP agents, which wait for their caller to drive them rather than returning: a built one when `member()` is called, and a factory's when the member is built.
 
     Args:
@@ -211,13 +237,15 @@ def member(
         limits: The member's own token, cost, turn, message or time limits.
         bridged: Whether the agent is bridged (runs a CLI in the sandbox through Inspect's agent bridge). `None` counts inspect_swe's agents as bridged and others as native. Pass `True` for any other bridged agent: the swarm stops a bridged member by cancelling it, because a limit error raised inside the bridge would end the sample, and it must know before the member's first model request. Bridged members cannot use channels with tools and records yet, and `swarm()` refuses one beside such a channel. A bridged agent that is not declared and not in the `inspect_swe/` namespace is not refused: it cannot reach those channels' tools, so it runs without them. Pass `True` to have it refused instead.
         delivery: The member's configured delivery mode: `notify` or `poll`. `None` selects `notify`. This setting is logged but does not yet add notices or change the member's conversation. A member declared or identified as bridged before it starts has effective mode `poll`. Bridge use detected later leaves its configured mode unchanged.
+        sandbox: The name of the member's own sandbox environment. `{member}` stands for the member's name. `None` shares the sample's sandbox.
+        visible_sandboxes: Other sandbox environments the member can reach by name, such as a shared service. Only with `sandbox`. It cannot include `default`, which inside the member is the member's own sandbox.
 
     Returns:
         The member record.
 
     Raises:
         TypeError: If `agent` is not registered with `@agent` or is an ACP agent, if a built agent is given `args` or `count` above 1, or if `args` do not match the factory's parameters.
-        ValueError: If `count` is below 1, `name` is empty or contains "/" or "#", a limit is a working limit, or a `deepagent()` member uses background dispatch.
+        ValueError: If `count` is below 1, `name` is empty or contains "/" or "#", a limit is a working limit, a `deepagent()` member uses background dispatch, `sandbox` is empty or has braces other than `{member}`, or `visible_sandboxes` is given without `sandbox`, names `default` or has an empty name.
     """
     form = "factory" if is_factory(agent) else "agent"
     return Member.model_validate(
@@ -230,6 +258,11 @@ def member(
             "limits": list(limits or []),
             "bridged": bridged,
             "delivery": delivery,
+            "sandbox": sandbox,
+            # a bare name is refused, rather than read as its characters
+            "visible_sandboxes": visible_sandboxes
+            if isinstance(visible_sandboxes, str)
+            else list(visible_sandboxes),
         }
     )
 
@@ -276,6 +309,80 @@ def build_member(record: Member) -> Agent:
     return agent
 
 
+# The member's own sandbox, by name, or None when it shares the sample's.
+def member_sandbox(record: Member, name: str) -> str | None:
+    if record.sandbox is None:
+        return None
+    return record.sandbox.replace(_MEMBER_FIELD, name)
+
+
+_T = TypeVar("_T")
+
+
+# A member's sandbox environments. Its own is the only one listed, so that Inspect's
+# selections without a name (sandbox_with(), and the injected tools of text_editor(),
+# bash_session(), sandbox MCP servers and the agent bridge, which take the first
+# environment that already has them) find it; its visible sandboxes resolve only by
+# name, through the lookups sandbox(name) and sandbox_with(name=) make.
+class _MemberEnvironments(dict[str, SandboxEnvironment]):
+    def __init__(
+        self,
+        own: str,
+        environment: SandboxEnvironment,
+        visible: Mapping[str, SandboxEnvironment],
+    ) -> None:
+        super().__init__({own: environment})
+        self._visible = dict(visible)
+
+    @overload
+    def get(self, key: str, default: None = None, /) -> SandboxEnvironment | None: ...
+
+    @overload
+    def get(self, key: str, default: SandboxEnvironment, /) -> SandboxEnvironment: ...
+
+    @overload
+    def get(self, key: str, default: _T, /) -> SandboxEnvironment | _T: ...
+
+    def get(self, key: str, default: object = None, /) -> object:
+        return super().get(key, self._visible.get(key, default))
+
+    def __getitem__(self, key: str) -> SandboxEnvironment:
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        return self._visible[key]
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(key) or key in self._visible
+
+
+# The member's own sandbox as its default, its visible sandboxes by name and no
+# other, as LeanOpenProblems' members ran; with a sandbox_with() cache of its own, so
+# that no lookup returns an environment it cannot see. The swarm checked the names
+# when it started.
+@contextmanager
+def _member_sandboxes(
+    sandbox: str | None, visible: Sequence[str]
+) -> Generator[None, None, None]:
+    if sandbox is None:
+        yield
+        return
+    environments = sandbox_environments_context_var.get()
+    environments_token = sandbox_environments_context_var.set(
+        _MemberEnvironments(
+            sandbox,
+            environments[sandbox],
+            {name: environments[name] for name in visible},
+        )
+    )
+    with_token = sandbox_with_environments_context_var.set({})
+    try:
+        with sandbox_default(sandbox):
+            yield
+    finally:
+        sandbox_with_environments_context_var.reset(with_token)
+        sandbox_environments_context_var.reset(environments_token)
+
+
 # The member's lever and the nodes its wrapper enters: the lever's pair, its share of
 # the swarm's caps, then its own limits re-created from their values, fresh for each
 # run (limits are single-use).
@@ -307,7 +414,8 @@ def member_nodes(
 # member's span when the span was entered. The caller keeps `state`, as as_solver()
 # does, for the output of a member that does not return. No error whose source is a
 # swarm node leaves it: a cap becomes a stop of the swarm, and the member's own nodes a
-# status. Anything else (a foreign error) is raised, without the swarm's leaves, after
+# status, as does a sourceless custom limit error, which the agent raised to stop
+# itself. Anything else (a foreign error) is raised, without the swarm's leaves, after
 # `end` with `errored`; a cancellation from outside ends the member as `cancelled`.
 async def run_member(
     record: Member,
@@ -346,8 +454,13 @@ async def _run_member(
 ) -> tuple[str, AgentState]:
     token = current_member.set(context)
     error: Exception | None = None
+    stopped = False
     try:
-        with tool_state_scope(name), context.scope:
+        with (
+            tool_state_scope(name),
+            _member_sandboxes(member_sandbox(record, name), record.visible_sandboxes),
+            context.scope,
+        ):
             agent = build_member(record)
             # entered before the member's conversation is built, as run() does not: a
             # member message limit replaces the sample's for that conversation from its
@@ -363,7 +476,7 @@ async def _run_member(
                 # it, since a span-id provider may await
                 await member_span.enter_async_context(span(name, type=AGENT_SPAN_TYPE))
                 context.span_id = current_span_id()
-                state = await agent(state)
+                state, stopped = await _call_agent(agent, state)
     except Exception as ex:
         error = ex
     finally:
@@ -380,14 +493,38 @@ async def _run_member(
         return _status_for(owned), state
     if context.stop_cause is not None:
         # a node that stopped a bridged member, whose cancellation may not have been
-        # delivered when its last call was the one that stopped it
+        # delivered when its last call was the one that stopped it, even if the agent
+        # then stopped itself
         return context.stop_cause, state
+    if stopped:
+        return "member_limit:custom", state
     if context.scope.cancelled_caught:
         # the hard stop
         return "cancelled", state
     if state.output.empty:
         return "submitted", state
     return _return_status(state.output.stop_reason), state
+
+
+# The agent call: the state it returned, and whether it stopped itself. An error the
+# agent raised to stop itself (a sourceless custom limit), bare or grouped with nothing
+# else, returns the state it was given and True; a group that holds anything else is
+# raised without it, and any other error as it is, for the wrapper to classify.
+async def _call_agent(agent: Agent, state: AgentState) -> tuple[AgentState, bool]:
+    try:
+        return await agent(state), False
+    except BaseException as ex:
+        if _self_stop(ex):
+            return state, True
+        if not isinstance(ex, BaseExceptionGroup):
+            raise
+        stops, rest = cast(BaseExceptionGroup[BaseException], ex).split(_self_stop)
+        if stops is None:
+            raise
+        if rest is None:
+            return state, True
+        remainder = rest
+    raise remainder
 
 
 def _return_status(stop_reason: StopReason) -> str:
@@ -446,6 +583,14 @@ def unwrap(error: BaseException) -> BaseException:
 def _source_in(error: BaseException, nodes: Sequence[Limit]) -> bool:
     return isinstance(error, LimitExceededError) and any(
         error.source is node for node in nodes
+    )
+
+
+def _self_stop(error: BaseException) -> bool:
+    return (
+        isinstance(error, LimitExceededError)
+        and error.type == "custom"
+        and error.source is None
     )
 
 
@@ -540,6 +685,27 @@ def _check_background(background: object, name: str) -> None:
     if background is not False:
         raise ValueError(
             f"member(): {name}(background={background!r}) is not supported in a swarm yet: background subagents outlive the member that started them. Use background=False."
+        )
+
+
+def _check_sandbox(sandbox: str | None, visible: Sequence[str]) -> None:
+    if sandbox is not None and (
+        not sandbox or any(c in sandbox.replace(_MEMBER_FIELD, "") for c in "{}")
+    ):
+        raise ValueError(
+            f"member(): sandbox must be a non-empty sandbox name, where {_MEMBER_FIELD} stands for the member's name and no other braces are used, got {sandbox!r}."
+        )
+    if not visible:
+        return
+    if sandbox is None:
+        raise ValueError(
+            "member(): visible_sandboxes is for a member with its own sandbox; give the member sandbox= as well. A member without one can reach every sandbox."
+        )
+    if not all(visible):
+        raise ValueError("member(): visible_sandboxes cannot have an empty name.")
+    if "default" in visible:
+        raise ValueError(
+            "member(): visible_sandboxes cannot name 'default': inside the member, sandbox('default') is the member's own sandbox. Give the service another name in the sample's sandbox configuration."
         )
 
 
