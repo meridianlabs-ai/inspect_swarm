@@ -126,9 +126,10 @@ A member's status says how it ended:
 | `stopped` | The swarm stopped it, for example when the swarm's time cap was reached. |
 | `share` | It used up its share of a split budget. |
 | `member_limit:<type>` | It reached one of its own `limits`. |
+| `member_limit:custom` | Its agent stopped itself by raising `LimitExceededError("custom", ...)` with no `source`, for example from `react(on_continue=...)`. The other members continue. |
 | `swarm_cap` | Its call reached one of the swarm's caps. |
 | `cancelled` | It was cancelled, after the grace period of a stop or from outside the swarm. |
-| `errored` | It raised an error. The error ends the sample. |
+| `errored` | It raised any other error. The error ends the sample. |
 
 ## Controllers and channels
 
@@ -153,22 +154,24 @@ You can write your own with `@swarm_controller` and `@swarm_channel`. See their 
 
 ## Budget
 
-By default the swarm takes its budget from the sample's cost, token and time limits. It stops its members at 95% of each, holding back 5% for calls already in flight. After a stop, members get `grace` seconds (default 120) to finish their calls, and are then cancelled.
+By default the swarm takes its budget from the sample's cost, token and time limits. It stops its members at 95% of each, holding back 5% for calls already in flight. After a stop, members have up to `grace` seconds (default 120) to finish calls already in flight. If the sample has a time limit, this period is capped at half its remaining time. Members still running are then cancelled.
 
 Set the caps yourself with `Budget`:
 
 ```python
 from inspect_ai.agent import react
 
-from inspect_swarm import Budget, member, swarm
+from inspect_swarm import Budget, member, swarm, swarm_resources
 
 solver = swarm(
-    members=member(react, count=4),
+    members=member(react, args={"tools": [swarm_resources()]}, count=4),
     budget=Budget(cost=20.0, time=1800, split="equal"),
 )
 ```
 
 `split` divides the cost and token caps between members: `"pool"` (default) shares one budget, `"equal"` gives each member an equal share, and a tuple of weights gives one share per member in roster order. A member that uses up its share stops, and its unused share is not given to the others.
+
+When the swarm has a cap, each member's preamble says how the budget is split. The `swarm_resources()` tool, as in the example, lets a member check the swarm's caps, how much all members have used, and its own share. Code inside a member can read the same with `swarm_budget()`. A tool that reads `sample_limits()` shows the sample's limits, not the swarm's caps.
 
 A cost cap needs cost data for every member's model. The swarm checks this when it starts and raises an error naming the models that have none. Configure prices with `set_model_cost()` or `--model-cost-config`.
 
@@ -202,7 +205,19 @@ When the swarm ends it writes two more store entries, each also logged as an `In
 - `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, the controller and the final step, model calls that errored or reported no usage, unpriced models, what stopped the swarm, and whether the sample resumed from a checkpoint.
 - `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members that never made a model call (`never_acted`), the model calls of the chosen member (`steps_to_answer`) and of the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member.
 
-`inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`:
+`inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`. `samples_df()` needs pandas and pyarrow, which neither install above includes:
+
+```bash
+pip install "pandas>=2.1.0" "pyarrow>=10.0.1"
+```
+
+or, in a uv project:
+
+```bash
+uv add "pandas>=2.1.0" "pyarrow>=10.0.1"
+```
+
+Then:
 
 ```python
 from inspect_ai.analysis import SampleSummary, samples_df
