@@ -39,6 +39,8 @@ def swarm(
 ) -> Agent:
     """A swarm of agents working on one sample.
 
+    Each member gets a timeline in the sample named after it, so member names must be unique across the swarm runs and other timelines in a sample. To run swarms more than once in one sample, build them with distinct member names.
+
     Args:
         members: The roster: built agents or `member()` records. A bare agent is `member(agent)`. A factory-form `member()` may stand for several members (`count`).
         controller: How the swarm runs: who starts, when and with what input, and when the swarm is done. A name resolves to a registered controller with its default parameters.
@@ -50,7 +52,7 @@ def swarm(
 
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
-        ValueError: If member names collide, the same agent object is in two members, a channel is given twice, a name does not resolve, or the controller refuses the roster.
+        ValueError: If member names collide, the same agent object is in two members, a channel is given twice, a name does not resolve, or the controller refuses the roster; or, when the returned agent runs, if the sample already has a timeline named after one of its members.
     """
     records = _members(members)
     names = member_names(records)

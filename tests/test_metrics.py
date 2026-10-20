@@ -6,7 +6,7 @@ from uuid import uuid4
 import anyio
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
-from inspect_ai.agent import Agent, AgentState, agent
+from inspect_ai.agent import Agent, AgentState, agent, run
 from inspect_ai.dataset import Sample
 from inspect_ai.event import (
     InfoEvent,
@@ -179,6 +179,32 @@ async def test_a_member_with_no_model_call_never_acted() -> None:
     assert _metrics(outcome.transcript).never_acted == ["waits", "unstarted"]
 
 
+@agent
+def replaying(model: Model) -> Agent:
+    """Generate once, with the cache."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate("same", cache=True)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_member_whose_only_call_is_a_cache_replay_acted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("INSPECT_CACHE_DIR", str(tmp_path))
+    model = scripted_model()
+    async with sample() as t:
+        # warms the cache, so that the member's call is a replay
+        await model.generate("same", cache=True)
+        await swarm(member(replaying(model), name="replays"), channels=[])(
+            AgentState(messages=[])
+        )
+        assert _metrics(t).never_acted == []
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "arguments,longest",
@@ -199,6 +225,24 @@ async def test_longest_identical_tool_run(
     outcome = await run_swarm(swarm(tool_caller(model), channels=[]))
     [metrics] = _metrics(outcome.transcript).members
     assert metrics.longest_identical_tool_run == longest
+
+
+@agent
+def delegating(model: Model) -> Agent:
+    """Run `tool_caller` as a subagent."""
+
+    async def execute(state: AgentState) -> AgentState:
+        return await run(tool_caller(model), state.messages)
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_subagents_tool_calls_count_for_its_member() -> None:
+    model = scripted_model(Script(_lookups({"key": "a"}, {"key": "a"})))
+    outcome = await run_swarm(swarm(delegating(model), channels=[]))
+    [metrics] = _metrics(outcome.transcript).members
+    assert metrics.longest_identical_tool_run == 2
 
 
 @pytest.mark.anyio
