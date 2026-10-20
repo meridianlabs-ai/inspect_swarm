@@ -477,7 +477,7 @@ def mixed(model: Model, foreign: Sequence[str] = ("crash",)) -> Agent:
             while True:
                 await model.generate(state.messages)
         except LimitExceededError as limit:
-            errors = [_FOREIGN[kind]() for kind in foreign]
+            errors = [(_FOREIGN | _CUSTOM)[kind]() for kind in foreign]
             raise ExceptionGroup("mixed", [limit, *errors]) from None
 
     return execute
@@ -610,6 +610,31 @@ async def test_a_member_that_stops_itself_ends_member_limit_custom(
     )
     assert stop.reason == "all_done"
     assert statuses(stop) == {"member": "member_limit:custom", "sibling": "submitted"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "limits,budget,expected",
+    [
+        ([token_limit(TOKENS_PER_CALL)], Budget(), "member_limit:token"),
+        ([], Budget(tokens=TOKENS_PER_CALL), "swarm_cap"),
+    ],
+)
+async def test_a_self_stop_grouped_with_the_swarms_error_keeps_the_swarms_status(
+    limits: list[Limit], budget: Budget, expected: str
+) -> None:
+    stop = await run_swarm(
+        swarm(
+            member(
+                mixed(scripted_model(), foreign=("self_stop",)),
+                name="member",
+                limits=limits,
+            ),
+            channels=[],
+            budget=budget,
+        )
+    )
+    assert statuses(stop) == {"member": expected}
 
 
 @agent
