@@ -612,6 +612,25 @@ async def test_a_member_that_stops_itself_ends_member_limit_custom(
     assert statuses(stop) == {"member": "member_limit:custom", "sibling": "submitted"}
 
 
+@agent
+def stops_while_built(grouped: bool = False) -> Agent:
+    # the factory raises the stop, before there is an agent to stop
+    raise ExceptionGroup("build", [_self_stop()]) if grouped else _self_stop()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("grouped", [False, True])
+async def test_a_custom_stop_from_a_members_factory_is_foreign(grouped: bool) -> None:
+    async with sample():
+        with pytest.raises(LimitExceededError) as raised:
+            await swarm(
+                member(stops_while_built, args={"grouped": grouped}), channels=[]
+            )(AgentState(messages=[ChatMessageUser(content="task")]))
+        ledger = _ledger()
+    assert (raised.value.type, raised.value.source) == ("custom", None)
+    assert [m.status for m in ledger.members] == ["errored"]
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "error,raised,limit_type",

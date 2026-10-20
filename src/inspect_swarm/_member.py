@@ -343,6 +343,9 @@ async def _run_member(
     token = current_member.set(context)
     error: Exception | None = None
     cancelled: BaseExceptionGroup[BaseException] | None = None
+    # whether an error came from the agent, which alone can stop itself: not from
+    # building it, entering its nodes or its span
+    in_agent = False
     try:
         with tool_state_scope(name), context.scope:
             agent = build_member(record)
@@ -360,7 +363,9 @@ async def _run_member(
                 # it, since a span-id provider may await
                 await member_span.enter_async_context(span(name, type=AGENT_SPAN_TYPE))
                 context.span_id = current_span_id()
+                in_agent = True
                 state = await agent(state)
+                in_agent = False
     except Exception as ex:
         error = ex
     except BaseExceptionGroup as ex:
@@ -372,11 +377,13 @@ async def _run_member(
         # on trio a cancellation grouped with errors, which the runtime catches: it
         # removes the swarm's leaves but cannot tell the agent's stop of itself, so that
         # is removed here, and the cancellation stays
-        _, rest = cancelled.split(_self_stop)
-        assert rest is not None
-        raise rest
+        if in_agent:
+            _, rest = cancelled.split(_self_stop)
+            assert rest is not None
+            raise rest
+        raise cancelled
     if error is not None:
-        cap, owned, foreign = classify_errors(error, caps, nodes, self_stops=True)
+        cap, owned, foreign = classify_errors(error, caps, nodes, self_stops=in_agent)
         if foreign is not None:
             raise foreign
         if cap:
