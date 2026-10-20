@@ -104,8 +104,8 @@ def _priced(cost: float, tokens: int = 10) -> ModelUsage:
 _SWARM = [str(c.name) for c in SwarmColumns]
 
 
-def _rows(logs: str) -> dict[str, dict[str, Any]]:
-    df = samples_df(logs, columns=SampleSummary + SwarmColumns)
+def _rows(logs: str, parallel: bool | int = False) -> dict[str, dict[str, Any]]:
+    df = samples_df(logs, columns=SampleSummary + SwarmColumns, parallel=parallel)
     records = cast(
         list[dict[str, Any]],
         df.to_dict("records"),  # pyright: ignore[reportUnknownMemberType]
@@ -158,7 +158,8 @@ def test_swarm_columns_read_realized_cost_and_the_ledger(tmp_path: Path) -> None
         swarm_unpriced=0,
         swarm_unpriced_models="[]",
     )
-    assert _rows(str(tmp_path)) == {
+    rows = _rows(str(tmp_path))
+    assert rows == {
         "complete": swarm
         | dict(
             swarm_cost=2.0,
@@ -191,6 +192,8 @@ def test_swarm_columns_read_realized_cost_and_the_ledger(tmp_path: Path) -> None
             swarm_unpriced_models="[]",
         ),
     }
+    # parallel reads pickle the columns into worker processes
+    assert _rows(str(tmp_path), parallel=2) == rows
 
 
 def test_swarm_columns_refuse_a_ledger_they_cannot_read(tmp_path: Path) -> None:
