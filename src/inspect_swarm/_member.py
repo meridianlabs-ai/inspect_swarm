@@ -195,6 +195,8 @@ def member(
 
     Submissions. A member that returns normally has submitted, and its output is its answer, unless the output's stop reason is `content_filter` or `model_length`. That is how `react()` returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered.
 
+    Stopping itself. An agent that raises `LimitExceededError("custom", ...)` with no `source` to stop itself ends only its member, with status `member_limit:custom`; the other members continue and the swarm never chooses its output as the answer. This holds when the error is raised in a task group inside the agent, too. A custom limit error with a `source` leaves the swarm as any other error does.
+
     `deepagent()` members with background dispatch (`background=True` or an integer) are not supported yet and are refused. So are ACP agents, which wait for their caller to drive them rather than returning: a built one when `member()` is called, and a factory's when the member is built.
 
     Args:
@@ -300,7 +302,8 @@ def member_nodes(
 # member's span when the span was entered. The caller keeps `state`, as as_solver()
 # does, for the output of a member that does not return. No error whose source is a
 # swarm node leaves it: a cap becomes a stop of the swarm, and the member's own nodes a
-# status. Anything else (a foreign error) is raised, without the swarm's leaves, after
+# status, as does a sourceless custom limit error, which the agent raised to stop
+# itself. Anything else (a foreign error) is raised, without the swarm's leaves, after
 # `end` with `errored`; a cancellation from outside ends the member as `cancelled`.
 async def run_member(
     record: Member,
@@ -363,7 +366,7 @@ async def _run_member(
         current_member.reset(token)
 
     if error is not None:
-        cap, owned, foreign = classify_errors(error, caps, nodes)
+        cap, owned, foreign = classify_errors(error, caps, nodes, self_stops=True)
         if foreign is not None:
             raise foreign
         if cap:
@@ -396,18 +399,24 @@ def _return_status(stop_reason: StopReason) -> str:
 
 
 def _status_for(error: LimitExceededError) -> str:
-    # the member's lever, share or own limit; a member time limit is Inspect's own node
+    # the member's lever, share or own limit; a member time limit is Inspect's own node,
+    # and an agent's stop of itself has no source
     if isinstance(error.source, SwarmNode):
         return error.source.stop_cause(error.type)
     return f"member_limit:{error.type}"
 
 
 # Splits an error from a member or the controller into its leaves: whether any is from
-# one of the swarm's caps, the first from the caller's own nodes, and the rest, which is
-# foreign: a single leaf bare, several as a group. A cancellation in the group, as trio
-# keeps one beside errors, stays in the rest.
+# one of the swarm's caps, the first from the caller's own nodes (or, with `self_stops`,
+# a sourceless custom limit error, which an agent raises to stop itself), and the rest,
+# which is foreign: a single leaf bare, several as a group. A cancellation in the group,
+# as trio keeps one beside errors, stays in the rest.
 def classify_errors(
-    error: BaseException, caps: Sequence[Limit], own: Sequence[Limit]
+    error: BaseException,
+    caps: Sequence[Limit],
+    own: Sequence[Limit],
+    *,
+    self_stops: bool = False,
 ) -> tuple[bool, LimitExceededError | None, BaseException | None]:
     group = (
         cast(BaseExceptionGroup[BaseException], error)
@@ -416,7 +425,9 @@ def classify_errors(
     )
     cap_errors, rest = group.split(lambda e: _source_in(e, caps))
     owned, foreign = (
-        rest.split(lambda e: _source_in(e, own)) if rest is not None else (None, None)
+        rest.split(lambda e: _source_in(e, own) or (self_stops and _self_stop(e)))
+        if rest is not None
+        else (None, None)
     )
     owned_leaf = _leaves(owned)[0] if owned is not None else None
     assert owned_leaf is None or isinstance(owned_leaf, LimitExceededError)
@@ -439,6 +450,14 @@ def unwrap(error: BaseException) -> BaseException:
 def _source_in(error: BaseException, nodes: Sequence[Limit]) -> bool:
     return isinstance(error, LimitExceededError) and any(
         error.source is node for node in nodes
+    )
+
+
+def _self_stop(error: BaseException) -> bool:
+    return (
+        isinstance(error, LimitExceededError)
+        and error.type == "custom"
+        and error.source is None
     )
 
 

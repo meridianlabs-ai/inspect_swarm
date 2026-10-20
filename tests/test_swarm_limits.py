@@ -507,6 +507,131 @@ async def test_a_group_mixing_the_swarms_error_with_a_foreign_one_raises_only_th
 
 
 # ---------------------------------------------------------------------------
+# An agent that stops itself: a custom limit error with no source
+
+
+def _self_stop() -> LimitExceededError:
+    return LimitExceededError("custom", value=1, limit=1, message="stuck")
+
+
+async def _stuck(state: AgentState) -> bool:
+    # a react() on_continue that stops a stuck agent, as inspect_boltons' loop limits do
+    raise _self_stop()
+
+
+def test_a_member_that_stops_itself_ends_alone_and_is_never_chosen(
+    tmp_path: Path,
+) -> None:
+    # answers without a submit, so react() calls on_continue, which stops it
+    stuck = Script(outputs=[ModelOutput.from_content("mockllm", "I am stuck.")])
+    # slower, so it submits after the stuck member has ended
+    solver = Script(
+        outputs=[ModelOutput.for_tool_call("mockllm", "submit", {"answer": "42"})],
+        delay=0.1,
+    )
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            [
+                member(
+                    react(model=scripted_model(stuck), on_continue=_stuck),
+                    name="stuck",
+                ),
+                member(react(model=scripted_model(solver)), name="solver"),
+            ],
+            channels=[],
+        ),
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    assert log.samples is not None
+    [sample] = log.samples
+    assert sample.error is None
+    record = SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
+    stopped, solved = record.members
+    assert (stopped.status, stopped.submitted) == ("member_limit:custom", False)
+    assert solved.status == "submitted"
+    assert stopped.time is not None and solved.time is not None
+    assert stopped.time < solved.time
+    # the stopped member's output is the reply it gave, which first passes over
+    assert stuck.calls == 1
+    assert record.final.member == "solver"
+    assert sample.output.completion.endswith("42")
+
+
+# Errors an agent can raise that end it with a custom limit, by kind.
+_CUSTOM: dict[str, Callable[[], Exception]] = {
+    "self_stop": _self_stop,
+    # a source the swarm does not own
+    "sourced": lambda: LimitExceededError(
+        "custom", value=1, limit=1, source=token_limit(1)
+    ),
+    "mixed": lambda: ExceptionGroup("mixed", [_self_stop(), RuntimeError("foreign")]),
+}
+
+
+@agent
+def stopper(model: Model, error: str, grouped: bool = False) -> Agent:
+    # generates once, then raises `error` bare or from a task group of its own
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(state.messages)
+
+        async def stop() -> None:
+            raise (_CUSTOM | _FOREIGN)[error]()
+
+        if grouped:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(stop)
+        else:
+            await stop()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("grouped", [False, True])
+async def test_a_member_that_stops_itself_ends_member_limit_custom(
+    grouped: bool,
+) -> None:
+    stop = await run_swarm(
+        swarm(
+            [
+                member(
+                    stopper(scripted_model(), "self_stop", grouped=grouped),
+                    name="member",
+                ),
+                # still running when the member stops itself
+                member(generator(scripted_model(Script(delay=0.05))), name="sibling"),
+            ],
+            channels=[],
+        )
+    )
+    assert stop.reason == "all_done"
+    assert statuses(stop) == {"member": "member_limit:custom", "sibling": "submitted"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "error,raised,limit_type",
+    [
+        # only the foreign leaf, bare
+        ("mixed", RuntimeError, None),
+        ("sourced", LimitExceededError, "custom"),
+        ("sample_limit", LimitExceededError, "token"),
+    ],
+)
+async def test_a_limit_error_the_member_does_not_own_still_propagates(
+    error: str, raised: type[Exception], limit_type: str | None
+) -> None:
+    with pytest.raises(Exception) as escaped:
+        await run_swarm(
+            swarm(member(stopper(scripted_model(), error)), channels=[]),
+        )
+    assert type(escaped.value) is raised
+    assert getattr(escaped.value, "type", None) == limit_type
+
+
+# ---------------------------------------------------------------------------
 # Exhaustion: foreign errors and limits from outside the swarm
 
 
