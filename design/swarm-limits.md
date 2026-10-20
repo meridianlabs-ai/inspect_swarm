@@ -427,7 +427,7 @@ class MemberLedger(BaseModel):
     background_cancelled: int  # of those, ended by a cancellation: the drain's end, a foreign error or the hard stop
 
 class SwarmLedger(BaseModel):
-    version: int = 1
+    version: Literal[1] = 1
     budget: Budget             # as configured
     caps: dict[str, float | None]           # derived or explicit, per kind
     sample_limits: dict[str, float | None]  # at swarm start
@@ -489,7 +489,7 @@ Claims. Completeness is judged over the whole interval the ledger covers (member
   - zero `unpriced_calls_recorded`, and `unpriced_models` empty;
   - `native_compaction_classes` empty.
 
-  Otherwise the arm's total is a lower bound, reported with the counts that cleared the flag. These calls are missing from the sample's `model_usage` too, so the flag applies to the arm's total, not only to the swarm's figures. It judges the solve only: the task's scorer calls, which the sample total also includes, run after the ledger is written and are judged by nothing, as in any Inspect eval.
+  Otherwise the arm's total is a lower bound, reported with the counts that cleared the flag. M1's `SwarmColumns` for `samples_df()` carry `errored`, `no_usage`, `unpriced` and the unpriced models; the other reasons (cancelled members, `interrupted`, `final_cancelled`, `unpriced_calls_recorded`, native compaction classes) stay in the ledger (decision: Ransom, 2026-10-20). These calls are missing from the sample's `model_usage` too, so the flag applies to the arm's total, not only to the swarm's figures. It judges the solve only: the task's scorer calls, which the sample total also includes, run after the ledger is written and are judged by nothing, as in any Inspect eval.
 - **The compaction rule is strict on purpose.** Any run in a process that has loaded the OpenAI or Anthropic provider, or a custom provider with native compaction, reports a lower-bound total, whichever compaction strategy its members chose. Choosing `CompactionSummary` does not change that, because nothing observable proves no other code called `Model.compact()`. Complete totals are possible today only in processes that never load a native-compaction provider.
   - An inspect_ai change that emits an event from `Model.compact()` at invocation, completed with its usage, error or cancellation, would let the ledger judge native compactions per call like generations ([Not this design](#not-this-design), [open question 3](#open-questions)).
 - `attribution_complete`: `total_complete`, and `unattributed` has zero tokens and its cost is within the tolerance of zero. Otherwise per-member figures are lower bounds, and the arm's total is unaffected. Approval or review model calls always leave their tokens unattributed (their cost is attributed), so runs that use them report per-member token figures as lower bounds.

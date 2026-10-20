@@ -1,6 +1,6 @@
 import logging
 import math
-from collections.abc import Callable, Sequence, Set
+from collections.abc import Callable, Mapping, Sequence, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -191,12 +191,7 @@ def share_nodes(
         raise ValueError(
             f"Budget.split={budget.split!r} divides the swarm's cost and token caps, but the swarm has neither. Set a cost or token limit on the sample or in the Budget, or use split='pool'."
         )
-    weights = [1.0] * len(names) if budget.split == "equal" else list(budget.split)
-    assert len(weights) == len(names)
-    # each member's fraction of the caps, exact: large weights neither overflow nor
-    # round a share away
-    total = sum(Fraction(w) for w in weights)
-    fractions = [Fraction(w) / total for w in weights]
+    fractions = _fractions(budget.split, len(names))
     costs = None if caps.cost is None else _cost_shares(caps.cost, fractions)
     tokens = None if caps.tokens is None else _token_shares(caps.tokens, fractions)
     shares: dict[str, list[Limit]] = {}
@@ -210,6 +205,36 @@ def share_nodes(
             )
         shares[name] = nodes
     return shares
+
+
+def _fractions(
+    split: Literal["equal"] | tuple[float, ...], count: int
+) -> list[Fraction]:
+    # each member's fraction of the caps, exact: large weights neither overflow nor
+    # round a share away
+    weights = [1.0] * count if split == "equal" else list(split)
+    assert len(weights) == count
+    total = sum(Fraction(w) for w in weights)
+    return [Fraction(w) / total for w in weights]
+
+
+def split_sentence(budget: Budget, caps: Caps, index: int, count: int) -> str | None:
+    # the preamble's statement of the split, for the member at `index` in roster order;
+    # None when the swarm has one member or no cap. Run at swarm start, after
+    # share_nodes().
+    if count == 1 or (caps.cost is None and caps.tokens is None and caps.time is None):
+        return None
+    if budget.split == "pool":
+        return "The budget is shared by all members."
+    kinds = " and ".join(
+        kind
+        for kind, cap in (("cost", caps.cost), ("token", caps.tokens))
+        if cap is not None
+    )
+    if budget.split == "equal":
+        return f"The swarm's {kinds} budget is split equally between the members; you stop when your share is used up."
+    share = float(_fractions(budget.split, count)[index]) * 100
+    return f"The swarm's {kinds} budget is split between the members in fixed shares; yours is {share:.3g}% of it, and you stop when it is used up."
 
 
 def _cost_shares(cap: float, fractions: Sequence[Fraction]) -> list[float]:
@@ -539,3 +564,121 @@ class SwarmMessageNode(SwarmNode, _MessageLimit):
                 limit,
                 f"count: {count:,}; limit: {limit:,}",
             )
+
+
+def cost_node(nodes: Sequence[Limit], role: NodeRole) -> SwarmCostNode | None:
+    # the cost-tree half of the pair with this role, whose usage is the pair's cost
+    return next(
+        (n for n in nodes if isinstance(n, SwarmCostNode) and n.role == role), None
+    )
+
+
+def token_node(nodes: Sequence[Limit], role: NodeRole) -> SwarmTokenNode | None:
+    # a lone token node with this role; a cost pair's token node is not it
+    return next(
+        (
+            n
+            for n in nodes
+            if isinstance(n, SwarmTokenNode) and n.role == role and n.pair is None
+        ),
+        None,
+    )
+
+
+@dataclass(frozen=True)
+class BudgetUsage:
+    """One capped kind of the swarm's budget, and what has been used of it."""
+
+    cap: float
+    """The swarm's cap: dollars, tokens or seconds."""
+
+    used: float
+    """What the whole swarm has used of the cap so far."""
+
+    share: float | None = None
+    """The member's own share of the cap when the budget is split, else `None`. Time is never split."""
+
+    share_used: float | None = None
+    """What the member has used of its share, when it has one."""
+
+
+@dataclass(frozen=True)
+class SwarmBudget:
+    """The swarm's budget as a member sees it, from `swarm_budget()`."""
+
+    split: Literal["pool", "equal"] | tuple[float, ...]
+    """How the cost and token caps are divided between members, as `Budget.split`."""
+
+    cost: BudgetUsage | None
+    """The cost cap in dollars, or `None` when the swarm has none."""
+
+    tokens: BudgetUsage | None
+    """The token cap, or `None` when the swarm has none."""
+
+    token_type: str
+    """The tokens the token cap meters: `all`, or a metering type such as `output`."""
+
+    time: BudgetUsage | None
+    """The time cap, and the seconds since the swarm started, or `None` when the swarm has none."""
+
+
+# The budget of one run of the swarm, as `swarm_budget()` reads it: the configured
+# budget, the cap nodes, the time cap and the run's start, and each member's context and
+# share nodes. A member of another run with the same name has a context of its own.
+@dataclass(frozen=True)
+class BudgetState:
+    budget: Budget
+    caps: Sequence[Limit]
+    time: float | None
+    start: float
+    members: Mapping[str, tuple[MemberContext, Sequence[Limit]]]
+
+
+current_budget: ContextVar[BudgetState | None] = ContextVar(
+    "inspect_swarm_current_budget", default=None
+)
+
+
+def swarm_budget() -> SwarmBudget:
+    """The budget of the swarm the caller runs in.
+
+    Reports the swarm's cap per kind and how much of it the whole swarm has used, and, when the budget is split and the caller is a member, the member's share and its usage. The caps are the ones that stop the swarm, which `sample_limits()` does not show: the swarm holds back part of each sample limit.
+
+    Returns:
+        The budget as the caller sees it.
+
+    Raises:
+        RuntimeError: If called outside a running swarm.
+    """
+    state = current_budget.get()
+    if state is None:
+        raise RuntimeError(
+            "swarm_budget() was called outside a swarm; call it from a swarm member or its tools."
+        )
+    share: Sequence[Limit] = ()
+    member = current_member.get()
+    if member is not None:
+        context, nodes = state.members.get(member.name, (None, ()))
+        if context is member:
+            share = nodes
+    token_cap = token_node(state.caps, "cap")
+    return SwarmBudget(
+        split=state.budget.split,
+        cost=_budget_usage(cost_node(state.caps, "cap"), cost_node(share, "share")),
+        tokens=_budget_usage(token_cap, token_node(share, "share")),
+        token_type=token_cap.type if token_cap is not None else "all",
+        time=None
+        if state.time is None
+        else BudgetUsage(cap=state.time, used=anyio.current_time() - state.start),
+    )
+
+
+def _budget_usage(cap: Limit | None, share: Limit | None) -> BudgetUsage | None:
+    if cap is None or cap.limit is None:
+        return None
+    return BudgetUsage(
+        cap=cap.limit,
+        used=cap.usage,
+        share=share.limit if share is not None else None,
+        share_used=share.usage if share is not None else None,
+    )

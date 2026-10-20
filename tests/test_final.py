@@ -430,6 +430,7 @@ async def test_the_record_is_written_at_start_and_on_each_start_and_end() -> Non
         "status",
         "submitted",
         "time",
+        "sandbox",
         "gate_checks",
         "gate_passes",
         "first_pass_time",

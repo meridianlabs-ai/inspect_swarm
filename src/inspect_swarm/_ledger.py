@@ -3,6 +3,7 @@ import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import anyio
 from inspect_ai.event import Event, ModelEvent, ScoreEvent, SpanBeginEvent, ToolEvent
@@ -15,7 +16,7 @@ from inspect_ai.util import Limit, current_span_id, sample_limits
 from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import BaseModel
 
-from ._budget import Budget, CostPair, SwarmCostNode, SwarmTokenNode
+from ._budget import Budget, CostPair, cost_node, token_node
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class MemberLedger(BaseModel):
 # Realized usage and cost of one run of the swarm, and how complete they are. Written
 # once, when the swarm ends, as an InfoEvent and a store entry.
 class SwarmLedger(BaseModel):
-    version: int = 1
+    version: Literal[1] = 1
     # as configured
     budget: Budget
     # derived or explicit, per kind
@@ -487,8 +488,8 @@ def _combine(a: ModelUsage, b: ModelUsage, sign: int) -> ModelUsage:
 def _cap_values(
     caps: Sequence[Limit], time_cap: float | None
 ) -> dict[str, float | None]:
-    cost = _cost_cap(caps)
-    tokens = _token_cap(caps)
+    cost = cost_node(caps, "cap")
+    tokens = token_node(caps, "cap")
     return {
         "cost": cost.limit if cost is not None else None,
         "tokens": tokens.limit if tokens is not None else None,
@@ -500,10 +501,10 @@ def _overshoot(
     caps: Sequence[Limit], time_cap: float | None, elapsed: float
 ) -> dict[str, float]:
     usage: dict[str, tuple[float, float | None]] = {"time": (elapsed, time_cap)}
-    cost = _cost_cap(caps)
+    cost = cost_node(caps, "cap")
     if cost is not None:
         usage["cost"] = (cost.usage, cost.limit)
-    tokens = _token_cap(caps)
+    tokens = token_node(caps, "cap")
     if tokens is not None:
         usage["tokens"] = (tokens.usage, tokens.limit)
     return {
@@ -511,21 +512,3 @@ def _overshoot(
         for kind, (value, cap) in usage.items()
         if cap is not None and value > cap
     }
-
-
-def _cost_cap(caps: Sequence[Limit]) -> SwarmCostNode | None:
-    return next(
-        (n for n in caps if isinstance(n, SwarmCostNode) and n.role == "cap"), None
-    )
-
-
-def _token_cap(caps: Sequence[Limit]) -> SwarmTokenNode | None:
-    # a lone token node; the cost cap pair's token node is not it
-    return next(
-        (
-            n
-            for n in caps
-            if isinstance(n, SwarmTokenNode) and n.role == "cap" and n.pair is None
-        ),
-        None,
-    )

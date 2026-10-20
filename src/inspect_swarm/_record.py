@@ -30,6 +30,9 @@ class MemberResult(BaseModel):
     time: float | None
     """Swarm time (seconds from the swarm's start) when the member ended; `None` until then."""
 
+    sandbox: str | None = None
+    """The member's own sandbox environment, by name; `None` when it shares the sample's."""
+
     gate_checks: int = 0
     """How many of the member's own submissions were checked in its loop, as `react()` checks them with `attempts`: intermediate scores from the task's first scorer, made in the member's own agent span and not a subagent's. Set when the member ends."""
 
