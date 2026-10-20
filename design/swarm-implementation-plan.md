@@ -180,7 +180,7 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 - Implements: the same open question; undecided.
 
 **AI-7. The store-event switch.** A context-scoped switch, a `ContextVar` with a context manager to enter it, that `track_store_changes()` and the checkpointing span (`SpanRotationScope`, when it snapshots the store for a span) read when a span is entered: spans entered inside it take no snapshots and log no `StoreEvent`, and spans entered before it diff as now. Done: merged on 2026-10-20 as UKGovernmentBEIS/inspect_ai#5960, in no release yet. The switch is `suspend_store_events()`, private (not exported from `inspect_ai.util`): inspect_swarm imports it from `inspect_ai.util._store`. It changes nothing outside the switch, and leaves the raising-span path and meridianlabs-ai/inspect_ai#589's general fix to their own pull requests ([swarm.md Not this design](swarm.md#not-this-design)).
-- Files: `src/inspect_ai/log/_transcript.py`, `src/inspect_ai/util/_span.py`, `src/inspect_ai/util/__init__.py`.
+- Files: `src/inspect_ai/log/_transcript.py`, `src/inspect_ai/util/_span.py`, `src/inspect_ai/util/_store.py`.
 - Tests: in inspect_ai's own suite: a span entered inside the switch logs no `StoreEvent`, nor do spans nested in it or tasks started inside it; a span entered before it logs the net change; the checkpointing span inside it logs none. No Docker.
 - Depends on: nothing. M1-14 needs it in a PyPI release.
 - Implements: [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics) (decision: Ransom, 2026-10-19).
