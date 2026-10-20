@@ -2,6 +2,7 @@ import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from inspect_ai.event import Event, ModelEvent, SpanBeginEvent
 from inspect_ai.log._samples import sample_active
@@ -89,7 +90,7 @@ class MemberLedger(BaseModel):
 # Realized usage and cost of one run of the swarm, and how complete they are. Written
 # once, when the swarm ends, as an InfoEvent and a store entry.
 class SwarmLedger(BaseModel):
-    version: int = 1
+    version: Literal[1] = 1
     # as configured
     budget: Budget
     # derived or explicit, per kind

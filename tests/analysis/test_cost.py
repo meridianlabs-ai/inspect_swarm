@@ -1,4 +1,5 @@
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -197,13 +198,28 @@ def test_sample_costs_read_realized_cost_and_the_ledger(tmp_path: Path) -> None:
 def test_arm_costs_compare_arms_on_realized_cost() -> None:
     swarm_arm = _log(
         [
-            _sample(1, {"a": _priced(3.0)}, {"s": 1.0}, _ledger(members=4)),
-            _sample(2, {"a": _priced(5.0)}, {"s": 0.0}, _ledger(members=4)),
+            # derived caps differ with what each sample spent before the swarm
+            _sample(
+                1, {"a": _priced(3.0)}, {"s": 1.0}, _ledger(members=4, cost_cap=8.5)
+            ),
+            _sample(
+                2, {"a": _priced(5.0)}, {"s": 0.0}, _ledger(members=4, cost_cap=7.5)
+            ),
             # left out: no score
-            _sample(3, {"a": _priced(100.0)}, None, _ledger(members=4)),
+            _sample(3, {"a": _priced(100.0)}, None, _ledger(members=4, cost_cap=1.0)),
+            # left out: Inspect's unscored value, as a failed model grade writes
+            _sample(
+                4,
+                {"a": _priced(100.0)},
+                {"s": float("nan")},
+                _ledger(members=4, cost_cap=1.0),
+            ),
             # left out: resumed, so its caps restarted from zero
             _sample(
-                4, {"a": _priced(100.0)}, {"s": 1.0}, _ledger(members=4, resumed=True)
+                5,
+                {"a": _priced(100.0)},
+                {"s": 1.0},
+                _ledger(members=4, resumed=True, cost_cap=1.0),
             ),
         ],
         task_args={"k": 4},
@@ -219,14 +235,22 @@ def test_arm_costs_compare_arms_on_realized_cost() -> None:
         task_args={"k": 1},
         cost_limit=8.0,
     )
-    arms = arm_costs(sample_costs([swarm_arm, single_arm], scorer="s"))
+    rows = sample_costs([swarm_arm, single_arm], scorer="s")
+    arms = arm_costs(rows)
     assert [
         (a.task_args, a.members, a.samples, a.unscored, a.resumed, a.score, a.cost)
         for a in arms
     ] == [
-        ({"k": 4}, 4, 2, 1, 1, 0.5, 4.0),
+        ({"k": 4}, 4, 2, 2, 1, 0.5, 4.0),
         ({"k": 1}, 1, 2, 0, 0, 1.0, 3.0),
     ]
+    # the caps of the samples in the means, whatever the row order
+    for ordered in (arms, arm_costs(rows[::-1])):
+        caps = {a.arm: (a.swarm_cost_cap_min, a.swarm_cost_cap_max) for a in ordered}
+        assert caps == {
+            task_identifier(swarm_arm, None): (7.5, 8.5),
+            task_identifier(single_arm, None): (None, None),
+        }
     assert [a.complete for a in arms] == [True, False]
     assert [a.arm for a in arms] == [
         task_identifier(swarm_arm, None),
@@ -276,8 +300,16 @@ def _arm(members: int | None, cost: float, score: float = 0.5) -> ArmCost:
         cost=cost,
         complete=True,
         cost_limit=None,
-        swarm_cost_cap=None,
+        swarm_cost_cap_min=None,
+        swarm_cost_cap_max=None,
     )
+
+
+def _grid(score: Callable[[int, float], float]) -> list[ArmCost]:
+    # agent count k and per-agent cost b
+    return [
+        _arm(k, k * b, score(k, b)) for k in (1, 2, 4, 8) for b in (0.5, 1.0, 2.0, 4.0)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -289,10 +321,18 @@ def _arm(members: int | None, cost: float, score: float = 0.5) -> ArmCost:
         ([_arm(2, 1.0), _arm(2, 2.0), _arm(2, 4.0)], "vary agent count"),
         # per-agent cost fixed by agent count: on one line
         ([_arm(1, 1.0), _arm(2, 4.0), _arm(4, 16.0)], "vary agent count"),
+        # one per-agent cost, which roundoff in ln(cost) - ln(k) must not hide
+        (
+            [_arm(k, k * 0.5, 0.2 + 0.05 * math.log(k)) for k in (1, 2, 4, 8)],
+            "vary agent count",
+        ),
         ([_arm(1, 1.0), _arm(2, 2.0)], "at least three arms"),
         ([_arm(1, 0.0), _arm(2, 2.0), _arm(4, 4.0)], "positive cost"),
         # the score does not move with per-agent cost
         ([_arm(1, 1.0), _arm(1, 2.0), _arm(2, 2.0)], "λ is undefined"),
+        # the same, where roundoff leaves a slope that is not exactly zero
+        (_grid(lambda k, b: 0.2), "λ is undefined"),
+        (_grid(lambda k, b: 0.2 + 0.05 * math.log(k)), "λ is undefined"),
     ],
 )
 def test_fit_lambda_refuses_what_it_cannot_fit(arms: list[ArmCost], error: str) -> None:
@@ -305,7 +345,7 @@ def test_fit_lambda_refuses_what_it_cannot_fit(arms: list[ArmCost], error: str) 
     [
         (
             _sample(1, {}, {"s": 1.0}, {**_ledger(), "version": 2}),
-            "ledger of version 2",
+            "ledger this inspect_swarm cannot read",
         ),
         (_sample(1, {}, {"s": {"best": 1.0}}), "dict score value"),
         (_sample(1, {}, {"s": 1.0, "t": 0.0}), "name the one to use"),
@@ -322,6 +362,17 @@ def test_arm_costs_refuse_a_sample_counted_twice() -> None:
     log = _log([_sample(1, {"a": _priced(1.0)}, {"s": 1.0})])
     with pytest.raises(ValueError, match="more than once"):
         arm_costs(sample_costs([log, log]))
+
+
+def test_arm_costs_refuse_an_arm_with_two_roster_sizes() -> None:
+    log = _log(
+        [
+            _sample(1, {"a": _priced(1.0)}, {"s": 1.0}, _ledger(members=2)),
+            _sample(2, {"a": _priced(1.0)}, {"s": 1.0}, _ledger(members=4)),
+        ]
+    )
+    with pytest.raises(ValueError, match="different roster sizes"):
+        arm_costs(sample_costs(log))
 
 
 def test_sample_costs_read_the_ledger_a_swarm_writes(tmp_path: Path) -> None:

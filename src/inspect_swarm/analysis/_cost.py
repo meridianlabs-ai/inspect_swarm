@@ -7,7 +7,7 @@ from inspect_ai.analysis._dataframe.util import LogPaths, resolve_logs
 from inspect_ai.log import EvalLog, EvalSample, read_eval_log
 from inspect_ai.model import ModelUsage
 from inspect_ai.scorer import value_to_float
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .._evidence import LEDGER_KEY
 from .._ledger import (
@@ -15,13 +15,15 @@ from .._ledger import (
     SwarmLedger,
 )
 
-# the ledger version these helpers read
-_LEDGER_VERSION = 1
-
 # sample fields the helpers never read, skipped when a log is read from a file
 _EXCLUDE_FIELDS = {"events", "messages", "attachments"}
 
 _to_float = value_to_float()
+
+# the relative size below which a spread, a correlation's complement or a fitted
+# effect counts as zero: the fit's inputs are logarithms and means, so roundoff in
+# a quantity that is exactly zero in theory is many orders of magnitude smaller
+_ZERO = 1e-9
 
 
 class SampleCost(BaseModel):
@@ -49,7 +51,7 @@ class SampleCost(BaseModel):
     """Sample epoch."""
 
     score: float | None
-    """The scorer's value as a float, or `None` when the sample has no score from it."""
+    """The scorer's value as a float, or `None` when the sample has no score from it or the score is Inspect's unscored value (NaN)."""
 
     cost: float
     """Realized cost in dollars: the priced cost in the sample's `model_usage`, scorer calls included."""
@@ -112,8 +114,11 @@ class ArmCost(BaseModel):
     cost_limit: float | None
     """The eval's sample cost limit."""
 
-    swarm_cost_cap: float | None
-    """The swarm's cost cap from the ledger."""
+    swarm_cost_cap_min: float | None
+    """The lowest swarm cost cap over the samples in the means. A derived cap is the sample's cost limit less its reserve and what the sample spent before the swarm started, so it can differ between samples."""
+
+    swarm_cost_cap_max: float | None
+    """The highest swarm cost cap over the samples in the means."""
 
 
 class LambdaFit(BaseModel):
@@ -153,7 +158,7 @@ def sample_costs(
         One row per sample, in log order.
 
     Raises:
-        ValueError: When `scorer` is `None` and a sample has more than one score, a score value is a list or dict, or a ledger has a version these helpers do not read.
+        ValueError: When `scorer` is `None` and a sample has more than one score, a score value is a list or dict, or a ledger does not validate (a version other than 1, for one).
     """
     rows: list[SampleCost] = []
     for entry in resolve_logs(logs):
@@ -230,13 +235,19 @@ def fit_lambda(arms: Sequence[ArmCost]) -> LambdaFit:
     sxy = sum((p[0] - mean_x) * (p[2] - mean_y) for p in points)
     szy = sum((p[1] - mean_z) * (p[2] - mean_y) for p in points)
     det = sxx * szz - sxz * sxz
-    if det <= 1e-12 * sxx * szz:
+    if (
+        not _varies([p[0] for p in points])
+        or not _varies([p[1] for p in points])
+        or det <= _ZERO * sxx * szz
+    ):
         raise ValueError(
-            "fit_lambda() needs arms that vary agent count and per-agent cost independently: at least three arms, with more than one agent count, not all on one line in log per-agent cost and log agent count."
+            "fit_lambda() needs arms that vary agent count and per-agent cost independently: at least three arms, with more than one agent count and more than one per-agent cost, not all on one line in log per-agent cost and log agent count."
         )
     slope = (sxy * szz - szy * sxz) / det
     agents = (szy * sxx - sxy * sxz) / det
-    if slope == 0:
+    # the score change the slope predicts across the arms' per-agent costs
+    effect = abs(slope) * (max(p[0] for p in points) - min(p[0] for p in points))
+    if effect <= _ZERO * max(1.0, max(abs(p[2]) for p in points)):
         raise ValueError(
             "The score does not change with per-agent cost, so λ is undefined."
         )
@@ -277,12 +288,12 @@ def _ledger(log: EvalLog, sample: EvalSample) -> SwarmLedger | None:
     data = sample.store.get(LEDGER_KEY)
     if data is None:
         return None
-    version = data.get("version")
-    if version != _LEDGER_VERSION:
+    try:
+        return SwarmLedger.model_validate(data)
+    except ValidationError as ex:
         raise ValueError(
-            f"Sample {sample.id} (epoch {sample.epoch}) in {log.location} has a ledger of version {version}; this inspect_swarm reads version {_LEDGER_VERSION}."
-        )
-    return SwarmLedger.model_validate(data)
+            f"Sample {sample.id} (epoch {sample.epoch}) in {log.location} has a ledger this inspect_swarm cannot read: {ex}"
+        ) from ex
 
 
 def _priced(usage: ModelUsage) -> bool:
@@ -310,7 +321,10 @@ def _score(log: EvalLog, sample: EvalSample, scorer: str | None) -> float | None
         raise ValueError(
             f"Sample {sample.id} (epoch {sample.epoch}) in {log.location} has a {type(value).__name__} score value; the helpers read scalar values only."
         )
-    return _to_float(value)
+    result = _to_float(value)
+    # Score.unscored() and the scorers that give up (a failed model grade, a timeout)
+    # write NaN
+    return None if math.isnan(result) else result
 
 
 def _arm_cost(rows: list[SampleCost]) -> ArmCost:
@@ -330,7 +344,7 @@ def _arm_cost(rows: list[SampleCost]) -> ArmCost:
         )
     scored = [row for row in rows if row.score is not None]
     included = [row for row in scored if not row.resumed]
-    caps = [row.swarm_cost_cap for row in rows if row.swarm_cost_cap is not None]
+    caps = [row.swarm_cost_cap for row in included if row.swarm_cost_cap is not None]
     return ArmCost(
         arm=first.arm,
         task=first.task,
@@ -344,8 +358,13 @@ def _arm_cost(rows: list[SampleCost]) -> ArmCost:
         cost=_mean([row.cost for row in included]),
         complete=bool(included) and all(row.complete for row in included),
         cost_limit=first.cost_limit,
-        swarm_cost_cap=caps[0] if caps else None,
+        swarm_cost_cap_min=min(caps) if caps else None,
+        swarm_cost_cap_max=max(caps) if caps else None,
     )
+
+
+def _varies(values: list[float]) -> bool:
+    return max(values) - min(values) > _ZERO * max(1.0, max(abs(v) for v in values))
 
 
 def _mean(values: list[float]) -> float | None:

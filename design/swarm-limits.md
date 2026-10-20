@@ -427,7 +427,7 @@ class MemberLedger(BaseModel):
     background_cancelled: int  # of those, ended by a cancellation: the drain's end, a foreign error or the hard stop
 
 class SwarmLedger(BaseModel):
-    version: int = 1
+    version: Literal[1] = 1
     budget: Budget             # as configured
     caps: dict[str, float | None]           # derived or explicit, per kind
     sample_limits: dict[str, float | None]  # at swarm start
