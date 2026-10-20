@@ -14,7 +14,7 @@ from inspect_ai.util import Limit, current_span_id, sample_limits
 
 from .._budget import Budget, CostPair, Lever, MemberContext, SwarmNode, is_bridged
 from .._evidence import MemberTimelines, evidence, write_ledger, write_metrics
-from .._final import finalise, settle
+from .._final import finalise, first, settle
 from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
     Member,
@@ -395,6 +395,8 @@ class SwarmRun:
                 if m.context.span_id is not None
             }
             places = interval.places(spans)
+            # the record's answer, final or provisional
+            chosen = first(self._results())
             write_metrics(
                 swarm_metrics(
                     ledger,
@@ -402,6 +404,7 @@ class SwarmRun:
                     places,
                     [MemberTimes(m.name, m.started, m.time) for m in self._members],
                     wall_clock,
+                    chosen.name if chosen is not None else None,
                 )
             )
             timelines.fill(places)

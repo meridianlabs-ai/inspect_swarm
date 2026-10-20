@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from ._ledger import EventLog, SpanPlaces, SwarmLedger
+from ._ledger import EventLog, MemberLedger, SpanPlaces, SwarmLedger
 
 
 # One member's metrics.
@@ -35,6 +35,15 @@ class SwarmMetrics(BaseModel):
     # harness validity: members with no completed model call in their spans, in roster
     # order
     never_acted: list[str]
+    # critical path, the simple definition: a member's steps are the completed model
+    # calls in its spans, cache replays included, from its ledger line, so they cover
+    # everything it did through its end. Calls a member makes concurrently (parallel
+    # subagent tool calls) count one each, so both numbers bound the sequential depth
+    # from above.
+    # the selected member's steps; None when there is no answer
+    steps_to_answer: int | None
+    # the largest step count of any member
+    longest_member_steps: int
 
 
 # When a member ran, in swarm time (seconds from the swarm's start).
@@ -53,6 +62,7 @@ def swarm_metrics(
     places: SpanPlaces,
     times: Sequence[MemberTimes],
     wall_clock: float,
+    answer: str | None,
 ) -> SwarmMetrics:
     tool_calls: dict[str, list[tuple[str, str]]] = {m.name: [] for m in ledger.members}
     for tool in events.tools.values():
@@ -84,10 +94,17 @@ def swarm_metrics(
         cost=ledger.swarm.cost,
         wall_clock=wall_clock,
         members=members,
-        never_acted=[
-            m.name for m in ledger.members if m.calls.calls + m.calls.cache_replays == 0
-        ],
+        never_acted=[m.name for m in ledger.members if _steps(m) == 0],
+        steps_to_answer=None
+        if answer is None
+        else next(_steps(m) for m in ledger.members if m.name == answer),
+        longest_member_steps=max(_steps(m) for m in ledger.members),
     )
+
+
+# Completed model calls in the member's spans, cache replays included.
+def _steps(line: MemberLedger) -> int:
+    return line.calls.calls + line.calls.cache_replays
 
 
 def _longest_run(calls: Sequence[tuple[str, str]]) -> int:
