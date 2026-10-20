@@ -17,11 +17,10 @@ classifiers = [
 dependencies = [
     # Temporarily a git reference: the runtime needs tool_state_scope()
     # (UKGovernmentBEIS/inspect_ai#5861) and suspend_store_events()
-    # (UKGovernmentBEIS/inspect_ai#5960), which no release has yet. Until
-    # #5960 merges this is its branch, then inspect_ai's `main`; go back to a
-    # released `inspect-ai>=X` floor once a release has both (decision:
-    # Ransom, 2026-10-20).
-    "inspect-ai @ git+https://github.com/meridianlabs-ai/inspect_ai@task-add-a-context-scoped-switch-that-turns-o",
+    # (UKGovernmentBEIS/inspect_ai#5960), which no release has yet, so this
+    # tracks inspect_ai's `main`. Go back to a released `inspect-ai>=X` floor
+    # once a release has both (decision: Ransom, 2026-10-20).
+    "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",
 ]
 
 [project.urls]

@@ -10,12 +10,8 @@ from anyio.abc import TaskGroup
 from inspect_ai.agent import Agent, AgentState
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
-from inspect_ai.util import (
-    Limit,
-    current_span_id,
-    sample_limits,
-    suspend_store_events,
-)
+from inspect_ai.util import Limit, current_span_id, sample_limits
+from inspect_ai.util._store import suspend_store_events
 
 from .._budget import Budget, CostPair, Lever, MemberContext, SwarmNode, is_bridged
 from .._evidence import MemberTimelines, evidence, write_ledger, write_metrics
