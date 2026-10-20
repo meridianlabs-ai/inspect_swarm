@@ -26,6 +26,7 @@ from inspect_ai.util import store
 from inspect_swarm import SwarmControl, member, swarm
 from inspect_swarm._evidence import METRICS_KEY
 from inspect_swarm._metrics import SwarmMetrics
+from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
@@ -334,6 +335,47 @@ async def test_cache_replays_and_concurrent_calls_are_steps(
         )
         metrics = _metrics(t)
         assert (metrics.steps_to_answer, metrics.longest_member_steps) == (3, 3)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ending", ["error", "cancel"])
+async def test_an_interrupted_swarm_counts_its_provisional_answer(ending: str) -> None:
+    # a submits after two calls; then the controller raises, or cancels an outer
+    # scope, while b still waits, so the swarm never finalises
+    outer = anyio.CancelScope()
+
+    async def run(control: SwarmControl) -> str:
+        control.start("a")
+        control.start("b")
+        async for event in control.events():
+            if event.member == "a":
+                break
+        if ending == "error":
+            raise RuntimeError("controller-failure")
+        outer.cancel()
+        await anyio.sleep(3600)
+        return "unreachable"
+
+    async with sample() as t:
+        agent = swarm(
+            [
+                member(_stepper(2, 0.0, True), name="a"),
+                member(sleeper(), name="b"),
+            ],
+            controller=controller(run, f"interrupted-{uuid4().hex}"),
+            channels=[],
+        )
+        with outer:
+            if ending == "error":
+                with pytest.raises(RuntimeError, match="controller-failure"):
+                    await agent(AgentState(messages=[]))
+            else:
+                await agent(AgentState(messages=[]))
+        assert outer.cancelled_caught is (ending == "cancel")
+        record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+        assert (record.final.member, record.final.provisional) == ("a", True)
+        metrics = _metrics(t)
+        assert (metrics.steps_to_answer, metrics.longest_member_steps) == (2, 2)
 
 
 # ---------------------------------------------------------------------------
