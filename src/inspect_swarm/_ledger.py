@@ -3,7 +3,6 @@ import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 
 from inspect_ai.event import Event, ModelEvent, SpanBeginEvent, ToolEvent
 from inspect_ai.log._samples import sample_active
@@ -157,14 +156,6 @@ class CallRecord:
     # retries inside the call, by the provider's client
     retries: int
     usage: ModelUsage | None
-    # when the event was first reported: for a call's last attempt, after the call
-    # waited for a connection and made its earlier attempts
-    reported: datetime
-    # when the call began, before its wait, once it has completed; until then as
-    # reported
-    timestamp: datetime
-    # set only when the call completed
-    completed: datetime | None
 
 
 # A tool event as it last stood.
@@ -192,7 +183,6 @@ class EventLog:
         elif isinstance(event, ModelEvent):
             # the transcript gives every event a uuid before it reports it
             assert event.uuid is not None
-            previous = self.calls.get(event.uuid)
             self.calls[event.uuid] = CallRecord(
                 span_id=event.span_id,
                 cache_read=event.cache == "read",
@@ -200,9 +190,6 @@ class EventLog:
                 pending=bool(event.pending),
                 retries=event.retries or 0,
                 usage=event.output.usage,
-                reported=event.timestamp if previous is None else previous.reported,
-                timestamp=event.timestamp,
-                completed=event.completed,
             )
         elif isinstance(event, ToolEvent):
             assert event.uuid is not None

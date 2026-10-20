@@ -13,7 +13,7 @@ from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
 from inspect_ai.util import Limit, current_span_id, sample_limits
 
 from .._budget import Budget, CostPair, Lever, MemberContext, SwarmNode, is_bridged
-from .._evidence import add_timelines, evidence, write_ledger, write_metrics
+from .._evidence import MemberTimelines, evidence, write_ledger, write_metrics
 from .._final import finalise, settle
 from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
@@ -294,6 +294,7 @@ class SwarmRun:
     # the runtime
 
     async def run(self, controller: Callable[["SwarmControl"], Awaitable[str]]) -> None:
+        timelines = MemberTimelines([m.name for m in self._members])
         interval = LedgerInterval()
         self._start = anyio.current_time()
         # the swarm's span
@@ -387,7 +388,7 @@ class SwarmRun:
                     wall_clock,
                 )
             )
-            add_timelines(places, list(spans))
+            timelines.fill(places)
         if error is not None:
             raise error
 

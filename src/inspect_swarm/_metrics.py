@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from ._ledger import CallRecord, EventLog, SpanPlaces, SwarmLedger
+from ._ledger import EventLog, SpanPlaces, SwarmLedger
 
 
 # One member's metrics.
@@ -14,14 +14,6 @@ class MemberMetrics(BaseModel):
     cost: float
     # seconds from the member's start to its end; None for a member never started
     running_time: float | None
-    # seconds of the swarm's wall clock the member was not running: before its start
-    # and after its end
-    idle_time: float
-    # seconds the member's completed model calls waited before their last attempt began:
-    # for a connection, and for earlier failed attempts and their backoff, which Inspect
-    # also counts as waiting. Summed over calls, so concurrent calls each count, and
-    # never merged with other members' waits as the sample's waiting time is.
-    model_wait_time: float
     # harness validity: the longest run of consecutive tool calls in the member's spans
     # with the same function and arguments. A signal, with no threshold. None for a
     # bridged member, whose tool calls leave no tool events.
@@ -62,12 +54,6 @@ def swarm_metrics(
     times: Sequence[MemberTimes],
     wall_clock: float,
 ) -> SwarmMetrics:
-    waits = {m.name: 0.0 for m in ledger.members}
-    for call in events.calls.values():
-        _, member = places(call.span_id)
-        wait = _wait(call)
-        if member is not None and wait is not None:
-            waits[member] += wait
     tool_calls: dict[str, list[tuple[str, str]]] = {m.name: [] for m in ledger.members}
     for tool in events.tools.values():
         _, member = places(tool.span_id)
@@ -88,8 +74,6 @@ def swarm_metrics(
                 tokens=line.meter.usage.total_tokens,
                 cost=line.meter.cost,
                 running_time=running,
-                idle_time=wall_clock - (running or 0.0),
-                model_wait_time=waits[line.name],
                 longest_identical_tool_run=None
                 if line.bridged
                 else _longest_run(tool_calls[line.name]),
@@ -104,14 +88,6 @@ def swarm_metrics(
             m.name for m in ledger.members if m.calls.calls + m.calls.cache_replays == 0
         ],
     )
-
-
-# How long a completed call waited before its last attempt began. None for a call that
-# did not complete, whose event keeps no start before its wait.
-def _wait(call: CallRecord) -> float | None:
-    if call.completed is None:
-        return None
-    return max(0.0, (call.reported - call.timestamp).total_seconds())
 
 
 def _longest_run(calls: Sequence[tuple[str, str]]) -> int:

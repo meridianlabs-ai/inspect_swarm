@@ -1,4 +1,3 @@
-import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -7,7 +6,6 @@ from uuid import uuid4
 import anyio
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
-from inspect_ai._util.working import init_sample_working_time, sample_waiting_time
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.dataset import Sample
 from inspect_ai.event import (
@@ -20,7 +18,7 @@ from inspect_ai.event import (
 )
 from inspect_ai.log import transcript
 from inspect_ai.log._transcript import Transcript
-from inspect_ai.model import GenerateConfig, Model, ModelOutput, get_model
+from inspect_ai.model import Model, ModelOutput
 from inspect_ai.model._call_tools import execute_tools
 from inspect_ai.tool import Tool, tool
 from inspect_ai.util import store
@@ -126,8 +124,8 @@ async def test_tokens_and_cost_are_the_ledgers() -> None:
 
 
 @pytest.mark.anyio
-async def test_idle_time_is_the_wall_clock_a_member_was_not_running() -> None:
-    # a ends at once and waits for b; c is never started
+async def test_running_time_is_from_a_members_start_to_its_end() -> None:
+    # a ends at once and b after its delay; c is never started
     async def run(control: SwarmControl) -> str:
         control.start("a")
         control.start("b")
@@ -149,36 +147,9 @@ async def test_idle_time_is_the_wall_clock_a_member_was_not_running() -> None:
     metrics = _metrics(outcome.transcript)
     a, b, c = metrics.members
     assert metrics.wall_clock >= 0.5
-    assert a.running_time is not None and b.running_time is not None
-    assert a.idle_time == metrics.wall_clock - a.running_time
-    assert a.idle_time > 0.3
-    assert b.idle_time < 0.15
-    assert c.running_time is None and c.idle_time == metrics.wall_clock
-
-
-@pytest.mark.anyio
-async def test_each_members_connection_wait_is_its_own() -> None:
-    # one connection: one member's call holds it while the other two queue behind it,
-    # so their waits overlap, and the sample's waiting time counts the overlap once
-    model = get_model(
-        f"mockllm/m-{uuid4().hex}",
-        memoize=False,
-        config=GenerateConfig(max_connections=1),
-        custom_outputs=Script(delay=0.3),
-    )
-    init_sample_working_time(time.monotonic())
-    outcome = await run_swarm(
-        swarm(member(generator, args={"model": model}, count=3), channels=[])
-    )
-    sample_waiting = sample_waiting_time()
-    waits = sorted(m.model_wait_time for m in _metrics(outcome.transcript).members)
-    # in the order the members took the connection
-    assert waits[0] < 0.1
-    assert waits[1] > 0.2
-    assert waits[2] > waits[1] + 0.2
-    # the sample merges the two overlapping waits; each member keeps its own
-    assert sample_waiting == pytest.approx(waits[2], abs=0.1)
-    assert sum(waits) > sample_waiting + 0.2
+    assert a.running_time is not None and a.running_time < 0.2
+    assert b.running_time is not None and 0.5 <= b.running_time <= metrics.wall_clock
+    assert c.running_time is None
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +227,18 @@ def _model_events(span: TimelineSpan) -> list[ModelEvent]:
     return found
 
 
+@agent
+def recording_eviction(inner: Agent) -> Agent:
+    """Run `inner`, then record in the store whether the transcript has evicted events."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state = await inner(state)
+        store().set("evicted", transcript().history.resident_events_truncated)
+        return state
+
+    return execute
+
+
 @pytest.mark.parametrize("bounded", [False, True])
 def test_each_member_has_a_timeline_of_its_spans(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bounded: bool
@@ -263,15 +246,19 @@ def test_each_member_has_a_timeline_of_its_spans(
     if bounded:
         monkeypatch.setenv("INSPECT_TRANSCRIPT_BOUNDED", "1")
     model = scripted_model()
+    # enough calls that a bounded transcript evicts a's first ones
+    a_calls = 120
     [log] = eval(
         Task(
             dataset=[Sample(input="task")],
-            solver=swarm(
-                [
-                    member(generator(model, calls=2), name="a"),
-                    member(generator(model), name="b"),
-                ],
-                channels=[],
+            solver=recording_eviction(
+                swarm(
+                    [
+                        member(generator(model, calls=a_calls), name="a"),
+                        member(generator(model), name="b"),
+                    ],
+                    channels=[],
+                )
             ),
         ),
         model=model,
@@ -280,6 +267,7 @@ def test_each_member_has_a_timeline_of_its_spans(
     )
     assert log.status == "success" and log.samples is not None
     [sample_log] = log.samples
+    assert sample_log.store["evicted"] is bounded
     assert sample_log.timelines is not None
     timelines = {t.name: t for t in sample_log.timelines}
     assert list(timelines) == ["a", "b"]
@@ -300,10 +288,17 @@ def test_each_member_has_a_timeline_of_its_spans(
             span = parents.get(span)
         return None
 
-    for name, calls in [("a", 2), ("b", 1)]:
+    for name, calls in [("a", a_calls), ("b", 1)]:
         events = _model_events(timelines[name].root)
         assert len(events) == calls
         assert {member_of(e.span_id) for e in events} == {name}
+    # a's first model event, evicted in a bounded transcript, is in its timeline
+    first = next(
+        e
+        for e in sample_log.events
+        if isinstance(e, ModelEvent) and member_of(e.span_id) == "a"
+    )
+    assert _model_events(timelines["a"].root)[0].uuid == first.uuid
 
 
 @pytest.mark.anyio
@@ -334,3 +329,42 @@ async def test_a_member_name_taken_by_a_timeline_is_refused() -> None:
             await swarm(member(generator(scripted_model()), name="a"), channels=[])(
                 AgentState(messages=[])
             )
+
+
+@agent
+def nesting(model: Model, ending: str) -> Agent:
+    """Act, run a swarm whose member has this member's name, then fail or wait as `ending` says."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(state.messages)
+        with pytest.raises(ValueError, match="already has a timeline named 'a'"):
+            await swarm(member(generator(model), name="a"), channels=[])(
+                AgentState(messages=[])
+            )
+        if ending == "error":
+            raise RuntimeError("original-member-failure")
+        await anyio.sleep(3600)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ending", ["error", "cancel"])
+async def test_a_member_name_taken_while_the_swarm_runs_is_refused_there(
+    ending: str,
+) -> None:
+    # the inner swarm is refused before it runs, and the outer swarm ends as its member
+    # makes it end, with its timeline
+    async with sample() as t:
+        run = swarm(member(nesting(scripted_model(), ending), name="a"), channels=[])
+        if ending == "error":
+            with pytest.raises(RuntimeError, match="original-member-failure"):
+                await run(AgentState(messages=[]))
+        else:
+            with anyio.move_on_after(0.3) as scope:
+                await run(AgentState(messages=[]))
+            assert scope.cancelled_caught
+        [timeline] = t.timelines
+        assert timeline.name == "a"
+        assert len(_model_events(timeline.root)) == 1
