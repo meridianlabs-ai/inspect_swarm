@@ -9,6 +9,7 @@ from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.dataset import Sample
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import TaskState
+from inspect_ai.tool._sandbox_tools_utils import sandbox as sandbox_tools
 from inspect_ai.util import (
     ExecResult,
     SandboxEnvironment,
@@ -196,6 +197,61 @@ async def test_members_reach_only_their_own_sandbox_and_the_visible_ones(
         (e["member"], e["sandbox"])
         for e in evidence(outcome.transcript, "member_result")
     ) == [("agent-1", "agent-1"), ("agent-2", "agent-2")]
+
+
+@agent
+def tools_prober(targets: dict[str, tuple[str, str]]) -> Agent:
+    """Record where Inspect's injected tools run without a sandbox name (as `text_editor()`, `bash_session()`, sandbox MCP servers and the agent bridge ask) and with the visible service's name."""
+
+    async def execute(state: AgentState) -> AgentState:
+        unnamed = await sandbox_tools.sandbox_with_injected_tools()
+        named = await sandbox_tools.sandbox_with_injected_tools(
+            sandbox_name="comparator"
+        )
+        targets[_member_name(state)] = (_name(unnamed), _name(named))
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_injected_tools_without_a_name_stay_in_the_members_own_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Inspect's tools are installed only in the visible service, which Inspect would
+    # otherwise pick as the environment needing no injection
+    installed = {"comparator"}
+    injected: list[str] = []
+
+    async def has_tools(environment: SandboxEnvironment) -> bool:
+        return _name(environment) in installed
+
+    async def inject(environment: SandboxEnvironment) -> None:
+        injected.append(_name(environment))
+        installed.add(_name(environment))
+
+    monkeypatch.setattr(sandbox_tools, "_sandbox_tools_installed", has_tools)
+    monkeypatch.setattr(sandbox_tools, "_inject_container_tools_code", inject)
+    targets: dict[str, tuple[str, str]] = {}
+    with environments("default", "agent-1", "agent-2", "comparator"):
+        await run_swarm(
+            swarm(
+                member(
+                    tools_prober,
+                    args={"targets": targets},
+                    name="agent",
+                    count=2,
+                    sandbox="{member}",
+                    visible_sandboxes=["comparator"],
+                ),
+                channels=[],
+            )
+        )
+    assert targets == {
+        "agent-1": ("agent-1", "comparator"),
+        "agent-2": ("agent-2", "comparator"),
+    }
+    assert sorted(injected) == ["agent-1", "agent-2"]
 
 
 @pytest.mark.anyio

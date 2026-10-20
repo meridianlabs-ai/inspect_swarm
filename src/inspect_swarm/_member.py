@@ -2,7 +2,7 @@ import inspect
 from collections import Counter
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import AsyncExitStack, ExitStack, contextmanager
-from typing import Any, Literal, assert_never, cast
+from typing import Any, Literal, TypeVar, assert_never, cast, overload
 
 from inspect_ai._util.registry import (
     extract_named_params,
@@ -20,6 +20,7 @@ from inspect_ai.model import ChatMessage, StopReason
 from inspect_ai.util import (
     Limit,
     LimitExceededError,
+    SandboxEnvironment,
     cost_limit,
     current_span_id,
     message_limit,
@@ -219,7 +220,7 @@ def member(
 
     Submissions. A member that returns normally has submitted, and its output is its answer, unless the output's stop reason is `content_filter` or `model_length`. That is how `react()` returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered.
 
-    Sandboxes. Members share the sample's sandbox by default. With `sandbox`, a member works in its own: the swarm makes that environment the member's default, so `sandbox()` in its tools returns it, and hides the sample's other environments from the member except those in `visible_sandboxes`, such as a shared service. `sandbox="{member}"` gives each copy of a counted member the environment named after it: `member(factory, name="agent", count=2, sandbox="{member}")` runs `agent-1` and `agent-2` in the environments of those names. The sample's sandbox configuration provides the environments (for Docker, a compose service for each), and the swarm checks that they exist when it starts. When one member has its own sandbox, every member must have one, no two the same, and the `filesystem` channel, which describes a shared sandbox, cannot be used. A service in `visible_sandboxes` is reachable from any of the member's tools that take a sandbox name, so list only services every member may use.
+    Sandboxes. Members share the sample's sandbox by default. With `sandbox`, a member works in its own: the swarm makes that environment the member's default, so `sandbox()` in its tools returns it, and hides the sample's other environments from the member except those in `visible_sandboxes`, such as a shared service. Tools that choose a sandbox without a name, such as `text_editor()`, `bash_session()` and the agent bridge, use the member's own; a visible service is reached only by name. `sandbox="{member}"` gives each copy of a counted member the environment named after it: `member(factory, name="agent", count=2, sandbox="{member}")` runs `agent-1` and `agent-2` in the environments of those names. The sample's sandbox configuration provides the environments (for Docker, a compose service for each), and the swarm checks that they exist when it starts. When one member has its own sandbox, every member must have one, no two the same, and the `filesystem` channel, which describes a shared sandbox, cannot be used. A service in `visible_sandboxes` is reachable from any of the member's tools that take a sandbox name, so list only services every member may use.
 
     Scoring with member sandboxes. The task's scorers run after the swarm, outside every member, where `sandbox()` is `default`. A scorer that grades the members' work names each member's sandbox itself, as in `sandbox("agent-1")`, and the `sandbox` field of each member in the swarm's result record says which member used which.
 
@@ -313,8 +314,47 @@ def member_sandbox(record: Member, name: str) -> str | None:
     return record.sandbox.replace(_MEMBER_FIELD, name)
 
 
-# The member's own sandbox as its default, and only it and its visible sandboxes by
-# name, as LeanOpenProblems' members ran; with a sandbox_with() cache of its own, so
+_T = TypeVar("_T")
+
+
+# A member's sandbox environments. Its own is the only one listed, so that Inspect's
+# selections without a name (sandbox_with(), and the injected tools of text_editor(),
+# bash_session(), sandbox MCP servers and the agent bridge, which take the first
+# environment that already has them) find it; its visible sandboxes resolve only by
+# name, through the lookups sandbox(name) and sandbox_with(name=) make.
+class _MemberEnvironments(dict[str, SandboxEnvironment]):
+    def __init__(
+        self,
+        own: str,
+        environment: SandboxEnvironment,
+        visible: Mapping[str, SandboxEnvironment],
+    ) -> None:
+        super().__init__({own: environment})
+        self._visible = dict(visible)
+
+    @overload
+    def get(self, key: str, default: None = None, /) -> SandboxEnvironment | None: ...
+
+    @overload
+    def get(self, key: str, default: SandboxEnvironment, /) -> SandboxEnvironment: ...
+
+    @overload
+    def get(self, key: str, default: _T, /) -> SandboxEnvironment | _T: ...
+
+    def get(self, key: str, default: object = None, /) -> object:
+        return super().get(key, self._visible.get(key, default))
+
+    def __getitem__(self, key: str) -> SandboxEnvironment:
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        return self._visible[key]
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(key) or key in self._visible
+
+
+# The member's own sandbox as its default, its visible sandboxes by name and no
+# other, as LeanOpenProblems' members ran; with a sandbox_with() cache of its own, so
 # that no lookup returns an environment it cannot see. The swarm checked the names
 # when it started.
 @contextmanager
@@ -326,7 +366,11 @@ def _member_sandboxes(
         return
     environments = sandbox_environments_context_var.get()
     environments_token = sandbox_environments_context_var.set(
-        {name: environments[name] for name in (sandbox, *visible)}
+        _MemberEnvironments(
+            sandbox,
+            environments[sandbox],
+            {name: environments[name] for name in visible},
+        )
     )
     with_token = sandbox_with_environments_context_var.set({})
     try:
