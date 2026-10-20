@@ -22,6 +22,7 @@ from ._budget import (
     derive_caps,
     is_bridged,
     share_nodes,
+    split_sentence,
 )
 from ._channel._channel import Channel
 from ._controller._control import SwarmRun
@@ -71,9 +72,6 @@ def swarm(
         resolved_controller.check(roster)
     _check_bus_channels(resolved_channels, records, names, roster)
     resolved_budget = _budget(budget)
-    preambles = {
-        info.name: _preamble(info, len(roster), resolved_channels) for info in roster
-    }
     runs = [
         (record, name)
         for record, record_names in zip(records, names, strict=True)
@@ -95,6 +93,17 @@ def swarm(
             cap_nodes.append(
                 SwarmTokenNode(caps.tokens, caps.token_type, owner=None, role="cap")
             )
+        shares = share_nodes(resolved_budget, caps, [info.name for info in roster])
+        # here rather than at construction: the split is stated only under a cap
+        preambles = {
+            info.name: _preamble(
+                info,
+                len(roster),
+                resolved_channels,
+                split_sentence(resolved_budget, caps, i, len(roster)),
+            )
+            for i, info in enumerate(roster)
+        }
         await SwarmRun(
             runs,
             state=state,
@@ -104,7 +113,7 @@ def swarm(
             time=caps.time,
             grace=resolved_budget.grace,
             budget=resolved_budget,
-            shares=share_nodes(resolved_budget, caps, [info.name for info in roster]),
+            shares=shares,
             channels=resolved_channels,
         ).run(resolved_controller.run)
         return state
@@ -112,7 +121,9 @@ def swarm(
     return execute
 
 
-def _preamble(member: MemberInfo, size: int, channels: Sequence[Channel]) -> str:
+def _preamble(
+    member: MemberInfo, size: int, channels: Sequence[Channel], split: str | None
+) -> str:
     parts = [
         f"You are {member.name}, one of {size} agents in a swarm working on this task at the same time."
         if size > 1
@@ -120,6 +131,8 @@ def _preamble(member: MemberInfo, size: int, channels: Sequence[Channel]) -> str
     ]
     if member.role is not None:
         parts.append(f"Your role: {member.role}.")
+    if split is not None:
+        parts.append(split)
     for channel in channels:
         text = channel.instructions(member)
         if text:
