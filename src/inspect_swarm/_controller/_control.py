@@ -13,7 +13,16 @@ from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
 from inspect_ai.util import Limit, current_span_id, sample_limits
 from inspect_ai.util._store import suspend_store_events
 
-from .._budget import Budget, CostPair, Lever, MemberContext, SwarmNode, is_bridged
+from .._budget import (
+    Budget,
+    BudgetState,
+    CostPair,
+    Lever,
+    MemberContext,
+    SwarmNode,
+    current_budget,
+    is_bridged,
+)
 from .._evidence import MemberTimelines, evidence, write_ledger, write_metrics
 from .._final import finalise, first, settle
 from .._ledger import LedgerInterval, MemberAccount
@@ -102,7 +111,7 @@ class SwarmControl(Protocol):
     ) -> None:
         """Start a member, and return at once.
 
-        The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm's input when `input` is `None`, followed by the member's preamble: its name, role and roster size, and each channel's instructions.
+        The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm's input when `input` is `None`, followed by the member's preamble: its name, role and roster size, how the budget is split, and each channel's instructions.
 
         Args:
             member: The member, or its name.
@@ -213,9 +222,10 @@ class SwarmRun:
         # deferred: the bus imports the channels, which import this module's package
         from .._bus._bus import Bus
 
-        shares = shares or {}
+        self._shares = shares or {}
         self._members = [
-            MemberRun(record, name, shares.get(name, ())) for record, name in records
+            MemberRun(record, name, self._shares.get(name, ()))
+            for record, name in records
         ]
         # the channel states open here, before any member starts
         self.bus = Bus(
@@ -323,6 +333,19 @@ class SwarmRun:
         self._settle()
         error: BaseException | None = None
         bus_token = current_bus.set(self.bus)
+        # for swarm_budget(), in every member's context and the controller's
+        budget_token = current_budget.set(
+            BudgetState(
+                budget=self._budget,
+                caps=self._caps,
+                time=self._time,
+                start=self._start,
+                members={
+                    m.name: (m.context, self._shares.get(m.name, ()))
+                    for m in self._members
+                },
+            )
+        )
         ended = False
         try:
             # first: spans inside the swarm, members' included, log no StoreEvent;
@@ -416,7 +439,9 @@ class SwarmRun:
                 )
             )
             timelines.fill(places)
-            # last, so that the bus is current through the final step and the ledger
+            # last, so that the bus and the budget are current through the final step
+            # and the ledger
+            current_budget.reset(budget_token)
             current_bus.reset(bus_token)
         if error is not None:
             raise error

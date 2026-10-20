@@ -220,6 +220,8 @@ def member(
 
     Submissions. A member that returns normally has submitted, and its output is its answer, unless the output's stop reason is `content_filter` or `model_length`. That is how `react()` returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered.
 
+    Stopping itself. An agent that raises `LimitExceededError("custom", ...)` with no `source` to stop itself ends only its member, with status `member_limit:custom`; the other members continue and the swarm never chooses its output as the answer. This holds when the error is raised in a task group inside the agent, too.
+
     Sandboxes. Members share the sample's sandbox by default. With `sandbox`, a member works in its own: the swarm makes that environment the member's default, so `sandbox()` in its tools returns it, and hides the sample's other environments from the member except those in `visible_sandboxes`, such as a shared service. Tools that choose a sandbox without a name, such as `text_editor()`, `bash_session()` and the agent bridge, use the member's own; a visible service is reached only by name. `sandbox="{member}"` gives each copy of a counted member the environment named after it: `member(factory, name="agent", count=2, sandbox="{member}")` runs `agent-1` and `agent-2` in the environments of those names. The sample's sandbox configuration provides the environments (for Docker, a compose service for each), and the swarm checks that they exist when it starts. When one member has its own sandbox, every member must have one, no two the same, and the `filesystem` channel, which describes a shared sandbox, cannot be used. A service in `visible_sandboxes` is reachable from any of the member's tools that take a sandbox name, so list only services every member may use.
 
     Scoring with member sandboxes. The task's scorers run after the swarm, outside every member, where `sandbox()` is `default`. A scorer that grades the members' work names each member's sandbox itself, as in `sandbox("agent-1")`, and the `sandbox` field of each member in the swarm's result record says which member used which.
@@ -412,7 +414,8 @@ def member_nodes(
 # member's span when the span was entered. The caller keeps `state`, as as_solver()
 # does, for the output of a member that does not return. No error whose source is a
 # swarm node leaves it: a cap becomes a stop of the swarm, and the member's own nodes a
-# status. Anything else (a foreign error) is raised, without the swarm's leaves, after
+# status, as does a sourceless custom limit error, which the agent raised to stop
+# itself. Anything else (a foreign error) is raised, without the swarm's leaves, after
 # `end` with `errored`; a cancellation from outside ends the member as `cancelled`.
 async def run_member(
     record: Member,
@@ -451,6 +454,7 @@ async def _run_member(
 ) -> tuple[str, AgentState]:
     token = current_member.set(context)
     error: Exception | None = None
+    stopped = False
     try:
         with (
             tool_state_scope(name),
@@ -472,7 +476,7 @@ async def _run_member(
                 # it, since a span-id provider may await
                 await member_span.enter_async_context(span(name, type=AGENT_SPAN_TYPE))
                 context.span_id = current_span_id()
-                state = await agent(state)
+                state, stopped = await _call_agent(agent, state)
     except Exception as ex:
         error = ex
     finally:
@@ -489,14 +493,38 @@ async def _run_member(
         return _status_for(owned), state
     if context.stop_cause is not None:
         # a node that stopped a bridged member, whose cancellation may not have been
-        # delivered when its last call was the one that stopped it
+        # delivered when its last call was the one that stopped it, even if the agent
+        # then stopped itself
         return context.stop_cause, state
+    if stopped:
+        return "member_limit:custom", state
     if context.scope.cancelled_caught:
         # the hard stop
         return "cancelled", state
     if state.output.empty:
         return "submitted", state
     return _return_status(state.output.stop_reason), state
+
+
+# The agent call: the state it returned, and whether it stopped itself. An error the
+# agent raised to stop itself (a sourceless custom limit), bare or grouped with nothing
+# else, returns the state it was given and True; a group that holds anything else is
+# raised without it, and any other error as it is, for the wrapper to classify.
+async def _call_agent(agent: Agent, state: AgentState) -> tuple[AgentState, bool]:
+    try:
+        return await agent(state), False
+    except BaseException as ex:
+        if _self_stop(ex):
+            return state, True
+        if not isinstance(ex, BaseExceptionGroup):
+            raise
+        stops, rest = cast(BaseExceptionGroup[BaseException], ex).split(_self_stop)
+        if stops is None:
+            raise
+        if rest is None:
+            return state, True
+        remainder = rest
+    raise remainder
 
 
 def _return_status(stop_reason: StopReason) -> str:
@@ -555,6 +583,14 @@ def unwrap(error: BaseException) -> BaseException:
 def _source_in(error: BaseException, nodes: Sequence[Limit]) -> bool:
     return isinstance(error, LimitExceededError) and any(
         error.source is node for node in nodes
+    )
+
+
+def _self_stop(error: BaseException) -> bool:
+    return (
+        isinstance(error, LimitExceededError)
+        and error.type == "custom"
+        and error.source is None
     )
 
 

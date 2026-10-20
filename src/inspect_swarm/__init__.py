@@ -3,7 +3,7 @@
 Experimental and under development; the API may change.
 """
 
-from ._budget import Budget
+from ._budget import Budget, BudgetUsage, SwarmBudget, swarm_budget
 from ._bus._record import Record
 from ._bus._tools import swarm_tools
 from ._channel._channel import Channel, ChannelRun, ChannelState, swarm_channel
@@ -24,6 +24,7 @@ from ._controller._controller import (
 from ._controller.leaderless import leaderless
 from ._member import Member, member
 from ._swarm import swarm
+from ._tools import swarm_resources
 
 try:
     from ._version import __version__
@@ -33,6 +34,7 @@ except ImportError:
 
 __all__ = [
     "Budget",
+    "BudgetUsage",
     "Channel",
     "ChannelRun",
     "ChannelState",
@@ -44,6 +46,7 @@ __all__ = [
     "MemberState",
     "Record",
     "StopReason",
+    "SwarmBudget",
     "SwarmControl",
     "SwarmEvent",
     "__version__",
@@ -51,7 +54,9 @@ __all__ = [
     "leaderless",
     "member",
     "swarm",
+    "swarm_budget",
     "swarm_channel",
     "swarm_controller",
+    "swarm_resources",
     "swarm_tools",
 ]

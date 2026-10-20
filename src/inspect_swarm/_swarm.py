@@ -25,6 +25,7 @@ from ._budget import (
     derive_caps,
     is_bridged,
     share_nodes,
+    split_sentence,
 )
 from ._channel._channel import Channel
 from ._controller._control import SwarmRun
@@ -82,10 +83,6 @@ def swarm(
         for name in record_names
     ]
     own_sandboxes = _check_member_sandboxes(runs, resolved_channels)
-    preambles = {
-        info.name: _preamble(info, len(roster), resolved_channels, own_sandboxes)
-        for info in roster
-    }
 
     async def execute(state: AgentState) -> AgentState:
         _check_sandbox_names(runs)
@@ -103,6 +100,18 @@ def swarm(
             cap_nodes.append(
                 SwarmTokenNode(caps.tokens, caps.token_type, owner=None, role="cap")
             )
+        shares = share_nodes(resolved_budget, caps, [info.name for info in roster])
+        # here rather than at construction: the split is stated only under a cap
+        preambles = {
+            info.name: _preamble(
+                info,
+                len(roster),
+                resolved_channels,
+                own_sandboxes,
+                split_sentence(resolved_budget, caps, i, len(roster)),
+            )
+            for i, info in enumerate(roster)
+        }
         await SwarmRun(
             runs,
             state=state,
@@ -112,7 +121,7 @@ def swarm(
             time=caps.time,
             grace=resolved_budget.grace,
             budget=resolved_budget,
-            shares=share_nodes(resolved_budget, caps, [info.name for info in roster]),
+            shares=shares,
             channels=resolved_channels,
         ).run(resolved_controller.run)
         return state
@@ -121,7 +130,11 @@ def swarm(
 
 
 def _preamble(
-    member: MemberInfo, size: int, channels: Sequence[Channel], own_sandboxes: bool
+    member: MemberInfo,
+    size: int,
+    channels: Sequence[Channel],
+    own_sandboxes: bool,
+    split: str | None,
 ) -> str:
     parts = [
         f"You are {member.name}, one of {size} agents in a swarm working on this task at the same time."
@@ -130,6 +143,8 @@ def _preamble(
     ]
     if member.role is not None:
         parts.append(f"Your role: {member.role}.")
+    if split is not None:
+        parts.append(split)
     if own_sandboxes:
         parts.append("You work in your own sandbox, which no other member can reach.")
     for channel in channels:
