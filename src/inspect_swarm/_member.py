@@ -2,8 +2,10 @@ import inspect
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, ExitStack
+from dataclasses import dataclass
 from typing import Any, Literal, assert_never, cast
 
+import anyio
 from inspect_ai._util.registry import (
     extract_named_params,
     has_registry_params,
@@ -11,7 +13,6 @@ from inspect_ai._util.registry import (
     registry_info,
     registry_log_name,
     registry_lookup,
-    registry_params,
     registry_unqualified_name,
     registry_value,
 )
@@ -46,6 +47,7 @@ from pydantic import (
     model_validator,
 )
 
+from ._background import MemberBackground
 from ._budget import (
     CostPair,
     Lever,
@@ -68,8 +70,6 @@ _LIMIT_KINDS: dict[str, type[Limit]] = {
     "message": _MessageLimit,
     "time": _TimeLimit,
 }
-
-_DEEPAGENT = "inspect_ai/deepagent"
 
 # characters a tool-state scope name may not contain
 _RESERVED = "/#"
@@ -200,7 +200,9 @@ def member(
 
     Submissions. A member that returns normally has submitted, and its output is its answer, unless the output's stop reason is `content_filter` or `model_length`. That is how `react()` returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered.
 
-    `deepagent()` members with background dispatch (`background=True` or an integer) are not supported yet and are refused. So are ACP agents, which wait for their caller to drive them rather than returning: a built one when `member()` is called, and a factory's when the member is built.
+    Background work belongs to the member. Work its agent starts with `background()`, such as `deepagent(background=...)` subagents, spends through the member's limits and share, and is the member's in the ledger. When the member's agent returns, the swarm stops the background work from starting model calls, gives it the swarm's grace period to finish calls and tool calls in flight, and cancels what is left. The member ends after that, with the status its agent ended with; `Budget.grace=0` cancels background work at once. A member time limit bounds its agent only: after the agent returns, its background work gets the grace period too, and the cancelled work's cleanup is awaited. Background work must be started by the agent while it runs; a factory that starts it while building the agent makes the member `errored`. Work started outside `background()` (an `asyncio` task, a process left running in the sandbox) is not stopped.
+
+    ACP agents, which wait for their caller to drive them rather than returning, are refused: a built one when `member()` is called, and a factory's when the member is built.
 
     Args:
         agent: A built, registered agent, or a registered `@agent` factory.
@@ -217,7 +219,7 @@ def member(
 
     Raises:
         TypeError: If `agent` is not registered with `@agent` or is an ACP agent, if a built agent is given `args` or `count` above 1, or if `args` do not match the factory's parameters.
-        ValueError: If `count` is below 1, `name` is empty or contains "/" or "#", a limit is a working limit, or a `deepagent()` member uses background dispatch.
+        ValueError: If `count` is below 1, `name` is empty or contains "/" or "#", or a limit is a working limit.
     """
     form = "factory" if is_factory(agent) else "agent"
     return Member.model_validate(
@@ -301,22 +303,37 @@ def member_nodes(
     return lever, nodes
 
 
+# What the member wrapper leaves on the member's run record: the state the agent
+# returned, set before the drain, which may raise, and the counts of its background
+# work, set after the owner has ended it.
+@dataclass
+class MemberOutcome:
+    state: AgentState | None = None
+    background_started: int = 0
+    background_cancelled: int = 0
+
+
 # The member wrapper. Runs the member on `state` with `input` as its conversation, in
 # its tool-state scope, cancel scope and agent span, under its nodes and the swarm's
-# caps, then calls `end` with its status and the state the agent returned, inside the
-# member's span when the span was entered. The caller keeps `state`, as as_solver()
-# does, for the output of a member that does not return. No error whose source is a
-# swarm node leaves it: a cap becomes a stop of the swarm, and the member's own nodes a
-# status. Anything else (a foreign error) is raised, without the swarm's leaves, after
-# `end` with `errored`; a cancellation from outside ends the member as `cancelled`.
+# caps, with its background work owned by the member; drains that work once the agent
+# has returned; then calls `end` with its status and the state the agent returned,
+# inside the member's span when the span was entered. The caller keeps `state`, as
+# as_solver() does, for the output of a member that does not return. No error whose
+# source is a swarm node leaves it: a cap becomes a stop of the swarm, and the member's
+# own nodes a status. Anything else (a foreign error) is raised, without the swarm's
+# leaves, after `end` with `errored`; a cancellation from outside ends the member as
+# `cancelled`.
 async def run_member(
     record: Member,
     name: str,
     context: MemberContext,
+    lever: Lever,
     nodes: list[Limit],
     caps: Sequence[Limit],
     input: list[ChatMessage],
     state: AgentState,
+    grace: Callable[[], float],
+    outcome: MemberOutcome,
     end: Callable[[str, AgentState], None],
 ) -> None:
     status = "cancelled"
@@ -324,70 +341,122 @@ async def run_member(
     # that their errors are classified inside it
     async with AsyncExitStack() as member_span:
         try:
-            status, state = await _run_member(
-                record, name, context, nodes, caps, input, state, member_span
+            status = await _run_member(
+                record,
+                name,
+                context,
+                lever,
+                nodes,
+                caps,
+                input,
+                state,
+                grace,
+                outcome,
+                member_span,
             )
         except Exception:
             status = "errored"
             raise
         finally:
-            end(status, state)
+            # the state the agent returned, kept through a drain that raised
+            end(status, outcome.state if outcome.state is not None else state)
 
 
 async def _run_member(
     record: Member,
     name: str,
     context: MemberContext,
+    lever: Lever,
     nodes: list[Limit],
     caps: Sequence[Limit],
     input: list[ChatMessage],
     state: AgentState,
+    grace: Callable[[], float],
+    outcome: MemberOutcome,
     member_span: AsyncExitStack,
-) -> tuple[str, AgentState]:
+) -> str:
     token = current_member.set(context)
-    error: Exception | None = None
+    status: str | None = None
     try:
         with tool_state_scope(name), context.scope:
-            agent = build_member(record)
-            # entered before the member's conversation is built, as run() does not: a
-            # member message limit replaces the sample's for that conversation from its
-            # first message. Errors from these nodes are classified below.
-            with ExitStack() as entered:
-                for node in nodes:
-                    entered.enter_context(node)
-                # the member's own copy of its input, as run() makes one
-                state.messages = [
-                    message.model_copy(update={"source": "input"}) for message in input
-                ]
-                # entered inside the member's limits and cancel scope, as run() enters
-                # it, since a span-id provider may await
-                await member_span.enter_async_context(span(name, type=AGENT_SPAN_TYPE))
-                context.span_id = current_span_id()
-                state = await agent(state)
-    except Exception as ex:
-        error = ex
+            # inside the member's scopes, so the hard stop cancels its background work
+            # and that work keeps the member's tool state; outside its nodes, so a
+            # member time limit cancels only the agent
+            owner = MemberBackground(contain=[*nodes, *caps])
+            try:
+                async with owner:
+                    foreign: BaseException | None = None
+                    try:
+                        agent = build_member(record)
+                        if owner.started:
+                            # such work would miss the member's nodes and span
+                            raise RuntimeError(
+                                f"Member {name!r}: its factory started background work while building the agent. Background work must be started by the agent when it runs."
+                            )
+                        # entered before the member's conversation is built, as run()
+                        # does not: a member message limit replaces the sample's for that
+                        # conversation from its first message
+                        with ExitStack() as entered:
+                            for node in nodes:
+                                entered.enter_context(node)
+                            # the member's own copy of its input, as run() makes one
+                            state.messages = [
+                                message.model_copy(update={"source": "input"})
+                                for message in input
+                            ]
+                            # entered inside the member's limits and cancel scope, as
+                            # run() enters it, since a span-id provider may await
+                            await member_span.enter_async_context(
+                                span(name, type=AGENT_SPAN_TYPE)
+                            )
+                            context.span_id = current_span_id()
+                            outcome.state = await agent(state)
+                        status = _returned(context, outcome.state)
+                    except Exception as ex:
+                        cap, owned, foreign = classify_errors(ex, caps, nodes)
+                        if foreign is None and cap:
+                            # the cap began the swarm's stop when it was reached
+                            status = "swarm_cap"
+                        elif foreign is None:
+                            assert owned is not None
+                            status = _status_for(owned)
+                    if foreign is not None:
+                        # no drain: leaving the owner cancels the background work
+                        raise foreign
+                    await _drain(owner, lever, grace)
+            finally:
+                # after the owner has ended its work, so its cancellations are counted
+                outcome.background_started = owner.started
+                outcome.background_cancelled = owner.cancelled
     finally:
         current_member.reset(token)
 
-    if error is not None:
-        cap, owned, foreign = classify_errors(error, caps, nodes)
-        if foreign is not None:
-            raise foreign
-        if cap:
-            # the cap began the swarm's stop when it was reached
-            return "swarm_cap", state
-        assert owned is not None
-        return _status_for(owned), state
+    if status is not None:
+        return status
+    # the agent was cancelled: a node that stopped a bridged member, or the hard stop
+    return context.stop_cause or "cancelled"
+
+
+# The member's background work, once its agent has returned: refused new model calls,
+# given the effective grace to finish what it has in flight, then cancelled by leaving
+# the owner.
+async def _drain(
+    owner: MemberBackground, lever: Lever, grace: Callable[[], float]
+) -> None:
+    # a stop that already closed the lever keeps its reason
+    lever.close("member_ended")
+    with anyio.move_on_after(grace()):
+        await owner.wait()
+
+
+def _returned(context: MemberContext, state: AgentState) -> str:
     if context.stop_cause is not None:
         # a node that stopped a bridged member, whose cancellation may not have been
         # delivered when its last call was the one that stopped it
-        return context.stop_cause, state
-    if context.scope.cancelled_caught:
-        # the hard stop
-        return "cancelled", state
+        return context.stop_cause
     if state.output.empty:
-        return "submitted", state
-    return _return_status(state.output.stop_reason), state
+        return "submitted"
+    return _return_status(state.output.stop_reason)
 
 
 def _return_status(stop_reason: StopReason) -> str:
@@ -517,8 +586,6 @@ def _check_agent(agent: Agent, args: Mapping[str, Any], count: int) -> None:
         raise TypeError(
             f"member(): count > 1 runs several copies at once, so each needs its own agent: pass the factory and its arguments, member({name}, args={{...}}, count={count})."
         )
-    if registry_info(agent).name == _DEEPAGENT:
-        _check_background(registry_params(agent).get("background", False), name)
 
 
 def _check_factory(factory: AgentFactory, args: Mapping[str, Any]) -> None:
@@ -531,16 +598,6 @@ def _check_factory(factory: AgentFactory, args: Mapping[str, Any]) -> None:
         raise TypeError(
             f"member(): args do not match the parameters of {name}: {ex}."
         ) from None
-    if registry_info(factory).name == _DEEPAGENT:
-        _check_background(args.get("background", False), name)
-
-
-def _check_background(background: object, name: str) -> None:
-    # True or an integer cap both enable background dispatch
-    if background is not False:
-        raise ValueError(
-            f"member(): {name}(background={background!r}) is not supported in a swarm yet: background subagents outlive the member that started them. Use background=False."
-        )
 
 
 def _limit_kind(limit: Limit) -> str:

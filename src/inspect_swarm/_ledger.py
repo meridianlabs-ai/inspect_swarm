@@ -86,6 +86,10 @@ class MemberLedger(BaseModel):
     calls: Calls
     # the member's scope was cancelled (hard stop, time limit, bridged branch)
     cancelled: bool
+    # tasks background() started in the member's owner
+    background_started: int = 0
+    # of those, ended by a cancellation: the drain's end, a foreign error or the hard stop
+    background_cancelled: int = 0
 
 
 # Realized usage and cost of one run of the swarm, and how complete they are. Written
@@ -145,6 +149,8 @@ class MemberAccount:
     # None for a member never started
     span_id: str | None
     cancelled: bool
+    background_started: int
+    background_cancelled: int
 
 
 # A model event as it last stood, with its live usage object.
@@ -278,11 +284,15 @@ class LedgerInterval:
                 meter=_meter(m.lever),
                 calls=member_calls.get(m.name, Calls()),
                 cancelled=m.cancelled,
+                background_started=m.background_started,
+                background_cancelled=m.background_cancelled,
             )
             for m in members
         ]
         total_complete = (
-            not any(m.cancelled for m in members)
+            # a cancelled agent loop, background ones included, may have had work in
+            # flight that left no trace
+            not any(m.cancelled or m.background_cancelled for m in members)
             and not interrupted
             and not final_cancelled
             and calls.errored == 0

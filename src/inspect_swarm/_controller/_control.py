@@ -18,6 +18,7 @@ from .._final import finalise, first, settle
 from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
     Member,
+    MemberOutcome,
     classify_errors,
     member_nodes,
     run_member,
@@ -153,6 +154,8 @@ class MemberRun:
         # the state the member runs on, kept for its output however it ends; its
         # conversation is built inside the member's limits
         self.agent_state = AgentState(messages=[])
+        # what its wrapper leaves: the state its agent returned and its background counts
+        self.outcome = MemberOutcome()
         # swarm times of its start and its end
         self.started: float | None = None
         self.time: float | None = None
@@ -378,6 +381,8 @@ class SwarmRun:
                         lever=m.lever,
                         span_id=m.context.span_id,
                         cancelled=m.cancelled,
+                        background_started=m.outcome.background_started,
+                        background_cancelled=m.outcome.background_cancelled,
                     )
                     for m in self._members
                 ],
@@ -472,10 +477,15 @@ class SwarmRun:
             m.record,
             m.name,
             m.context,
+            m.lever,
             m.nodes,
             self._caps,
             input,
             m.agent_state,
+            # called when the member's drain begins, so that its grace is clipped to
+            # the sample's remaining time then
+            self._grace_now,
+            m.outcome,
             end,
         )
 
