@@ -2,7 +2,7 @@ import inspect
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, ExitStack
-from typing import Any, assert_never, cast
+from typing import Any, Literal, assert_never, cast
 
 from inspect_ai._util.registry import (
     extract_named_params,
@@ -107,6 +107,9 @@ class Member(BaseModel):
     bridged: bool | None = None
     """Whether the member's agent is bridged. `None` counts agents in the `inspect_swe/` namespace as bridged."""
 
+    delivery: Literal["notify", "poll"] | None = None
+    """The member's configured delivery mode: `notify` or `poll`. `None` selects `notify`. It is logged but does not yet add notices or change the member's conversation."""
+
     @field_validator("factory", mode="before")
     @classmethod
     def _resolve_factory(cls, value: object) -> object:
@@ -170,6 +173,7 @@ class Member(BaseModel):
         data["count"] = self.count
         data["limits"] = [_limit_dict(limit) for limit in self.limits]
         data["bridged"] = self.bridged
+        data["delivery"] = self.delivery
         return data
 
 
@@ -182,6 +186,7 @@ def member(
     count: int = 1,
     limits: Sequence[Limit] | None = None,
     bridged: bool | None = None,
+    delivery: Literal["notify", "poll"] | None = None,
 ) -> Member:
     """A swarm member, with a name, role, limits or count.
 
@@ -205,6 +210,7 @@ def member(
         count: How many members this record stands for. Above 1 needs a factory.
         limits: The member's own token, cost, turn, message or time limits.
         bridged: Whether the agent is bridged (runs a CLI in the sandbox through Inspect's agent bridge). `None` counts inspect_swe's agents as bridged and others as native. Pass `True` for any other bridged agent: the swarm stops a bridged member by cancelling it, because a limit error raised inside the bridge would end the sample, and it must know before the member's first model request. Bridged members cannot use channels with tools and records yet, and `swarm()` refuses one beside such a channel. A bridged agent that is not declared and not in the `inspect_swe/` namespace is not refused: it cannot reach those channels' tools, so it runs without them. Pass `True` to have it refused instead.
+        delivery: The member's configured delivery mode: `notify` or `poll`. `None` selects `notify`. This setting is logged but does not yet add notices or change the member's conversation. A member declared or identified as bridged before it starts has effective mode `poll`. Bridge use detected later leaves its configured mode unchanged.
 
     Returns:
         The member record.
@@ -223,6 +229,7 @@ def member(
             "count": count,
             "limits": list(limits or []),
             "bridged": bridged,
+            "delivery": delivery,
         }
     )
 

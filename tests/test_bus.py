@@ -256,6 +256,8 @@ async def test_a_record_is_applied_once_with_its_evidence(
         "channel": "board",
         "member": "w-1",
         "span_id": None,
+        "loop": None,
+        "nested": False,
         "record": "b-1",
         "recipients": recipients,
         "seq": 1,

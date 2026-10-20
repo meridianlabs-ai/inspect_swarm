@@ -164,7 +164,9 @@ class MemberRun:
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
         self.context = MemberContext(
-            name, bridged=is_bridged(cast(Agent, agent), record.bridged)
+            name,
+            bridged=is_bridged(cast(Agent, agent), record.bridged),
+            delivery=record.delivery,
         )
         self.lever, self.nodes = member_nodes(record, name, share)
 

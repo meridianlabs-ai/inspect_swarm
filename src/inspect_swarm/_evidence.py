@@ -42,11 +42,15 @@ def evidence(
 # Communication evidence: a `comm` event for each record that reached the bus (`sent`)
 # and for each one it delivered (`delivered`), written in the span the channel's tool
 # runs in. Its `member` and `span_id` are the sender's and the sender's member span,
-# even from a member's descendant; the record keeps the writing loop's span.
+# even from a member's descendant; `loop` is the writing loop's agent span, and
+# `nested` whether that loop is not the member's own.
 
 
 def comm_sent(
-    span_id: str | None, record: Record, rejected: tuple[str, str] | None
+    span_id: str | None,
+    record: Record,
+    nested: bool,
+    rejected: tuple[str, str] | None,
 ) -> None:
     # every attempt that reached the bus, rejected or not; `rejected` is the control
     # that refused it and the reason the sender got
@@ -55,6 +59,8 @@ def comm_sent(
         "sent",
         member=record.sender,
         span_id=span_id,
+        loop=record.sender_span_id,
+        nested=nested,
         channel=record.channel,
         record=_record(record),
         rejected=None
@@ -66,6 +72,7 @@ def comm_sent(
 def comm_delivered(
     span_id: str | None,
     record: Record,
+    nested: bool,
     seq: int,
     notify: list[str],
     result: Mapping[str, JsonValue] | None,
@@ -75,6 +82,8 @@ def comm_delivered(
         "delivered",
         member=record.sender,
         span_id=span_id,
+        loop=record.sender_span_id,
+        nested=nested,
         channel=record.channel,
         record=record.id,
         recipients=list(record.recipients),

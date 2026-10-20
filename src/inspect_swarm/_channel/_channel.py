@@ -1,6 +1,14 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, ClassVar, ParamSpec, Protocol, overload
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    ClassVar,
+    Literal,
+    ParamSpec,
+    Protocol,
+    overload,
+)
 
 from inspect_ai.tool import Tool
 from pydantic import JsonValue
@@ -29,6 +37,9 @@ class Channel:
 
     prefix: ClassVar[str | None] = None
     """The prefix of the channel's record ids (`"w"` gives `w-1`), set exactly when `name` is. No two channels of a swarm may share it."""
+
+    reach: ClassVar[Literal["loop", "member"]] = "loop"
+    """Which of a member's agent loops get the channel's tools from `swarm_tools()`. `"loop"` (the default): only the member's own loop, the first in which it resolves `swarm_tools()`. `"member"`: also the member's nested loops, such as a `deepagent()` member's subagents, which then act as the member."""
 
     storm: StormControls = StormControls()
     """The storm controls the bus applies to the channel's records. By default there are none."""
