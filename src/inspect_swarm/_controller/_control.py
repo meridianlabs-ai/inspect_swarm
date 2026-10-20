@@ -45,7 +45,7 @@ class MemberHandle(Protocol):
 
     @property
     def status(self) -> str | None:
-        """How the member ended, once it has: `submitted`, `stopped`, `share`, `member_limit:<type>`, `swarm_cap`, `cancelled` or `errored`."""
+        """How the member ended, once it has: `submitted`, `unsubmitted`, `stopped`, `share`, `member_limit:<type>`, `swarm_cap`, `cancelled` or `errored`."""
         ...
 
     @property

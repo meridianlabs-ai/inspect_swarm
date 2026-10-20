@@ -4,7 +4,7 @@ from typing import Any
 import anyio
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
-from inspect_ai.agent import Agent, AgentState, agent
+from inspect_ai.agent import Agent, AgentState, agent, react
 from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent, SpanBeginEvent, SpanEndEvent
 from inspect_ai.model import (
@@ -123,6 +123,45 @@ def test_first_is_the_earliest_submission_then_roster_order(
 ) -> None:
     chosen = first([_result(*m) for m in members])
     assert (chosen.name if chosen is not None else None) == expected
+
+
+def test_first_skips_a_react_member_that_gave_up_after_refusals(
+    tmp_path: Path,
+) -> None:
+    refusals = Script(
+        outputs=[
+            ModelOutput.from_content(
+                "mockllm", "I can't help with that.", stop_reason="content_filter"
+            )
+            for _ in range(3)
+        ]
+    )
+    # slower, so it submits after the refusing member has ended
+    solver = Script(
+        outputs=[ModelOutput.for_tool_call("mockllm", "submit", {"answer": "42"})],
+        delay=0.1,
+    )
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            [
+                member(react(model=scripted_model(refusals)), name="refuser"),
+                member(react(model=scripted_model(solver)), name="solver"),
+            ],
+            channels=[],
+        ),
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    assert log.samples is not None
+    [sample] = log.samples
+    record = SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
+    refuser, solved = record.members
+    assert (refuser.status, refuser.submitted) == ("unsubmitted", False)
+    assert solved.status == "submitted"
+    assert refuser.time is not None and solved.time is not None
+    assert refuser.time < solved.time
+    assert record.final.member == "solver"
+    assert sample.output.completion.endswith("42")
 
 
 @pytest.mark.anyio
