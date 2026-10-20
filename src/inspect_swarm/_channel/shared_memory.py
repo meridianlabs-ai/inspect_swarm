@@ -524,9 +524,10 @@ class _SharedMemoryState:
                     new_path=_required(new_path, "new_path", command),
                 )
                 payload = ""
-        # what enters the board, and the record: line endings as memory() normalises
-        # them, and no fence marker
-        payload = remove_markers(_normalise(payload))
+        # the record holds no fence marker; line endings are normalised in the file the
+        # write composes, as memory() does, since a carriage return at the payload's end
+        # joins the newline after it
+        payload = remove_markers(payload)
         changes = self._plan(command, args, payload, loop, None)
         delivery = await self._bus.deliver(
             Draft(
@@ -554,7 +555,9 @@ class _SharedMemoryState:
         # admission passes the one allocated then
         match command:
             case "create":
-                return [self._plan_create(_path(args.path), payload, loop, new_id)]
+                return [
+                    self._plan_create(_path(args.path), _clean(payload), loop, new_id)
+                ]
             case "str_replace":
                 f = self._file_at(_path(args.path))
                 content = cast(str, f.content)
@@ -573,7 +576,7 @@ class _SharedMemoryState:
                     raise ToolError(
                         f"No replacement was performed. Multiple occurrences of old_str `{old}` in lines {lines}. Please ensure it is unique"
                     )
-                return [_edit(f, remove_markers(content.replace(old, payload)))]
+                return [_edit(f, _clean(content.replace(old, payload)))]
             case "insert":
                 f = self._file_at(_path(args.path))
                 self._require_seen(loop, f, "inserting into it")
@@ -584,7 +587,7 @@ class _SharedMemoryState:
                         f"Invalid `insert_line` parameter: {at}. It should be within the range of lines of the file: {[0, len(lines)]}"
                     )
                 inserted = lines[:at] + payload.split("\n") + lines[at:]
-                return [_edit(f, remove_markers("\n".join(inserted)))]
+                return [_edit(f, _clean("\n".join(inserted)))]
             case "delete":
                 path = _path(args.path)
                 if path == ROOT:
@@ -893,8 +896,10 @@ def _required(value: str | None, name: str, command: str, empty: bool = False) -
     return value
 
 
-def _normalise(text: str) -> str:
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+def _clean(content: str) -> str:
+    # a file as it enters the board: line endings as memory() normalises them, and no
+    # fence marker
+    return remove_markers(content.replace("\r\n", "\n").replace("\r", "\n"))
 
 
 def _is_path(path: str) -> bool:
@@ -1002,6 +1007,7 @@ def _acknowledgment(
         case "str_replace":
             return f"Edited {first.path} ({first.file}, now version {first.version})."
         case "insert":
+            # the lines of `insert_text` as memory() splits it
             count = len(payload.split("\n"))
             return f"Inserted {count} line{'' if count == 1 else 's'} after line {args.insert_line} of {first.path} ({first.file}, now version {first.version})."
         case "delete" if len(changes) == 1 and first.old_path == args.path:

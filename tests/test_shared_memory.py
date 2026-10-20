@@ -137,6 +137,22 @@ PARITY: list[Any] = [
         [("str_replace", {"path": "a.md", "old_str": "two\n"})],
         id="str_replace-to-empty",
     ),
+    # a carriage return at the end of the new text joins the newline after it
+    pytest.param(
+        [
+            ("str_replace", {"path": "a.md", "old_str": "one", "new_str": "x\r"}),
+            ("view", {"path": "a.md"}),
+        ],
+        id="str_replace-trailing-carriage-return",
+    ),
+    pytest.param(
+        [
+            ("view", {"path": "a.md"}),
+            ("insert", {"path": "a.md", "insert_line": 0, "insert_text": "x\r"}),
+            ("view", {"path": "a.md"}),
+        ],
+        id="insert-trailing-carriage-return",
+    ),
     *[
         pytest.param(
             [
@@ -728,6 +744,28 @@ async def test_storm_controls(
         assert len(board.files()) == len(accepted)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "command,args",
+    [
+        pytest.param(
+            "str_replace", {"old_str": "a", "new_str": "x\r"}, id="str_replace"
+        ),
+        pytest.param("insert", {"insert_line": 0, "insert_text": "x\r"}, id="insert"),
+    ],
+)
+async def test_line_limits_count_the_lines_of_the_normalised_file(
+    command: str, args: dict[str, Any]
+) -> None:
+    # the payload's line endings are normalised in the file it composes, which keeps
+    # within `max_file_lines`
+    async with _board(shared_memory(max_file_lines=2, rate=None)) as (board, _):
+        text = "a" if command == "insert" else "a\nb"
+        await board("w-1", "create", path=_p("a.md"), file_text=text)
+        await board("w-1", command, path=_p("a.md"), **args)
+        assert board.files() == {_p("a.md"): "x\na" if command == "insert" else "x\nb"}
+
+
 # Evidence
 
 
@@ -738,7 +776,8 @@ async def test_every_write_is_a_record_and_replaying_them_in_commit_order_rebuil
     async with _board() as (board, transcript):
         await board("w-1", "create", path=_p("d/a.md"), file_text="1\n2")
         await board("w-2", "view", path=_p("d/a.md"))
-        await board("w-2", "str_replace", path=_p("d/a.md"), old_str="2", new_str="3")
+        # the record holds the payload as typed; line endings are normalised in the file
+        await board("w-2", "str_replace", path=_p("d/a.md"), old_str="1", new_str="3\r")
         await board("w-2", "insert", path=_p("d/a.md"), insert_line=0, insert_text="0")
         await board("w-1", "create", path=_p("d/b.md"), file_text="b")
         await board("w-1", "view", path=_p("d/a.md"))
@@ -814,6 +853,10 @@ def _replay(
 ) -> dict[str, str]:
     records = {s["record"]["id"]: s["record"] for s in sent}
     files: dict[str, tuple[str, str]] = {}
+
+    def normalised(content: str) -> str:
+        return content.replace("\r\n", "\n").replace("\r", "\n")
+
     for d in sorted(delivered, key=lambda d: d["seq"]):
         record = records[d["record"]]
         op, payload = record["op"], record["payload"]
@@ -821,17 +864,22 @@ def _replay(
             file = entry["file"]
             match record["kind"]:
                 case "create":
-                    files[file] = (entry["path"], payload)
+                    files[file] = (entry["path"], normalised(payload))
                 case "str_replace":
                     path, content = files[file]
-                    files[file] = (path, content.replace(op["old_str"], payload))
+                    files[file] = (
+                        path,
+                        normalised(content.replace(op["old_str"], payload)),
+                    )
                 case "insert":
                     path, content = files[file]
                     lines = content.split("\n")
                     at = op["insert_line"]
                     files[file] = (
                         path,
-                        "\n".join(lines[:at] + payload.split("\n") + lines[at:]),
+                        normalised(
+                            "\n".join(lines[:at] + payload.split("\n") + lines[at:])
+                        ),
                     )
                 case "rename":
                     files[file] = (entry["new_path"], files[file][1])
