@@ -1,4 +1,5 @@
 import re
+import time
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -309,6 +310,7 @@ async def test_a_loops_own_write_counts_as_seen_and_a_member_may_overwrite_its_o
 
 
 _DEEP = _p("a/b/c/d/e/f/ggg.md")
+_SURROGATE = _p("a\ud800")
 
 REFUSALS: list[Any] = [
     pytest.param(
@@ -399,6 +401,37 @@ REFUSALS: list[Any] = [
             ("over-160-bytes", _p("a" * 64 + "/" + "b" * 64 + "/" + "c" * 16)),
             ("nine-components", _p("/".join("abcdefghi"))),
             ("component-over-64", _p("a" * 65)),
+        )
+    ],
+    # a lone surrogate, as a model's JSON can escape it, is refused as any other
+    # character outside the grammar
+    *[
+        pytest.param(
+            command,
+            args,
+            "Invalid path: paths are /shared_memory followed by",
+            id=f"surrogate-{name}",
+        )
+        for name, command, args in (
+            ("view", "view", {"path": _SURROGATE}),
+            ("create", "create", {"path": _SURROGATE, "file_text": ""}),
+            ("str_replace", "str_replace", {"path": _SURROGATE, "old_str": "x"}),
+            (
+                "insert",
+                "insert",
+                {"path": _SURROGATE, "insert_line": 0, "insert_text": ""},
+            ),
+            ("delete", "delete", {"path": _SURROGATE}),
+            (
+                "rename-old_path",
+                "rename",
+                {"old_path": _SURROGATE, "new_path": _p("z.md")},
+            ),
+            (
+                "rename-new_path",
+                "rename",
+                {"old_path": _p("x.md"), "new_path": _SURROGATE},
+            ),
         )
     ],
 ]
@@ -566,6 +599,20 @@ async def test_fence_markers_are_removed_from_what_enters_the_board(
         assert board.files() == {_p("a.md"): content}
         # the record holds the cleaned payload
         assert "peer_file" not in evidence(transcript, "sent")[0]["record"]["payload"]
+
+
+@pytest.mark.anyio
+async def test_removing_nested_markers_from_a_large_write_is_quick() -> None:
+    # removing one marker per pass over the whole text took about 8 seconds here; the
+    # write is admitted as an empty file
+    n = 20_000
+    async with _board() as (board, _):
+        start = time.perf_counter()
+        await board(
+            "w-1", "create", path=_p("a.md"), file_text="<peer_" * n + "file" * n
+        )
+        assert time.perf_counter() - start < 2
+        assert board.files() == {_p("a.md"): ""}
 
 
 # The read budget: every accepted file, and the listing of a full board, fits whole in

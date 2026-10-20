@@ -898,11 +898,17 @@ def _normalise(text: str) -> str:
 
 
 def _is_path(path: str) -> bool:
-    if not path.startswith(ROOT + "/") or utf8_bytes(path) > _MAX_PATH_BYTES:
+    # the grammar is ASCII, so it is checked before the path is encoded: a model's
+    # path can hold a lone surrogate, which does not encode
+    if not path.startswith(ROOT + "/"):
         return False
     parts = path[len(ROOT) + 1 :].split("/")
-    return len(parts) <= _MAX_COMPONENTS and all(
-        _COMPONENT.fullmatch(part) and part not in (".", "..") for part in parts
+    return (
+        len(parts) <= _MAX_COMPONENTS
+        and all(
+            _COMPONENT.fullmatch(part) and part not in (".", "..") for part in parts
+        )
+        and utf8_bytes(path) <= _MAX_PATH_BYTES
     )
 
 
