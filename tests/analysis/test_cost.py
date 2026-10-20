@@ -189,6 +189,14 @@ def test_sample_costs_read_each_stored_sample_once(tmp_path: Path, case: str) ->
     assert sample_costs(_stored_inputs(path)[case]) == [row]
 
 
+def test_sample_costs_take_completeness_from_the_ledger() -> None:
+    # every model priced, so only the ledger's judgment makes the cost a lower bound
+    ledger = _ledger(complete=False)
+    ledger["calls"]["no_usage"] = 1
+    [row] = sample_costs(_log([_sample(1, {"a": _priced(1.0)}, ledger)]))
+    assert (row.complete, row.no_usage, row.unpriced_models) == (False, 1, [])
+
+
 def test_sample_costs_report_why_a_cost_is_a_lower_bound() -> None:
     ledger = _ledger(members=3, complete=False, resumed=True)
     ledger["calls"].update(errored=3, no_usage=2, unpriced=4)

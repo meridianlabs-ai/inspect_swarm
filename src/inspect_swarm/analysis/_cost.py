@@ -14,8 +14,9 @@ from .._ledger import (
     SwarmLedger,
 )
 
-# sample fields the helper never reads, skipped when a log is read from a file
-_EXCLUDE_FIELDS = {"events", "messages", "attachments"}
+# sample fields the helper never reads, skipped when a log is read from a file; a
+# timeline refers to events by id, so it cannot be read without them
+_EXCLUDE_FIELDS = {"events", "timelines", "messages", "attachments"}
 
 
 class SampleCost(BaseModel):

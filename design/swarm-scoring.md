@@ -173,7 +173,7 @@ class SwarmResultRecord(BaseModel):
   - It records the same evidence and returns an empty output when its member does not submit, where a plain agent is scored on its last output.
   - Part 2's `baseline()` only names this configuration; M1 needs no helper.
 - **Cost** is the ledger's realized cost (the limits deep dive), taken from sample usage, which includes grading ([above](#why-m1-needs-little-from-scoring)).
-- **What M1 does not provide.** team@k, mean member and select@k need Part 2. best@k on graded scores needs a best-of-k reducer, which Inspect does not have ([Comparison quantities](#comparison-quantities)).
+- **What M1 does not provide.** team@k, mean member and select@k need Part 2. best@k on graded scores is computed in the user's analysis from per-epoch values in `samples_df()` ([Comparison quantities](#comparison-quantities)).
 
 ### What M1 leaves out of the merged API
 
