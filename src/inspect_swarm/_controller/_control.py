@@ -11,6 +11,7 @@ from inspect_ai.agent import Agent, AgentState
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
 from inspect_ai.util import Limit, current_span_id, sample_limits
+from inspect_ai.util._store import suspend_store_events
 
 from .._budget import Budget, CostPair, Lever, MemberContext, SwarmNode, is_bridged
 from .._evidence import MemberTimelines, evidence, write_ledger, write_metrics
@@ -20,6 +21,7 @@ from .._member import (
     Member,
     classify_errors,
     member_nodes,
+    member_sandbox,
     run_member,
 )
 from .._metrics import MemberTimes, swarm_metrics
@@ -148,6 +150,7 @@ class MemberRun:
         self.record = record
         self.name = name
         self.role = record.role
+        self.sandbox = member_sandbox(record, name)
         self.state: MemberState = "pending"
         self.status: str | None = None
         # the state the member runs on, kept for its output however it ends; its
@@ -186,6 +189,7 @@ class MemberRun:
             status=self.status,
             submitted=self.submitted,
             time=self.time,
+            sandbox=self.sandbox,
         )
 
 
@@ -321,7 +325,9 @@ class SwarmRun:
         bus_token = current_bus.set(self.bus)
         ended = False
         try:
-            with ExitStack() as meter:
+            # first: spans inside the swarm, members' included, log no StoreEvent;
+            # the swarm's span, entered before, logs the net change
+            with suspend_store_events(), ExitStack() as meter:
                 for node in self._swarm_meter.nodes:
                     meter.enter_context(node)
                 try:
@@ -492,6 +498,7 @@ class SwarmRun:
             span_id=m.context.span_id,
             status=status,
             time=m.time,
+            sandbox=m.sandbox,
         )
         self._settle()
         self._queue.append(MemberEnded(m.name, status, m.submitted))

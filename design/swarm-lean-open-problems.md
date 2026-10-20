@@ -170,7 +170,7 @@ Gains in M2, beyond what the port needs to run:
 
 Gains after M2, if they choose them:
 
-- `member_scores` with `best_member` (team@k) and `mean_member`, `baseline()`, `best_at(k)` and select@k, compared on realized cost ([Comparison quantities](swarm-scoring.md#comparison-quantities)).
+- `member_scores` with `best_member` (team@k) and `mean_member`, `baseline()` and select@k, compared on realized cost ([Comparison quantities](swarm-scoring.md#comparison-quantities)).
 - The messages channel with notices.
 
 Losses and costs:
