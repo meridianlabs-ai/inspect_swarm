@@ -13,6 +13,9 @@ from inspect_ai._util.registry import (
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.model import Model, get_model
 from inspect_ai.util import Limit
+from inspect_ai.util._sandbox.context import (
+    sandbox_environments_context_var,  # pyright: ignore[reportPrivateUsage]
+)
 
 from ._budget import (
     Budget,
@@ -26,8 +29,10 @@ from ._budget import (
 from ._channel._channel import Channel
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
-from ._member import Member, is_factory, member, member_names
+from ._member import Member, is_factory, member, member_names, member_sandbox
 from ._registry import resolve
+
+_FILESYSTEM = "inspect_swarm/filesystem"
 
 
 @agent
@@ -53,7 +58,7 @@ def swarm(
 
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
-        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, or a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet); or, when the returned agent runs, if the sample already has a timeline named after one of its members.
+        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet), some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, or the `filesystem` channel is given while members have their own sandboxes; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
     """
     records = _members(members)
     names = member_names(records)
@@ -71,16 +76,19 @@ def swarm(
         resolved_controller.check(roster)
     _check_bus_channels(resolved_channels, records, names, roster)
     resolved_budget = _budget(budget)
-    preambles = {
-        info.name: _preamble(info, len(roster), resolved_channels) for info in roster
-    }
     runs = [
         (record, name)
         for record, record_names in zip(records, names, strict=True)
         for name in record_names
     ]
+    own_sandboxes = _check_member_sandboxes(runs, resolved_channels)
+    preambles = {
+        info.name: _preamble(info, len(roster), resolved_channels, own_sandboxes)
+        for info in roster
+    }
 
     async def execute(state: AgentState) -> AgentState:
+        _check_sandbox_names(runs)
         caps = derive_caps(resolved_budget, len(roster))
         if caps.cost is not None:
             models = [_model(record) for record in records]
@@ -112,7 +120,9 @@ def swarm(
     return execute
 
 
-def _preamble(member: MemberInfo, size: int, channels: Sequence[Channel]) -> str:
+def _preamble(
+    member: MemberInfo, size: int, channels: Sequence[Channel], own_sandboxes: bool
+) -> str:
     parts = [
         f"You are {member.name}, one of {size} agents in a swarm working on this task at the same time."
         if size > 1
@@ -120,6 +130,8 @@ def _preamble(member: MemberInfo, size: int, channels: Sequence[Channel]) -> str
     ]
     if member.role is not None:
         parts.append(f"Your role: {member.role}.")
+    if own_sandboxes:
+        parts.append("You work in your own sandbox, which no other member can reach.")
     for channel in channels:
         text = channel.instructions(member)
         if text:
@@ -271,6 +283,57 @@ def _check_bus_channels(
             raise ValueError(
                 f"swarm(): member {record_names[0]!r} is bridged, and bridged members cannot use bus channels such as {registry_info(bus_channels[0]).name} yet. Leave the channel out, or the member."
             )
+
+
+# Whether the members have their own sandboxes. Then every member has one, no two
+# share one or reach another's, and the filesystem channel, which describes a shared
+# sandbox, is refused.
+def _check_member_sandboxes(
+    runs: Sequence[tuple[Member, str]], channels: Sequence[Channel]
+) -> bool:
+    sandboxes = {name: member_sandbox(record, name) for record, name in runs}
+    own = [name for name, sandbox in sandboxes.items() if sandbox is not None]
+    if not own:
+        return False
+    shared = [name for name, sandbox in sandboxes.items() if sandbox is None]
+    if shared:
+        raise ValueError(
+            f"swarm(): member {own[0]!r} has its own sandbox and {shared[0]!r} does not. Give every member its own sandbox, with member(..., sandbox=...), or none."
+        )
+    if any(registry_info(channel).name == _FILESYSTEM for channel in channels):
+        raise ValueError(
+            f"swarm(): the filesystem channel describes a sandbox the members share, and member {own[0]!r} has its own. Leave the channel out, with channels=[] or other channels."
+        )
+    owners: dict[str, str] = {}
+    for name, sandbox in sandboxes.items():
+        assert sandbox is not None
+        other = owners.setdefault(sandbox, name)
+        if other != name:
+            raise ValueError(
+                f"swarm(): members {other!r} and {name!r} both have the sandbox {sandbox!r}, and a member's sandbox is its own. Give each member its own; for the copies of a counted member, sandbox='{{member}}' gives each the sandbox named after it."
+            )
+    for record, name in runs:
+        for visible in record.visible_sandboxes:
+            owner = owners.get(visible, name)
+            if owner != name:
+                raise ValueError(
+                    f"swarm(): member {name!r} lists {visible!r} in visible_sandboxes, which is the sandbox of member {owner!r}. A member cannot reach another member's sandbox."
+                )
+    return True
+
+
+# At swarm start: every sandbox a member names is one of the sample's.
+def _check_sandbox_names(runs: Sequence[tuple[Member, str]]) -> None:
+    environments = sandbox_environments_context_var.get(None) or {}
+    for record, name in runs:
+        sandbox = member_sandbox(record, name)
+        if sandbox is None:
+            continue
+        for environment in (sandbox, *record.visible_sandboxes):
+            if environment not in environments:
+                raise ValueError(
+                    f"swarm(): member {name!r} names the sandbox {environment!r}, which this sample does not have. The sample's sandboxes are: {', '.join(repr(e) for e in environments) or 'none'}."
+                )
 
 
 def _budget(budget: object) -> Budget:

@@ -95,6 +95,7 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-n auto"
 timeout = 120
+markers = ["slow: needs Docker; runs only with --runslow"]
 
 [tool.pyright]
 include = ["src", "tests"]

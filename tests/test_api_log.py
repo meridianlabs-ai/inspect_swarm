@@ -73,6 +73,8 @@ def _record(**fields: Any) -> dict[str, Any]:
         "limits": [],
         "bridged": None,
         "delivery": None,
+        "sandbox": None,
+        "visible_sandboxes": [],
         **fields,
     }
 
@@ -135,6 +137,22 @@ def _agent_tool(name: str) -> dict[str, Any]:
             ],
             id="mixed-list",
         ),
+        pytest.param(
+            lambda: member(
+                never_built,
+                count=2,
+                sandbox="{member}",
+                visible_sandboxes=["comparator"],
+            ),
+            _record(
+                factory="inspect_swarm/log_test_never_built",
+                args={},
+                count=2,
+                sandbox="{member}",
+                visible_sandboxes=["comparator"],
+            ),
+            id="sandboxes",
+        ),
     ],
 )
 def test_logged_members(members: Callable[[], Any], logged: Any) -> None:
@@ -186,6 +204,15 @@ def test_factory_args_log_as_the_built_agents_params() -> None:
                 ),
             ],
             id="limits",
+        ),
+        pytest.param(
+            lambda: member(
+                never_built,
+                count=2,
+                sandbox="{member}",
+                visible_sandboxes=["comparator"],
+            ),
+            id="sandboxes",
         ),
     ],
 )

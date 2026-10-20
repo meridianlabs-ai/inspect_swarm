@@ -20,6 +20,7 @@ from .._member import (
     Member,
     classify_errors,
     member_nodes,
+    member_sandbox,
     run_member,
 )
 from .._metrics import MemberTimes, swarm_metrics
@@ -148,6 +149,7 @@ class MemberRun:
         self.record = record
         self.name = name
         self.role = record.role
+        self.sandbox = member_sandbox(record, name)
         self.state: MemberState = "pending"
         self.status: str | None = None
         # the state the member runs on, kept for its output however it ends; its
@@ -186,6 +188,7 @@ class MemberRun:
             status=self.status,
             submitted=self.submitted,
             time=self.time,
+            sandbox=self.sandbox,
         )
 
 
@@ -492,6 +495,7 @@ class SwarmRun:
             span_id=m.context.span_id,
             status=status,
             time=m.time,
+            sandbox=m.sandbox,
         )
         self._settle()
         self._queue.append(MemberEnded(m.name, status, m.submitted))
