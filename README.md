@@ -203,7 +203,7 @@ A member's `state` is `pending` (never started), `running` or `ended`. `time` is
 When the swarm ends it writes two more store entries, each also logged as an `InfoEvent` with source `inspect_swarm`:
 
 - `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, the controller and the final step, model calls that errored or reported no usage, unpriced models, what stopped the swarm, and whether the sample resumed from a checkpoint.
-- `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members that never made a model call (`never_acted`), the model calls of the chosen member (`steps_to_answer`) and of the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member.
+- `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members with no completed model call (`never_acted`), counts of completed model calls for the chosen member (`steps_to_answer`) and the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member. These call counts include cache replays and exclude failed or cancelled attempts.
 
 `inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`. `samples_df()` needs pandas and pyarrow, which neither install above includes:
 

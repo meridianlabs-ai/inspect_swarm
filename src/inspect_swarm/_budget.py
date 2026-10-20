@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 class Budget(BaseModel):
     """The swarm-wide budget.
 
-    By default the swarm derives its caps from the sample's cost, token and time limits when it starts, holding back `reserve` of each. The caps are stopping rules: when one is reached the swarm stops its members, gives them `grace` seconds to finish the calls they have in flight, and then cancels the rest.
+    By default the swarm derives its caps from the sample's cost, token and time limits when it starts, holding back `reserve` of each. The caps are stopping rules: when one is reached the swarm stops its members, gives them up to `grace` seconds to finish the calls they have in flight, and then cancels the members still running. If the sample has a time limit, the grace period is capped at half its remaining time.
 
     Every field is a plain value, so each can be a task parameter, and two budgets that differ in any field are logged as different arguments.
     """
@@ -55,7 +55,7 @@ class Budget(BaseModel):
     """How the cost and token caps are divided between members: one shared pool, equal shares, or one weight per member in roster order. A member that uses up its share stops, and its unused share is not given to the others."""
 
     grace: float = 120.0
-    """Seconds members are given to finish in-flight work after a stop."""
+    """Seconds members have, at most, to finish calls already in flight after a stop. If the sample has a time limit, this period is capped at half its remaining time."""
 
     @model_validator(mode="after")
     def _check_fields(self) -> "Budget":
