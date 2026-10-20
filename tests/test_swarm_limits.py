@@ -656,6 +656,26 @@ async def test_a_custom_stop_from_a_members_factory_is_foreign(grouped: bool) ->
     assert [m.status for m in ledger.members] == ["errored"]
 
 
+@agent
+def returns_nothing() -> Agent:
+    # breaks the agent contract by returning None, which is not a stop of itself
+    async def execute(state: AgentState) -> AgentState:
+        return cast(AgentState, None)
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_an_agent_that_returns_none_fails_the_sample() -> None:
+    async with sample():
+        with pytest.raises(AttributeError):
+            await swarm(member(returns_nothing()), channels=[])(
+                AgentState(messages=[ChatMessageUser(content="task")])
+            )
+        ledger = _ledger()
+    assert [m.status for m in ledger.members] == ["errored"]
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "error,raised,limit_type",

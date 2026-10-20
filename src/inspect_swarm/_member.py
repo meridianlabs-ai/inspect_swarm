@@ -367,11 +367,7 @@ async def _run_member(
                 # it, since a span-id provider may await
                 await member_span.enter_async_context(span(name, type=AGENT_SPAN_TYPE))
                 context.span_id = current_span_id()
-                returned = await _call_agent(agent, state)
-                if returned is None:
-                    stopped = True
-                else:
-                    state = returned
+                state, stopped = await _call_agent(agent, state)
     except Exception as ex:
         error = ex
     finally:
@@ -401,22 +397,23 @@ async def _run_member(
     return _return_status(state.output.stop_reason), state
 
 
-# The agent call. An error the agent raised to stop itself (a sourceless custom limit),
-# bare or grouped with nothing else, returns None; a group that holds anything else is
+# The agent call: the state it returned, and whether it stopped itself. An error the
+# agent raised to stop itself (a sourceless custom limit), bare or grouped with nothing
+# else, returns the state it was given and True; a group that holds anything else is
 # raised without it, and any other error as it is, for the wrapper to classify.
-async def _call_agent(agent: Agent, state: AgentState) -> AgentState | None:
+async def _call_agent(agent: Agent, state: AgentState) -> tuple[AgentState, bool]:
     try:
-        return await agent(state)
+        return await agent(state), False
     except BaseException as ex:
         if _self_stop(ex):
-            return None
+            return state, True
         if not isinstance(ex, BaseExceptionGroup):
             raise
         stops, rest = cast(BaseExceptionGroup[BaseException], ex).split(_self_stop)
         if stops is None:
             raise
         if rest is None:
-            return None
+            return state, True
         remainder = rest
     raise remainder
 
