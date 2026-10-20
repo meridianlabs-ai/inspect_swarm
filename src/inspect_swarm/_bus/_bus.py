@@ -2,9 +2,10 @@ import json
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from inspect_ai._util.json import to_json_safe
+from inspect_ai.agent._channel import current_agent_channel
 from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
 from inspect_ai.tool import ToolError
 from inspect_ai.util._span import current_agent_span_id, current_span_id
@@ -55,6 +56,7 @@ class Bus:
         self._states: dict[str, ChannelState] = {}
         self._storms: dict[str, Storm] = {}
         self._prefixes: dict[str, str] = {}
+        self._reach: dict[str, Literal["loop", "member"]] = {}
         run = ChannelRun(
             bus=self, roster=[MemberInfo(name=m.name, role=m.role) for m in members]
         )
@@ -69,11 +71,17 @@ class Bus:
             self._states[channel.name] = state
             self._storms[channel.name] = Storm(channel.storm)
             self._prefixes[channel.name] = channel.prefix
+            self._reach[channel.name] = channel.reach
 
     @property
     def states(self) -> Mapping[str, ChannelState]:
         # the opened channel states, by channel name
         return dict(self._states)
+
+    @property
+    def reach(self) -> Mapping[str, Literal["loop", "member"]]:
+        # each opened channel's reach, by channel name
+        return dict(self._reach)
 
     @property
     def stopping(self) -> bool:
@@ -89,6 +97,10 @@ class Bus:
         sender = context.name
         # the member's own span, for the evidence; the record keeps the writing loop's
         member_span = context.span_id
+        # written from a loop other than the member's own, such as a subagent's
+        nested = (
+            context.loop is not None and current_agent_channel() is not context.loop
+        )
         if self._stopping:
             raise ToolError(_STOPPING)
         state = self._state(draft.channel)
@@ -124,25 +136,32 @@ class Bus:
             try:
                 state.admit(record)
             except ToolError as ex:
-                comm_sent(member_span, record, ("admit", str(ex)))
+                comm_sent(member_span, record, nested, ("admit", str(ex)))
                 raise
         if rejection is not None:
-            comm_sent(member_span, record, rejection)
+            comm_sent(member_span, record, nested, rejection)
             raise ToolError(rejection[1])
 
         # step 3: evidence
-        comm_sent(member_span, record, None)
+        comm_sent(member_span, record, nested, None)
 
         # step 4: commit and apply
         self._seq += 1
         notify, result = state.apply(record)
         storm.commit(record)
-        comm_delivered(member_span, record, self._seq, notify, result)
+        comm_delivered(member_span, record, nested, self._seq, notify, result)
         return Delivery(record, self._seq, list(notify), result)
 
-    def _sender(self) -> MemberContext:
+    def member(self) -> MemberContext | None:
+        # the member the caller runs in or descends from, if it is one of this run's
         context = current_member.get()
         if context is None or self._contexts.get(context.name) is not context:
+            return None
+        return context
+
+    def _sender(self) -> MemberContext:
+        context = self.member()
+        if context is None:
             raise RuntimeError(
                 "Bus.deliver() was called outside a member of this swarm; channel tools deliver records for the member that calls them."
             )
