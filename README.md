@@ -231,7 +231,7 @@ df["score"] = df["score_match"].map(value_to_float(), na_action="ignore")
 df.groupby("log")[["score", "swarm_cost"]].mean()
 ```
 
-`swarm_cost` is the sample's priced cost, scorer calls included, and `swarm_complete` is `False` when calls may be missing from it. The `SwarmColumns` docstring lists every column.
+`swarm_cost` is the sample's recorded priced cost, including scorer calls. `swarm_complete` requires the swarm's ledger to mark its interval complete and all recorded model usage to be priced. It does not check for missing usage outside the swarm, including scorer calls. The `SwarmColumns` docstring lists every column.
 
 ## Logs and the store
 
