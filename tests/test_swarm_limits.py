@@ -1,11 +1,18 @@
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 from uuid import uuid4
 
 import anyio
 import pytest
+from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai._util.error import PrerequisiteError
-from inspect_ai.agent import Agent, AgentState, agent
+from inspect_ai._util.exception import TerminateSampleError
+from inspect_ai.agent import Agent, AgentState, agent, react
+from inspect_ai.dataset import Sample
+from inspect_ai.event import InfoEvent
+from inspect_ai.log._samples import sample_active
 from inspect_ai.model import (
     ChatMessageTool,
     ChatMessageUser,
@@ -23,6 +30,8 @@ from inspect_ai.util import (
     LimitExceededError,
     cost_limit,
     message_limit,
+    sample_limits,
+    store,
     time_limit,
     token_limit,
     turn_limit,
@@ -39,8 +48,11 @@ from inspect_swarm import (
     swarm,
     swarm_controller,
 )
-from inspect_swarm._budget import CostPair
+from inspect_swarm._budget import CostPair, SwarmNode
 from inspect_swarm._controller._control import SwarmRun
+from inspect_swarm._evidence import LEDGER_KEY
+from inspect_swarm._ledger import SwarmLedger
+from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
@@ -371,6 +383,51 @@ async def test_the_swarms_own_errors_become_statuses(
     assert statuses(stop) == {"member": expected, "sibling": "submitted"}
 
 
+# The outputs a react() member's model gives, by how the member ends.
+def _react_outputs(end: str) -> list[ModelOutput]:
+    match end:
+        case "refusals":
+            return [
+                ModelOutput.from_content(
+                    "mockllm", "I can't help with that.", stop_reason="content_filter"
+                )
+                for _ in range(3)
+            ]
+        case "overflow":
+            return [ModelOutput.from_content("mockllm", "", stop_reason="model_length")]
+        case _:
+            return [ModelOutput.for_tool_call("mockllm", "submit", {"answer": "42"})]
+
+
+@pytest.mark.parametrize(
+    "end,expected,calls",
+    [
+        # react() gives up after three refusals in a row
+        ("refusals", "unsubmitted", 3),
+        # an overflow react() has no truncation or compaction to recover from
+        ("overflow", "unsubmitted", 1),
+        ("submit", "submitted", 1),
+    ],
+)
+def test_a_react_member_that_returns_without_a_submit_is_unsubmitted(
+    tmp_path: Path, end: str, expected: str, calls: int
+) -> None:
+    # react() runs only in a sample
+    script = Script(outputs=_react_outputs(end))
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            member(react(model=scripted_model(script)), name="member"), channels=[]
+        ),
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    assert log.samples is not None
+    [sample] = log.samples
+    assert script.calls == calls
+    [result] = SwarmResultRecord.model_validate(sample.store[RECORD_KEY]).members
+    assert result.status == expected
+
+
 @pytest.mark.anyio
 async def test_a_grouped_lever_stop_gives_the_same_status_as_a_bare_one() -> None:
     async def run(control: SwarmControl) -> StopReason:
@@ -401,16 +458,27 @@ async def test_a_grouped_lever_stop_gives_the_same_status_as_a_bare_one() -> Non
     }
 
 
+# Foreign errors a member can raise, by kind.
+_FOREIGN: dict[str, Callable[[], Exception]] = {
+    "sample_limit": lambda: LimitExceededError(
+        "token", value=1, limit=1, source=sample_limits().token
+    ),
+    "terminate": lambda: TerminateSampleError("terminated"),
+    "crash": lambda: RuntimeError("foreign"),
+}
+
+
 @agent
-def mixed(model: Model) -> Agent:
+def mixed(model: Model, foreign: Sequence[str] = ("crash",)) -> Agent:
     # captures a real limit error from the swarm's nodes, then raises it in a group
-    # with a foreign error
+    # with foreign errors
     async def execute(state: AgentState) -> AgentState:
         try:
             while True:
                 await model.generate(state.messages)
         except LimitExceededError as limit:
-            raise ExceptionGroup("mixed", [limit, RuntimeError("foreign")]) from None
+            errors = [_FOREIGN[kind]() for kind in foreign]
+            raise ExceptionGroup("mixed", [limit, *errors]) from None
 
     return execute
 
@@ -436,6 +504,352 @@ async def test_a_group_mixing_the_swarms_error_with_a_foreign_one_raises_only_th
         )
     # the swarm's leaf was removed, so the foreign one escapes bare, not as a group
     assert type(raised.value) is RuntimeError
+
+
+# ---------------------------------------------------------------------------
+# Exhaustion: foreign errors and limits from outside the swarm
+
+
+def _ledger() -> SwarmLedger:
+    return SwarmLedger.model_validate(store().get(LEDGER_KEY))
+
+
+def _leaves(error: BaseException) -> list[BaseException]:
+    if isinstance(error, BaseExceptionGroup):
+        group = cast(BaseExceptionGroup[BaseException], error)
+        return [leaf for e in group.exceptions for leaf in _leaves(e)]
+    return [error]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "foreign,ended_by",
+    [
+        (["sample_limit"], "sample_limit:token"),
+        (["terminate"], None),
+        (["crash"], None),
+        (["sample_limit", "crash"], "sample_limit:token"),
+    ],
+)
+async def test_foreign_errors_propagate_without_the_swarms_leaves(
+    foreign: list[str], ended_by: str | None
+) -> None:
+    async with sample():
+        with pytest.raises(Exception) as raised:
+            await swarm(
+                member(mixed(scripted_model(), foreign=foreign)),
+                channels=[],
+                budget=Budget(tokens=TOKENS_PER_CALL),
+            )(AgentState(messages=[ChatMessageUser(content="task")]))
+        ledger = _ledger()
+        expected = [type(_FOREIGN[kind]()) for kind in foreign]
+    # without the cap's leaf; a single leaf bare, as collect() raises it
+    assert [type(e) for e in _leaves(raised.value)] == expected
+    assert isinstance(raised.value, ExceptionGroup) == (len(expected) > 1)
+    # the cap began a stop, and a sample limit then ended the swarm
+    assert (ledger.stop_reason, ledger.ended_by, ledger.interrupted) == (
+        "swarm_cap",
+        ended_by,
+        True,
+    )
+    assert [m.status for m in ledger.members] == ["errored"]
+
+
+@agent
+def catcher(model: Model, caught: list[LimitExceededError]) -> Agent:
+    # keeps the error its lever raised at the soft stop
+    async def execute(state: AgentState) -> AgentState:
+        try:
+            while True:
+                await model.generate(state.messages)
+        except LimitExceededError as ex:
+            caught.append(ex)
+            raise
+
+    return execute
+
+
+@agent
+def carrier(caught: list[LimitExceededError]) -> Agent:
+    # raises another member's limit error in a group with a foreign one
+    async def execute(state: AgentState) -> AgentState:
+        while not caught:
+            await anyio.sleep(0.001)
+        raise ExceptionGroup("carried", [caught[0], RuntimeError("foreign")])
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_the_runtime_removes_a_swarm_leaf_its_wrapper_did_not_own() -> None:
+    # the carrier's wrapper owns neither leaf, so both reach the runtime, which
+    # removes the other member's
+    caught: list[LimitExceededError] = []
+
+    async def run_members(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        return "enough"
+
+    with pytest.raises(RuntimeError, match="foreign") as raised:
+        await run_swarm(
+            swarm(
+                [
+                    member(
+                        catcher(scripted_model(Script(delay=0.001)), caught),
+                        name="stopped",
+                    ),
+                    member(carrier(caught), name="carrier"),
+                ],
+                controller=_controller(run_members, "limits_test_carrier"),
+                channels=[],
+            )
+        )
+    assert type(raised.value) is RuntimeError
+    [lever_stop] = caught
+    assert lever_stop.type == "custom"
+
+
+@agent
+def interrupter() -> Agent:
+    # the operator interrupts the sample, to be scored, while the member works
+    async def execute(state: AgentState) -> AgentState:
+        active = sample_active()
+        assert active is not None
+        active.interrupt("score")
+        await anyio.sleep(3600)
+        return state
+
+    return execute
+
+
+def _busy(limit: str) -> Agent:
+    # the member still working when the sample's limit or the operator ends it
+    match limit:
+        case "message":
+            return generator(scripted_model(Script(delay=0.01)), calls=None)
+        case "operator":
+            return interrupter()
+        case _:
+            return sleeper()
+
+
+@pytest.mark.parametrize("limit", ["message", "time", "working", "operator"])
+def test_a_sample_limit_leaves_the_ledger_and_the_provisional_answer(
+    tmp_path: Path, limit: str
+) -> None:
+    async def run_members(control: SwarmControl) -> StopReason:
+        control.start("early")
+        async for _ in control.events():
+            pass
+        control.start("busy")
+        # ends only when the busy member does, by the sample's message limit
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            [
+                member(
+                    generator(scripted_model(), calls=1, answer="early answer"),
+                    name="early",
+                ),
+                member(_busy(limit), name="busy"),
+            ],
+            controller=_controller(run_members, f"limits_test_exhaustion_{limit}"),
+            channels=[],
+            # a time cap above the sample's limit, which ends the swarm first
+            budget=Budget(time=60) if limit == "time" else Budget(),
+        ),
+        message_limit=6 if limit == "message" else None,
+        time_limit=1 if limit == "time" else None,
+        working_limit=1 if limit == "working" else None,
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    assert log.samples is not None
+    [sample] = log.samples
+    assert sample.limit is not None and sample.limit.type == limit
+    # the provisional answer
+    assert sample.output.completion == "early answer"
+    record = SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
+    assert (record.final.member, record.final.provisional) == ("early", True)
+    # the ledger
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    if limit != "message":
+        # no stop began; the busy member that raised the message limit has ended, which
+        # can reach the controller first
+        assert ledger.stop_reason is None
+    assert ledger.ended_by == (
+        "operator" if limit == "operator" else f"sample_limit:{limit}"
+    )
+    assert ledger.interrupted and not ledger.total_complete
+    assert {m.name: m.status for m in ledger.members} == {
+        "early": "submitted",
+        # a limit it raised itself is a foreign error; the others cancel it
+        "busy": "errored" if limit == "message" else "cancelled",
+    }
+    assert [
+        e
+        for e in sample.events
+        if isinstance(e, InfoEvent)
+        and e.source == "inspect_swarm"
+        and isinstance(e.data, dict)
+        and e.data.get("type") == "ledger"
+    ]
+
+
+@agent
+def cleanup_crash() -> Agent:
+    # works until cancelled, and its cleanup then fails
+    async def execute(state: AgentState) -> AgentState:
+        try:
+            await anyio.sleep_forever()
+        finally:
+            raise RuntimeError("cleanup failed")
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_cleanup_error_after_a_sample_limit_records_an_unknown_end() -> None:
+    # the error and the sample's limit cannot be ordered from what they show, so
+    # neither is recorded as the end; Inspect records the crash
+    ledgers: list[SwarmLedger] = []
+    # bare on asyncio, grouped with the cancellation on trio
+    with pytest.raises(BaseException) as raised:
+        async with sample(time=0.05):
+            try:
+                await swarm(
+                    member(cleanup_crash()), channels=[], budget=Budget(time=60)
+                )(AgentState(messages=[ChatMessageUser(content="task")]))
+            finally:
+                ledgers.append(_ledger())
+    # the cleanup error still propagates
+    assert "cleanup failed" in [str(e) for e in _leaves(raised.value)]
+    [ledger] = ledgers
+    assert (ledger.stop_reason, ledger.ended_by, ledger.interrupted) == (
+        None,
+        "unknown",
+        True,
+    )
+
+
+@pytest.mark.anyio
+async def test_a_cancellation_the_sample_does_not_explain_records_an_unknown_end() -> (
+    None
+):
+    ledgers: list[SwarmLedger] = []
+    async with sample():
+        with anyio.move_on_after(0.01):
+            try:
+                await swarm(sleeper(), channels=[])(
+                    AgentState(messages=[ChatMessageUser(content="task")])
+                )
+            finally:
+                ledgers.append(_ledger())
+    [ledger] = ledgers
+    assert (ledger.stop_reason, ledger.ended_by, ledger.interrupted) == (
+        None,
+        "unknown",
+        True,
+    )
+
+
+@agent
+def limited_cleanup(model: Model, owned: list[LimitExceededError]) -> Agent:
+    # reaches its own limit in one task, still cleaning up when the sample's time limit
+    # cancels it, while another task's cleanup fails
+    async def execute(state: AgentState) -> AgentState:
+        async def limited() -> None:
+            try:
+                await model.generate(state.messages)
+            except LimitExceededError as ex:
+                owned.append(ex)
+                raise
+            finally:
+                # until the sample's time limit has cancelled the other task
+                deadline = sample_limits().time
+                assert deadline.limit is not None
+                with anyio.CancelScope(shield=True):
+                    while deadline.usage < deadline.limit + 0.05:
+                        await anyio.sleep(0.005)
+
+        async def failing_cleanup() -> None:
+            try:
+                await anyio.sleep_forever()
+            finally:
+                raise RuntimeError("cleanup failed")
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(limited)
+            tg.start_soon(failing_cleanup)
+            await anyio.sleep_forever()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_cancellation_grouped_with_errors_loses_the_swarms_leaves() -> None:
+    # on trio the cancellation stays in the member's group, which its wrapper does not
+    # catch, so the runtime removes the member's limit
+    owned: list[LimitExceededError] = []
+    with pytest.raises(BaseException) as raised:
+        async with sample(time=0.2):
+            await swarm(
+                member(
+                    limited_cleanup(scripted_model(), owned),
+                    limits=[token_limit(1)],
+                ),
+                channels=[],
+                budget=Budget(time=60),
+            )(AgentState(messages=[ChatMessageUser(content="task")]))
+    # the member's limit was raised before the sample's time limit
+    [limit] = owned
+    assert isinstance(limit.source, SwarmNode)
+    leaves = _leaves(raised.value)
+    assert "cleanup failed" in [str(e) for e in leaves]
+    assert not [
+        e
+        for e in leaves
+        if isinstance(e, LimitExceededError) and isinstance(e.source, SwarmNode)
+    ]
+
+
+def test_the_swarms_messages_stay_within_a_small_sample_message_limit(
+    tmp_path: Path,
+) -> None:
+    # each member's conversation fits the limit: the input, its preamble and two
+    # replies; all three together, or with the swarm's, would not
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            member(generator, args={"model": scripted_model(), "calls": 2}, count=3),
+            channels=[],
+        ),
+        message_limit=5,
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    assert log.samples is not None
+    [sample] = log.samples
+    assert sample.limit is None
+    assert [m.role for m in sample.messages] == ["user", "assistant"]
+
+
+@pytest.mark.anyio
+async def test_the_ledger_is_written_after_the_final_step() -> None:
+    # so that the final meter it reports covers the final step
+    stop = await run_swarm(swarm(generator(scripted_model()), channels=[]))
+    kinds = [
+        e.data.get("kind", e.data.get("type"))
+        for e in stop.transcript.events
+        if isinstance(e, InfoEvent)
+        and e.source == "inspect_swarm"
+        and isinstance(e.data, dict)
+    ]
+    assert kinds[-2:] == ["final", "ledger"]
 
 
 @tool

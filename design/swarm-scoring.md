@@ -94,10 +94,11 @@ In inspect_ai unless noted.
 
 ### Terms
 
-- **Member output.** The member's `AgentState.output` when it stops, however it stops: what Inspect would have scored had that member been the only solver. The runtime's member wrapper keeps a reference to the member's `AgentState`, as `as_solver()` does, so the output survives the member's own limit and the stop procedure. For agents that do not update their state in place, a cancelled member's output is empty.
+- **Member output.** The member's `AgentState.output` when it stops, however it stops: what Inspect would have scored had that member been the only solver. The runtime's member wrapper keeps a reference to the member's `AgentState`, as `as_solver()` does, so the output survives the member's own limit and the stop procedure. For agents that do not update their state in place, a cancelled member's output is empty. The wrapper does this since M1-5 (#31): it builds the member's `AgentState` itself and calls the agent on it, rather than through `run()`, which would discard the state when the agent raises (`src/inspect_swarm/_member.py`, `_run_member()`). A member with background work keeps the output its agent ended with through its drain ([swarm-background-members.md](swarm-background-members.md#entering-the-owner)).
 - **Submission.** A member output from a member that ended with status `submitted`: it finished normally.
   - For `react()` that is a submit; for a bridged agent it is the agent returning.
   - A member that ended with any other status (stopped, its own or the swarm's limit, cancelled, errored) has an output but no submission.
+  - A member with background work ends after its drain (M2-5). A foreign error from one of its background children during the drain makes it `errored`, even when its agent had submitted, so that submission never enters the provisional answer, which holds only ended members' submissions ([swarm-background-members.md Statuses, ended, and the record](swarm-background-members.md#statuses-ended-and-the-record)).
   - Each member submits at most once in M1, because a member runs once and `react()`'s internal attempts are not visible outside it.
 - **Not started.** A member the controller never started stays `pending`. It has no output and no submission.
 - **Final answer.** What the swarm returns as its `AgentState.output`.
@@ -134,7 +135,7 @@ class MemberResult(BaseModel):
     state: MemberState                # swarm-api.md: "pending", "running" or "ended"
     status: str | None                # the limits deep dive's status once ended, else None
     submitted: bool                   # status == "submitted"
-    time: float | None                # swarm time when the member stopped
+    time: float | None                # swarm time when the member ended, after any background drain (M2-5)
 
 class FinalRecord(BaseModel):
     mode: str | None                  # the mode that produced the answer: "first" in M1
@@ -158,7 +159,7 @@ class SwarmResultRecord(BaseModel):
   - the common fields `member` and `span_id` (the swarm's span for `final`).
 
   Each event is written inside the member's span or the swarm's span. The events put the result in the transcript at the time it happened; the store record is what scorers read. The payload format is the Observer's ([Observer](swarm.md#observer-evidence-accounting-and-metrics)). This design adds the `result` type, as the communication design adds `comm`.
-- **No outputs in M1.** Nothing in M1 reads a member's output from the record. `first` uses `submitted` and `time`, and the chosen member's output reaches the returned `AgentState`, `TaskState.output` and the sample's logged output on its own; the runtime holds the members' outputs in memory. Inspect copies each store change into every span open at the time, so writing whole outputs as members end would grow the log roughly with the square of the member count (meridianlabs-ai/inspect_ai#589). Part 2 adds them ([What the record adds](#what-the-record-adds)) (decision: Ransom, 2026-10-19). Evidence events carry the member name and status, not the text.
+- **No outputs in M1.** Nothing in M1 reads a member's output from the record. `first` uses `submitted` and `time`, and the chosen member's output reaches the returned `AgentState`, `TaskState.output` and the sample's logged output on its own; the runtime holds the members' outputs in memory. The decision was also for log size: Inspect copies each store change into every span open at the time, so writing whole outputs as members end would grow the log roughly with the square of the member count (meridianlabs-ai/inspect_ai#589). The store-event switch removes that reason: spans inside the swarm log no `StoreEvent`s, so an output written there is logged in the swarm's span's net change and the enclosing spans', a fixed number of copies however many members run (decision: Ransom, 2026-10-19; [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)). M1 still writes no outputs, because nothing reads them; Part 2 can add them ([What the record adds](#what-the-record-adds)) (decision: Ransom, 2026-10-19). Evidence events carry the member name and status, not the text.
 - **Additive later.** Part 2 adds optional fields to these models ([What the record adds](#what-the-record-adds)). `version` stays 1, because no existing field changes meaning, and an M1 record reads as the record of a swarm without a result contract.
 
 ### Comparisons in M1

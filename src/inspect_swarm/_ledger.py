@@ -117,8 +117,12 @@ class SwarmLedger(BaseModel):
     native_compaction_classes: list[str]
     # per capped kind: usage at the end minus the cap, if positive
     overshoot: dict[str, float]
-    # how the swarm stopped, or None when it ended without a stop
+    # the reason of the swarm's own stop, the first one begun; None when none began
     stop_reason: str | None
+    # the sample limit (sample_limit:<type>) or operator interrupt that ended the swarm,
+    # even during its stop; "unknown" when an outside cause may have ended it but
+    # cannot be attributed; None when nothing from outside ended it
+    ended_by: str | None
     # a foreign error or outside cancellation ended the swarm
     interrupted: bool
     # the final step was cancelled
@@ -211,6 +215,7 @@ class LedgerInterval:
         final: CostPair,
         swarm: CostPair,
         stop_reason: str | None,
+        ended_by: str | None,
         interrupted: bool,
         final_cancelled: bool,
     ) -> SwarmLedger:
@@ -280,6 +285,7 @@ class LedgerInterval:
             native_compaction_classes=classes,
             overshoot=_overshoot(caps, time_cap, time.monotonic() - self._start_time),
             stop_reason=stop_reason,
+            ended_by=ended_by,
             interrupted=interrupted,
             final_cancelled=final_cancelled,
             resumed=self._resumed,

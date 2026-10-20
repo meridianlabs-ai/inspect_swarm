@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import anyio
 from anyio.abc import TaskGroup
 from inspect_ai.agent import Agent, AgentState
+from inspect_ai.log._samples import sample_active
 from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
 from inspect_ai.util import Limit, current_span_id, sample_limits
 
@@ -20,7 +21,6 @@ from .._member import (
     classify_errors,
     member_nodes,
     run_member,
-    unwrap,
 )
 from .._record import MemberResult, MemberState
 
@@ -48,7 +48,7 @@ class MemberHandle(Protocol):
 
     @property
     def status(self) -> str | None:
-        """How the member ended, once it has: `submitted`, `stopped`, `share`, `member_limit:<type>`, `swarm_cap`, `cancelled` or `errored`."""
+        """How the member ended, once it has: `submitted`, `unsubmitted`, `stopped`, `share`, `member_limit:<type>`, `swarm_cap`, `cancelled` or `errored`."""
         ...
 
     @property
@@ -310,28 +310,54 @@ class SwarmRun:
         # the swarm's span
         self._span_id = current_span_id()
         self._settle()
-        error: Exception | None = None
+        error: BaseException | None = None
         bus_token = current_bus.set(self.bus)
         ended = False
         try:
-            with ExitStack() as caps:
-                for node in [*self._swarm_meter.nodes, *self._caps]:
-                    caps.enter_context(node)
-                async with anyio.create_task_group() as members_tg:
-                    self._members_tg = members_tg
-                    self._member_ctx = contextvars.copy_context()
-                    async with anyio.create_task_group() as runtime_tg:
-                        runtime_tg.start_soon(self._supervise, runtime_tg)
-                        if self._time is not None:
-                            runtime_tg.start_soon(self._time_cap, self._time)
-                        runtime_tg.start_soon(self._run_controller, controller)
-            ended = True
+            with ExitStack() as meter:
+                for node in self._swarm_meter.nodes:
+                    meter.enter_context(node)
+                try:
+                    with ExitStack() as caps:
+                        for node in self._caps:
+                            caps.enter_context(node)
+                        async with anyio.create_task_group() as members_tg:
+                            self._members_tg = members_tg
+                            self._member_ctx = contextvars.copy_context()
+                            async with anyio.create_task_group() as runtime_tg:
+                                runtime_tg.start_soon(self._supervise, runtime_tg)
+                                if self._time is not None:
+                                    runtime_tg.start_soon(self._time_cap, self._time)
+                                runtime_tg.start_soon(self._run_controller, controller)
+                except (Exception, BaseExceptionGroup) as ex:
+                    # a foreign error from a member or the controller, or on trio a
+                    # cancellation grouped with errors, which the wrappers do not
+                    # catch. The swarm's own leaves are removed here, so that none
+                    # reaches the runner as the sample's limit; a cancellation stays,
+                    # and skips the final step. Only the swarm's own leaves would leave
+                    # nothing to raise.
+                    _, _, error = classify_errors(ex, self._nodes(), [])
+                if error is None:
+                    # the final step, outside the caps: only the sample's limits apply
+                    with ExitStack() as final:
+                        for node in self._final_meter.nodes:
+                            final.enter_context(node)
+                        finalise(
+                            self._state,
+                            self._input,
+                            self._results(),
+                            self._outputs(),
+                            span_id=self._span_id,
+                            stop_reason=self.stop_reason,
+                        )
+                    ended = True
         except Exception as ex:
-            # a foreign error from a member or the controller; the wrappers have
-            # already removed the swarm's own leaves
+            # from the final step, under the sample's limits
             error = ex
+            raise
         finally:
-            current_bus.reset(bus_token)
+            # synchronous, so that it runs under cancellation too; the provisional
+            # answer is already written, as each change to the record writes it
             write_ledger(
                 interval.ledger(
                     budget=self._budget,
@@ -352,20 +378,16 @@ class SwarmRun:
                     final=self._final_meter,
                     swarm=self._swarm_meter,
                     stop_reason=self.stop_reason,
+                    ended_by=None if ended else _exhaustion(error),
                     interrupted=not ended,
+                    # M1's final step does not await, so nothing can cancel it
                     final_cancelled=False,
                 )
             )
+            # last, so that the bus is current through the final step and the ledger
+            current_bus.reset(bus_token)
         if error is not None:
-            raise unwrap(error)
-        finalise(
-            self._state,
-            self._input,
-            self._results(),
-            self._outputs(),
-            span_id=self._span_id,
-            stop_reason=self.stop_reason,
-        )
+            raise error
 
     def stop(self, reason: str) -> None:
         # the first call wins; everything before the grace period is synchronous, so
@@ -486,6 +508,16 @@ class SwarmRun:
             return self._grace
         return min(self._grace, max(0.0, (time.limit - time.usage) / 2))
 
+    # every node this run created, the members' included
+    def _nodes(self) -> list[Limit]:
+        return [
+            *self._swarm_meter.nodes,
+            *self._caps,
+            *self._runtime_lever.nodes,
+            *self._final_meter.nodes,
+            *(node for m in self._members for node in m.nodes),
+        ]
+
     def _lookup(self, name: str) -> MemberRun:
         try:
             return self._by_name[name]
@@ -504,3 +536,51 @@ class SwarmRun:
     def _notify(self) -> None:
         self._changed.set()
         self._changed = anyio.Event()
+
+
+# How a sample limit or the operator ended the swarm, from direct evidence only: the
+# raised error's sample-limit leaf, or for a cancellation what the sample shows.
+# "unknown" for a cancellation the sample does not explain, and for a foreign error
+# while the sample shows an outside cause, since which came first is not known. None
+# for a foreign error with no outside cause.
+def _exhaustion(error: BaseException | None) -> str | None:
+    if error is not None:
+        limits = sample_limits()
+        roots = [
+            limits.token,
+            limits.cost,
+            limits.message,
+            limits.turn,
+            limits.working,
+            limits.time,
+        ]
+        _, limit, _ = classify_errors(error, [], roots)
+        if limit is not None:
+            return f"sample_limit:{limit.type}"
+        if _errors(error) is not None:
+            return None if _sample_cause() is None else "unknown"
+    # a cancellation leaving the run is never the swarm's own: its scopes catch those
+    return _sample_cause() or "unknown"
+
+
+# An error without its cancellations, or None when it has nothing else.
+def _errors(error: BaseException) -> BaseException | None:
+    group = (
+        cast(BaseExceptionGroup[BaseException], error)
+        if isinstance(error, BaseExceptionGroup)
+        else BaseExceptionGroup("swarm", [error])
+    )
+    return group.split(anyio.get_cancelled_exc_class())[1]
+
+
+# The outside cause the sample shows, or None.
+def _sample_cause() -> str | None:
+    active = sample_active()
+    if active is not None and active.interrupt_action is not None:
+        return "operator"
+    if active is not None and active.limit_exceeded_error is not None:
+        return f"sample_limit:{active.limit_exceeded_error.type}"
+    time = sample_limits().time
+    if time.limit is not None and time.usage >= time.limit:
+        return "sample_limit:time"
+    return None

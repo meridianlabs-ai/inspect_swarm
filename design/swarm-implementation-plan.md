@@ -8,12 +8,12 @@ This is the build plan for inspect_swarm across the merged designs. It is a plan
 
 There are two milestones (decision: Ransom, 2026-10-13):
 
-- **M1, ready for first internal usage.** A leaderless swarm over a shared sandbox, with full accounting: the `swarm()` API with registered controllers and channels, per-member tool state, a budget cap that stops members in an orderly way, a ledger of what was actually spent, the final answer `first`, with each member's submission status and time recorded, and evidence and metrics in the log. Existing task scorers score it unchanged. Two small inspect_ai pull requests land first: the registry types and the tool-state scope.
+- **M1, ready for first internal usage.** A leaderless swarm over a shared sandbox, with full accounting: the `swarm()` API with registered controllers and channels, per-member tool state, a budget cap that stops members in an orderly way, a ledger of what was actually spent, the final answer `first`, with each member's submission status and time recorded, and evidence and metrics in the log. Existing task scorers score it unchanged. Two small inspect_ai pull requests land first, the registry types and the tool-state scope; a third, the store-event switch, must be released before the runtime enters it, so that spans inside a swarm log no `StoreEvent`s (decision: Ransom, 2026-10-19).
 - **M2, ready for external usage.** What an external team needs to port its own agent-swarm experiment and gain from it, measured against Epoch's LeanOpenProblems swarm: a sandbox per member, background deepagent members, a shared-memory channel routed through a monitored bus, budget visibility for members, custom limits that end only the member and gate-check metrics, plus user docs, examples, an API stability statement and a first PyPI release. The port keeps its own scorer, so M2 adds no scoring beyond M1's.
 
 Direct messages between members and scoring beyond `first` (the result contract, per-member scores, `baseline()` and the comparisons with epochs) are not needed for that and are future work ([Decisions](#decisions), Ransom, 2026-10-14).
 
-Each milestone is a set of small pull requests. Most are in this repository; three are in inspect_ai, each a separate pull request with its own place in the dependency graph. Neither milestone needs a change in inspect_swe or inspect_sentinel. Everything else in the designs is future work, in any order.
+Each milestone is a set of small pull requests. Most are in this repository; four are in inspect_ai, each a separate pull request with its own place in the dependency graph. Neither milestone needs a change in inspect_swe or inspect_sentinel. Everything else in the designs is future work, in any order.
 
 ## Why
 
@@ -39,10 +39,10 @@ What the plan starts from, checked on 2026-10-13:
 
 - **No runtime code.** `src/inspect_swarm/` holds only `__init__.py` (exporting `__version__` and nothing else), `_version.py` and `py.typed`; `tests/` holds the scaffold's package test.
 - **The merged designs:** [swarm-overview.md](swarm-overview.md), [swarm.md](swarm.md), [swarm-api.md](swarm-api.md), [swarm-communication.md](swarm-communication.md) (with its optional push delivery), [swarm-limits.md](swarm-limits.md), [swarm-scoring.md](swarm-scoring.md), [swarm-lean-open-problems.md](swarm-lean-open-problems.md) and [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md).
-- **The inspect_ai prerequisites have not landed.** inspect_ai `main`'s `RegistryType` has no `swarm_controller` or `swarm_channel` (`src/inspect_ai/_util/registry.py`), and `inspect_ai.util` has no `tool_state_scope`. This repository's lockfile installs inspect_ai `0.3.278.dev1+gfccfb298e`; the latest inspect_ai release is 0.3.279 (2026-10-12).
+- **The inspect_ai prerequisites have not landed.** inspect_ai `main`'s `RegistryType` has no `swarm_controller` or `swarm_channel` (`src/inspect_ai/_util/registry.py`), and `inspect_ai.util` has no `tool_state_scope`. On 2026-10-19, `track_store_changes()` read no switch (`src/inspect_ai/log/_transcript.py:1104-1111`, at `5a2bafe9`). This repository's lockfile installs inspect_ai `0.3.278.dev1+gfccfb298e`; the latest inspect_ai release is 0.3.279 (2026-10-12).
 - **inspect_sentinel's dispatcher has reached inspect_ai `main`.** `src/inspect_ai/_sentinel/` (with `_dispatch.py`) is on `main`, with commits through 2026-10-12 (#5811, "sentinel monitors can watch every agent's model calls"). Its tool stages still do not run for bridged agents: `warn_sentinel_bridged()` (`src/inspect_ai/_sentinel/_context.py:57-64`, at `81c1668d3`) warns that bridged agents' tool calls are not monitored, only their model calls (inspect_ai#5759). So the bus's `policy=` hook is still needed for bridged sends ([Decisions](#decisions), item 5).
 - **The scaffold is still on Python 3.10.** `pyproject.toml` (`requires-python = ">=3.10"`, pyright `pythonVersion = "3.10"`), `AGENTS.md`, `CONTRIBUTING.md` and the CI matrix in `.github/workflows/build.yaml` (`["3.10", "3.14"]`) predate the 3.11 decision (decision: Ransom, 2026-10-07; [swarm.md Compatibility](swarm.md#compatibility-and-migration)).
-- **Releases are off.** `.github/workflows/release.yaml` has only `workflow_dispatch`; its comment says to restore the `push` trigger to cut 0.1.0. The `inspect-ai` dependency was a PyPI version floor (`>=0.3.281`, #25, 2026-10-16) until M1-4 (#27) moved it back to inspect_ai's git `main` for AI-2 (inspect_ai#5861, merged 2026-10-16 but in no release yet). That is temporary: once a release contains #5861 the dependency returns to an `inspect-ai>=X` floor at that release (decision: Ransom, 2026-10-16).
+- **Releases are off.** `.github/workflows/release.yaml` has only `workflow_dispatch`; its comment says to restore the `push` trigger to cut 0.1.0. The `inspect-ai` dependency was a PyPI version floor (`>=0.3.281`, #25, 2026-10-16) until M1-4 (#27) moved it back to inspect_ai's git `main` for AI-2 (inspect_ai#5861, merged 2026-10-16 but in no release yet). That is temporary: once a release contains #5861 the dependency returns to an `inspect-ai>=X` floor at that release (decision: Ransom, 2026-10-16). A release of inspect_swarm needs every inspect_ai change it uses in a PyPI release of inspect_ai (`pyproject.toml`, checked 2026-10-19).
 - **Sibling packages' layout for docs and examples.** inspect_sentinel and inspect_flow keep a Quarto site in `docs/` (`_quarto.yml`); inspect_sentinel keeps runnable `examples/`. This repository's `pyproject.toml` already excludes `docs/` from the wheel and from ruff.
 
 ## Milestones
@@ -59,7 +59,8 @@ M1 is a leaderless filesystem swarm with full accounting ([swarm.md Implementati
 - `InfoEvent` evidence, a named timeline per member, a recorded stop reason, metrics, harness-validity checks, and a simple critical path: the steps to the answer and the longest member's step count (decision: Ransom, 2026-10-14; [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics));
 - thin analysis helpers for realized-cost comparisons and λ fits;
 - three small items from [swarm-lean-open-problems.md](swarm-lean-open-problems.md#recommended-changes-to-our-designs): the `unsubmitted` status, the rejection of an integer `background`, and documentation that the default `memory()` is private to each member ([table](#where-the-deep-dives-milestone-items-land));
-- the two inspect_ai pull requests that land first: the registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09).
+- the two inspect_ai pull requests that land first: the registry types (decision: Ransom, 2026-10-08) and the tool-state scope (decision: Ransom, 2026-10-09);
+- no `StoreEvent`s inside the swarm: the inspect_ai store-event switch (AI-7) and the runtime entering it (M1-14) (decision: Ransom, 2026-10-19; [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)).
 
 Done means: an internal user can run a leaderless swarm of `react()`, synchronous `deepagent()` or bridged members on an existing task, sweep member count and budget as task parameters, and compare arms on the ledger's realized cost, with the task's own scorers unchanged.
 
@@ -67,7 +68,7 @@ Done means: an internal user can run a leaderless swarm of `react()`, synchronou
 
 M2's test is Epoch's LeanOpenProblems swarm: an external team could port that experiment to inspect_swarm and gain from doing so ([swarm-lean-open-problems.md](swarm-lean-open-problems.md)). Its analysis says what the port needs and what the port gains ([Could inspect_swarm express their experiment?](swarm-lean-open-problems.md#could-inspect_swarm-express-their-experiment), [What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)). M2 contains:
 
-- **What the port needs:** per-member sandboxes (Recommendation 1), an agent-raised custom limit that ends only the member (Recommendation 2), and background deepagent members, which need inspect_ai's scoped owner for `background()` (Recommendation 3). Without the first two the port cannot express the experiment; without the third it runs a different arm. With them it runs with its scorer unchanged ([With recommendations 1 and 2 it can](swarm-lean-open-problems.md#could-inspect_swarm-express-their-experiment)).
+- **What the port needs:** per-member sandboxes (Recommendation 1), an agent-raised custom limit that ends only the member (Recommendation 2), and background deepagent members, which need a private inspect_ai seam for where `background()` starts work and an owner per member in inspect_swarm (Recommendation 3; [swarm-background-members.md](swarm-background-members.md)). Without the first two the port cannot express the experiment. Without the third a port must run `deepagent()` synchronously, so each subagent call blocks its member, which changes the experiment and makes its results not comparable to Epoch's. With them it runs with its scorer unchanged ([With recommendations 1 and 2 it can](swarm-lean-open-problems.md#could-inspect_swarm-express-their-experiment)).
 - **What the port gains:** members that can see the budget that will stop them (Recommendation 4), gate checks as metrics (Recommendation 5), and a shared-memory channel through the bus (Recommendation 7).
 - **The bus**, because the shared-memory channel runs through it: `deliver()`, storm controls, evidence, member binding, notices and communication metrics ([swarm-communication.md](swarm-communication.md#implementation-plan), steps 1, 2, 4 and 5), with a construction-time refusal of bridged members in a swarm that has a bus channel (M2-6).
 - **What any external release needs:** user docs, examples (among them the `until_proved` controller of Recommendation 6), a statement of which API is supported and which is experimental, packaging, the Python floor, and a first PyPI release that depends on released inspect_ai.
@@ -92,7 +93,7 @@ Each item a deep dive assigns to a milestone, with the milestone it is in and wh
 | Per-member sandboxes, `member(sandbox=, visible_sandboxes=)` | [Lean Rec. 1](swarm-lean-open-problems.md#1-m2-per-member-sandboxes-as-an-opt-in-member-field) | M2 | Needed by the external port; internal first use runs on the shared default (decision: Ransom, 2026-10-07) |
 | Agent-raised custom limit ends only the member | [Lean Rec. 2](swarm-lean-open-problems.md#2-m2-an-agent-raised-custom-limit-ends-only-the-member) | M2 | Needed by the external port; until then such an error ends the sample loudly, as it does for any agent today, rather than producing a wrong result |
 | Reject integer `background` as well as `True` | [Lean Rec. 3](swarm-lean-open-problems.md#3-m2-background-deepagent-members), M1 part | M1 | Without it `deepagent(background=64)` slips past the rejection and breaks the drain guarantee silently |
-| Background deepagent members (inspect_ai scoped owner) | Lean Rec. 3; [swarm.md Members](swarm.md#members) | M2 | Both of Epoch's configs use them; without them the port is a different arm |
+| Background deepagent members (a private inspect_ai seam for `background()`, an owner per member in inspect_swarm) | Lean Rec. 3; [swarm.md Members](swarm.md#members); [swarm-background-members.md](swarm-background-members.md) | M2 | Both of Epoch's configs use them; without them a port must run `deepagent()` synchronously, so each subagent call blocks its member, which changes the experiment and makes its results not comparable to Epoch's |
 | Budget visible to members | [Lean Rec. 4](swarm-lean-open-problems.md#4-m2-members-can-see-the-budget-that-will-stop-them) | M2 | Members pacing themselves is the external port's need; first internal use needs the cap, not the view |
 | Gate checks as metrics | [Lean Rec. 5](swarm-lean-open-problems.md#5-m2-gate-checks-as-metrics) | M2 | The outcome gated tasks like Epoch's care about; not needed to run or compare a first internal swarm |
 | Critical-path steps for leaderless swarms | [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics), Metrics | M1, the simple definition; the dependency-linked one Future | Decision: Ransom, 2026-10-14. M1's only channel, the filesystem, is observed but not attributed, so a chain linked by reads of another member's writes has no cross-member edges in M1 |
@@ -139,19 +140,22 @@ flowchart LR
   M1_9 --> M1_13
   AI3[AI-3 compact event, optional]
   AI4[AI-4 errored-event status, optional]
+  AI7[AI-7 store-event switch] --> M1_14[M1-14 store events off in the swarm]
+  M1_4 --> M1_14
+  M1_14 --> M1_13
 ```
 
 What can be built in parallel, in waves (each wave starts when its dependencies merge):
 
-1. AI-1, AI-2 and M1-0, all independent. The optional AI-3 and AI-4 can go at any point.
+1. AI-1, AI-2, AI-7 and M1-0, all independent. The optional AI-3 and AI-4 can go at any point.
 2. M1-1 (after AI-1 and M1-0) and M1-2 (after M1-0).
 3. M1-3.
 4. M1-4 (needs AI-2).
-5. M1-5, M1-6 and M1-8, in parallel.
+5. M1-5, M1-6 and M1-8, in parallel; M1-14 once a PyPI release contains AI-7.
 6. M1-7, M1-9, M1-10 and M1-12, in parallel.
 7. M1-11 and M1-13.
 
-The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13, with AI-2 needed by M1-4. Starting AI-2 in wave 1 keeps it off the critical path.
+The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13, with AI-2 needed by M1-4 and AI-7 by M1-14, which M1-13 waits for. Starting AI-2 and AI-7 in wave 1 keeps them off the critical path, as long as a release with AI-7 is out in time for M1-14 to merge before M1-7 does.
 
 ### inspect_ai
 
@@ -174,6 +178,12 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 **AI-4 (optional). A status code on errored model events.** Lets the ledger count a verified pre-inference rejection (an HTTP 429) as zero spend instead of unknown.
 - Depends on: nothing. Nothing in M1 depends on it.
 - Implements: the same open question; undecided.
+
+**AI-7. The store-event switch.** A context-scoped switch, a `ContextVar` with a context manager to enter it, that `track_store_changes()` and the checkpointing span (`SpanRotationScope`, when it snapshots the store for a span) read when a span is entered: spans entered inside it take no snapshots and log no `StoreEvent`, and spans entered before it diff as now. Exported from `inspect_ai.util`; the pull request settles the name, which the designs write as `suppress_store_events()` as a placeholder. A companion implement loop is building it (2026-10-19). It changes nothing outside the switch, and leaves the raising-span path and meridianlabs-ai/inspect_ai#589's general fix to their own pull requests ([swarm.md Not this design](swarm.md#not-this-design)).
+- Files: `src/inspect_ai/log/_transcript.py`, `src/inspect_ai/util/_span.py`, `src/inspect_ai/util/__init__.py`.
+- Tests: in inspect_ai's own suite: a span entered inside the switch logs no `StoreEvent`, nor do spans nested in it or tasks started inside it; a span entered before it logs the net change; the checkpointing span inside it logs none. No Docker.
+- Depends on: nothing. M1-14 needs it in a PyPI release.
+- Implements: [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics) (decision: Ransom, 2026-10-19).
 
 ### inspect_swarm
 
@@ -220,7 +230,7 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 - Implements: [swarm-limits.md](swarm-limits.md#implementation-plan) step 4, [The ledger](swarm-limits.md#the-ledger); [swarm.md Accounting](swarm.md#observer-evidence-accounting-and-metrics).
 
 **M1-7. Exhaustion and the final step.** M1-4 already supplies recovery from the swarm's own caps (the cap node begins the stop and the member wrapper records `swarm_cap`, `src/inspect_swarm/_member.py`, `run_member()`) and propagation with the swarm's own errors removed from mixed groups (`classify_errors()`, in the wrapper and for the controller's `run` in `src/inspect_swarm/_controller/_control.py`). What is left for M1-7: the synchronous `finally` that writes the ledger and the output on every exit path, including cancellation from outside; the guarantee that the ledger and the provisional answer survive a sample limit; and the final meter around finalisation and the provisional answer.
-- Files: `src/inspect_swarm/_swarm.py`, `src/inspect_swarm/_final.py`.
+- Files: `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_ledger.py`, `src/inspect_swarm/_member.py`.
 - Tests: the exhaustion cases of `tests/test_swarm_limits.py`, including that a sample time limit leaves the ledger and the provisional answer written.
 - Depends on: M1-5 (the finalisation it wraps) and M1-6 (the ledger its tests check). This runs swarm-limits.md's steps 3 and 4 in the other order, so that step 3's test of the ledger surviving a sample limit lands with it.
 - Implements: [swarm-limits.md](swarm-limits.md#implementation-plan) step 3, [Exhaustion and errors](swarm-limits.md#exhaustion-and-errors), [The final step and the reserve](swarm-limits.md#the-final-step-and-the-reserve).
@@ -243,7 +253,7 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 - Depends on: M1-5, M1-6.
 - Implements: [swarm.md Observer](swarm.md#observer-evidence-accounting-and-metrics) ("Metrics", "Member views", the harness-validity bullet of "Analysis").
 
-**M1-11. Critical path for leaderless swarms, the simple definition** (decision: Ransom, 2026-10-14). Two per-sample metrics: `steps_to_answer`, the selected member's steps up to its submission (absent when there is no answer), and `longest_member_steps`, the largest step count of any member. A step is one completed model call in the member's spans, cache replays included, from the member's ledger line (`calls.calls + calls.cache_replays`, M1-6). Under `first` the selected member ends at its submission, so its steps to the answer are all its steps. Calls a member makes concurrently (parallel subagent tool calls) count one each, so both numbers bound the sequential depth from above; the metric's docstring says so.
+**M1-11. Critical path for leaderless swarms, the simple definition** (decision: Ransom, 2026-10-14). Two per-sample metrics: `steps_to_answer`, the selected member's completed model calls through its end, including any background drain (absent when there is no answer), and `longest_member_steps`, the largest step count of any member. A step is one completed model call in the member's spans, cache replays included, from the member's ledger line (`calls.calls + calls.cache_replays`, M1-6). Under `first` the selected member ends at its submission, or after its background drain (M2-5; [swarm-background-members.md](swarm-background-members.md#statuses-ended-and-the-record)), so its steps to the answer are all its steps, drain included. Calls a member makes concurrently (parallel subagent tool calls) count one each, so both numbers bound the sequential depth from above; the metric's docstring says so.
 - Why this definition: the dependency-linked one swarm.md suggests (the longest chain of member steps linked by reads of another member's writes) needs attributed cross-member reads and writes. M1's only channel, the filesystem, is observed but not attributed, so in M1 that graph has no cross-member edges and reduces to these per-member chains. The linked definition is later work over the bus's evidence ([Future work](#future-work)), and swarm.md's caution stands: latency curves are not interpreted until it exists.
 - Files: `src/inspect_swarm/_metrics.py`. Tests: `tests/test_metrics.py`, on mockllm runs with scripted members of known step counts, including a run with no submission.
 - Depends on: M1-5 (the selected member), M1-10 (the metrics module and the ledger lines it reads). No separate design.
@@ -257,8 +267,14 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 
 **M1-13. README for internal users.** How to run a swarm on an existing task, the common configurations, and M1's documented restrictions: background members are rejected; tool state a setup solver prepared at the default instance is not carried into members, and tasks whose scorers read a member's tool state are unsupported ([swarm.md Compatibility](swarm.md#compatibility-and-migration)); the default `memory()` is private to each member and a shared board needs an explicit instance; the filesystem observation limit ([swarm.md Security](swarm.md#security)); the result record's store key `inspect_swarm:result` is owned by the runtime, task code must not write it, and a tool that reads it gives members a view of each other's results, a channel outside the bus ([swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records); decision: Ransom, 2026-10-14).
 - Files: `README.md`.
-- Depends on: M1-7, M1-8, M1-9 (so the text describes merged behaviour).
+- Depends on: M1-7, M1-8, M1-9, M1-14 (so the text describes merged behaviour).
 - Implements: the documentation parts of swarm.md's M1 and Lean Rec. 7's M1 part.
+
+**M1-14. No store events inside the swarm.** `SwarmRun.run()` enters AI-7's switch first, inside the swarm's span, so the cap nodes, the member and runtime task groups, the controller and finalisation run inside it, and the member context it copies (`self._member_ctx`) carries it into every member; always on, a swarm of one included, with no parameter. It waits for a PyPI release of inspect_ai containing both the tool-state scope and AI-7, because `src/` calls both. In `pyproject.toml` it replaces the git reference to inspect_ai `main` with `inspect-ai>=X` for that release if the reference is still there, or raises the existing floor to it otherwise, and updates `uv.lock`. M1-13's README says that a swarm's log has no `StoreEvent`s inside the swarm, only the swarm's net change; that a sample ended by an error, limit or cancellation escaping the swarm may log no `StoreEvent` of the swarm's writes, so `sample.store` is the record of the final store; and that members' `ToolEvent`s are the record of what they did.
+- Files: `src/inspect_swarm/_controller/_control.py`, `pyproject.toml`, `uv.lock`.
+- Tests: `tests/test_controller.py`: swarm.md's store-events runtime test, for a swarm of two whose members' tools write the store, for a swarm of one, and for a sample-level limit escaping the swarm, where `sample.store` keeps a member's write and no span strictly inside the swarm's span logs a `StoreEvent`. That case asserts nothing about the swarm's or the enclosing spans' `StoreEvent`s, so the upstream `try`/`finally` fix in `track_store_changes()` does not break it; today's missing diff on the raising path stays documented as an upstream limitation.
+- Depends on: M1-4, AI-7 in a PyPI release.
+- Implements: [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics) (decision: Ransom, 2026-10-19).
 
 ## M2 pull requests
 
@@ -272,7 +288,7 @@ flowchart LR
   M1 --> M2_2[M2-2 member-ending custom limits]
   M1 --> M2_3[M2-3 budget view]
   M1 --> M2_4[M2-4 gate checks]
-  D2[D-2 background owner design] --> AI5[AI-5 scoped owner for background]
+  D2[D-2 background members design, merged] --> AI5[AI-5 private seam for background]
   AI5 --> M2_5[M2-5 background deepagent members]
   M1 --> M2_5
   M1 --> M2_6[M2-6 bus core]
@@ -289,7 +305,7 @@ flowchart LR
 "M1" in the graph means the M1 pull requests the item names under "Depends on"; most M2 work needs only part of M1. Four strands are independent of each other and can be built in parallel:
 
 - **Isolation and limits:** M2-1, M2-2, M2-3 and M2-4, each alone.
-- **Background members:** D-2 → AI-5 → M2-5. D-2 starts during M1 (decision: Ransom, 2026-10-14).
+- **Background members:** D-2 → AI-5 → M2-5. D-2 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-background-members.md](swarm-background-members.md), #28).
 - **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8. D-1 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-memory-channel.md](swarm-memory-channel.md), #22).
 - **Release:** M2-11 and M2-12, after the three strands above.
 
@@ -300,16 +316,17 @@ flowchart LR
 - Depends on: nothing; [swarm-communication.md How channels plug into the bus](swarm-communication.md#how-channels-plug-into-the-bus) is the interface it implements, with the refinements of [Changes to the bus](swarm-memory-channel.md#changes-to-the-bus).
 - Implements: nothing itself; specifies [Lean Rec. 7](swarm-lean-open-problems.md#7-m2-a-shared-memory-channel-through-the-bus), built by M2-6 to M2-10.
 
-**D-2. Design: background deepagent members.** The inspect_ai scoped owner that `background()` attaches to when one encloses the caller (the sample's task group otherwise, as now), and how the swarm uses it: entering it per member, draining it on member end and at the swarm's stop, and how the ledger and statuses count background children. Written here, as [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md) designed its inspect_ai scope here.
+**D-2. Design: background deepagent members.** Done: merged on 2026-10-19 as [swarm-background-members.md](swarm-background-members.md) (#28); AI-5 and M2-5 below carry what it decided. A private inspect_ai seam through which a caller sets where `background()` starts work (the sample's task group when it is unset, as now), and an owner per member in inspect_swarm set as that target: entered per member, drained on member end and at the swarm's stop, and how the ledger and statuses count background children. Written here, as [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md) designed its inspect_ai scope here.
 - Files: `design/swarm-background-members.md`.
 - Depends on: nothing.
-- Implements: nothing yet; prepares [swarm.md Members](swarm.md#members) ("Lifting the restriction") and [Lean Rec. 3](swarm-lean-open-problems.md#3-m2-background-deepagent-members).
+- Implements: nothing itself; specifies [swarm.md Members](swarm.md#members) ("Lifting the restriction") and [Lean Rec. 3](swarm-lean-open-problems.md#3-m2-background-deepagent-members), built by AI-5 and M2-5.
 
 ### inspect_ai
 
-**AI-5. A scoped owner for `background()`.** As D-2 specifies.
-- Files and tests: as D-2 specifies (inspect_ai's `background()` utility and deepagent's background dispatch, with tests in its own suite).
-- Depends on: D-2.
+**AI-5. A private seam for where `background()` starts work.** As D-2 specifies ([The seam](swarm-background-members.md#the-seam-ai-5-inspect_ai)): a private `background_target` ContextVar and `BackgroundTarget` protocol; when the ContextVar is set, `background()` starts its task in that target instead of the sample's task group, and `BackgroundRegistry.owned_task_group()` steps aside so deepagent's children go there too. Unset, every line runs as today. It adds no public API and no docs, so it is a `refactor:` pull request.
+- Files: `src/inspect_ai/util/_background.py` (the protocol, the ContextVar and the branch in `background()`), `src/inspect_ai/agent/_deepagent/agent_tool.py` (the condition in `owned_task_group()`), and the docstrings of `background()` and `_dispatch_background()`.
+- Tests: in inspect_ai's own suite, async on its anyio backends with mockllm, no network or Docker ([Testing](swarm-background-members.md#inspect_ai-ai-5)): `tests/util/test_background.py` (unset, the existing tests pass and `background()` outside a sample still raises; set, `background()` calls the target's `start_soon` once with the caller's context and logs and re-raises as today) and `tests/agent/deepagent/test_deepagent_background.py` (a deepagent's children, a scorer's and a nested deepagent's included, go to a set target; `TestAbandonOnExit`, `test_solver_child_outlives_parent_until_sample_teardown` and `TestNoLiveSampleTaskGroup` pass unchanged).
+- Depends on: D-2 (merged).
 
 **No metadata contract in M2.** Earlier revisions of #23 added AI-6 here: an inspect_ai helper, `tool_result_metadata()`, that lets a running tool set its result message's metadata, and full `combined_from` lineage across repeated user-message merges, so that read results carried the swarm's ids in metadata. No M2 piece reads those ids; their only consumer is ORBIT's exposure observer, so the contract moved to the ORBIT port, after M2, which chooses how a read result names its records for that observer ([swarm-orbit.md P2](swarm-orbit.md#p2-bus-extensions)) ([Decisions](#decisions), item 10). The lineage fix is an optional standalone inspect_ai fix, not a swarm prerequisite.
 
@@ -330,7 +347,7 @@ None in M2, and none in M1.
 - Depends on: M1-4, M1-5.
 - Implements: [Lean Rec. 1](swarm-lean-open-problems.md#1-m2-per-member-sandboxes-as-an-opt-in-member-field).
 
-**M2-2. An agent-raised custom limit ends only the member.** A `LimitExceededError` with `type="custom"` and `source is None` ends the member with status `member_limit:custom`, bare or grouped; a group that also holds a foreign leaf re-raises only the foreign leaves.
+**M2-2. An agent-raised custom limit ends only the member.** A `LimitExceededError` with `type="custom"` and `source is None` ends the member with status `member_limit:custom`, bare or grouped; a group that also holds a foreign leaf re-raises only the foreign leaves. The rule applies when the error leaves the member's own agent. The same error raised in a background child ends that child alone, not the member, as it does from a synchronous subagent ([swarm-background-members.md The owner](swarm-background-members.md#the-owner-m2-5-inspect_swarm), "How a task ends"); the owner's rule for it in `src/inspect_swarm/_background.py`, and its test, land with whichever of M2-2 and M2-5 merges second.
 - Files: `src/inspect_swarm/_member.py`.
 - Tests: the Rec. 2 cases of Lean Testing, in `tests/test_swarm_limits.py`.
 - Depends on: M1-4 (and M1-5 for the test that `first` never selects the stopped member).
@@ -348,11 +365,11 @@ None in M2, and none in M1.
 - Depends on: M1-10.
 - Implements: [Lean Rec. 5](swarm-lean-open-problems.md#5-m2-gate-checks-as-metrics).
 
-**M2-5. Background deepagent members.** The runtime enters AI-5's owner for each member and drains it; the rejection of `deepagent(background=...)` members is lifted; the ledger and statuses cover background children as D-2 specifies.
-- Files: `src/inspect_swarm/_member.py`, `src/inspect_swarm/_swarm.py`, `uv.lock`; others as D-2 specifies.
-- Tests: as D-2 specifies, at least a `deepagent(background=True)` member whose background child is cancelled and awaited by the drain and whose spend is in the member's ledger line.
-- Depends on: AI-5 (merged on inspect_ai `main`), M1-4, M1-6.
-- Implements: [Lean Rec. 3](swarm-lean-open-problems.md#3-m2-background-deepagent-members); swarm.md Members ("Lifting the restriction").
+**M2-5. Background deepagent members.** As D-2 specifies ([The owner](swarm-background-members.md#the-owner-m2-5-inspect_swarm) to [Lifting the refusal](swarm-background-members.md#lifting-the-refusal)): the runtime enters its own owner for each member (`MemberBackground`), set as AI-5's seam, inside the member's tool-state scope and cancel scope and around its nodes; refuses background work started while a factory builds the member's agent; drains the owner when the member's agent returns (closing the lever with `member_ended`, waiting up to the effective grace, then cancelling what is left and awaiting it) and ends the member only after the drain; and lifts the rejection of `deepagent(background=...)` members, with `member()`'s docstring stating the contract. A child stopped by one of the member's nodes or a swarm cap ends alone. The ledger gains `background_started` and `background_cancelled`, and `total_complete` requires no cancelled background task. D-2's cap notification at the cap node is already on `main`: M1-4's `SwarmNode.exceeded()` calls `stop("swarm_cap")` when a cap is reached, for native and bridged members alike, so M2-5 relies on it unchanged.
+- Files: `src/inspect_swarm/_background.py` (new: `MemberBackground`); `src/inspect_swarm/_member.py` (the owner in `_run_member()` around the node stack, the construction refusal, the drain, the background counts and the agent's returned state, kept for a drain that raises, on the member's run record, `_check_background()` deleted, `member()`'s docstring); `src/inspect_swarm/_controller/_control.py` (the wrapper receives `self._grace_now` and calls it when its member-end drain begins, so the drain's grace is clipped to the sample's remaining time at that moment, not the configured grace stored before any stop; `_end()` reads the counts); `src/inspect_swarm/_ledger.py` (the two fields and the completeness rule); `pyproject.toml` (the `inspect-ai` floor, raised to the first release containing AI-5, since `_background.py` imports `background_target`) and `uv.lock`.
+- Tests: as D-2 specifies ([Testing](swarm-background-members.md#inspect_swarm-m2-5)): `tests/test_background.py` (the owner alone), `tests/test_background_members.py` (the swarm), `tests/test_member.py` (the refusal cases become acceptance cases) and `tests/test_tool_state.py`; at least a `deepagent(background=True)` member whose background child is cancelled and awaited by the drain and whose spend is in the member's ledger line.
+- Depends on: AI-5 in a PyPI release of inspect_ai (the floor in `pyproject.toml` names a release), M1-4, M1-5, M1-6.
+- Implements: [swarm-background-members.md](swarm-background-members.md), the inspect_swarm part; [Lean Rec. 3](swarm-lean-open-problems.md#3-m2-background-deepagent-members); swarm.md Members ("Lifting the restriction").
 
 **M2-6. Bus core.** `Record`, `Bus` and `deliver()` steps 0, 2, 3 and 4 with the stopping flag and `close()`; the `max_bytes` and `rate` storm controls; `sent` and `delivered` evidence; `Channel` gains `name`, `prefix`, `check()` and `open()`, with `ChannelRun` and `ChannelState`; `bus.close()` as the first synchronous act of `stop(reason)`. The other two storm controls, `max_unread` and `dedupe`, need a recipient's unread inbox, so they come with the `messages` channel, which is after M2 (decision: Ransom, 2026-10-14; deferral: Ransom, 2026-10-19). The bus hook (step 1: `swarm(policy=)`, `CommDecision`, `CommPolicy`, `SwarmView`) is not in M2: every M2 record is a native tool call that sentinel sees, so `deliver()` has no `await` ([Decisions](#decisions), item 5).
 - **The bus refinements the shared-memory channel needs** ([swarm-memory-channel.md Changes to the bus](swarm-memory-channel.md#changes-to-the-bus)): unaddressed records (`to=()`: no address resolution, self-send or recipient liveness check, and `apply()` says whom to notify); the sender's liveness checked at step 2, since a task the member left behind can run after it ends; `ChannelState.admit(record)`, called synchronously at step 2 after the storm controls, where compare-and-swap and state-dependent limits refuse a write before step 3 records it, so `apply()` cannot fail; and a commit sequence number given at step 4 and written as `seq` in `delivered`, with the JSON result `apply()` returns beside the members to notify. Record ids are attempt ids; the commit order is `seq`.
@@ -394,7 +411,7 @@ None in M2, and none in M1.
 
 **M2-12. API statement, packaging and the first release.** The README and the package docstring state which API is supported and which is experimental, as decided ([Decisions](#decisions), item 6); classifiers move from "Development Status :: 1 - Planning"; `requires-python` stays at M1-0's 3.11; the `push` trigger is restored in `release.yaml`, so Release Please opens the 0.1.0 release pull request.
 - Files: `README.md`, `src/inspect_swarm/__init__.py`, `pyproject.toml`, `.github/workflows/release.yaml`.
-- Depends on: M2-11, and an inspect_ai PyPI release containing AI-1, AI-2 and AI-5 (the floor in `pyproject.toml` names a release, so the work that uses them cannot merge before it ships). Epoch's configs pin inspect_ai 0.3.273 ([Lean, What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)); the port moves them to that release.
+- Depends on: M2-11, and an inspect_ai PyPI release containing AI-1, AI-2, AI-5 and AI-7 (the floor in `pyproject.toml` names a release, so the work that uses them cannot merge before it ships). Epoch's configs pin inspect_ai 0.3.273 ([Lean, What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)); the port moves them to that release.
 - Implements: what an external release needs.
 
 ## Future work
@@ -449,13 +466,13 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 ## Compatibility and migration
 
 - **inspect_swarm** has no released API until M2-12; nothing in M1 or M2 before it is a compatibility concern. From M2-12, the API statement says what later releases keep.
-- **Eval logs.** M1 and M2 write only existing event types, store entries and message metadata, each payload carrying `version: 1`, as the deep dives specify. No log schema, generated TypeScript type or ts-mono change is in either milestone.
-- **inspect_ai.** AI-1 adds two literal values outside the log schema; AI-2 leaves default store keys and ordinary explicit instances unchanged outside a scope, while reserving instances that start with `@` and applying the skill tool's shared install checks everywhere ([swarm.md Members](swarm.md#members)); AI-5 changes nothing outside an owner scope, as D-2 must confirm. The optional AI-3 and AI-4 add observability without changing behaviour.
+- **Eval logs.** M1 and M2 write only existing event types, store entries and message metadata, each payload carrying `version: 1`, as the deep dives specify. From M1-14, spans inside a swarm log no `StoreEvent`s, and the swarm's span logs the net change ([swarm.md Compatibility](swarm.md#compatibility-and-migration)). No log schema, generated TypeScript type or ts-mono change is in either milestone.
+- **inspect_ai.** AI-1 adds two literal values outside the log schema; AI-2 leaves default store keys and ordinary explicit instances unchanged outside a scope, while reserving instances that start with `@` and applying the skill tool's shared install checks everywhere ([swarm.md Members](swarm.md#members)); AI-5 changes nothing while its seam is unset, as D-2 confirms ([swarm-background-members.md Compatibility](swarm-background-members.md#compatibility-and-migration)); AI-7 changes nothing outside its switch. The optional AI-3 and AI-4 add observability without changing behaviour.
 - **External users' inspect_ai versions.** A release of inspect_swarm requires an inspect_ai release with its prerequisites, so users pinned to older inspect_ai (Epoch: 0.3.273) must move.
 
 ## Security
 
-This plan adds no behaviour of its own. Each pull request carries its design's Security section: [swarm.md](swarm.md#security), [swarm-api.md](swarm-api.md#security), [swarm-communication.md](swarm-communication.md#security) for the bus, [swarm-memory-channel.md](swarm-memory-channel.md#security) for the memory channel (whose paths and contents are peer model output, fenced and stamped with the bus-bound sender), [swarm-limits.md](swarm-limits.md#security), [swarm-scoring.md](swarm-scoring.md#security), and [swarm-lean-open-problems.md](swarm-lean-open-problems.md#security) for per-member sandboxes (sandbox names come from the eval author and are validated at start; a service in `visible_sandboxes` is reachable by every member, a trust decision for the eval author). D-1 and D-2 each need their own Security section: the memory channel handles model-written file names and contents, which D-1's covers ([swarm-memory-channel.md Security](swarm-memory-channel.md#security)), and the background owner changes who can outlive a member. The result record in the store is readable by every member's code, though not by models; a tool that reads it is a channel between members outside the bus, with none of its fencing or evidence, which the docs say (M1-13, M2-11).
+This plan adds no behaviour of its own. Each pull request carries its design's Security section: [swarm.md](swarm.md#security), [swarm-api.md](swarm-api.md#security), [swarm-communication.md](swarm-communication.md#security) for the bus, [swarm-memory-channel.md](swarm-memory-channel.md#security) for the memory channel (whose paths and contents are peer model output, fenced and stamped with the bus-bound sender), [swarm-limits.md](swarm-limits.md#security), [swarm-scoring.md](swarm-scoring.md#security), and [swarm-lean-open-problems.md](swarm-lean-open-problems.md#security) for per-member sandboxes (sandbox names come from the eval author and are validated at start; a service in `visible_sandboxes` is reachable by every member, a trust decision for the eval author). D-1 and D-2 each have their own Security section: the memory channel handles model-written file names and contents, which D-1's covers ([swarm-memory-channel.md Security](swarm-memory-channel.md#security)), and the background owner changes who can outlive a member, which D-2's covers ([swarm-background-members.md Security](swarm-background-members.md#security)). The result record in the store is readable by every member's code, though not by models; a tool that reads it is a channel between members outside the bus, with none of its fencing or evidence, which the docs say (M1-13, M2-11).
 
 ## Testing
 
@@ -469,7 +486,7 @@ Each pull request carries the tests listed with it, from its design's Testing se
 
 ## Decisions
 
-Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his words quoted), and one point settled from the code. [Open questions](#open-questions) holds the one still open.
+Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his words quoted), his decision of 2026-10-19 (item 11), and one point settled from the code. [Open questions](#open-questions) holds the one still open.
 
 1. **M1's final answer is `first` plus the per-member record.** The brief's "final-answer modes, the result contract" is read as M1 ([swarm-scoring.md Part 1](swarm-scoring.md#part-1-m1)). Ransom: "OQ1 - yes". With item 8, the result contract is future work rather than M2.
 2. **M2 has the bus without direct messages.** M2 has the bus core, binding, notices, communication evidence and the shared-memory channel; the `messages` channel and bridged members' bus tools are future work, and a swarm that gives a bridged member a bus channel is refused at construction (M2-6). Ransom: "OQ2 agree with the recommendation".
@@ -483,6 +500,8 @@ Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his wor
 9. **M1-10 reports "members stuck in loops" as a signal, not a verdict.** swarm.md lists the check among the harness-validity checks ([Observer, Analysis](swarm.md#observer-evidence-accounting-and-metrics)). Per member, the longest run of consecutive identical tool calls (same function and arguments) is reported as a metric, with no threshold fixed until there is data. Ransom: "OQ1 agree with recommendation".
 
 10. **The swarm writes no exposure or proposal events** (2026-10-15). Exposure came from ORBIT, where only ORBIT's own observer can see it, and the swarm's own uses are served by `read`; notices and injections carry their ids in metadata, which the swarm writes when it creates them. This supersedes the same day's decision to rest exposure on inspect_ai#5884, #5883 and #5882 and to mark exposure through an errored result inferred. Ransom: "yes, drop exposed and proposed, send it. Let the loops finish." On 2026-10-16, asked whether to add AI-6 so that read results also carry the ids in metadata, Ransom answered: "This is only needed by ORBIT? In that case it should be after M2." So M2 identifies a read by its `read` event and the fenced ids in its result text, and how a read result names its records for ORBIT's observer is the ORBIT port's choice, with stamping in `swarm_on_continue()` the leading option (Ransom: "I agree that c sounds most promising here, we can decide for sure once we start work."; [swarm-orbit.md P2](swarm-orbit.md#p2-bus-extensions)).
+
+11. **No `StoreEvent`s inside a swarm** (2026-10-19). The swarm enters an inspect_ai switch that turns span store tracking off, always, a swarm of one included; the swarm's span still logs the net change. Per-member stores were considered and not adopted for now, and meridianlabs-ai/inspect_ai#589's general fix is still wanted upstream but no longer a swarm dependency ([swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)). This adds AI-7 and M1-14.
 
 One more decision shapes this plan: the result record's store key is documented as owned by the runtime and readable by member code (Ransom: "yes, add the docs line"; M1-13, M2-11 and [swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records)).
 
