@@ -511,6 +511,86 @@ async def test_a_wait_past_its_timeout_does_not_count_as_waiting() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("returns", ["news", "stop", "drain"])
+async def test_a_wait_called_with_a_cancellation_pending_names_nothing(
+    returns: str,
+) -> None:
+    # the wait would return at once, but its caller is already cancelled
+    async with run(("w-1", "w-2", "w-3")) as (r, transcript):
+        r.end("w-3")
+        if returns == "stop":
+            r.bus.close()
+        elif returns == "drain":
+            r.bus.member_ending("w-1")
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await r.wait("w-1")
+        [record] = waited(transcript)
+        assert (record["outcome"], record["files"], record["ended"]) == (
+            "cancelled",
+            [],
+            [],
+        )
+        # the end is still reported to the loop's next wait
+        assert (await r.wait("w-1")).startswith("w-3 ended (submitted).")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("late", ["write", "end"])
+async def test_news_after_the_timeout_does_not_replace_it(late: str) -> None:
+    # the news comes after w-1's deadline and before its task resumes
+    async with run(("w-1", "w-2", "w-3"), max_wait=1) as (r, transcript):
+        async with anyio.create_task_group() as tg:
+            pending = await start(tg, r, "w-1")
+            # holds the event loop past w-1's deadline
+            time.sleep(1.2)
+            if late == "write":
+                await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
+                named = changed("f-1 new", "w-2", "f-1")
+            else:
+                r.end("w-3")
+                named = "w-3 ended (submitted)."
+            assert await pending.value() == (
+                f"{named}\nNothing you waited for happened in 1 s."
+            )
+        [record] = waited(transcript)
+        assert (record["outcome"], record["woken_by"]) == ("timeout", [])
+
+
+@pytest.mark.anyio
+async def test_idle_time_ends_at_the_waits_timeout() -> None:
+    async with run(max_wait=1) as (r, transcript):
+        async with anyio.create_task_group() as tg:
+            pending = await start(tg, r, "w-1")
+            # the task resumes well after its deadline
+            time.sleep(1.6)
+            await pending.value()
+        [record] = waited(transcript)
+        assert record["outcome"] == "timeout"
+        assert record["duration"] >= 1.55
+        assert 0.95 <= record["idle"] <= 1.05
+
+
+@pytest.mark.anyio
+async def test_idle_time_ends_at_an_enclosing_deadline() -> None:
+    async with run() as (r, transcript):
+
+        async def limited() -> None:
+            with anyio.move_on_after(0.3):
+                await r.wait("w-1")
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(limited)
+            await anyio.wait_all_tasks_blocked()
+            # the task resumes well after the deadline around it
+            time.sleep(0.5)
+        [record] = waited(transcript)
+        assert record["outcome"] == "cancelled"
+        assert record["duration"] >= 0.45
+        assert 0.25 <= record["idle"] <= 0.35
+
+
+@pytest.mark.anyio
 async def test_refusals() -> None:
     async with run() as (r, transcript):
         with pytest.raises(ToolError, match="Invalid path"):

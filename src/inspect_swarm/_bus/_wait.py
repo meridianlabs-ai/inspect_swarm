@@ -102,14 +102,14 @@ class Waits:
         state = self._states.get(record.channel)
         if state is None or not record.wake:
             return
-        for waiter in self._unreleased():
+        for waiter in self._live():
             if record.channel in waiter.channels and state.wakes(waiter.spec, record):
                 waiter.woken_by.append(seq)
                 self._release(waiter, "news")
 
     def member_ended(self, name: str, status: str) -> None:
         self._ended.append((name, status))
-        for waiter in self._unreleased():
+        for waiter in self._live():
             if waiter.spec.member != name:
                 self._release(waiter, "news")
         self.recheck()
@@ -131,8 +131,7 @@ class Waits:
         for waiter in self._unreleased():
             if waiter.idle_since is None and self._idle(waiter):
                 waiter.idle_since = now
-        # a wait whose timeout or cancellation has fired is about to return
-        unreleased = [w for w in self._unreleased() if not _fired(w)]
+        unreleased = self._live()
         if not unreleased:
             return
         if any(
@@ -191,9 +190,6 @@ class Waits:
                         started + effective - anyio.current_time()
                     ):
                         await waiter.event.wait()
-                    # a cancellation that arrived after the release ends the wait here,
-                    # before it names or marks anything for a result that is discarded
-                    await anyio.lowlevel.checkpoint_if_cancelled()
                     if (
                         waiter.reason != "news"
                         or self._finished(name)
@@ -204,6 +200,10 @@ class Waits:
                     waiter.reason = None
                     waiter.event = anyio.Event()
                 reason = waiter.reason or "timeout"
+            # a cancellation that is pending, whether it arrived before the call or
+            # after a release, ends the wait here, before it names or marks anything
+            # for a result that is discarded
+            await anyio.lowlevel.checkpoint_if_cancelled()
             outcome = (
                 "stopping"
                 if self._bus.stopping
@@ -310,6 +310,11 @@ class Waits:
     def _unreleased(self) -> list[_Waiter]:
         return [w for w in self._waiters.values() if w.reason is None]
 
+    def _live(self) -> list[_Waiter]:
+        # the waiters news and the all-waiting check may release: not those whose
+        # timeout or cancellation has fired, which return as such when they resume
+        return [w for w in self._unreleased() if not _fired(w)]
+
     def _release(self, waiter: _Waiter, reason: Outcome) -> None:
         # a released waiter no longer makes its member waiting
         waiter.reason = reason
@@ -341,8 +346,11 @@ def _fired(waiter: _Waiter) -> bool:
 
 
 def _close_idle(waiter: _Waiter) -> None:
+    # an interval ends at the wait's deadline at the latest, since the member stops
+    # counting as waiting then, though the task may resume later
     if waiter.idle_since is not None:
-        waiter.idle += anyio.current_time() - waiter.idle_since
+        end = min(anyio.current_time(), waiter.deadline)
+        waiter.idle += max(0.0, end - waiter.idle_since)
         waiter.idle_since = None
 
 
