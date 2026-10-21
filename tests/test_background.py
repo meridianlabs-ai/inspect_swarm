@@ -104,23 +104,6 @@ async def test_a_limit_from_a_contained_node_ends_only_its_task(
 
 
 @pytest.mark.anyio
-async def test_a_tasks_error_cancels_the_block_and_its_siblings() -> None:
-    owner = MemberBackground(_member(), contain=[])
-
-    async def fails() -> None:
-        await anyio.sleep(0.01)
-        raise RuntimeError("worker failed")
-
-    with pytest.raises(RuntimeError, match="worker failed"):
-        async with owner:
-            background(fails)
-            background(anyio.sleep_forever)
-            await anyio.sleep_forever()
-    assert owner.cancelled == 1
-    assert background_target.get() is None
-
-
-@pytest.mark.anyio
 async def test_two_task_errors_are_raised_as_a_group() -> None:
     async def fails(message: str) -> None:
         raise RuntimeError(message)
@@ -154,35 +137,6 @@ async def test_an_error_keeps_its_cause(where: str) -> None:
         await _caused(where)
     assert isinstance(info.value.__cause__, ValueError)
     assert str(info.value.__cause__) == "original"
-
-
-@pytest.mark.anyio
-async def test_the_blocks_own_error_cancels_the_tasks_and_is_raised_bare() -> None:
-    owner = MemberBackground(_member(), contain=[])
-    with pytest.raises(ValueError, match="block failed"):
-        async with owner:
-            background(anyio.sleep_forever)
-            await anyio.sleep(0.01)
-            raise ValueError("block failed")
-    assert owner.cancelled == 1
-    assert background_target.get() is None
-
-
-@pytest.mark.anyio
-async def test_a_cancellation_from_outside_is_reraised() -> None:
-    reached_after = False
-    owner = MemberBackground(_member(), contain=[])
-    with anyio.CancelScope() as scope:
-        async with owner:
-            background(anyio.sleep_forever)
-            await anyio.sleep(0.01)
-            scope.cancel()
-            await anyio.sleep_forever()
-        reached_after = True
-    assert scope.cancelled_caught
-    assert not reached_after
-    assert owner.cancelled == 1
-    assert background_target.get() is None
 
 
 @pytest.mark.anyio
@@ -233,7 +187,16 @@ async def _by_foreign_error(owner: MemberBackground) -> None:
             await anyio.sleep_forever()
 
 
+async def _by_block_error(owner: MemberBackground) -> None:
+    with pytest.raises(ValueError, match="block failed"):
+        async with owner:
+            background(anyio.sleep_forever)
+            await anyio.sleep(0.01)
+            raise ValueError("block failed")
+
+
 async def _by_enclosing_scope(owner: MemberBackground) -> None:
+    reached_after = False
     with anyio.CancelScope() as scope:
         async with owner:
             background(anyio.sleep_forever)
@@ -246,6 +209,10 @@ async def _by_enclosing_scope(owner: MemberBackground) -> None:
                 with anyio.CancelScope(shield=True):
                     await anyio.sleep(0.01)
                 assert (owner.running, owner.cancelled) == (0, 1)
+        reached_after = True
+    # the owner re-raises the cancellation rather than absorbing it
+    assert scope.cancelled_caught
+    assert not reached_after
 
 
 async def _by_nothing(owner: MemberBackground) -> None:
@@ -261,14 +228,16 @@ async def _by_nothing(owner: MemberBackground) -> None:
     [
         pytest.param(_by_exit, 1, id="owner-exit"),
         pytest.param(_by_foreign_error, 1, id="foreign-error"),
+        pytest.param(_by_block_error, 1, id="block-error"),
         pytest.param(_by_enclosing_scope, 1, id="enclosing-scope"),
         pytest.param(_by_nothing, 0, id="returned-or-absorbed"),
     ],
 )
-async def test_cancelled_counts_each_cancelled_task_once(
+async def test_each_way_the_block_ends_cancels_and_counts_its_tasks(
     scenario: Callable[[MemberBackground], Awaitable[None]], cancelled: int
 ) -> None:
     owner = MemberBackground(_member(), contain=[])
     await scenario(owner)
     assert owner.running == 0
     assert owner.cancelled == cancelled
+    assert background_target.get() is None

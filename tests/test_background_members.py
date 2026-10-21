@@ -1,7 +1,7 @@
 import gc
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -30,6 +30,7 @@ from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import TaskState
 from inspect_ai.tool import Tool, ToolCall, ToolChoice, ToolInfo, tool
 from inspect_ai.util import (
+    Limit,
     LimitExceededError,
     background,
     message_limit,
@@ -165,15 +166,10 @@ async def test_each_members_drain_waits_only_for_its_own_background_work() -> No
     assert times["quick"] is not None and times["quick"] < 0.4
     # cancelled at the end of its member's drain, not when the sample ends
     assert times["stuck"] is not None and 0.5 <= times["stuck"] < 3
-    lines = {m.name: m for m in _ledger(outcome).members}
-    assert (lines["quick"].background_started, lines["quick"].background_cancelled) == (
-        1,
-        0,
-    )
-    assert (lines["stuck"].background_started, lines["stuck"].background_cancelled) == (
-        1,
-        1,
-    )
+    assert {
+        m.name: (m.background_started, m.background_cancelled)
+        for m in _ledger(outcome).members
+    } == {"quick": (1, 0), "stuck": (1, 1)}
 
 
 @pytest.mark.anyio
@@ -325,119 +321,64 @@ async def test_a_soft_stop_lets_background_work_finish_its_calls(stop: str) -> N
     assert ledger.calls.errored == 0
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    "kind,when,expected",
-    [
-        ("tokens", "running", "swarm_cap"),
-        ("cost", "running", "swarm_cap"),
-        ("tokens", "drain", "submitted"),
-        ("cost", "drain", "submitted"),
-    ],
-)
-async def test_a_cap_reached_in_a_child_ends_it_alone_and_stops_the_swarm(
-    kind: str, when: str, expected: str
-) -> None:
-    log: list[str] = []
-    if when == "running":
-        # the greedy child reaches the cap while the parent and the slow child work
-        model = scripted_model(Script(delay=0.05), cost=1.0)
-        children = [
+# A limit a background child reaches: a swarm cap, one of the member's own limits, or a
+# custom limit it raises to stop itself. `scenario` makes the member's model, its
+# children and its own steps, fresh for each run.
+@dataclass
+class _ChildLimit:
+    id: str
+    scenario: Callable[[list[str]], tuple[Model, list[_Child], list[Step]]]
+    log: list[str]
+    status: str
+    limits: list[Limit] = field(default_factory=lambda: [])
+    budget: Budget = field(default_factory=lambda: Budget(grace=2))
+    # the sample's cost limit, which a cost cap needs
+    sample_cost: float | None = None
+    reason: str | None = None
+
+
+def _cap_running(log: list[str]) -> tuple[Model, list[_Child], list[Step]]:
+    # the greedy child reaches the cap while the parent and the slow child work
+    return (
+        scripted_model(Script(delay=0.05), cost=1.0),
+        [
             _Child("greedy", ["forever"], model=scripted_model(cost=1.0)),
             _Child("slow", [_sleep(0.3), "call"]),
-        ]
-        steps: list[Step] = ["forever"]
-        calls = 4
-    else:
-        # the parent uses the cap and returns while the child's call is in flight;
-        # that call passes the cap during the drain
-        model = scripted_model(cost=1.0)
-        children = [
-            _Child(
-                "late",
-                ["call", "call"],
-                model=scripted_model(Script(delay=0.2), cost=1.0),
-            )
-        ]
-        steps = ["call", "call"]
-        calls = 2
-    budget = (
-        Budget(tokens=calls * TOKENS_PER_CALL, grace=2)
-        if kind == "tokens"
-        else Budget(cost=float(calls), grace=2)
+        ],
+        ["forever"],
     )
-    outcome = await run_swarm(
-        swarm(
-            member(spawner(model, children, log, steps=steps), name="x"),
-            channels=[],
-            budget=budget,
-        ),
-        cost=100,
+
+
+def _cap_drain(log: list[str]) -> tuple[Model, list[_Child], list[Step]]:
+    # the parent uses the cap and returns while the child's call is in flight; that
+    # call passes the cap during the drain
+    late = _Child(
+        "late", ["call", "call"], model=scripted_model(Script(delay=0.2), cost=1.0)
     )
-    assert outcome.reason == "swarm_cap"
-    assert statuses(outcome) == {"x": expected}
-    assert sorted(log) == sorted(f"{c.name} stopped" for c in children)
-    ledger = _ledger(outcome)
-    assert ledger.members[0].background_cancelled == 0
-    # siblings' calls in flight finished
-    assert ledger.calls.errored == 0
+    return scripted_model(cost=1.0), [late], ["call", "call"]
 
 
-@pytest.mark.anyio
-async def test_a_member_limit_reached_in_a_child_ends_the_child_then_the_member() -> (
-    None
-):
-    log: list[str] = []
-
+def _member_limit(log: list[str]) -> tuple[Model, list[_Child], list[Step]]:
     async def parent_continues() -> None:
         log.append("parent continued")
 
-    outcome = await run_swarm(
-        swarm(
-            [
-                member(
-                    spawner(
-                        scripted_model(),
-                        [_Child("greedy", ["forever"])],
-                        log,
-                        steps=[_sleep(0.2), parent_continues, "call"],
-                    ),
-                    name="x",
-                    limits=[token_limit(3 * TOKENS_PER_CALL)],
-                ),
-                member(generator(scripted_model(), calls=3), name="y"),
-            ],
-            channels=[],
-        )
+    # the parent goes on after the child has ended, and meets the same limit
+    return (
+        scripted_model(),
+        [_Child("greedy", ["forever"])],
+        [_sleep(0.2), parent_continues, "call"],
     )
-    # the child ended alone; the parent went on and met the same limit at its next call
-    assert log == ["greedy stopped", "parent continued"]
-    assert statuses(outcome) == {"x": "member_limit:token", "y": "submitted"}
 
 
-@pytest.mark.anyio
-async def test_a_member_message_limit_reached_in_a_child_ends_only_the_child() -> None:
-    log: list[str] = []
-    outcome = await run_swarm(
-        swarm(
-            member(
-                spawner(
-                    scripted_model(),
-                    [
-                        _Child("long", ["call"], messages=10),
-                        _Child("short", [_sleep(0.05), "call"]),
-                    ],
-                    log,
-                    steps=[_sleep(0.2), "call"],
-                ),
-                name="x",
-                limits=[message_limit(5)],
-            ),
-            channels=[],
-        )
+def _message_limit(log: list[str]) -> tuple[Model, list[_Child], list[Step]]:
+    return (
+        scripted_model(),
+        [
+            _Child("long", ["call"], messages=10),
+            _Child("short", [_sleep(0.05), "call"]),
+        ],
+        [_sleep(0.2), "call"],
     )
-    assert sorted(log) == ["long stopped", "short finished"]
-    assert statuses(outcome) == {"x": "submitted"}
 
 
 async def _stop_itself() -> None:
@@ -445,40 +386,113 @@ async def _stop_itself() -> None:
     raise LimitExceededError("custom", value=1, limit=1)
 
 
+def _custom(when: str) -> Callable[[list[str]], tuple[Model, list[_Child], list[Step]]]:
+    def scenario(log: list[str]) -> tuple[Model, list[_Child], list[Step]]:
+        # in the drain the child stops itself after the agent has returned, and the
+        # lever refuses the sibling's calls, so it makes none
+        running = when == "running"
+        sibling: list[Step] = [_sleep(0.1), "call"] if running else [_sleep(0.1)]
+        return (
+            scripted_model(),
+            [_Child("stuck", [_sleep(0.02), _stop_itself]), _Child("sibling", sibling)],
+            [_sleep(0.2), "call"] if running else [],
+        )
+
+    return scenario
+
+
+_CHILD_LIMITS = [
+    _ChildLimit(
+        "token-cap-running",
+        _cap_running,
+        ["greedy stopped", "slow stopped"],
+        "swarm_cap",
+        budget=Budget(tokens=4 * TOKENS_PER_CALL, grace=2),
+        reason="swarm_cap",
+    ),
+    _ChildLimit(
+        "cost-cap-running",
+        _cap_running,
+        ["greedy stopped", "slow stopped"],
+        "swarm_cap",
+        budget=Budget(cost=4.0, grace=2),
+        sample_cost=100,
+        reason="swarm_cap",
+    ),
+    _ChildLimit(
+        "token-cap-drain",
+        _cap_drain,
+        ["late stopped"],
+        "submitted",
+        budget=Budget(tokens=2 * TOKENS_PER_CALL, grace=2),
+        reason="swarm_cap",
+    ),
+    _ChildLimit(
+        "cost-cap-drain",
+        _cap_drain,
+        ["late stopped"],
+        "submitted",
+        budget=Budget(cost=2.0, grace=2),
+        sample_cost=100,
+        reason="swarm_cap",
+    ),
+    _ChildLimit(
+        "member-token-limit",
+        _member_limit,
+        ["greedy stopped", "parent continued"],
+        "member_limit:token",
+        limits=[token_limit(3 * TOKENS_PER_CALL)],
+    ),
+    _ChildLimit(
+        "member-message-limit",
+        _message_limit,
+        ["long stopped", "short finished"],
+        "submitted",
+        limits=[message_limit(5)],
+    ),
+    _ChildLimit(
+        "custom-running",
+        _custom("running"),
+        ["sibling finished", "stuck stopped"],
+        "submitted",
+    ),
+    _ChildLimit(
+        "custom-drain",
+        _custom("drain"),
+        ["sibling finished", "stuck stopped"],
+        "submitted",
+    ),
+]
+
+
 @pytest.mark.anyio
-@pytest.mark.parametrize("when", ["running", "drain"])
-async def test_a_custom_limit_raised_in_a_child_ends_only_the_child(when: str) -> None:
+@pytest.mark.parametrize("case", _CHILD_LIMITS, ids=lambda c: c.id)
+async def test_a_limit_reached_in_a_child_ends_only_that_child(
+    case: _ChildLimit,
+) -> None:
     log: list[str] = []
-    model = scripted_model()
+    model, children, steps = case.scenario(log)
     outcome = await run_swarm(
         swarm(
             member(
-                spawner(
-                    model,
-                    [
-                        _Child("stuck", [_sleep(0.02), _stop_itself]),
-                        # in the drain the lever refuses its calls, so it makes none
-                        _Child(
-                            "sibling",
-                            [_sleep(0.1), "call"]
-                            if when == "running"
-                            else [_sleep(0.1)],
-                        ),
-                    ],
-                    log,
-                    # the parent returns after or before the child stops itself
-                    steps=[_sleep(0.2), "call"] if when == "running" else [],
-                ),
+                spawner(model, children, log, steps=steps),
                 name="x",
+                limits=case.limits,
             ),
             channels=[],
-            budget=Budget(grace=2),
-        )
+            budget=case.budget,
+        ),
+        cost=case.sample_cost,
     )
-    assert sorted(log) == ["sibling finished", "stuck stopped"]
-    assert statuses(outcome) == {"x": "submitted"}
-    [line] = _ledger(outcome).members
-    assert (line.background_started, line.background_cancelled) == (2, 0)
+    if case.reason is not None:
+        assert outcome.reason == case.reason
+    assert statuses(outcome) == {"x": case.status}
+    assert sorted(log) == case.log
+    ledger = _ledger(outcome)
+    [line] = ledger.members
+    assert (line.background_started, line.background_cancelled) == (len(children), 0)
+    # siblings' calls in flight finished
+    assert ledger.calls.errored == 0
 
 
 @pytest.mark.anyio

@@ -199,21 +199,6 @@ def test_member_refusals(
         make()
 
 
-@pytest.mark.parametrize(
-    "make",
-    [
-        lambda: member(deepagent(background=True)),
-        lambda: member(deepagent(background=64)),
-        lambda: member(deepagent, args={"background": True}),
-        lambda: member(deepagent, args={"background": 64}),
-        lambda: _swarm(deepagent(background=64)),
-    ],
-)
-def test_background_deepagent_members_are_accepted(make: Callable[[], object]) -> None:
-    # the member's owner holds its background work, whatever agent starts it
-    make()
-
-
 def test_member_does_not_call_factory() -> None:
     record = member(outside_sample, args={"prompt": "x"}, count=2)
     with pytest.raises(RuntimeError, match="only inside a sample"):
@@ -243,8 +228,11 @@ def test_build_member_gives_the_agent_or_a_new_one_per_call() -> None:
             count=4,
             limits=[token_limit(100, type="output")],
         ),
+        # background members are accepted, in both forms, and round-trip
+        lambda: member(deepagent(background=True), name="b"),
         lambda: member(deepagent(background=64), name="b"),
         lambda: member(deepagent, args={"background": True}, count=2),
+        lambda: member(deepagent, args={"background": 64}),
     ],
 )
 def test_member_validates_from_its_logged_dict(record: Callable[[], Member]) -> None:

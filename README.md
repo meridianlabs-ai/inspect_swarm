@@ -115,6 +115,14 @@ solver = swarm(
 - A member cannot see the sample's other environments, except those in its `visible_sandboxes`, such as a shared service. It reaches those only by name. Any member that lists a service can use it, so list only services every member may use.
 - The task's scorer runs outside every member, where `sandbox()` is the sample's `default`. A scorer that grades the members' work names each member's sandbox, as in `sandbox("agent-1")`. The result record's `sandbox` field says which member used which.
 
+### Background work
+
+Native members support `deepagent(background=True)` and integer background limits. Work started with `background()` belongs to its member and uses its limits and sandbox. A member limit or swarm cap that the work reaches ends only that piece of work.
+
+When the member's agent ends, its background work gets the swarm's grace period to finish work in flight. The swarm then cancels the rest and waits for its cleanup before the member ends. `Budget.grace=0` skips the grace wait.
+
+Start background work from the running agent, not its factory. A factory that starts it makes the member `errored`.
+
 ### How a member ends
 
 A member's status says how it ended:
@@ -241,7 +249,8 @@ If an error, limit or cancellation escapes the swarm and ends the sample, the lo
 
 ## Restrictions
 
-- **No background subagents.** A `deepagent()` member with `background=True` or an integer is refused. So are ACP agents.
+- **No background work in bridged members.** A member cannot combine background work with the agent bridge. `background()` raises in a bridged member, and a member that uses the bridge after starting background work ends `errored`.
+- **No ACP agents.** ACP agents wait for their caller to drive them, so they are refused.
 - **Tool state is per member.** Each member runs in its own tool-state scope. Built-in tools that keep state in the store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default.
   - Tool state that a setup solver prepared at the default instance is not carried into the members. They start with fresh state.
   - Tasks whose scorers read a member's tool state from the store are not supported. The keys inside a member's scope differ from the default ones.
