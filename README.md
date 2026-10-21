@@ -85,9 +85,43 @@ solver = swarm(
 
 This swarm has four members: `solver-1` to `solver-3` and `reviewer`. The role is added to the member's preamble.
 
-- **Names.** A member is named after its agent (`react`, `deepagent`) unless you give `name`. With `count` above 1 the members are `name-1` to `name-k`. Names must be unique in the swarm. They cannot be `init`, `solvers` or `scorers`, and cannot contain `/` or `#`.
+- **Names.** A member is named after its agent (`react`, `deepagent`) unless you give `name`. With `count` above 1 the members are `name-1` to `name-k`. Default names are numbered across records ([Members that differ](#members-that-differ)). Names must be unique in the swarm. They cannot be `init`, `solvers` or `scorers`, and cannot contain `/` or `#`.
 - **Limits.** `limits` takes token, cost, turn, message and time limits for that member alone. Working limits are refused.
 - **A swarm of one.** `swarm(members=react(), channels=[])` is a single agent run under the swarm's rules, with the same records. Use it as the single-agent arm when you compare a swarm with one agent. Unlike a plain agent, it returns an empty output when its member does not submit.
+
+### Members that differ
+
+Members left on their default name are numbered across the whole roster, not per record. So one member with a different prompt and model takes two records:
+
+```python
+from inspect_ai.agent import react
+
+from inspect_swarm import member, swarm
+
+solver = swarm(
+    members=[
+        member(react, args={"prompt": "Solve the task."}, count=6),
+        member(
+            react,
+            args={
+                "prompt": "Check the others' work in /shared.",
+                "model": "openai/gpt-5",
+            },
+        ),
+    ],
+)
+```
+
+The first record makes `react-1` to `react-6` and the second `react-7`.
+
+When every copy differs, give each its own record. A list comprehension builds them:
+
+```python
+prompts = ["Try algebra.", "Try brute force.", "Try a proof by cases."]
+solver = swarm(members=[member(react, args={"prompt": p}) for p in prompts])
+```
+
+These are `react-1` to `react-3`. Names you give with `name` are not numbered across records, so give each record its own.
 
 Each member's events are in a timeline named after it, so the log viewer can show one member's trajectory.
 
@@ -202,7 +236,7 @@ A member's `state` is `pending` (never started), `running` or `ended`. `time` is
 
 When the swarm ends it writes two more store entries, each also logged as an `InfoEvent` with source `inspect_swarm`:
 
-- `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, the controller and the final step, model calls that errored or reported no usage, unpriced models, what stopped the swarm, and whether the sample resumed from a checkpoint.
+- `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, the controller and the final step, model calls that errored or reported no usage, unpriced models, what stopped the swarm, and whether the sample resumed from a checkpoint. See [The ledger](#the-ledger).
 - `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members with no completed model call (`never_acted`), counts of completed model calls for the chosen member (`steps_to_answer`) and the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member (`null` for a bridged member, see [Restrictions](#restrictions)). These call counts include cache replays and exclude failed or cancelled attempts.
 
 `inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`. `samples_df()` needs pandas and pyarrow, which neither install above includes:
@@ -231,7 +265,77 @@ df["score"] = df["score_match"].map(value_to_float(), na_action="ignore")
 df.groupby("log")[["score", "swarm_cost"]].mean()
 ```
 
-`swarm_cost` is the sample's recorded priced cost, including scorer calls. `swarm_complete` requires the swarm's ledger to mark its interval complete and all recorded model usage to be priced. It does not check for missing usage outside the swarm, including scorer calls. The `SwarmColumns` docstring lists every column.
+The columns:
+
+- `swarm_cost`: the sample's priced cost in dollars, from its `model_usage`, including scorer calls. Tokens are in `SampleSummary`'s `total_tokens`.
+- `swarm_complete`: no call is known to be missing from `swarm_cost`. The ledger marks the swarm's interval complete, and every model in the sample's `model_usage` is priced. Calls outside the swarm, including scorer calls, are not checked. `False` for a sample with no ledger.
+- `swarm_members`: members in the roster.
+- `swarm_resumed`: the sample resumed from a checkpoint, so the swarm restarted its caps from zero. `False` for a sample with no ledger.
+- `swarm_cost_cap`, `swarm_token_cap`, `swarm_time_cap`: the swarm's caps. The time cap is in seconds.
+- `swarm_errored`, `swarm_no_usage`, `swarm_unpriced`: model calls in the swarm that errored or were cancelled (retries included), that completed with no usage, and whose usage has no cost. Each makes the cost a lower bound.
+- `swarm_unpriced_models`: models with tokens and no cost, from the ledger and the sample's `model_usage`, as a JSON list.
+
+The columns read from the ledger are null for a sample with no ledger. A sample that runs two swarms keeps only the last one's ledger, while its `model_usage` covers both. The columns read the sample's `store` and `model_usage`, so do not exclude either with `samples_df(exclude_fields=...)`.
+
+### The ledger
+
+The ledger of a two-member swarm with a cost cap of $1 and a time cap of 600 seconds:
+
+```json
+{
+  "version": 1,
+  "budget": {"cost": 1.0, "tokens": null, "time": 600.0, "reserve": 0.05, "split": "pool", "grace": 120.0},
+  "caps": {"cost": 1.0, "tokens": null, "time": 600.0},
+  "sample_limits": {"token": null, "cost": null, "message": null, "turn": null, "working": null, "time": null},
+  "members": [
+    {
+      "name": "react-1",
+      "status": "submitted",
+      "bridged": false,
+      "meter": {"usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.0081}, "cost": 0.0081, "suspended_cost": 0.0},
+      "calls": {"calls": 1, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
+      "cancelled": false
+    },
+    {
+      "name": "react-2",
+      "status": "submitted",
+      "bridged": false,
+      "meter": {"usage": {"input_tokens": 1150, "output_tokens": 280, "total_tokens": 1430, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.00765}, "cost": 0.00765, "suspended_cost": 0.0},
+      "calls": {"calls": 1, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
+      "cancelled": false
+    }
+  ],
+  "runtime": {"usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": null}, "cost": 0.0, "suspended_cost": 0.0},
+  "final": {"usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": null}, "cost": 0.0, "suspended_cost": 0.0},
+  "swarm": {"usage": {"input_tokens": 2350, "output_tokens": 580, "total_tokens": 2930, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.01575}, "cost": 0.01575, "suspended_cost": 0.0},
+  "calls": {"calls": 2, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
+  "unpriced_calls_recorded": 0,
+  "sample_delta": {"input_tokens": 2350, "output_tokens": 580, "total_tokens": 2930, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.01575},
+  "unattributed": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.0},
+  "unpriced_models": [],
+  "native_compaction_classes": [],
+  "overshoot": {},
+  "stop_reason": "all_done",
+  "ended_by": null,
+  "interrupted": false,
+  "final_cancelled": false,
+  "resumed": false,
+  "total_complete": true,
+  "attribution_complete": true
+}
+```
+
+- `budget` is the `Budget` as given. `caps` are the caps the swarm applied, derived from the sample's limits or given: `cost` in dollars, `tokens`, and `time` in seconds, `null` for no cap. `sample_limits` are the sample's limits when the swarm started.
+- `members` has one entry per member, in roster order. `status` is as in [How a member ends](#how-a-member-ends), `null` for a member never started. `cancelled` means the swarm or the sample cancelled the member, so calls it had in flight are unknown.
+- `meter` is the usage and cost of what a member did. `suspended_cost` is the part spent while token counting was suspended, such as approval calls.
+- `calls` counts model calls: `calls` completed, `cache_replays` replayed from cache at no charge, `errored` attempts that errored or were cancelled (retries included), `no_usage` completed with no usage, and `unpriced` completed with usage but no cost.
+- `runtime` meters the controller's own calls, `final` the final step's (the default first-submission answer makes none), and `swarm` everything in the swarm: members, runtime and final step. The top-level `calls` counts every call in the swarm. `unpriced_calls_recorded` counts the unpriced calls the swarm's meter recorded.
+- `sample_delta` is the sample's usage while the swarm ran. `unattributed` is `sample_delta` minus `swarm`: usage no meter holds, such as the tokens of approval calls.
+- `unpriced_models` are models with tokens but no cost. `native_compaction_classes` are loaded model classes that can compact a conversation natively, which logs nothing, so their usage may be missing.
+- `overshoot` is how far usage went past each cap, for caps it passed. Calls in flight at a stop can carry usage past a cap.
+- `stop_reason` is why the swarm stopped itself: the controller's reason (`all_done` for `leaderless`), `swarm_cap` or `swarm_time`. `ended_by` is what ended it from outside: `sample_limit:<type>`, `operator` for an interrupt, or `unknown`. Each is `null` when it did not happen. Both are set when a sample limit ends the swarm during its own stop.
+- `interrupted` means an error or cancellation from outside the swarm ended it, `final_cancelled` that the final step was cancelled, and `resumed` that the sample resumed from a checkpoint.
+- `total_complete` means no call is known to be missing from the totals: nothing was cancelled or interrupted, every call reported priced usage, and no model class can compact natively. Otherwise the totals are lower bounds. `attribution_complete` adds that `unattributed` is zero.
 
 ## Logs and the store
 

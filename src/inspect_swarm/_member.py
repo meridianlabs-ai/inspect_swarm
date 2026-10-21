@@ -214,6 +214,8 @@ def member(
 
     No agent object runs twice at the same time in one sample. A built agent is one member: it is built once, when the task is built, and shared by concurrent samples, as any Inspect solver is. The same agent object cannot be in two members. Several copies of one configuration (`count` above 1) need the factory form: the swarm calls `factory(**args)` once for each member in each sample, so each copy gets its own agent and whatever the factory builds. `member()` checks the arguments against the factory's signature but does not call it, so the factory's own checks run when the member is built.
 
+    Names. Members left on their default name are numbered across the whole roster, not per record, so one member with different arguments takes two records: `[member(react, args={"prompt": a}, count=6), member(react, args={"prompt": b, "model": m})]` is `react-1` to `react-7`. When every copy differs, give each its own record, as in `[member(react, args={"prompt": p}) for p in prompts]`. Names given with `name` are not numbered across records, so give each record its own.
+
     Objects given to an agent are shared. Every member built from one record receives the same objects from `args`, and two built agents given the same tool object share it, across members and samples. Inspect's built-in tools keep their state in the sample store or the sandbox, so this matters only for a custom tool or helper that keeps state in its Python object (a counter, a cache, a client). To give each member its own, construct it inside a member builder, an `@agent` factory that builds the configured agent, and use the factory form.
 
     Tool state. Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member. An explicit `instance` is used as given: members, or the copies of one counted member, that name the same instance share its state, so a board shared on purpose is `memory(instance="board")`. The sample store itself is shared. State that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with `tool_state_instance()`. Built-in tool state that a setup solver prepared at the default instance before the swarm runs is not visible to the members.
@@ -231,7 +233,7 @@ def member(
     Args:
         agent: A built, registered agent, or a registered `@agent` factory.
         args: The factory's keyword arguments. Only for a factory.
-        name: The member's name. Defaults to the agent's or factory's registry name, without its package. With `count` above 1 the members are `name-1` to `name-k`. It names the member's tool-state scope, so it cannot be empty or contain "/" or "#".
+        name: The member's name. Defaults to the agent's or factory's registry name, without its package; a default name that more than one member has is numbered across the roster. With `count` above 1 the members are `name-1` to `name-k`. It names the member's tool-state scope, so it cannot be empty or contain "/" or "#".
         role: The member's role, given to the controller and in the member's preamble.
         count: How many members this record stands for. Above 1 needs a factory.
         limits: The member's own token, cost, turn, message or time limits.
