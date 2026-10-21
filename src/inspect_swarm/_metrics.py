@@ -12,6 +12,23 @@ from ._ledger import EventLog, MemberLedger, SpanPlaces, SwarmLedger
 _score_value = value_to_float()
 
 
+# One member's communication over one channel with records, from the bus's evidence as
+# it was written. The member's descendants act as the member, so their records and
+# reads are its own.
+class CommMetrics(BaseModel):
+    # records delivered (`delivered` events): committed and applied to the channel
+    records: int = 0
+    # the UTF-8 bytes of the delivered records' payloads
+    record_bytes: int = 0
+    # attempts the bus rejected (`sent` events with `rejected`), by the control that
+    # rejected them; a control that rejected none is left out
+    rejections: dict[str, int] = {}
+    # results that showed the channel's content (`read` events), and those that showed
+    # a listing of it
+    reads: int = 0
+    listings: int = 0
+
+
 # One member's metrics.
 class MemberMetrics(BaseModel):
     name: str
@@ -32,6 +49,10 @@ class MemberMetrics(BaseModel):
     gate_checks: int = 0
     gate_passes: int = 0
     first_pass_time: float | None = None
+    # communication (`CommMetrics`), by channel name: an entry for each channel the
+    # swarm opened with records, in the order given, zeros included, and none for a
+    # swarm without one. The default loads metrics written before this field.
+    comm: dict[str, CommMetrics] = {}
 
 
 # The swarm's metrics for one run, written once, when the swarm ends, as an InfoEvent
@@ -121,6 +142,7 @@ def swarm_metrics(
     places: SpanPlaces,
     times: Sequence[MemberTimes],
     gates: Sequence[GateChecks],
+    channels: Sequence[str],
     wall_clock: float,
     answer: str | None,
 ) -> SwarmMetrics:
@@ -129,6 +151,7 @@ def swarm_metrics(
         _, member = places(tool.span_id)
         if member is not None:
             tool_calls[member].append((tool.function, tool.arguments))
+    comm = _comm_metrics(events, [m.name for m in ledger.members], channels)
 
     members: list[MemberMetrics] = []
     for line, member_times, gate in zip(ledger.members, times, gates, strict=True):
@@ -150,6 +173,7 @@ def swarm_metrics(
                 gate_checks=gate.checks,
                 gate_passes=gate.passes,
                 first_pass_time=gate.first_pass_time,
+                comm=comm[line.name],
             )
         )
     return SwarmMetrics(
@@ -163,6 +187,39 @@ def swarm_metrics(
         else next(_steps(m) for m in ledger.members if m.name == answer),
         longest_member_steps=max(_steps(m) for m in ledger.members),
     )
+
+
+# Each member's communication over each of the channels, from the evidence events that
+# name one of the members. Member names are unique in a sample, since each names a
+# timeline, so another swarm's events never name these members.
+def _comm_metrics(
+    events: EventLog, members: Sequence[str], channels: Sequence[str]
+) -> dict[str, dict[str, CommMetrics]]:
+    comm = {name: {c: CommMetrics() for c in channels} for name in members}
+    # the payload bytes of each record the bus accepted, by member and record id
+    accepted: dict[tuple[str, str | None], int] = {}
+    for event in events.comms:
+        metrics = comm.get(event.member, {}).get(event.channel)
+        if metrics is None:
+            continue
+        match event.kind:
+            case "sent" if event.rejected is not None:
+                metrics.rejections[event.rejected] = (
+                    metrics.rejections.get(event.rejected, 0) + 1
+                )
+            case "sent":
+                accepted[(event.member, event.record)] = event.payload_bytes
+            case "delivered":
+                metrics.records += 1
+                metrics.record_bytes += accepted[(event.member, event.record)]
+            case "read" if event.listing:
+                metrics.listings += 1
+            case "read":
+                metrics.reads += 1
+            case _:
+                # notices (`notified` events) are not counted yet
+                pass
+    return comm
 
 
 # Completed model calls in the member's spans, cache replays included.
