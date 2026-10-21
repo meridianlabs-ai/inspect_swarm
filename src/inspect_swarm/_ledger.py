@@ -96,7 +96,7 @@ class MemberLedger(BaseModel):
     """Model events in the member's spans."""
 
     cancelled: bool
-    """The member's agent was cancelled: by the hard stop after a grace period, a member time limit, or a cancellation from outside the swarm."""
+    """The member's agent was cancelled: by the hard stop after a grace period, a member time limit or a cancellation from outside the swarm. A bridged member is also cancelled at once when it reaches a cap, its share or one of its own limits, or makes a call after the swarm stopped it."""
 
 
 class SwarmLedger(BaseModel):
