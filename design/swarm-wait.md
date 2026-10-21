@@ -41,7 +41,7 @@ Non-goals:
 - The messages channel, persistent members, coordinator wake-from-idle and push delivery. They stay future work; [Room for later work](#room-for-later-work) says how they fit.
 - Bridged members' waits: a swarm with a bus channel refuses bridged members in M2 (M2-6).
 - Watching files in a sandbox. The filesystem channel stays observed ([swarm-communication.md The filesystem channel](swarm-communication.md#the-filesystem-channel)).
-- Changing what notices or the status line say.
+- Changing the notice and status-line templates. What they list changes in two stated ways: a version a wait reported to the member's own loop counts as covered, as a notice-covered one does, and a loop that was told of a file hears of its deletion ([Told](#what-wakes-a-wait)).
 
 ## Current behaviour
 
@@ -124,12 +124,17 @@ Description (fixed template; the numbers come from the configuration):
 
 A wait is **level-triggered on what the loop has not been told**. It returns as soon as, for the waiting loop, there is:
 
-1. **an unreported board change under `path`**: a file under `path` that is news to the loop (the channel's existing rule: written by another loop, newer than what the loop has seen, a tombstone only if heard of before) at a version above the highest version the loop has been **told** of; or
+1. **an unreported board change under `path`**: a file under `path` that is **reportable** to the loop: its current version was written by another loop and is above both the version the loop has seen and the version it has been **told** of (in the member's own loop, also above the version a notice or wait **covered**), and, for a tombstone, the loop has **heard of** the file before: seen it, been told of it, had it covered (own loop), or already captured it in this wait ([What a wait returns](#what-a-wait-returns)); or
 2. **an unreported end**: a member other than the waiter's own that has ended and that no earlier wait result of this loop named.
 
 If either holds when the wait is called, it returns at once. Otherwise the bus registers the waiter and returns it when one becomes true.
 
-**Told.** The shared-memory state keeps, per loop, the highest version of each file the loop has been told about (`told: dict[loop span, dict[file id, version]]`). A loop is told about a version when it views or writes it (the existing `seen`), when a status line names it, when a wait result names it, and, for the member's own loop, when a notice covers it. A wait result in the member's own loop also sets `covered`, as a notice does, so neither the next notice nor that loop's status line repeats what the wait said. Otherwise the status line is unchanged: it still lists a file until the loop views it, and naming it there marks it told only for waits.
+**Told.** The shared-memory state keeps, per loop, the highest version of each file the loop has been told of (`told: dict[loop span, dict[file id, version]]`). A loop is told of a version when a status line names it or a wait result names it; what it viewed or wrote is already in `seen`. `covered`, which D-1 keeps per member for its own loop, becomes the versions reported to that loop by a notice **or a wait**: a wait result in the member's own loop sets it, as a notice does. Two consequences for what notices and status lines list, with their templates unchanged:
+
+- **Wait-reported versions are deduplicated in the own loop.** A version a wait reported to the member's own loop is left out of that loop's next notice and of its status lines until a newer version is written, exactly as a notice-covered version is today ([swarm-memory-channel.md Notices](swarm-memory-channel.md#notices-and-the-status-line)). In other loops, and for anything a wait did not report, the status line still lists a file until the loop views it.
+- **Hearing of a file includes being told of it.** The tombstone rule ("a deletion is news only to a loop that heard of the file") reads `seen`, `told` and, in the own loop, `covered`, for waits, status lines and notices alike. With `seen` and `covered` alone, as PR #49 builds it (`_is_news`, `shared_memory.py:848-860`), a `general()` child told of a creation only by a wait or a status line would never hear of the file's deletion.
+
+`reportable()`, one predicate in the channel, decides both whether a commit wakes a waiter and what a wait reports ([Channels that wake waits](#channels-that-wake-waits)).
 
 Why level-triggered on "told", not on the alternatives:
 
@@ -154,8 +159,10 @@ The result is fixed-template lines with counts, swarm-assigned file ids, roster 
 | The member's drain | `worker-1 is ending: its own agent has finished.` |
 | Timeout | `Nothing you waited for happened in 600 s.` |
 
-- A wait woken by news reports everything unreported at that moment: changes under `path` (with `new` and `deleted` markers, up to ten ids then "and N more", as notices list them) and ends, each on its line, and marks what it named as told. Files counted in "and N more" are not marked, so a second wait returns them.
-- The result ends with the shared memory's status line, as every swarm tool result does, leaving out files already named above.
+- **What woke the wait is captured when it wakes.** A registered waiter keeps the reportable items the bus found for it, captured synchronously at each commit and end that wakes it or adds to its capture, until its task resumes and unregisters: per file, the latest captured version, whether it is a tombstone, and its writer; per ended member, its status. So a file a peer creates and then deletes before the waiter's task runs is still reported (`f-7 deleted`, by the deleting member), and `delivered.woke` never names a wait whose result then says nothing. A file in the capture counts as heard of for its later deletion.
+- **At resume** the result reports the capture merged with what is reportable then, the higher version per file: changes under `path` (with `new` and `deleted` markers, up to ten ids then "and N more", as notices list them) and every unreported end, each kind on its line. Any news is reported whatever released the wait, before the release line (a stop that arrives after a write gives both). `report()` builds the lines and the structured list of exactly what they name in one synchronous step and marks that list told (and, in the own loop, covered), so the evidence and the marks come from the same list ([Channels that wake waits](#channels-that-wake-waits)). Files counted in "and N more" are neither named nor marked, so a second wait returns them.
+- The result ends with the shared memory's status line, as every swarm tool result does, leaving out files already named above; naming a file there marks it told, as on every `shared_memory` result.
+- **Nothing is marked that the model does not receive.** The tool is built with `max_output=0`, as `shared_memory` is, so neither the generate config's `max_tool_output` nor Inspect's 16 KiB default can cut a result after it was marked (`src/inspect_ai/model/_call_tools.py:1537-1587`). The result is bounded instead: when the run opens, the bus computes a wait budget from its longest fixed line, a changed-files line of ten 16-byte ids with markers and every roster name as a writer, an ends line with every other roster member's name and the longest status (`member_limit:<type>`), and the status line's own bound, as D-1 computes the read budget; every result fits it whole. `report()` runs after the wait's last `await`, and the tool returns its text with no `await` in between, so a marked result is a returned result; a cancelled wait reports and marks nothing.
 - Why no content: a view is fenced, evidenced as `read` and bounded by the read budget for one file; a wait may report many files, and the model chooses which to read. Returning content would need a budget across files and a second kind of read. One `view` after a wake is the cost.
 
 ### When a wait ends without news
@@ -165,7 +172,7 @@ The result is fixed-template lines with counts, swarm-assigned file ids, roster 
 - **The member's drain** (M2-5). When the member's own agent returns, the drain releases that member's waiters with the drain result and refuses its loops' later waits the same way, at once: the drain lets calls in flight finish, and a wait for peers serves nothing once the member's attempt is over. The background child's next model call then meets the lever closed with `member_ended`.
 - **Timeout.** After the effective timeout.
 - **Cancellation.** A hard stop, the member's time limit or a cancellation from outside cancels the wait's task. The waiter is removed and its evidence written in a synchronous `finally`, and the next all-waiting check sees one waiter fewer.
-- **Refusals.** A wait from a member that is not running returns `ToolError("worker-1 has ended.")`, as `shared_memory` does; a member's own limits cannot fire during a wait, since a wait makes no model call.
+- **Refusals.** A wait from a member that is not running returns `ToolError("worker-1 has ended.")`, as `shared_memory` does. A wait makes no model call, so limits checked only at model dispatch (tokens, cost, turns, messages, the lever) do not fire inside it; the member's time limit can cancel it, as above.
 
 **Why this cannot deadlock.** A wait ends by news, by no member being active, by the stop or the drain, or by its timeout, which is at most `max_wait`. Two members each waiting for the other's file are both waiting, so neither is active; if every other member is also waiting, ended or pending, both are released at once, and otherwise someone active can still write. The time cap, the sample's time limit and the hard stop end everything else. The registration, the check for news and the all-waiting check run with no `await` between them, so a write or an end cannot fall between "nothing to report" and "registered".
 
@@ -183,7 +190,7 @@ Descendants still wait for themselves: a `general()` child, synchronous or backg
 
 ### The filesystem channel and per-member sandboxes
 
-- **Filesystem only** (`channels=["filesystem"]`, M1's default): no `swarm_wait`. The filesystem channel is instructions-only and observed: no swarm code sees a file written in the sandbox, so a wait could not wake on the notes file, only on peers' ends and its timeout. And `swarm_tools()` gives no tools without a bus channel, which keeps a `channels=[]` arm free of anything that reports peers' states. A filesystem swarm that wants waits adds the shared-memory channel and keeps shared notes on the board ([Open questions](#open-questions)).
+- **Filesystem only** (`channels=["filesystem"]`, M1's default): no `swarm_wait`. The filesystem channel is instructions-only and observed: no swarm code sees a file written in the sandbox, so a wait could not wake on the notes file, only on peers' ends and its timeout. And `swarm_tools()` gives no tools without a bus channel, which keeps a `channels=[]` arm free of anything that reports peers' states. A filesystem swarm that wants waits adds the shared-memory channel and keeps its notes on the board (decision: Ransom, 2026-10-21: "Q1 agree with recommendation").
 - **Filesystem and shared memory together** over a shared sandbox: `swarm_wait` wakes on board writes and ends, never on sandbox files. The tool's description and the shared memory's instructions say what it watches.
 - **Per-member sandboxes** cannot be combined with the filesystem channel (`_swarm.py:319-321`); their members' only channel is the shared memory, so they get the full wait.
 
@@ -205,10 +212,11 @@ One `InfoEvent` per wait, written when it ends (in the synchronous `finally`, so
 | `started`, `duration` | swarm time of the call, and seconds waited (0 for an immediate return) |
 | `idle` | seconds of the wait during which the member counted as waiting (only own-loop waits can have any) |
 | `outcome` | `news`, `all_waiting`, `stopping`, `member_ending`, `timeout` or `cancelled` |
-| `files` | `[{"file", "version", "deleted"}]` the result named |
+| `files` | `[{"file", "version", "deleted"}]`: exactly the items `report()` returned, which its lines named; files named only in the appended status line are not listed, as status lines are evidenced nowhere |
 | `ended` | `[{"member", "status"}]` the result named |
+| `captured` | whether the result included items captured at release that were no longer reportable at resume (the create-then-delete case) |
 
-And `delivered` gains `woke`: the ids of the waits the write ended. With the `waited` event's `files` (ids and versions), the later dependency-linked critical path can tell that a member's idle time ended at a peer's commit, which the `read` that usually follows then links by content.
+And `delivered` gains `woke`: the ids of the waits whose capture the write added to, whether it released them or they were already released and not yet resumed. With the `waited` event's `files` (ids and versions), the later dependency-linked critical path can tell that a member's idle time ended at a peer's commit, which the `read` that usually follows then links by content.
 
 ### Metrics
 
@@ -227,7 +235,7 @@ Neither is Inspect's working time, and neither replaces per-member working time 
 class Channel:
     ...
     max_wait: int | None = None
-    """The longest `swarm_wait` this channel lets a member make, in seconds, or `None` for a channel whose records wake no waits."""
+    """This channel's contribution to the longest `swarm_wait`, in seconds, or `None` for a channel whose records wake no waits. The bus's effective maximum is the largest `max_wait` of the run's open channels that wake waits."""
 
 @dataclass(frozen=True)
 class WaitSpec:
@@ -237,16 +245,31 @@ class WaitSpec:
     own: bool            # the member's own loop
     path: str | None     # the shared memory's filter; later channels add theirs
 
+@dataclass(frozen=True)
+class WaitItem:
+    channel: str         # "shared_memory"
+    id: str              # "f-7"; later channels' ids
+    version: int         # the version reported
+    deleted: bool        # a tombstone
+    by: str              # the member whose write produced it
+
+@dataclass(frozen=True)
+class WaitReport:
+    lines: list[str]         # the channel's lines for the result, in order
+    items: list[WaitItem]    # exactly what `lines` name: `waited.files`, and what was marked
+    status: str | None       # the channel's status line, without what `lines` named
+
 class WaitingState(ChannelState, Protocol):
-    def wait_check(self, spec: WaitSpec) -> None: ...         # validate the filter; raise ToolError
-    def unreported(self, spec: WaitSpec) -> bool: ...         # anything unreported now
-    def wakes(self, spec: WaitSpec, record: Record) -> bool: ...  # does this applied record make it so
-    def report(self, spec: WaitSpec) -> list[str]: ...        # result lines; marks what they name told
+    def wait_check(self, spec: WaitSpec) -> None: ...                     # validate the filter; raise ToolError
+    def pending(self, spec: WaitSpec, captured: Mapping[str, WaitItem]) -> list[WaitItem]: ...   # reportable now
+    def triggered(self, spec: WaitSpec, record: Record, captured: Mapping[str, WaitItem]) -> list[WaitItem]: ...  # reportable items this applied record made
+    def report(self, spec: WaitSpec, items: Sequence[WaitItem]) -> WaitReport: ...  # the one acknowledgment: marks what it names told (own loop: covered)
 ```
 
-- A channel whose state wakes waits sets `max_wait` from its factory (like `storm`) and its state implements `WaitingState`. The bus offers `swarm_wait` when some open channel has `max_wait`, clamps to the largest such `max_wait`, and asks only those states.
+- A channel whose state wakes waits sets `max_wait` from its factory (like `storm`) and its state implements `WaitingState`. The bus offers `swarm_wait` when some open channel has `max_wait`, clamps every wait to the effective maximum (the largest such `max_wait`), and asks only those states. A channel's `max_wait` is therefore a contribution, not a bound it enforces alone: with the shared memory at 600 and the later messages channel at 30, a wait may last 600 s.
 - **Records that can wake** set `wake=True` (`Draft` gains `wake: bool = False`, which the bus copies to the record). Shared-memory writes always set it: every write may end a wait whose filter it matches, and the writer has no choice, as no write has a parameter for it. This amends D-1's `wake=False`.
-- `wakes()` is called at step 4, after `apply()`, for each registered waiter, with no `await`; it looks only at the files the record changed, so its cost is per write, not per board. `unreported()` scans the board once, at registration and at a recheck.
+- `pending()` and `triggered()` apply the same `reportable(spec, file, captured)` predicate ([What wakes a wait](#what-wakes-a-wait)); `captured` is the waiter's capture, which makes a captured file heard of. `triggered()` is called at step 4, after `apply()`, for each registered waiter, with no `await`, and looks only at the files the record changed, so its cost is per write, not per board; `pending()` scans the board, at the call and at resume.
+- `report()` is the only method that marks anything. It is given the merged items, sorts them, names up to ten in its lines, and returns exactly the named ones in `items`, so the bus writes `waited.files` from `items` without parsing text or reading the channel's state.
 
 ### The bus
 
@@ -263,13 +286,17 @@ class Bus:
 `wait()`, in the calling member's context:
 
 1. Refuse if the member is not running. If the bus is closed or the member is draining, return that result at once.
-2. Build the `WaitSpec` (`own` from `not bus.nested(context)`), clamp the timeout, and call `wait_check()` on each waiting state.
-3. If any state's `unreported()` is true or an end is unreported to this loop, report and return at once.
-4. Register the waiter (an `anyio.Event`, its spec and a released flag), mark the member waiting if `own` and it has no background work, and run the all-waiting check, which may release it at once.
+2. Build the `WaitSpec` (`own` from `not bus.nested(context)`), clamp the timeout to the effective maximum, and call `wait_check()` on each waiting state.
+3. If any state's `pending()` is non-empty or an end is unreported to this loop, report (step 6) and return at once.
+4. Register the waiter: an `anyio.Event`, its spec, its capture (empty) and a released flag. Mark the member waiting if `own` and it has no background work, and run the all-waiting check, which may release it at once.
 5. Await the event under `anyio.move_on_after(timeout)`. Steps 1 to 4 have no `await`.
-6. In `finally`: unregister, stop the member's idle clock, build the result (`report()` lines and ends, or the release reason), write `waited`.
+6. On cancellation: unregister, stop the member's idle clock, write `waited` with `cancelled` and nothing named, and re-raise; nothing is marked. Otherwise, with no `await` from here to the return: unregister, stop the idle clock, merge the capture with each state's `pending()` (the higher version per file) and the unreported ends, call each state's `report()`, mark the named ends told for this loop, assemble the lines, the release line and the status lines within the wait budget, write `waited`, and return the text.
 
-Release sources set the waiter's event, its reason and its released flag synchronously (a released waiter no longer makes its member waiting): `deliver()` step 4 (each waiter for which a waiting state's `wakes()` is true; their ids go into `delivered.woke`), `member_ended()` (every waiter of another member; then the all-waiting check), `member_ending()` (the member's waiters), `recheck()` (the all-waiting check), and `close()` (every waiter). `SwarmRun._end()` calls `bus.member_ended(m.name, status)` right after it marks the member ended.
+Release sources run synchronously and set the waiter's event, reason and released flag (a released waiter no longer makes its member waiting):
+
+- `deliver()` step 4: for every registered waiter, released or not, `triggered()`; a non-empty result is added to its capture, releases it with `news` if it was not released, and puts its id in `delivered.woke`.
+- `member_ended()`, called by `SwarmRun._end()` right after it marks the member ended: adds the end to the capture of every waiter of another member and releases each with `news`; then the all-waiting check.
+- `member_ending()` (the member's waiters), `recheck()` (the all-waiting check) and `close()` (every waiter).
 
 ### Configuration
 
@@ -287,8 +314,8 @@ There is no switch to turn waiting off for an arm; [Not this design](#not-this-d
 
 ### Room for later work
 
-- **The messages channel** sets `max_wait` (its designed 120) and implements `WaitingState` with `"loop"` reach: a `wake=True` message delivered to the member wakes its own loop's wait, `report()` gives `3 unread messages (from worker-2, worker-4). Call read_messages() to read them.` and marks them told for the wait, and `read_messages` loses its `wait_seconds` parameter. Nested loops' waits never consider messages, since they cannot read them. `send_message(wake=...)` keeps its meaning. The amended [Wake](swarm-communication.md#wake-and-turn-boundaries) section says this.
-- **Bridged members' bus tools** (later) give them `swarm_wait` through `swarm_bridged_tools()`. A bridged member never counts as waiting, because the host cannot tell whether one blocked call is all its CLI is doing, as swarm-communication.md already says; its waits end by news, ends, the stop or timeout. Its CLI's MCP timeout must exceed `max_wait`.
+- **The messages channel** contributes its `max_wait` (its designed 120) to the effective maximum and implements `WaitingState` with `"loop"` reach: a `wake=True` message delivered to the member wakes its own loop's wait, `report()` gives `3 unread messages (from worker-2, worker-4). Call read_messages() to read them.` and marks them told for the wait, and `read_messages` loses its `wait_seconds` parameter. Nested loops' waits never consider messages, since they cannot read them. `send_message(wake=...)` keeps its meaning. The amended [Wake](swarm-communication.md#wake-and-turn-boundaries) section says this.
+- **Bridged members' bus tools** (later) give them `swarm_wait` through `swarm_bridged_tools()`. A bridged member never counts as waiting, because the host cannot tell whether one blocked call is all its CLI is doing, as swarm-communication.md already says; its waits end by news, ends, the stop or timeout. Its CLI's MCP timeout must exceed the bus's effective maximum wait.
 - **Persistent members and wake from idle.** An idle member (submitted, held between activations) is not in a tool call, so it is not a waiter. The all-waiting check generalises to quiescence: no member active, idle members counting as not active, and every channel's `quiescent()`. Waking an idle member stays the controller's decision on a `SwarmEvent` ([swarm-communication.md Wake later](swarm-communication.md#wake-and-turn-boundaries)).
 - **Push delivery.** An urgent message to a member in `swarm_wait` ends the wait (outcome `waiting` in the urgent-message table), as it ended a `read_messages` wait.
 
@@ -306,7 +333,7 @@ There is no switch to turn waiting off for an arm; [Not this design](#not-this-d
 
 **Count a subagent's wait as its member waiting.** Lets Epoch-shaped members join the all-waiting release. Rejected for M2: the bus cannot check that a synchronous subagent's ancestors are all blocked in calls that run alone, and background children would need per-task wait tracking in the owner. Waits there end by news, ends, the stop or the timeout.
 
-**Waits on the filesystem channel**, through a bus-owned tool offered without a bus channel. Rejected as the default: it could wake only on ends and timeouts, it would put a peer-state report into `channels=[]` arms meant to have no channel, and the shared memory is M2's board ([Open questions](#open-questions)).
+**Waits on the filesystem channel**, through a bus-owned tool offered without a bus channel. Rejected (decision: Ransom, 2026-10-21): it could wake only on ends and timeouts, it would put a peer-state report into `channels=[]` arms meant to have no channel, and the shared memory is M2's board.
 
 **Edge-triggered waits, or waits on news alone.** See [What wakes a wait](#what-wakes-a-wait): the first misses writes made just before the call, the second returns forever for files the member chose not to view.
 
@@ -316,7 +343,7 @@ There is no switch to turn waiting off for an arm; [Not this design](#not-this-d
 
 - **inspect_ai:** none. `parallel=False` and `ToolDef` are public; the bus already uses `current_agent_channel()` and `current_agent_span_id()`.
 - **Eval logs:** only existing types. `waited` is a new comm kind inside the versioned `InfoEvent` payload, `delivered` gains `woke`, and shared-memory `sent` records now carry `wake: true`. No schema or generated-type change. inspect_swarm has not released, so evidence stays `version: 1`.
-- **inspect_swarm API (unreleased):** the `swarm_wait` tool (name, parameters, texts), `shared_memory(max_wait=)`, `Channel.max_wait`, `WaitSpec` and `WaitingState`, and `Draft.wake`. `Channel`/`ChannelState` stay experimental ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6). The tool and its texts are evaluated surface: an arm with the shared memory now also has `swarm_wait`, so results from before and after this change are different conditions.
+- **inspect_swarm API (unreleased):** the `swarm_wait` tool (name, parameters, texts), `shared_memory(max_wait=)`, `Channel.max_wait`, `WaitSpec`, `WaitItem`, `WaitReport` and `WaitingState`, and `Draft.wake`. `Channel`/`ChannelState` stay experimental ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6). The tool and its texts are evaluated surface: an arm with the shared memory now also has `swarm_wait`, so results from before and after this change are different conditions.
 - **Members and tasks:** nothing changes for a swarm without the shared-memory channel. A member definition with `swarm_tools()` gains `swarm_wait` in arms with the shared memory, and no new tool otherwise.
 
 ## Security
@@ -335,14 +362,15 @@ Untrusted input reaching this code, and how it is handled:
 
 All tests use mockllm with scripted tool calls, run on asyncio and trio, and need no network, Docker or model provider. Scripted members coordinate with test tools that set `anyio.Event`s, so tests do not depend on sleeps; timeout cases use `max_wait=1`.
 
-- **Waking** (`tests/test_wait.py`): a peer's write under `path` ends the wait and the result names the file by id and the writer; a write outside `path`, and the waiter's own write, do not; a write by the member's own subagent does; a file id as `path` follows the file through a rename; a `path` that does not exist yet wakes on its creation; a wait called after an unreported write returns at once, and a second wait does not return for it again; a file named in a status line does not end the next wait; a notice-covered file does not end a wait in the member's own loop, and a wait's report is not repeated by the next notice (with M2-9).
+- **Waking** (`tests/test_wait.py`): a peer's write under `path` ends the wait and the result names the file by id and the writer; a write outside `path`, and the waiter's own write, do not; a write by the member's own subagent does; a file id as `path` follows the file through a rename; a `path` that does not exist yet wakes on its creation; a wait called after an unreported write returns at once, and a second wait does not return for it again; a file named in a status line does not end the next wait; a peer that creates and then deletes a file under `path` before the waiter's task resumes (a test tool holds the waiter's task between the two writes) gives a result naming `f-N deleted`, `waited.files` with the tombstone's version and `captured: true`, and `delivered.woke` with the wait on both writes; for the member's own loop and for a `general()` child, a creation reported by a wait, and one named only in a status line, are each followed by the file's deletion, which ends the next wait and appears in the next status line (and, own loop, notice); a notice-covered file does not end a wait in the member's own loop, and a wait's report is not repeated by the next notice (with M2-9).
 - **Ends**: a member ending wakes every waiter of every other member with its name and status; a loop's first wait after an end it was not told about returns at once; ends are reported once per loop.
 - **Releases**: two members waiting with nothing else running are both released with the all-waiting result, as is a lone member; a pending member (a custom controller that never starts it) and an ended one count as not active; a member in a long scripted tool call keeps the others waiting; a subagent's wait does not make its member waiting; a turn calling a slow tool and `swarm_wait` runs them one after the other; the stop (controller return, swarm cap, time cap) releases every wait at once and a wait called after it returns at once; the timeout returns the timeout result with the effective, clamped value.
 - **Cancellation**: a member time limit during a wait writes `waited` with `cancelled`, and the next all-waiting check no longer counts that member.
 - **Background members** (with whichever of M2-5 and this pull request merges second, in `tests/test_background_members.py`): a background child's wait is released when the member's own agent returns, and a child's later wait returns the drain result at once; a member whose own loop waits while a child runs is not waiting, and becomes waiting (the all-waiting release fires) when the child ends.
 - **Tools offered**: `swarm_wait` with `channels=["shared_memory"]` in the member's own loop and in a `general()` child; neither tool with `channels=["filesystem"]` or `channels=[]`.
 - **Configuration** (`tests/test_shared_memory_channel.py`): `max_wait` logged and rebuilt, its bounds raise, two arms differing in it get distinct identifiers.
-- **Evidence** (`tests/test_comm_evidence.py`): `waited` with each outcome, in the waiter's tool span with `loop` and `nested`, `idle` 0 for nested waits; `delivered.woke` names the waits a write ended; `sent` records of shared-memory writes have `wake: true`; no result contains a file's content or a peer's path, with a peer path chosen to look like an instruction.
+- **Truncation** (`tests/test_wait.py`): under a generate config with `max_tool_output=100`, a wait that reports several ends and changed files returns its whole text, and the next wait does not report them again; the longest possible result for a roster of 48-byte names fits the computed wait budget.
+- **Evidence** (`tests/test_comm_evidence.py`): `waited` with each outcome, `files` equal to the items the result named (not those of the appended status line), in the waiter's tool span with `loop` and `nested`, `idle` 0 for nested waits; `delivered.woke` names the waits a write ended; `sent` records of shared-memory writes have `wake: true`; no result contains a file's content or a peer's path, with a peer path chosen to look like an instruction.
 - **Metrics** (with M2-10, `tests/test_metrics.py`): `waits`, `waits_by_outcome`, `wait_time` and `idle_time` from a scripted run with known waits, including a member whose subagent waits while its own loop works (wait time counted, idle time not).
 
 ## Implementation plan
@@ -351,11 +379,11 @@ One pull request, M2-13 in [swarm-implementation-plan.md](swarm-implementation-p
 
 1. **M2-13. Waiting for other members.**
    - `src/inspect_swarm/_bus/_wait.py` (new): `WaitSpec`, the waiter registry, the all-waiting check and idle clock, the `swarm_wait` tool and its result templates.
-   - `src/inspect_swarm/_bus/_bus.py`: the registry on `Bus`; `wait()`, `member_ended()`, `member_ending()`, `recheck()`; `close()` releasing waiters; step 4 calling `wakes()` and passing `woke` to `delivered`; `Draft.wake` copied to the record.
+   - `src/inspect_swarm/_bus/_bus.py`: the registry on `Bus`; `wait()`, `member_ended()`, `member_ending()`, `recheck()`; `close()` releasing waiters; step 4 calling `triggered()`, capturing for each waiter and passing `woke` to `delivered`; the wait budget; `Draft.wake` copied to the record.
    - `src/inspect_swarm/_bus/_record.py`: `Draft.wake`.
    - `src/inspect_swarm/_bus/_tools.py`: `swarm_tools()` adds `swarm_wait` when a reachable open channel has `max_wait`.
-   - `src/inspect_swarm/_channel/_channel.py`: `Channel.max_wait`, `WaitingState`.
-   - `src/inspect_swarm/_channel/shared_memory.py`: `max_wait` with validation; `told`; the status line marking told; `wait_check()`, `unreported()`, `wakes()`, `report()`; `wake=True` on its drafts; the instructions sentence.
+   - `src/inspect_swarm/_channel/_channel.py`: `Channel.max_wait`, `WaitSpec`, `WaitItem`, `WaitReport`, `WaitingState`.
+   - `src/inspect_swarm/_channel/shared_memory.py`: `max_wait` with validation; `told`; the status line marking told; `reportable()`, `wait_check()`, `pending()`, `triggered()`, `report()`; `told` read by the tombstone rule; `wake=True` on its drafts; the instructions sentence.
    - `src/inspect_swarm/_controller/_control.py`: `_end()` calls `bus.member_ended()`.
    - `src/inspect_swarm/_evidence.py`: `comm_waited()`; `comm_delivered()` gains `woke`.
    - Tests: `tests/test_wait.py`, and the cases above in `tests/test_shared_memory_channel.py`, `tests/test_bus.py` and `tests/test_comm_evidence.py`.
@@ -366,7 +394,7 @@ One pull request, M2-13 in [swarm-implementation-plan.md](swarm-implementation-p
 
 ## Open questions
 
-1. **Should a swarm without a bus channel have a wait?** The first internal user's swarm was filesystem-only. Recommendation: no, in M2. Such a wait could wake only on peers' ends and its timeout, since sandbox files are unobserved, and it would report peers' states into arms meant to have no channel; a filesystem swarm that wants waits adds `"shared_memory"` and keeps its shared notes on the board, where writes wake waits. The alternative is an opt-in that gives `swarm_wait` (ends and timeout only) to filesystem swarms, for example a `filesystem(wait=True)` parameter backed by a record-less bus state.
+None. The one question of round 1, whether a swarm without a bus channel (filesystem-only, as the first internal user ran) gets a wait, is decided: no wait in M2; a filesystem swarm that wants waits adds `"shared_memory"` and keeps its notes on the board (decision: Ransom, 2026-10-21: "Q1 agree with recommendation"; [The filesystem channel and per-member sandboxes](#the-filesystem-channel-and-per-member-sandboxes)).
 
 ## Not this design
 
