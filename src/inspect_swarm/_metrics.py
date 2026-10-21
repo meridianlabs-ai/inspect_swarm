@@ -79,9 +79,14 @@ class SwarmMetrics(BaseModel):
     never_acted: list[str]
     # harness validity, in roster order: members in notify mode whose own loop, not a
     # subagent's, completed two or more model calls, to whose own loop a record was
-    # news, and whose own loop never ran swarm_on_continue(); and, in a swarm with channels that have tools, members
-    # with a completed model call whose loops never resolved swarm_tools(). The
-    # defaults load metrics written before these fields.
+    # news, and whose own loop never ran swarm_on_continue(); and, in a swarm with
+    # channels that have tools, members with a completed model call whose loops never
+    # resolved swarm_tools(). The defaults load metrics written before these fields.
+    # notify_unwired is a heuristic: two own calls stand for a turn boundary, where the
+    # hook would have run. A first turn with a refusal retry (`retry_refusals`),
+    # overflow recovery or an interrupt makes two own calls before any boundary, so a
+    # correctly wired member that then ends can be listed falsely (decision: Ransom,
+    # 2026-10-21).
     notify_unwired: list[str] = []
     tools_unwired: list[str] = []
     # critical path, the simple definition: a member's steps are the completed model

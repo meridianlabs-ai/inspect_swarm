@@ -439,10 +439,17 @@ def _status(log: EvalLog, name: str) -> str | None:
 async def test_a_member_that_stops_after_its_subagents_write_is_not_unwired(
     inner: AgentContinue, status: str, tmp_path: Path
 ) -> None:
+    # the parent's first reply is a refusal, which deepagent() retries, so its own
+    # loop has two model calls before its first boundary, enough for notify_unwired;
     # the subagent's prompt has no preamble, so _Turns names it ""
     turns = _Turns(
         {
-            "w": [_call("agent", prompt="child task")],
+            "w": [
+                ModelOutput.from_content(
+                    "mockllm", "I can't help with that.", stop_reason="content_filter"
+                ),
+                _call("agent", prompt="child task"),
+            ],
             "": [
                 _call(
                     "shared_memory",
@@ -462,6 +469,7 @@ async def test_a_member_that_stops_after_its_subagents_write_is_not_unwired(
                     "tools": [noop(), swarm_tools()],
                     "subagents": [general()],
                     "todo_write": False,
+                    "retry_refusals": 1,
                     "on_continue": swarm_on_continue(inner),
                 },
                 name="w",
@@ -474,7 +482,7 @@ async def test_a_member_that_stops_after_its_subagents_write_is_not_unwired(
     # the child's write was news to the parent, which stopped at its first boundary
     [create] = _comm(log, "delivered")
     assert create["notify"] == ["w"]
-    assert len(turns.inputs["w"]) == 1
+    assert len(turns.inputs["w"]) == 2
     assert _status(log, "w") == status
     assert _comm(log, "notified") == []
     assert _metrics(log)["notify_unwired"] == []
