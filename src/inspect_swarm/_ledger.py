@@ -99,7 +99,7 @@ class MemberLedger(BaseModel):
     """Model events in the member's spans."""
 
     cancelled: bool
-    """The member's agent was cancelled: by the hard stop after a grace period, a member time limit or a cancellation from outside the swarm. A bridged member is also cancelled at once when it reaches a cap, its share or one of its own limits, or makes a call after the swarm stopped it."""
+    """The member's agent was cancelled, or the swarm's hard stop cancelled its background drain after the agent had returned. A hard stop during the drain keeps the agent's status, so `cancelled` can be `True` with `status="submitted"`. The agent is cancelled by the hard stop after a grace period, a member time limit or a cancellation from outside the swarm. A bridged member is also cancelled at once when it reaches a cap, its share or one of its own limits, or makes a call after the swarm stopped it."""
 
     background_started: int = 0
     """Tasks the member's agent started with `background()`, such as `deepagent()` background subagents."""

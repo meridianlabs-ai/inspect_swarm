@@ -194,8 +194,8 @@ class MemberRun:
 
     @property
     def cancelled(self) -> bool:
-        # its agent loop was cancelled: the hard stop, the bridged branch, a member
-        # time limit, or a cancellation from outside the swarm
+        # its agent loop or its background drain was cancelled: the hard stop, the
+        # bridged branch, a member time limit, or a cancellation from outside the swarm
         return self.context.scope.cancel_called or self.status in (
             "cancelled",
             "member_limit:time",
