@@ -1,3 +1,4 @@
+import copy
 from typing import Literal
 
 from inspect_ai.agent import AgentContinue, AgentState
@@ -57,8 +58,9 @@ def _notice(bus: Bus, context: MemberContext, state: AgentState) -> None:
     # a loop that has not resolved swarm_tools() cannot act on a notice
     if context.delivery_effective != "notify" or context.loop is None:
         return
+    # the ids as they are now, which the channel may change later
     lines = [
-        (channel, line)
+        (channel, line.text, copy.deepcopy(dict(line.ids)))
         for channel, channel_state in bus.states.items()
         for line in channel_state.notice_lines(context.name)
     ]
@@ -66,19 +68,19 @@ def _notice(bus: Bus, context: MemberContext, state: AgentState) -> None:
         return
     notice = bus.notice_id()
     message = ChatMessageUser(
-        content="\n".join(line.text for _, line in lines),
+        content="\n".join(text for _, text, _ in lines),
         metadata={
             "inspect_swarm": {
                 "version": 1,
                 "type": "notice",
                 "id": notice,
-                "lines": [{"channel": channel, **line.ids} for channel, line in lines],
+                "lines": [{"channel": channel, **ids} for channel, _, ids in lines],
             }
         },
     )
     state.messages.append(message)
     loop = current_agent_span_id()
-    for channel, line in lines:
+    for channel, _, ids in lines:
         comm_notified(
-            context.span_id, context.name, channel, notice, message.id, loop, line.ids
+            context.span_id, context.name, channel, notice, message.id, loop, ids
         )

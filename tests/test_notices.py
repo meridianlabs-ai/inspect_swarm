@@ -15,6 +15,7 @@ from inspect_ai.agent import (
     general,
     react,
 )
+from inspect_ai.agent._channel import agent_channel
 from inspect_ai.dataset import Sample
 from inspect_ai.event import Event, InfoEvent, ModelEvent
 from inspect_ai.log import EvalLog
@@ -29,16 +30,24 @@ from inspect_ai.model import (
     get_model,
 )
 from inspect_ai.tool import Tool, ToolChoice, ToolInfo, tool
+from pydantic import JsonValue
 
 from inspect_swarm import (
+    ChannelRun,
+    ChannelState,
     NoticeLine,
+    Record,
     member,
     shared_memory,
     swarm,
     swarm_on_continue,
     swarm_tools,
 )
+from inspect_swarm._bus._bus import current_bus
 from inspect_swarm._evidence import METRICS_KEY
+
+from .swarm_runtime import evidence, sample
+from .test_bus import _as, _Board, _BoardState, _bus, _send
 
 ROOT = "/shared_memory"
 
@@ -485,6 +494,59 @@ async def test_a_subagents_deletion_is_news_to_its_parent_once(
 def test_a_notice_line_cannot_name_an_id_after_an_evidence_field(name: str) -> None:
     with pytest.raises(ValueError, match=name):
         NoticeLine("[Swarm notice] 1 change.", {"records": ["c-1"], name: 2})
+
+
+class _ListState(_BoardState):
+    # gives its own, growing list of record ids as a notice line's ids
+    def __init__(self) -> None:
+        super().__init__(None)
+        self.records: list[JsonValue] = []
+        self.covered = 0
+
+    def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
+        self.records.append(record.id)
+        return super().apply(record)
+
+    def notice_lines(self, member: str) -> list[NoticeLine]:
+        if self.covered == len(self.records):
+            return []
+        self.covered = len(self.records)
+        return [NoticeLine("[Swarm notice] New records.", {"records": self.records})]
+
+
+class _ListBoard(_Board):
+    def open(self, run: ChannelRun) -> ChannelState | None:
+        return _ListState()
+
+
+@pytest.mark.anyio
+async def test_a_notice_keeps_its_ids_when_the_channel_changes_them() -> None:
+    bus, members = _bus(channels=[_ListBoard()])
+    board = bus.states["board"]
+    assert isinstance(board, _ListState)
+    context = members["w-2"].context
+    state = AgentState(messages=[])
+    state.output = _call("noop")
+    async with sample() as transcript:
+        token = current_bus.set(bus)
+        try:
+            async with agent_channel() as loop:
+                context.loop = loop
+                await _send(bus, to=("w-2",))
+                with _as(context):
+                    await swarm_on_continue()(state)
+        finally:
+            current_bus.reset(token)
+    [notice] = _notices(state.messages)
+    [notified] = evidence(transcript, "notified")
+
+    for change in [lambda: board.records.append("b-2"), board.records.clear]:
+        change()
+        assert notice.metadata is not None
+        assert notice.metadata["inspect_swarm"]["lines"] == [
+            {"channel": "board", "records": ["b-1"]}
+        ]
+        assert notified["records"] == ["b-1"]
 
 
 # Wiring checks and the effective delivery mode, in the swarm's metrics
