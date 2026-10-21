@@ -27,7 +27,7 @@ from inspect_ai.util._sandbox.context import (
 )
 from pydantic import BaseModel
 
-from inspect_swarm import Member, filesystem, member, swarm
+from inspect_swarm import Member, filesystem, leaderless, member, swarm
 from inspect_swarm._record import RECORD_KEY
 
 from .swarm_runtime import evidence, run_swarm
@@ -244,6 +244,7 @@ async def test_injected_tools_without_a_name_stay_in_the_members_own_sandbox(
                     sandbox="{member}",
                     visible_sandboxes=["comparator"],
                 ),
+                controller=leaderless(stop_on_submission=False),
                 channels=[],
             )
         )

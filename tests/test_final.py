@@ -25,6 +25,7 @@ from inspect_swarm import (
     Controller,
     StopReason,
     SwarmControl,
+    leaderless,
     member,
     swarm,
     swarm_controller,
@@ -258,7 +259,9 @@ def _limited_task(*, early_submission: bool) -> Task:
         )
     return Task(
         dataset=[Sample(input="task")],
-        solver=swarm(members, channels=[]),
+        solver=swarm(
+            members, controller=leaderless(stop_on_submission=False), channels=[]
+        ),
         message_limit=6,
     )
 
@@ -319,7 +322,7 @@ def test_an_answer_finalisation_cannot_fit_ends_the_sample_on_its_message_limit(
     # the ledger is written after the final step, which the sample's limit ended
     ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
     assert (ledger.stop_reason, ledger.ended_by, ledger.interrupted) == (
-        "all_done",
+        "submitted",
         "sample_limit:message",
         True,
     )

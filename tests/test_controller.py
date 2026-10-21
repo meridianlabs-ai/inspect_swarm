@@ -22,6 +22,7 @@ from inspect_swarm import (
     MemberHandle,
     StopReason,
     SwarmControl,
+    leaderless,
     member,
     swarm,
     swarm_controller,
@@ -60,15 +61,49 @@ async def _start_all(control: SwarmControl) -> StopReason:
 
 
 @pytest.mark.anyio
-async def test_leaderless_starts_every_member_and_returns_all_done() -> None:
-    script = Script()
-    model = scripted_model(script)
+@pytest.mark.parametrize(
+    "stop_on_submission,reason,slow_status,slow_calls",
+    [(True, "submitted", "stopped", 1), (False, "all_done", "submitted", 2)],
+)
+async def test_leaderless_stops_at_the_first_submission_unless_told_not_to(
+    stop_on_submission: bool, reason: str, slow_status: str, slow_calls: int
+) -> None:
+    refusal = ModelOutput.from_content("mockllm", "no", stop_reason="content_filter")
+    slow = Script(delay=0.3)
     stop = await run_swarm(
-        swarm([generator(model, calls=1), generator(model, calls=1)], channels=[])
+        swarm(
+            [
+                # end first, without a submission: neither stops the swarm
+                member(generator(scripted_model(Script([refusal]))), name="refuser"),
+                member(
+                    generator(scripted_model(), calls=None),
+                    name="limited",
+                    limits=[token_limit(TOKENS_PER_CALL)],
+                ),
+                member(
+                    generator(scripted_model(Script(delay=0.05)), answer="first"),
+                    name="quick",
+                ),
+                member(
+                    generator(scripted_model(slow), calls=2, answer="second"),
+                    name="slow",
+                ),
+            ],
+            controller=leaderless(stop_on_submission=stop_on_submission),
+            channels=[],
+        )
     )
-    assert stop.reason == "all_done"
-    assert statuses(stop) == {"generator-1": "submitted", "generator-2": "submitted"}
-    assert script.calls == 2
+    assert stop.reason == reason
+    assert statuses(stop) == {
+        "refuser": "unsubmitted",
+        "limited": "member_limit:token",
+        "quick": "submitted",
+        "slow": slow_status,
+    }
+    # stopped, the slow member finished its call in flight and started no other
+    assert (slow.started, slow.calls) == (slow_calls, slow_calls)
+    assert stop.record.final.member == "quick"
+    assert stop.state.output.completion == "first"
 
 
 @agent
@@ -443,6 +478,7 @@ async def test_a_member_limit_ends_only_that_member() -> None:
                 ),
                 member(generator(scripted_model(), calls=3), name="free"),
             ],
+            controller=leaderless(stop_on_submission=False),
             channels=[],
         )
     )
@@ -842,7 +878,12 @@ def test_no_span_inside_the_swarm_logs_store_events(
     [log] = eval(
         Task(
             dataset=[Sample(input="x")],
-            solver=swarm(members, channels=[]),
+            solver=swarm(
+                members,
+                # every member writes, and the sample limit is reached
+                controller=leaderless(stop_on_submission=False),
+                channels=[],
+            ),
             message_limit=message_limit,
         ),
         model="mockllm/model",

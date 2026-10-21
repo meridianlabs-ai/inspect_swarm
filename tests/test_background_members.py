@@ -39,7 +39,7 @@ from inspect_ai.util import (
     token_limit,
 )
 
-from inspect_swarm import Budget, SwarmControl, member, swarm
+from inspect_swarm import Budget, SwarmControl, leaderless, member, swarm
 from inspect_swarm._controller._control import SwarmRun
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import SwarmLedger
@@ -156,6 +156,7 @@ async def test_each_members_drain_waits_only_for_its_own_background_work() -> No
                     name="stuck",
                 ),
             ],
+            controller=leaderless(stop_on_submission=False),
             channels=[],
             budget=Budget(grace=0.5),
         )
@@ -521,6 +522,7 @@ async def test_a_sample_limit_reached_in_a_child_ends_the_sample(
                     name="busy",
                 ),
             ],
+            controller=leaderless(stop_on_submission=False),
             channels=[],
             # a token cap above the sample's limit, which ends the swarm first
             budget=Budget(tokens=10**6, grace=2),

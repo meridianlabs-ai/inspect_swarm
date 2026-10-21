@@ -35,7 +35,7 @@ from inspect_ai.tool import Tool, tool
 from inspect_ai.util import store
 from inspect_ai.util._span import AGENT_SPAN_TYPE
 
-from inspect_swarm import SwarmControl, member, swarm
+from inspect_swarm import SwarmControl, leaderless, member, swarm
 from inspect_swarm._evidence import METRICS_KEY
 from inspect_swarm._ledger import EventLog, ScoreRecord
 from inspect_swarm._metrics import GateChecks, SwarmMetrics, gate_checks
@@ -125,6 +125,7 @@ async def test_tokens_and_cost_are_the_ledgers() -> None:
                 member(generator(model, calls=2), name="a"),
                 member(generator(model), name="b"),
             ],
+            controller=leaderless(stop_on_submission=False),
             channels=[],
         )
     )
@@ -311,6 +312,7 @@ async def test_steps_to_answer_and_longest_member_steps(
                 member(_stepper(*a, submits), name="a"),
                 member(_stepper(*b, submits), name="b"),
             ],
+            controller=leaderless(stop_on_submission=False),
             channels=[],
         )
     )
@@ -436,6 +438,7 @@ def test_each_member_has_a_timeline_of_its_spans(
                         member(generator(model, calls=a_calls), name="a"),
                         member(generator(model), name="b"),
                     ],
+                    controller=leaderless(stop_on_submission=False),
                     channels=[],
                 )
             ),

@@ -142,7 +142,7 @@ class SwarmControl(Protocol):
 
 
 # Reasons a controller may return as they are; any other is recorded as controller:<reason>.
-_TOPOLOGY_REASONS = frozenset({"all_done", "verified", "quiescence"})
+_TOPOLOGY_REASONS = frozenset({"all_done", "submitted", "verified", "quiescence"})
 
 
 # start()'s refusal once a stop has begun. A controller that resumed before the stop's

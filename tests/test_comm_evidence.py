@@ -8,7 +8,7 @@ from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent
 from inspect_ai.model import ModelOutput
 
-from inspect_swarm import member, shared_memory, swarm, swarm_tools
+from inspect_swarm import leaderless, member, shared_memory, swarm, swarm_tools
 from inspect_swarm._metrics import CommMetrics, MemberMetrics, SwarmMetrics
 
 from .swarm_runtime import Script, scripted_model
@@ -74,6 +74,7 @@ async def test_records_rejections_and_reads_are_counted_per_member_and_channel(
                 _member("w", {"command": "view", "path": "/shared_memory"}),
                 _member("q"),
             ],
+            controller=leaderless(stop_on_submission=False),
             channels=[shared_memory(max_file_bytes=20, rate=(2, 3600.0))],
         ),
         tmp_path,

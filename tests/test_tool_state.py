@@ -13,7 +13,7 @@ from inspect_ai.tool._tools import _bash_session as bash_session_module
 from inspect_ai.tool._tools._web_browser import _web_browser as web_browser_module
 from inspect_ai.util import tool_state_instance
 
-from inspect_swarm import member, swarm
+from inspect_swarm import leaderless, member, swarm
 
 from .swarm_runtime import Script, sample, scripted_model
 
@@ -157,6 +157,7 @@ async def test_deepagent_members_general_subagents_have_their_own_installed_skil
                 },
                 count=2,
             ),
+            controller=leaderless(stop_on_submission=False),
             channels=[],
         ),
         tmp_path,

@@ -289,7 +289,7 @@ Nothing new is needed; the drain composes with [Stopping](swarm-limits.md#stoppi
 **One end time per member.** A member ends when its drain ends. Until then its `MemberHandle.state` is `running`; then the runtime's `_end()` sets its state `ended` and its status, writes its `MemberResult` (status, output, time) and updates the provisional answer, and queues `MemberEnded`, all at once, as in M1. There is no earlier, separate decision (decision: Ransom, 2026-10-16: "it doesn't make sense to charge them for work but not be able to include that in the answer"). So:
 
 - The swarm's guarantee holds without extra state: a member reported `ended` has no work left running.
-- `events()` ends, and `leaderless` returns `all_done`, only when no member is running, so never while children still spend.
+- `events()` ends, and `leaderless` returns `all_done`, only when no member is running, so never while children still spend. `leaderless`'s default stop at the first submission comes at that member's `MemberEnded`, after its drain.
 - The stop procedure waits for and cancels running members, and a draining member is running, so grace and the hard stop reach its children.
 - `MemberResult.time` is the swarm time the member ended, after its drain, and `first` ("the submission with the earliest swarm time", [swarm-scoring.md](swarm-scoring.md#the-final-answer-first)) uses it. A member's steps, for M1-11's `steps_to_answer`, are its whole ledger line, drain included, as in M1.
 - After M2, the verdict is taken before `MemberEnded` is queued ([swarm-scoring.md](swarm-scoring.md#the-final-answer-chain)), so at the member's end.

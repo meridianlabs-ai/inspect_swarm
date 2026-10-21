@@ -333,7 +333,7 @@ which means, written out:
 ```python
 agent = swarm(
     members=member(deepagent, args={...}, count=4),  # copies from a factory; or a list of built agents and member() records
-    controller="leaderless",                  # a @swarm_controller: leaderless(final=..., stop_on_verified=...); later "coordinator"
+    controller="leaderless",                  # a @swarm_controller: leaderless(final=..., stop_on_verified=..., stop_on_submission=...); later "coordinator"
     channels=["filesystem"],                  # names or @swarm_channel objects: filesystem(...); later messages(...), notes, tasks, board
     budget=Budget(),                          # swarm-wide cap (limits deep dive)
 )
@@ -627,7 +627,7 @@ Each topology is a controller: a `@swarm_controller` registry object chosen per 
 
 | Topology | Started by | Typical channels | Ends when |
 |---|---|---|---|
-| Leaderless (M1) | The controller starts all members with the same task | filesystem; later notes and tasks | all members submitted, the budget or time is exhausted, or (optionally, after M2) the first answer passes a task-supplied verifier |
+| Leaderless (M1) | The controller starts all members with the same task | filesystem; later notes and tasks | the first member submits (by default) or all members ended, the budget or time is exhausted, or (optionally, after M2) the first answer passes a task-supplied verifier |
 | Coordinator tree (later) | A root member spawns named children, which may spawn their own | messages; later tasks | the root submits |
 | Lead and teammates (later) | A lead with a fixed roster of teammates | messages, tasks | the lead submits |
 
@@ -635,8 +635,8 @@ A deepagent with `background=True` is not reimplemented. It stays a member type 
 
 **Termination.** Always bounded by the swarm budget and the sample's limits.
 
-- Leaderless swarms have no single submitter. In M1 they end when every member has submitted, or on budget or time; after M2, also on a verified answer. With explicit channels they would end by quiescence: every member idle, no open or claimed task, and empty inboxes. Quiescence needs members that can be idle and woken, so it depends on the persistent-members work ([Members](#members)).
-- Every run records why it stopped, as one of a fixed set of reasons: every member ended, verified answer, swarm cap, sample limit, time, quiescence ([swarm-limits.md](swarm-limits.md#stopping) names them). Strands and AutoGen report stop reasons the same way, and AutoGen's termination conditions compose with `&` and `|`. Later topologies may compose conditions the same way.
+- Leaderless swarms have no single submitter. In M1 they end at the first submission, since with `first` nothing later can change the answer (decision: Ransom, 2026-10-21); with `leaderless(stop_on_submission=False)` they end when every member has ended. Either way budget or time can end them first; after M2, also a verified answer. With explicit channels they would end by quiescence: every member idle, no open or claimed task, and empty inboxes. Quiescence needs members that can be idle and woken, so it depends on the persistent-members work ([Members](#members)).
+- Every run records why it stopped, as one of a fixed set of reasons: every member ended, first submission, verified answer, swarm cap, sample limit, time, quiescence ([swarm-limits.md](swarm-limits.md#stopping) names them). Strands and AutoGen report stop reasons the same way, and AutoGen's termination conditions compose with `&` and `|`. Later topologies may compose conditions the same way.
 - Quiescence, when explicit channels exist, can follow SCHEME's pattern: a shared status registry with `wait` and `done`, where a `wait` returns immediately once every other member is done. AG2's passive `max_silence` expectations are a related signal.
 - On termination the controller cancels and awaits the remaining members and their descendants (drain, within the [ownership boundary](#members)). It does not abandon them, so nothing edits the shared environment during finalisation and their usage is in the ledger before the sample is scored.
 

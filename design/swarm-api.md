@@ -31,7 +31,7 @@ def swarm(
 
 # Controllers: how the swarm runs. A @swarm_controller factory returns a Controller.
 @swarm_controller
-def leaderless(final: FinalSpec | None = None, stop_on_verified: bool = False) -> Controller: ...   # M1: no parameters
+def leaderless(final: FinalSpec | None = None, stop_on_verified: bool = False, stop_on_submission: bool = True) -> Controller: ...   # M1: stop_on_submission only
 
 class Controller:
     def __init__(
@@ -408,7 +408,7 @@ SwarmEvent = MemberEnded         # later work adds kinds (idle and woken members
 
   Members never started stay `pending`; the evidence records them as not started.
 - **Errors and outer stops.** These are not stops the controller requested, and the limits deep dive's exhaustion rules apply unchanged: a foreign error from a member (a sample limit, `TerminateSampleError`, a crash) or from `run` makes the task group cancel the rest at once and propagates. The runtime classifies an exception from `run` leaf by leaf, bare or grouped, as the limits deep dive's [Exhaustion and errors](swarm-limits.md#exhaustion-and-errors) step 2 says: it removes `start()` refusals raised because a stop had already begun; it removes swarm-cap leaves and runtime-lever leaves as the swarm's own (the cap node has already begun the stop, and the lever refuses only once a stop has begun), so a controller whose own model call reaches a cap ends through the orderly `swarm_cap` stop; and it propagates only the remaining foreign leaves, an ordinary `RuntimeError` included, a single leaf bare and several as a group; cancellation from outside (the sample's time limit, an operator interrupt) does no awaiting work. A member's own limit is not an error: that member ends with a status and an event, and the swarm continues.
-- **Stop reasons.** The limits deep dive's closed set is `all_done`, `verified`, `swarm_cap`, `swarm_time` and later `quiescence`. A controller returns one of the topology reasons (`all_done`, `verified`, `quiescence`), or its own string, which is recorded as `controller:<reason>`; the ORBIT deep dive's `policy:<name>` reasons are this form once its policies are controllers. The built-in `leaderless` returns `all_done` or `verified`.
+- **Stop reasons.** The limits deep dive's closed set is `all_done`, `submitted`, `verified`, `swarm_cap`, `swarm_time` and later `quiescence`. A controller returns one of the topology reasons (`all_done`, `submitted`, `verified`, `quiescence`), or its own string, which is recorded as `controller:<reason>`; the ORBIT deep dive's `policy:<name>` reasons are this form once its policies are controllers. The built-in `leaderless` returns `submitted` or `all_done`, and after M2 `verified`.
 - **Usage.** A controller normally makes no model calls. If one does, its usage is the swarm's, not a member's; the limits deep dive meters it, as it does verifier calls, under the runtime lever ([swarm-limits.md](swarm-limits.md#swarm-nodes)).
 
 The built-in controllers are `inspect_swarm/leaderless` (M1) and, later, `inspect_swarm/coordinator`. If the ORBIT deep dive's scheduled mode is adopted, its `ActivationPolicy` becomes a controller's `run`, its `SwarmControl` and `MemberHandle` additions (`activate()`, `snapshot()`, `set_output()`, `append()`, `edit()`) are methods on these same handles, and its `round_robin` is a `@swarm_controller`. Its own text already says "M1's leaderless controller is the policy that activates every member once".
@@ -601,7 +601,7 @@ def research_math(k: int = 4, cost: float = 40.0, controller: str = "leaderless"
     )
 ```
 
-`inspect eval research_math.py -T k=8 -T cost=80` runs eight members, `solver-1` to `solver-8`, each with its own deepagent, in the sample's sandbox, with the filesystem channel, under a cost cap of 80 (dollars), each started with the sample's input and its preamble; it stops when all have ended, and the final answer is the first submission. After M2, with the scoring deep dive's `result=answer_result(answer_key=boxed_number, verifier=check_answer)`, the default answer is scoring's default chain. The explicit form of the same arm after M2, with a strict verifier-only answer and the swarm stopping at the first verified answer:
+`inspect eval research_math.py -T k=8 -T cost=80` runs eight members, `solver-1` to `solver-8`, each with its own deepagent, in the sample's sandbox, with the filesystem channel, under a cost cap of 80 (dollars), each started with the sample's input and its preamble; it stops when the first member submits, and that submission is the final answer. After M2, with the scoring deep dive's `result=answer_result(answer_key=boxed_number, verifier=check_answer)`, the default answer is scoring's default chain. The explicit form of the same arm after M2, with a strict verifier-only answer and the swarm stopping at the first verified answer:
 
 ```python
 swarm(
@@ -613,14 +613,18 @@ swarm(
 )
 ```
 
-The built-in it uses, as it is after M2. In M1 it has no parameters, starts every member and returns `all_done`:
+The built-in it uses, as it is after M2. In M1 its only parameter is `stop_on_submission`: it starts every member and returns `submitted` at the first submission, or `all_done` when every member has ended:
 
 ```python
 import contextlib
 
 @swarm_controller
-def leaderless(final: FinalSpec | None = None, stop_on_verified: bool = False) -> Controller:
-    """Start every member with the swarm's input; stop when all have ended."""
+def leaderless(
+    final: FinalSpec | None = None,
+    stop_on_verified: bool = False,
+    stop_on_submission: bool = True,
+) -> Controller:
+    """Start every member with the swarm's input; stop at the first submission, or when all have ended."""
     if final is not None and has_reporter(final):   # any `reporter` mode in the chain
         raise ValueError("leaderless: a leaderless swarm has no reporter")
 
@@ -631,10 +635,14 @@ def leaderless(final: FinalSpec | None = None, stop_on_verified: bool = False) -
             async for event in events:
                 if stop_on_verified and isinstance(event, MemberEnded) and event.verdict and event.verdict.passed:
                     return "verified"
+                if stop_on_submission and event.submitted:
+                    return "submitted"
         return "all_done"
 
     return Controller(run, final=final)
 ```
+
+`stop_on_submission` (M1, on by default; decision: Ransom, 2026-10-21) is meaningful only with the `first` chain: the first submission is then the answer, so nothing the other members do after it can change it. With `verify` or `vote` in the chain a later member can still change the answer. How the two combine, and the default once the default chain is not `first` alone, is for the post-M2 work to settle; refusing the combination is the likely answer. `stop_on_submission=False` keeps every member running to its end, for tasks whose scorer reads a shared artifact after the drain, arms that measure each member's result (team@k), and agents for which any normal return counts as a submission.
 
 **A coordinator swarm (later: coordinator topologies, on the later messages channel).** A lead and three workers. All start together; workers wait for the lead's instructions with `swarm_wait` ([swarm-wait.md](swarm-wait.md)), and the lead's submission is the answer. Members with hooks and tool sources are registered builders, passed uncalled, so the log can name them and each member gets its own hooks ([Members](#tool-state-and-member-builders)).
 
@@ -814,7 +822,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, no network or Docker:
   - (after M2) a final chain mixing strings and pydantic `FinalMode` values (including a `synthesize` with a model) validates back from its logged JSON;
   - `-T channels=filesystem` (a string) and `-T channels=filesystem,messages` (a list) both resolve.
 - `tests/test_controller.py`:
-  - `leaderless` starts every member and returns `all_done`; after M2, with `stop_on_verified` it returns `verified` at the first passed verdict;
+  - `leaderless` starts every member and returns `submitted` at the first submission, soft-stopping the members still running, while a member that ends without a submission does not stop it; with `stop_on_submission=False` every member runs to its end and it returns `all_done`; after M2, with `stop_on_verified` it returns `verified` at the first passed verdict;
   - (after M2) a delayed verifier: the last member's agent returns before its verdict is taken, and `events()` still yields that member's `MemberEnded` with the verdict before it ends, so `stop_on_verified` and `escalate` see it;
   - a custom controller (`escalate`) starts members later and with custom input; `start()` twice raises; `events()` ends when nothing runs; a second iterator raises while one is open, including one that competes in the interval after a waiting iterator is woken (the woken one keeps its event); an open iterator holds its events until it is closed;
   - returning while members run goes through the soft stop: in-flight mockllm calls complete and are recorded, members get status `stopped`, and only a member still running after `Budget.grace` is cancelled; the swarm cap and time cap take the same path with reasons `swarm_cap` and `swarm_time`, and `run` is cancelled;
