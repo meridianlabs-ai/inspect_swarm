@@ -2,11 +2,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import pytest
-from inspect_ai._util.registry import (
-    registry_kwargs,
-    registry_params,
-    set_registry_params,
-)
+from inspect_ai._util.registry import registry_kwargs
 from inspect_ai.agent import Agent, AgentState, agent, deepagent, react
 from inspect_ai.tool import bash, python
 from inspect_ai.util import (
@@ -194,15 +190,6 @@ def shadowing() -> Agent:
             ValueError,
             "working limit",
         ),
-        (lambda: member(deepagent(background=True)), ValueError, "background"),
-        (lambda: member(deepagent(background=64)), ValueError, "background"),
-        (
-            lambda: member(deepagent, args={"background": True}),
-            ValueError,
-            "background",
-        ),
-        (lambda: member(deepagent, args={"background": 64}), ValueError, "background"),
-        (lambda: _swarm(deepagent(background=64)), ValueError, "background"),
     ],
 )
 def test_member_refusals(
@@ -241,6 +228,11 @@ def test_build_member_gives_the_agent_or_a_new_one_per_call() -> None:
             count=4,
             limits=[token_limit(100, type="output")],
         ),
+        # background members are accepted, in both forms, and round-trip
+        lambda: member(deepagent(background=True), name="b"),
+        lambda: member(deepagent(background=64), name="b"),
+        lambda: member(deepagent, args={"background": True}, count=2),
+        lambda: member(deepagent, args={"background": 64}),
     ],
 )
 def test_member_validates_from_its_logged_dict(record: Callable[[], Member]) -> None:
@@ -305,19 +297,6 @@ def to_be_replaced() -> Agent:
     return react()
 
 
-def _mutated_factory_args() -> Member:
-    record = member(deepagent)
-    record.args["background"] = 64
-    return record
-
-
-def _mutated_agent_params() -> Member:
-    built = deepagent()
-    record = member(built)
-    set_registry_params(built, {**registry_params(built), "background": 64})
-    return record
-
-
 def _replaced_factory() -> Member:
     record = member(to_be_replaced)
 
@@ -331,8 +310,6 @@ def _replaced_factory() -> Member:
 @pytest.mark.parametrize(
     "record,error,match",
     [
-        (_mutated_factory_args, ValueError, "background"),
-        (_mutated_agent_params, ValueError, "background"),
         (_replaced_factory, TypeError, "@agent"),
     ],
 )

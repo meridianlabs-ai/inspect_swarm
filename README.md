@@ -149,6 +149,14 @@ solver = swarm(
 - A member cannot see the sample's other environments, except those in its `visible_sandboxes`, such as a shared service. It reaches those only by name. Any member that lists a service can use it, so list only services every member may use.
 - The task's scorer runs outside every member, where `sandbox()` is the sample's `default`. A scorer that grades the members' work names each member's sandbox, as in `sandbox("agent-1")`. The result record's `sandbox` field says which member used which.
 
+### Background work
+
+Native members support `deepagent(background=True)` and integer background limits. Work started with `background()` belongs to its member and uses its limits and sandbox. A member limit or swarm cap ends the background task that reached it. A swarm cap also starts the swarm's soft stop; other work gets the effective grace period to finish calls already in flight.
+
+When the member's agent ends, its background work gets the swarm's grace period to finish work in flight. The swarm then cancels the rest and waits for its cleanup before the member ends. `Budget.grace=0` skips the grace wait.
+
+Start background work from the running agent, not its factory. A factory that starts it makes the member `errored`.
+
 ### How a member ends
 
 A member's status says how it ended:
@@ -318,7 +326,9 @@ The ledger of a two-member swarm with a cost cap of $1 and a time cap of 600 sec
       "bridged": false,
       "meter": {"usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.0081}, "cost": 0.0081, "suspended_cost": 0.0},
       "calls": {"calls": 1, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
-      "cancelled": false
+      "cancelled": false,
+      "background_started": 0,
+      "background_cancelled": 0
     },
     {
       "name": "react-2",
@@ -326,7 +336,9 @@ The ledger of a two-member swarm with a cost cap of $1 and a time cap of 600 sec
       "bridged": false,
       "meter": {"usage": {"input_tokens": 1150, "output_tokens": 280, "total_tokens": 1430, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.00765}, "cost": 0.00765, "suspended_cost": 0.0},
       "calls": {"calls": 1, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
-      "cancelled": false
+      "cancelled": false,
+      "background_started": 0,
+      "background_cancelled": 0
     }
   ],
   "runtime": {"usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": null}, "cost": 0.0, "suspended_cost": 0.0},
@@ -350,7 +362,7 @@ The ledger of a two-member swarm with a cost cap of $1 and a time cap of 600 sec
 ```
 
 - `budget` is the `Budget` as given. `caps` are the caps the swarm applied, derived from the sample's limits or given: `cost` in dollars, `tokens`, and `time` in seconds, `null` for no cap. `sample_limits` are the sample's limits when the swarm started.
-- `members` has one entry per member, in roster order. `status` is as in [How a member ends](#how-a-member-ends), `null` for a member never started. `cancelled` means the swarm or the sample cancelled the member, so calls it had in flight are unknown.
+- `members` has one entry per member, in roster order. `status` is as in [How a member ends](#how-a-member-ends), `null` for a member never started. `cancelled` means the swarm or the sample cancelled the member, so calls it had in flight are unknown. A hard stop during a background drain also sets `cancelled`; the agent's returned status is kept. `background_started` counts the tasks the member started with `background()`, and `background_cancelled` those cancelled before they finished, whose calls in flight are unknown too.
 - `meter` is the usage and cost of what a member did. `suspended_cost` is the part spent while token counting was suspended, such as approval calls.
 - `calls` counts model calls: `calls` completed ones other than cache replays, `cache_replays` replayed from cache at no charge, `errored` attempts that errored or were cancelled (retries included), `no_usage` completed with no usage, and `unpriced` completed with usage but no cost.
 - `runtime` meters the controller's own calls, `final` the final step's (the default first-submission answer makes none), and `swarm` everything in the swarm: members, runtime and final step. The top-level `calls` counts every call in the swarm. `unpriced_calls_recorded` counts the unpriced calls the swarm's meter recorded.
@@ -369,7 +381,8 @@ If an error, limit or cancellation escapes the swarm and ends the sample, the lo
 
 ## Restrictions
 
-- **No background subagents.** A `deepagent()` member with `background=True` or an integer is refused. So are ACP agents.
+- **No background work in bridged members.** A member cannot combine background work with the agent bridge. `background()` raises in a bridged member, and a member that uses the bridge after starting background work ends `errored`.
+- **No ACP agents.** ACP agents wait for their caller to drive them, so they are refused.
 - **Tool state is per member.** Each member runs in its own tool-state scope. Built-in tools that keep state in the store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default.
   - Tool state that a setup solver prepared at the default instance is not carried into the members. They start with fresh state.
   - Tasks whose scorers read a member's tool state from the store are not supported. The keys inside a member's scope differ from the default ones.

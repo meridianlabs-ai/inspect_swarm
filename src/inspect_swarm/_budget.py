@@ -314,6 +314,10 @@ class MemberContext:
     # first resolved, and whether ACP was bound to that channel then
     loop: AgentChannel | None = None
     acp_bound: bool | None = None
+    # set when the member starts background work, which bridged members cannot have
+    background: bool = False
+    # the error for bridge use found after the member started background work
+    refusal: RuntimeError | None = None
 
     @property
     def delivery_effective(self) -> Literal["notify", "poll"]:
@@ -323,6 +327,12 @@ class MemberContext:
         if self.bridged and not self.bridged_late:
             return "poll"
         return self.delivery or "notify"
+
+
+def bridged_background_error(name: str) -> RuntimeError:
+    return RuntimeError(
+        f"Member {name!r} uses the agent bridge and background work, which cannot be combined: a limit that stops a bridged member cancels all of its work. Run bridged agents in members that start no background work."
+    )
 
 
 current_member: ContextVar[MemberContext | None] = ContextVar(
@@ -348,6 +358,12 @@ class SwarmNode(Limit):
         if member is not None and not member.bridged and in_bridge_model_generate():
             member.bridged = True
             member.bridged_late = True
+            if member.background:
+                # its nodes would now cancel the member, background work and all, with
+                # no error to say why; a raise here would end the sample, so the member
+                # wrapper raises the refusal once the member is cancelled
+                member.refusal = bridged_background_error(member.name)
+                member.scope.cancel()
 
     def exceeded(
         self,
