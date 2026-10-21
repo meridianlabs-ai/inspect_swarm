@@ -477,7 +477,7 @@ def mixed(model: Model, foreign: Sequence[str] = ("crash",)) -> Agent:
             while True:
                 await model.generate(state.messages)
         except LimitExceededError as limit:
-            errors = [_FOREIGN[kind]() for kind in foreign]
+            errors = [(_FOREIGN | _CUSTOM)[kind]() for kind in foreign]
             raise ExceptionGroup("mixed", [limit, *errors]) from None
 
     return execute
@@ -504,6 +504,198 @@ async def test_a_group_mixing_the_swarms_error_with_a_foreign_one_raises_only_th
         )
     # the swarm's leaf was removed, so the foreign one escapes bare, not as a group
     assert type(raised.value) is RuntimeError
+
+
+# ---------------------------------------------------------------------------
+# An agent that stops itself: a custom limit error with no source
+
+
+def _self_stop() -> LimitExceededError:
+    return LimitExceededError("custom", value=1, limit=1, message="stuck")
+
+
+async def _stuck(state: AgentState) -> bool:
+    # a react() on_continue that stops a stuck agent, as inspect_boltons' loop limits do
+    raise _self_stop()
+
+
+def test_a_member_that_stops_itself_ends_alone_and_is_never_chosen(
+    tmp_path: Path,
+) -> None:
+    # answers without a submit, so react() calls on_continue, which stops it
+    stuck = Script(outputs=[ModelOutput.from_content("mockllm", "I am stuck.")])
+    # slower, so it submits after the stuck member has ended
+    solver = Script(
+        outputs=[ModelOutput.for_tool_call("mockllm", "submit", {"answer": "42"})],
+        delay=0.1,
+    )
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            [
+                member(
+                    react(model=scripted_model(stuck), on_continue=_stuck),
+                    name="stuck",
+                ),
+                member(react(model=scripted_model(solver)), name="solver"),
+            ],
+            channels=[],
+        ),
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    assert log.samples is not None
+    [sample] = log.samples
+    assert sample.error is None
+    record = SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
+    stopped, solved = record.members
+    assert (stopped.status, stopped.submitted) == ("member_limit:custom", False)
+    assert solved.status == "submitted"
+    assert stopped.time is not None and solved.time is not None
+    assert stopped.time < solved.time
+    # the stopped member's output is the reply it gave, which first passes over
+    assert stuck.calls == 1
+    assert record.final.member == "solver"
+    assert sample.output.completion.endswith("42")
+
+
+# Limit errors an agent can raise itself, by kind.
+_CUSTOM: dict[str, Callable[[], Exception]] = {
+    "self_stop": _self_stop,
+    # sourceless, but not custom
+    "sourceless_token": lambda: LimitExceededError("token", value=1, limit=1),
+    # a source the swarm does not own
+    "sourced": lambda: LimitExceededError(
+        "custom", value=1, limit=1, source=token_limit(1)
+    ),
+    "mixed": lambda: ExceptionGroup("mixed", [_self_stop(), RuntimeError("foreign")]),
+}
+
+
+@agent
+def stopper(model: Model, error: str, grouped: bool = False) -> Agent:
+    # generates once, then raises `error` bare or from a task group of its own
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(state.messages)
+
+        async def stop() -> None:
+            raise (_CUSTOM | _FOREIGN)[error]()
+
+        if grouped:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(stop)
+        else:
+            await stop()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("grouped", [False, True])
+async def test_a_member_that_stops_itself_ends_member_limit_custom(
+    grouped: bool,
+) -> None:
+    stop = await run_swarm(
+        swarm(
+            [
+                member(
+                    stopper(scripted_model(), "self_stop", grouped=grouped),
+                    name="member",
+                ),
+                # still running when the member stops itself
+                member(generator(scripted_model(Script(delay=0.05))), name="sibling"),
+            ],
+            channels=[],
+        )
+    )
+    assert stop.reason == "all_done"
+    assert statuses(stop) == {"member": "member_limit:custom", "sibling": "submitted"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "limits,budget,expected",
+    [
+        ([token_limit(TOKENS_PER_CALL)], Budget(), "member_limit:token"),
+        ([], Budget(tokens=TOKENS_PER_CALL), "swarm_cap"),
+    ],
+)
+async def test_a_self_stop_grouped_with_the_swarms_error_keeps_the_swarms_status(
+    limits: list[Limit], budget: Budget, expected: str
+) -> None:
+    stop = await run_swarm(
+        swarm(
+            member(
+                mixed(scripted_model(), foreign=("self_stop",)),
+                name="member",
+                limits=limits,
+            ),
+            channels=[],
+            budget=budget,
+        )
+    )
+    assert statuses(stop) == {"member": expected}
+
+
+@agent
+def stops_while_built(grouped: bool = False) -> Agent:
+    # the factory raises the stop, before there is an agent to stop
+    raise ExceptionGroup("build", [_self_stop()]) if grouped else _self_stop()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("grouped", [False, True])
+async def test_a_custom_stop_from_a_members_factory_is_foreign(grouped: bool) -> None:
+    async with sample():
+        with pytest.raises(LimitExceededError) as raised:
+            await swarm(
+                member(stops_while_built, args={"grouped": grouped}), channels=[]
+            )(AgentState(messages=[ChatMessageUser(content="task")]))
+        ledger = _ledger()
+    assert (raised.value.type, raised.value.source) == ("custom", None)
+    assert [m.status for m in ledger.members] == ["errored"]
+
+
+@agent
+def returns_nothing() -> Agent:
+    # breaks the agent contract by returning None, which is not a stop of itself
+    async def execute(state: AgentState) -> AgentState:
+        return cast(AgentState, None)
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_an_agent_that_returns_none_fails_the_sample() -> None:
+    async with sample():
+        with pytest.raises(AttributeError):
+            await swarm(member(returns_nothing()), channels=[])(
+                AgentState(messages=[ChatMessageUser(content="task")])
+            )
+        ledger = _ledger()
+    assert [m.status for m in ledger.members] == ["errored"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "error,raised,limit_type",
+    [
+        # only the foreign leaf, bare
+        ("mixed", RuntimeError, None),
+        ("sourced", LimitExceededError, "custom"),
+        ("sourceless_token", LimitExceededError, "token"),
+        ("sample_limit", LimitExceededError, "token"),
+    ],
+)
+async def test_a_limit_error_the_member_does_not_own_still_propagates(
+    error: str, raised: type[Exception], limit_type: str | None
+) -> None:
+    with pytest.raises(Exception) as escaped:
+        await run_swarm(
+            swarm(member(stopper(scripted_model(), error)), channels=[]),
+        )
+    assert type(escaped.value) is raised
+    assert getattr(escaped.value, "type", None) == limit_type
 
 
 # ---------------------------------------------------------------------------
@@ -758,12 +950,16 @@ async def test_a_cancellation_the_sample_does_not_explain_records_an_unknown_end
 
 
 @agent
-def limited_cleanup(model: Model, owned: list[LimitExceededError]) -> Agent:
-    # reaches its own limit in one task, still cleaning up when the sample's time limit
-    # cancels it, while another task's cleanup fails
+def limited_cleanup(
+    model: Model, owned: list[LimitExceededError], self_stop: bool = False
+) -> Agent:
+    # reaches its own limit (or stops itself) in one task, still cleaning up when the
+    # sample's time limit cancels it, while another task's cleanup fails
     async def execute(state: AgentState) -> AgentState:
         async def limited() -> None:
             try:
+                if self_stop:
+                    raise _self_stop()
                 await model.generate(state.messages)
             except LimitExceededError as ex:
                 owned.append(ex)
@@ -792,30 +988,29 @@ def limited_cleanup(model: Model, owned: list[LimitExceededError]) -> Agent:
 
 
 @pytest.mark.anyio
-async def test_a_cancellation_grouped_with_errors_loses_the_swarms_leaves() -> None:
-    # on trio the cancellation stays in the member's group, which its wrapper does not
-    # catch, so the runtime removes the member's limit
+@pytest.mark.parametrize("self_stop", [False, True])
+async def test_a_cancellation_grouped_with_errors_loses_the_swarms_leaves(
+    self_stop: bool,
+) -> None:
+    # on trio the cancellation stays in the member's group: the runtime removes the
+    # member's limit, and the wrapper the agent's stop of itself
     owned: list[LimitExceededError] = []
     with pytest.raises(BaseException) as raised:
         async with sample(time=0.2):
             await swarm(
                 member(
-                    limited_cleanup(scripted_model(), owned),
-                    limits=[token_limit(1)],
+                    limited_cleanup(scripted_model(), owned, self_stop=self_stop),
+                    limits=[] if self_stop else [token_limit(1)],
                 ),
                 channels=[],
                 budget=Budget(time=60),
             )(AgentState(messages=[ChatMessageUser(content="task")]))
-    # the member's limit was raised before the sample's time limit
+    # the member's limit or stop was raised before the sample's time limit
     [limit] = owned
-    assert isinstance(limit.source, SwarmNode)
+    assert (limit.source is None) if self_stop else isinstance(limit.source, SwarmNode)
     leaves = _leaves(raised.value)
     assert "cleanup failed" in [str(e) for e in leaves]
-    assert not [
-        e
-        for e in leaves
-        if isinstance(e, LimitExceededError) and isinstance(e.source, SwarmNode)
-    ]
+    assert all(e is not limit for e in leaves)
 
 
 def test_the_swarms_messages_stay_within_a_small_sample_message_limit(
@@ -1217,11 +1412,14 @@ async def test_a_member_declared_bridged_is_cancelled_at_its_first_compaction(
         pytest.param([], Budget(), "submitted", id="control"),
     ],
 )
+@pytest.mark.parametrize("self_stop", [False, True])
 async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
-    limits: list[Limit], budget: Budget, expected: str
+    limits: list[Limit], budget: Budget, expected: str, self_stop: bool
 ) -> None:
-    # the node cancels the member rather than raising, and the member returns before
-    # the cancellation reaches it
+    # the node cancels the member rather than raising, and the member returns, or stops
+    # itself, before the cancellation reaches it; the node's cause is kept
+    if self_stop and expected == "submitted":
+        expected = "member_limit:custom"
     handles: list[MemberHandle] = []
 
     async def run(control: SwarmControl) -> StopReason:
@@ -1236,11 +1434,19 @@ async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
     stop = await run_swarm(
         swarm(
             [
-                member(generator(scripted_model()), bridged=True, limits=limits),
+                member(
+                    stopper(scripted_model(), "self_stop")
+                    if self_stop
+                    else generator(scripted_model()),
+                    name="generator",
+                    bridged=True,
+                    limits=limits,
+                ),
                 *sibling,
             ],
             controller=_controller(
-                run, f"limits_test_last_call_{expected.replace(':', '_')}"
+                run,
+                f"limits_test_last_call_{expected.replace(':', '_')}_{self_stop}",
             ),
             channels=[],
             budget=budget,

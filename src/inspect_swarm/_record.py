@@ -30,6 +30,9 @@ class MemberResult(BaseModel):
     time: float | None
     """Swarm time (seconds from the swarm's start) when the member ended; `None` until then."""
 
+    sandbox: str | None = None
+    """The member's own sandbox environment, by name; `None` when it shares the sample's."""
+
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""

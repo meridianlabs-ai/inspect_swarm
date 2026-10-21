@@ -13,6 +13,16 @@ from ._budget import MemberContext, bridged_background_error
 PosArgsT = TypeVarTuple("PosArgsT")
 
 
+# an error an agent raised to stop itself: a sourceless custom limit; here so that the
+# member wrapper and the owner share it
+def self_stop(error: BaseException) -> bool:
+    return (
+        isinstance(error, LimitExceededError)
+        and error.type == "custom"
+        and error.source is None
+    )
+
+
 # The owner of one member's background work: the target of inspect_ai's
 # background_target while the member runs, entered once. Leaving it cancels the tasks
 # still running and waits for them. A task that raises a bare limit error from one of

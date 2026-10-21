@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -6,11 +7,13 @@ import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent, as_solver
 from inspect_ai.dataset import Sample
-from inspect_ai.model import ChatMessage, Model, ModelOutput
+from inspect_ai.event import InfoEvent, SpanBeginEvent, StoreEvent
+from inspect_ai.log import EvalSample
+from inspect_ai.model import ChatMessage, Model, ModelOutput, execute_tools
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import Generate, Solver, TaskState, solver
-from inspect_ai.tool import memory
-from inspect_ai.util import store, token_limit, tool_state_instance
+from inspect_ai.tool import Tool, memory, tool
+from inspect_ai.util import store, store_from_events, token_limit, tool_state_instance
 
 from inspect_swarm import (
     Budget,
@@ -24,6 +27,7 @@ from inspect_swarm import (
     swarm_controller,
 )
 from inspect_swarm._controller._control import SwarmRun
+from inspect_swarm._record import RECORD_KEY
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
@@ -744,3 +748,126 @@ def test_the_sample_store_is_shared_and_setup_tool_state_is_not(
     assert seen == {"first": ("prepared", False), "second": ("changed by first", False)}
     assert log.samples[0].scores is not None
     assert log.samples[0].scores["env_scorer"].answer == "changed by first"
+
+
+@tool
+def write() -> Tool:
+    async def execute(key: str, value: str) -> str:
+        """Write a value to the store.
+
+        Args:
+            key: The key.
+            value: The value.
+        """
+        store().set(key, value)
+        return "written"
+
+    return execute
+
+
+@agent
+def store_writer(model: Model) -> Agent:
+    # runs its write calls until a reply calls none
+    async def execute(state: AgentState) -> AgentState:
+        tools = [write()]
+        while True:
+            state.output = await model.generate(state.messages, tools=tools)
+            state.messages.append(state.output.message)
+            if not state.output.message.tool_calls:
+                return state
+            result = await execute_tools(state.messages, tools)
+            state.messages.extend(result.messages)
+
+    return execute
+
+
+def _writes(key: str) -> Model:
+    return scripted_model(
+        Script(
+            [ModelOutput.for_tool_call("mockllm", "write", {"key": key, "value": key})]
+        )
+    )
+
+
+def _writes_forever(key: str) -> Model:
+    # until the sample's message limit ends it
+    return scripted_model(
+        Script(
+            respond=lambda _: ModelOutput.for_tool_call(
+                "mockllm", "write", {"key": key, "value": key}
+            )
+        )
+    )
+
+
+def _swarm_span(sample: EvalSample) -> tuple[str, set[str]]:
+    # the span the swarm's ledger is written in, and the spans strictly inside it
+    [swarm_span] = [
+        e.span_id
+        for e in sample.events
+        if isinstance(e, InfoEvent)
+        and e.source == "inspect_swarm"
+        and isinstance(e.data, dict)
+        and e.data.get("type") == "ledger"
+    ]
+    assert swarm_span is not None
+    parents = {
+        e.id: e.parent_id for e in sample.events if isinstance(e, SpanBeginEvent)
+    }
+    inside: set[str] = set()
+    for span in parents:
+        parent = parents[span]
+        while parent is not None:
+            if parent == swarm_span:
+                inside.add(span)
+                break
+            parent = parents.get(parent)
+    return swarm_span, inside
+
+
+@pytest.mark.parametrize(
+    "writers,message_limit",
+    [
+        pytest.param({"a": _writes, "b": _writes}, None, id="two"),
+        pytest.param({"a": _writes}, None, id="one"),
+        pytest.param({"a": _writes, "b": _writes_forever}, 8, id="sample-limit"),
+    ],
+)
+def test_no_span_inside_the_swarm_logs_store_events(
+    tmp_path: Path,
+    writers: dict[str, Callable[[str], Model]],
+    message_limit: int | None,
+) -> None:
+    members = [member(store_writer(model(n)), name=n) for n, model in writers.items()]
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="x")],
+            solver=swarm(members, channels=[]),
+            message_limit=message_limit,
+        ),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.samples is not None
+    [sample] = log.samples
+    names = list(writers)
+    # the store keeps every member's write
+    assert {n: sample.store.get(n) for n in names} == {n: n for n in names}
+    swarm_span, inside = _swarm_span(sample)
+    assert inside
+    store_spans = [e.span_id for e in sample.events if isinstance(e, StoreEvent)]
+    assert not inside & set(store_spans)
+    if message_limit is not None:
+        assert sample.limit is not None and sample.limit.type == "message"
+        # nothing about the swarm's or enclosing spans' events: a raising span logs
+        # none today, which an upstream fix may change
+        return
+    # the swarm's span logs the net change once, the result record included
+    [changes] = [
+        e.changes
+        for e in sample.events
+        if isinstance(e, StoreEvent) and e.span_id == swarm_span
+    ]
+    assert {c.path.split("/")[1] for c in changes} >= {*names, RECORD_KEY}
+    assert store_from_events(sample.events) == sample.store
