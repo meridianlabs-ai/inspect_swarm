@@ -21,18 +21,23 @@ class _SwarmTools(ToolSource):
             context.loop = loop
             context.acp_bound = _acp_bound(loop)
         own = context.loop is loop
-        return [
+        tools = [
             tool
             for name, state in bus.states.items()
             if own or bus.reach[name] == "member"
             for tool in state.tools()
         ]
+        # swarm_wait, when a channel the loop reaches wakes waits
+        wait = bus.waits.tool()
+        if wait is not None and bus.waits.reaches(own):
+            tools.append(wait)
+        return tools
 
 
 def swarm_tools() -> ToolSource:
     """The tools of the swarm's channels, for a member's agent.
 
-    Pass it in the member's tools, `react(tools=[bash(), swarm_tools()])`. The member's own loop gets the tools of every channel of the swarm that has them; its nested loops, such as a `deepagent()` member's subagents, get only those of channels whose `reach` is `"member"`. The member's own loop is the first in which the tools are resolved, which for `react()` and `deepagent()` members is their top-level loop. Each tool acts as the member, whichever loop calls it.
+    Pass it in the member's tools, `react(tools=[bash(), swarm_tools()])`. The member's own loop gets the tools of every channel of the swarm that has them; its nested loops, such as a `deepagent()` member's subagents, get only those of channels whose `reach` is `"member"`. A loop also gets `swarm_wait`, which waits for other members' work, when one of the channels it reaches wakes waits, as `shared_memory()` does. The member's own loop is the first in which the tools are resolved, which for `react()` and `deepagent()` members is their top-level loop. Each tool acts as the member, whichever loop calls it.
 
     The same member definition serves swarms with different channels, and one with none. Outside a swarm it gives no tools.
 

@@ -48,13 +48,17 @@ DEFAULTS = {
 
 def _config(channel: object) -> dict[str, Any]:
     assert isinstance(channel, _SharedMemory)
-    return {**vars(channel.limits), "rate": channel.storm.rate}
+    return {
+        **vars(channel.limits),
+        "rate": channel.storm.rate,
+        "max_wait": channel.max_wait,
+    }
 
 
 @pytest.mark.parametrize("name", ["shared_memory", "inspect_swarm/shared_memory"])
 def test_names_resolve_with_the_defaults(name: str) -> None:
     channel = resolve("swarm_channel", name)
-    assert _config(channel) == {**DEFAULTS, "rate": (60, 60.0)}
+    assert _config(channel) == {**DEFAULTS, "rate": (60, 60.0), "max_wait": 600}
     assert (channel.name, channel.prefix, channel.reach) == (
         "shared_memory",
         "w",
@@ -66,19 +70,27 @@ def test_the_plan_step_logs_the_channel_and_replay_rebuilds_it() -> None:
     plan = Plan(
         [
             as_solver(
-                swarm(react(), channels=[shared_memory(max_files=5, rate=(3, 10.0))])
+                swarm(
+                    react(),
+                    channels=[shared_memory(max_files=5, rate=(3, 10.0), max_wait=30)],
+                )
             )
         ]
     )
     [step] = plan_to_eval_plan(plan, GenerateConfig()).steps
     name = "inspect_swarm/shared_memory"
-    params: dict[str, Any] = {"max_files": 5, "rate": [3, 10.0]}
+    params: dict[str, Any] = {"max_files": 5, "rate": [3, 10.0], "max_wait": 30}
     assert step.params["channels"] == [
         {"type": "swarm_channel", "name": name, "params": params}
     ]
     # the tuple comes back from the log as a list
     rebuilt = create_registry_object("swarm_channel", name, params)
-    assert _config(rebuilt) == {**DEFAULTS, "max_files": 5, "rate": (3, 10.0)}
+    assert _config(rebuilt) == {
+        **DEFAULTS,
+        "max_files": 5,
+        "rate": (3, 10.0),
+        "max_wait": 30,
+    }
 
 
 def _identifier(solver: Agent) -> str:
@@ -105,6 +117,7 @@ def test_eval_set_arms_are_distinct() -> None:
         arm([shared_memory(max_files=5)]),
         arm([shared_memory(max_files=6)]),
         arm([shared_memory(rate=None)]),
+        arm([shared_memory(max_wait=30)]),
         # the observed board of M1
         arm([], tools=[memory(instance="board")]),
     ]
@@ -132,6 +145,8 @@ def test_eval_set_arms_are_distinct() -> None:
         {"rate": (1, float("inf"))},
         {"rate": (1,)},
         {"rate": "60/60"},
+        {"max_wait": 0},
+        {"max_wait": 3_601},
     ],
 )
 def test_each_bound_is_checked(arguments: dict[str, Any]) -> None:
@@ -146,6 +161,7 @@ def test_bounds_at_their_limits_are_accepted() -> None:
         max_file_lines=1,
         max_board_bytes=1,
         rate=(1, 0.5),
+        max_wait=1,
     )
     shared_memory(
         max_files=10_000,
@@ -153,6 +169,7 @@ def test_bounds_at_their_limits_are_accepted() -> None:
         max_file_lines=100_000,
         max_board_bytes=16_777_216,
         rate=[1, 1],
+        max_wait=3_600,
     )
 
 

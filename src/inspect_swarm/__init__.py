@@ -12,6 +12,9 @@ from ._channel._channel import (
     ChannelRun,
     ChannelState,
     NoticeLine,
+    WaitingState,
+    WaitNews,
+    WaitSpec,
     swarm_channel,
 )
 from ._channel.filesystem import filesystem
@@ -58,6 +61,9 @@ __all__ = [
     "SwarmBudget",
     "SwarmControl",
     "SwarmEvent",
+    "WaitNews",
+    "WaitSpec",
+    "WaitingState",
     "__version__",
     "filesystem",
     "leaderless",

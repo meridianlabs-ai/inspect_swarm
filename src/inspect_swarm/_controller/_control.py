@@ -348,6 +348,7 @@ class SwarmRun:
         interval = self._interval = LedgerInterval()
         self._scorer = first_scorer()
         self._start = anyio.current_time()
+        self.bus.waits.start = self._start
         # the swarm's span
         self._span_id = current_span_id()
         self._settle()
@@ -555,6 +556,8 @@ class SwarmRun:
         # the member counts as running until its event is queued
         m.state = "ended"
         m.status = status
+        # releases the other members' waits
+        self.bus.member_ended(m.name, status)
         m.time = anyio.current_time() - self._start
         if m.context.span_id is not None:
             assert self._interval is not None

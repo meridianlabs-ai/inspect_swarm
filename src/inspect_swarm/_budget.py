@@ -320,6 +320,9 @@ class MemberContext:
     news: bool = False
     # set when the member starts background work, which bridged members cannot have
     background: bool = False
+    # the member's background tasks not yet finished, kept by its owner, for the bus's
+    # all-waiting check
+    background_running: int = 0
     # the error for bridge use found after the member started background work
     refusal: RuntimeError | None = None
 
