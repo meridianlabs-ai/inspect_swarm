@@ -48,7 +48,7 @@ def filesystem(
     The channel adds no tools and does not create the directories.
 
     Args:
-        shared: The directory for files members share.
+        shared: The directory for files members share. With `shared_volume=True`, an absolute path where the volume is mounted.
         notes: The notes file members read and append to, relative to `shared` (or an absolute path). With `shared_volume=True` it must be inside `shared`.
         scratch: Each member's own directory. `{member}` is replaced by the member's name. Not used with `shared_volume=True`.
         shared_volume: Whether members have their own sandboxes that each mount one shared volume at `shared`. `swarm()` accepts the channel beside per-member sandboxes only with `True`, and refuses `True` when members share the sample's sandbox.
@@ -57,11 +57,15 @@ def filesystem(
         The channel.
 
     Raises:
-        ValueError: If `scratch` has no `{member}` placeholder, or has another placeholder, or is other than the default with `shared_volume=True`; or if `notes` is outside `shared` with `shared_volume=True`.
+        ValueError: If `scratch` has no `{member}` placeholder, or has another placeholder, or is other than the default with `shared_volume=True`; or, with `shared_volume=True`, if `shared` is not an absolute path or `notes` is outside it.
     """
     if shared_volume and scratch != _SCRATCH:
         raise ValueError(
             f"filesystem(): scratch is not used with shared_volume=True, since each member's sandbox is already its own, got {scratch!r}. Leave scratch out."
+        )
+    if shared_volume and not posixpath.isabs(shared):
+        raise ValueError(
+            f"filesystem(): with shared_volume=True, shared must be an absolute path, where the volume is mounted, got {shared!r}."
         )
     if shared_volume and not _inside(posixpath.join(shared, notes), shared):
         raise ValueError(
