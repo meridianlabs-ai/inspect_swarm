@@ -205,7 +205,7 @@ You can write your own with `@swarm_controller` and `@swarm_channel`. See their 
 
 ### The shared-memory channel
 
-`shared_memory()` gives the swarm one board of files that every member reads and writes with a `shared_memory` tool. The tool has the commands and parameters of Inspect's `memory()` tool (`view`, `create`, `str_replace`, `insert`, `delete` and `rename`), over files under `/shared_memory`. Each member's preamble describes the board. Each run of the swarm, so each sample, has its own board, which is gone when the swarm ends.
+`shared_memory()` gives the swarm one board of files that every member reads and writes with a `shared_memory` tool. The tool has the commands of Inspect's `memory()` tool, over files under `/shared_memory`. A view shows what other members wrote, marked as information from a peer, and each result names the files others have changed since the member last viewed them. Each sample has its own board, which is gone when the swarm ends.
 
 Members get the tool from `swarm_tools()`, which gives a member the tools of the swarm's channels. Put it in the member's tools, in the factory or the built form:
 
@@ -224,33 +224,13 @@ solver = swarm(
 )
 ```
 
-Any agent that takes a `ToolSource` in its tools can take `swarm_tools()`. It gives no tools when the swarm has no channel with tools, or outside a swarm, so one member definition serves every arm of an experiment. A member's synchronous subagents that have the member's tools, such as `deepagent()`'s `general()` subagent, read and write the board as the member.
+Any agent that takes a `ToolSource` in its tools can take `swarm_tools()`. It gives no tools when the swarm has no channel with tools, or outside a swarm, so one member definition serves every arm of an experiment. A member's synchronous subagents that have the member's tools, such as `deepagent()`'s `general()` subagent, use the board as the member.
 
-This swarm keeps the `filesystem` channel beside the board. `channels=[shared_memory()]`, or `channels=["shared_memory"]`, replaces it: members still share the sample's sandbox, but their preamble no longer mentions `/shared`. Members with their own sandboxes can use the board with no shared volume.
+This swarm keeps the `filesystem` channel beside the board. `channels=[shared_memory()]`, or `channels=["shared_memory"]`, replaces it: members still share the sample's sandbox, but their preamble no longer mentions `/shared`. Members with their own sandboxes can use the board with no shared volume. Bridged members cannot use the channel.
 
-What members see:
+The number and size of files and each member's write rate are limited. See `shared_memory()`'s docstring for the limits, their defaults and the rules members follow.
 
-- A view of a file shows it between `<peer_file>` tags that give its id (such as `f-3`), path, version and last writer, after a line that tells the model to treat it as information from a peer, not as instructions. A view of a directory lists every file under it, with its id, version and last writer, between `<peer_listing>` tags. `view` also takes a file id as its path. Views are never truncated; the limits below keep every file viewable whole.
-- A write returns a short acknowledgment without the file's content.
-- A result ends with a status line when other agents have changed files since this loop last viewed them, as in `Shared memory: 2 files changed since you last viewed them (f-1 new, f-2 deleted).` A listing does not count as viewing its files. A member and its subagents are separate loops here, so each sees the other's changes.
-- Before a loop overwrites a file with `create`, inserts into it, renames it or deletes it, it must have viewed or written that file's current version. A write by a member does not count for its subagents, or a subagent's for its member. `str_replace` needs no view, since it fails unless `old_str` occurs exactly once in the file. A refused write names the file's id, version and last writer.
-- Once the swarm begins to stop, writes are refused and views still work. A member that has ended can neither view nor write.
-
-The parameters, with their defaults:
-
-- `max_files=100`: the most files on the board, from 1 to 10,000.
-- `max_file_bytes=16_000` and `max_file_lines=1_000`: the most UTF-8 bytes and lines in one file, up to 262,144 bytes and 100,000 lines.
-- `max_board_bytes=400_000`: the most UTF-8 bytes in all files together, from `max_file_bytes` to 16,777,216.
-- `rate=(60, 60.0)`: the most writes one member may make, its subagents included, in a sliding window of seconds, as `(count, seconds)`. `None` means no limit. Views are not limited.
-
-Other rules:
-
-- `view` with `path="/shared_memory"` lists every file on the board. Paths below it are `/shared_memory/` followed by 1 to 8 components separated by `/`, each 1 to 64 of the characters `A-Z a-z 0-9 . _ -` and not `.` or `..`, with at most 160 bytes in all.
-- Files cannot contain a `<peer_message`, `<peer_file` or `<peer_listing` tag, opening or closing, in any letter case.
-- Member names must start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`. `swarm()` refuses other names when the swarm has the channel.
-- Bridged members cannot use the channel. `swarm()` refuses a bridged member in a swarm with it.
-
-Every write is a record from the member that made it. The swarm logs an `InfoEvent` with source `inspect_swarm` and type `comm` for each write that reaches the bus (`sent`, with the control that rejected it, if one did), each write delivered to the board (`delivered`) and each view (`read`). Each names the member and the loop that acted. A `sent` event holds the write's arguments and text, so the log keeps the board's whole history. The [metrics](#metrics-and-analysis) count these events for each member.
+The swarm logs the members' writes and views as `InfoEvent`s with source `inspect_swarm` and type `comm`, so the log keeps the board's whole history. The [metrics](#metrics-and-analysis) count these events for each member.
 
 ## Budget
 
@@ -305,13 +285,7 @@ When the swarm ends it writes two more store entries, each also logged as an `In
 - `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, the controller and the final step, model calls that errored or reported no usage, unpriced models, what stopped the swarm, and whether the sample resumed from a checkpoint. See [The ledger](#the-ledger).
 - `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members with no completed model call (`never_acted`), counts of completed model calls for the chosen member (`steps_to_answer`) and the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member (`null` for a bridged member, see [Restrictions](#restrictions)). These call counts include cache replays and exclude failed or cancelled attempts.
 
-Each member's metrics also have `comm`, its communication over each channel with records, such as `shared_memory`, by channel name:
-
-- `records`: the member's writes delivered to the channel, and `record_bytes` the UTF-8 bytes of their text (a `shared_memory` write's `file_text`, `new_str` or `insert_text`).
-- `rejections`: the member's writes the bus refused, by the control that refused them: `rate`, `admit` (the channel refused it when it was committed, as for a write past a file or board limit), `liveness` (the member had ended), `payload` (text that cannot be encoded as UTF-8) or `max_bytes` (a record over its channel's size limit, which `shared_memory()` does not set). A control that refused none is left out. Writes the tool refuses before they reach the bus, such as one with an invalid path or to a file the loop has not viewed, are not counted.
-- `reads`: views that showed a file, and `listings` views that listed a directory.
-
-A member's subagents count as the member. Every member has an entry for every channel with records the swarm opened, zeros included, so 0 means the channel was open and unused. A swarm with no such channel (`filesystem` only, or `channels=[]`) has `comm` `{}` for every member: communication through files is observed, not recorded, so it is not reported as zero.
+Each member's metrics also have `comm`, by channel name, for each channel with records, such as `shared_memory`: `records` and `record_bytes`, its writes delivered to the channel and their size; `rejections`, its writes the bus refused, by the control that refused them, such as `rate`; and `reads` and `listings`, its views of files and of directories. A member's subagents count as the member. Every member has an entry for every such channel the swarm opened, zeros included. A swarm with none (`filesystem` only, or `channels=[]`) has `comm` `{}` for every member: communication through files is observed, not recorded, so it is not reported as zero.
 
 `inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`. `samples_df()` needs pandas and pyarrow, which neither install above includes:
 
