@@ -167,29 +167,28 @@ class Waits:
         files: list[JsonValue] = []
         ended: list[JsonValue] = []
         try:
-            # what ended the wait, unless the stop or the drain did
-            reason: Outcome = "news"
-            if not (self._finished(name) or self._reportable(waiter)):
-                while True:
-                    self._register(waiter)
-                    with anyio.move_on_after(
-                        started + effective - anyio.current_time()
-                    ):
-                        await waiter.event.wait()
-                    if (
-                        waiter.reason != "news"
-                        or self._finished(name)
-                        or self._reportable(waiter)
-                    ):
-                        break
-                    # released for news that is gone: back to sleep until the deadline
-                    waiter.reason = None
-                    waiter.event = anyio.Event()
-                reason = waiter.reason or "timeout"
-            # a cancellation that is pending, whether it arrived before the call or
-            # after a release, ends the wait here, before it names or marks anything
-            # for a result that is discarded
-            await anyio.lowlevel.checkpoint_if_cancelled()
+            deadline = started + effective
+            while True:
+                # what ended the wait, unless the stop or the drain did
+                reason: Outcome = "news"
+                if not (self._finished(name) or self._reportable(waiter)):
+                    if anyio.current_time() >= deadline:
+                        reason = "timeout"
+                    else:
+                        waiter.reason = None
+                        waiter.event = anyio.Event()
+                        self._register(waiter)
+                        with anyio.move_on_after(deadline - anyio.current_time()):
+                            await waiter.event.wait()
+                        reason = waiter.reason or "timeout"
+                # delivers a pending cancellation, an AnyIO one or a task's own, so that
+                # the wait ends as cancelled before it names or marks anything for a
+                # result that is discarded
+                await anyio.lowlevel.checkpoint()
+                if reason != "news" or self._finished(name) or self._reportable(waiter):
+                    break
+                # released for news that is gone by now: back to sleep, until the
+                # wait's own deadline
             outcome = (
                 "stopping"
                 if self._bus.stopping

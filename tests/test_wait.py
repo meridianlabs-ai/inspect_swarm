@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
@@ -498,6 +499,55 @@ async def test_a_wait_called_with_a_cancellation_pending_names_nothing(
         )
         # the end is still reported to the loop's next wait
         assert (await r.wait("w-1")).startswith("w-3 ended (submitted).")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+@pytest.mark.parametrize("returns", ["news", "stop", "drain"])
+async def test_a_wait_called_with_its_task_cancelled_names_nothing(
+    returns: str,
+) -> None:
+    # asyncio's own Task.cancel(), which no AnyIO scope knows of
+    async with run(("w-1", "w-2", "w-3")) as (r, transcript):
+        r.end("w-3")
+        if returns == "stop":
+            r.bus.close()
+        elif returns == "drain":
+            r.bus.member_ending("w-1")
+
+        async def cancelled() -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            await r.wait("w-1")
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.create_task(cancelled())
+        [record] = waited(transcript)
+        assert (record["outcome"], record["files"], record["ended"]) == (
+            "cancelled",
+            [],
+            [],
+        )
+        assert (await r.wait("w-1")).startswith("w-3 ended (submitted).")
+
+
+@pytest.mark.anyio
+async def test_news_that_keeps_vanishing_does_not_outlast_the_timeout() -> None:
+    # a peer's file moves into the watched directory and out again before each resume
+    async with run(max_wait=1) as (r, _):
+        await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
+        async with anyio.create_task_group() as tg:
+            pending = await start(tg, r, "w-1", path=_p("r"))
+            started = anyio.current_time()
+            while pending.result is None and anyio.current_time() < started + 3:
+                await r.sm("w-2", "rename", old_path=_p("a.md"), new_path=_p("r/a.md"))
+                await r.sm("w-2", "rename", old_path=_p("r/a.md"), new_path=_p("a.md"))
+                await anyio.sleep(0)
+            if pending.result is None:
+                r.bus.close()
+            assert await pending.value() == "Nothing you waited for happened in 1 s."
+            assert anyio.current_time() < started + 2
 
 
 @pytest.mark.anyio
