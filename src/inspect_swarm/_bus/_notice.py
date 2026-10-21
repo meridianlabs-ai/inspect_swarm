@@ -74,7 +74,9 @@ def _notice(bus: Bus, context: MemberContext, state: AgentState) -> None:
                 "version": 1,
                 "type": "notice",
                 "id": notice,
-                "lines": [{"channel": channel, **ids} for channel, _, ids in lines],
+                "lines": [
+                    {"channel": channel, "ids": ids} for channel, _, ids in lines
+                ],
             }
         },
     )

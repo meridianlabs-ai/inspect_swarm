@@ -16,9 +16,10 @@ from inspect_ai.agent import (
     react,
 )
 from inspect_ai.agent._channel import agent_channel
+from inspect_ai.agent._types import DEFAULT_CONTINUE_PROMPT
 from inspect_ai.dataset import Sample
 from inspect_ai.event import Event, InfoEvent, ModelEvent
-from inspect_ai.log import EvalLog
+from inspect_ai.log import EvalLog, resolve_sample_attachments
 from inspect_ai.model import (
     ChatMessage,
     ChatMessageAssistant,
@@ -122,6 +123,19 @@ def _notices(messages: Sequence[ChatMessage]) -> list[ChatMessageUser]:
     ]
 
 
+def _model_inputs(log: EvalLog, name: str) -> list[list[ChatMessage]]:
+    # the input of each of a member's ModelEvents, in order, with long texts resolved
+    # from the log's attachments; a member is named by its preamble
+    assert log.samples is not None
+    return [
+        e.input
+        for e in resolve_sample_attachments(log.samples[0]).events
+        if isinstance(e, ModelEvent)
+        and f"You are {name},"
+        in "\n".join(m.text for m in e.input if isinstance(m, ChatMessageUser))
+    ]
+
+
 def _worker(turns: _Turns, *, hook: bool = True, tools: bool = True) -> Agent:
     return react(
         model=turns.model(),
@@ -208,7 +222,7 @@ async def test_a_notice_names_new_files_by_id_and_reaches_the_next_model_call(
         "version": 1,
         "type": "notice",
         "id": "n-1",
-        "lines": [{"channel": "shared_memory", "files": files}],
+        "lines": [{"channel": "shared_memory", "ids": {"files": files}}],
     }
     assert notice.metadata == {"inspect_swarm": metadata}
 
@@ -226,7 +240,7 @@ async def test_a_notice_names_new_files_by_id_and_reaches_the_next_model_call(
         "notice": "n-1",
     }
     assert notified["message"] == notice.id
-    assert notified["files"] == files
+    assert notified["ids"] == {"files": files}
     # in the member's own loop, the loop its views are made in
     [read] = [r for r in _comm(log, "read") if r["member"] == "w-2"]
     assert notified["loop"] == read["loop"] is not None
@@ -278,6 +292,88 @@ async def test_notices_cap_listed_ids_and_report_a_deletion_once(
     )
     # no notice after the view, which changed nothing, nor after the deletion's notice
     assert texts == [[], [first], [first], [first, second], [first, second]]
+
+
+@pytest.mark.anyio
+async def test_a_notice_goes_in_the_state_the_inner_hook_returns(
+    tmp_path: Path,
+) -> None:
+    turns = _Turns(
+        {
+            "w-1": [
+                _call(
+                    "shared_memory",
+                    command="create",
+                    path=f"{ROOT}/a.md",
+                    file_text="x",
+                )
+            ],
+            "w-2": [(_call("noop"), "w-1:2"), _call("noop")],
+        }
+    )
+
+    async def replace(state: AgentState) -> AgentState:
+        # a new state, with a new list of messages, which react() adopts
+        replacement = AgentState(
+            messages=[*state.messages, ChatMessageUser(content="replaced")]
+        )
+        replacement.output = state.output
+        return replacement
+
+    replacing = react(
+        model=turns.model(),
+        tools=[noop(), swarm_tools()],
+        on_continue=swarm_on_continue(replace),
+    )
+    log = await _eval(
+        swarm(
+            [member(_worker(turns), name="w-1"), member(replacing, name="w-2")],
+            channels=[shared_memory()],
+        ),
+        tmp_path,
+    )
+
+    inputs = _model_inputs(log, "w-2")
+    [notice] = _notices(inputs[1])
+    assert [m.text for m in inputs[1][-2:]] == ["replaced", notice.text]
+
+
+@pytest.mark.parametrize("inner", [None, "Keep going."], ids=["default", "string"])
+@pytest.mark.anyio
+async def test_a_notice_comes_just_before_the_continue_message(
+    inner: str | None, tmp_path: Path
+) -> None:
+    turns = _Turns(
+        {
+            "w-1": [
+                _call(
+                    "shared_memory",
+                    command="create",
+                    path=f"{ROOT}/a.md",
+                    file_text="x",
+                )
+            ],
+            # a turn without tool calls, after the write
+            "w-2": [(_text(), "w-1:2")],
+        }
+    )
+    continuing = react(
+        model=turns.model(),
+        tools=[noop(), swarm_tools()],
+        on_continue=swarm_on_continue(inner),
+    )
+    log = await _eval(
+        swarm(
+            [member(_worker(turns), name="w-1"), member(continuing, name="w-2")],
+            channels=[shared_memory()],
+        ),
+        tmp_path,
+    )
+
+    inputs = _model_inputs(log, "w-2")
+    [notice] = _notices(inputs[1])
+    continuation = inner or DEFAULT_CONTINUE_PROMPT.replace("{submit}", "submit")
+    assert [m.text for m in inputs[1][-2:]] == [notice.text, continuation]
 
 
 @pytest.mark.anyio
@@ -469,31 +565,13 @@ async def test_a_subagents_deletion_is_news_to_its_parent_once(
         'View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
     )
     [notified] = _comm(log, "notified")
-    assert notified["files"] == [{"file": "f-1", "version": 2, "record": "w-2"}]
+    assert notified["ids"] == {
+        "files": [{"file": "f-1", "version": 2, "record": "w-2"}]
+    }
     # attributed to the child's loop
     [delete_event] = [d for d in _comm(log, "delivered") if d["record"] == "w-2"]
     assert delete_event["nested"] is True and delete_event["notify"] == ["w"]
     assert delete_event["loop"] != notified["loop"]
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "version",
-        "type",
-        "kind",
-        "member",
-        "span_id",
-        "loop",
-        "nested",
-        "channel",
-        "notice",
-        "message",
-    ],
-)
-def test_a_notice_line_cannot_name_an_id_after_an_evidence_field(name: str) -> None:
-    with pytest.raises(ValueError, match=name):
-        NoticeLine("[Swarm notice] 1 change.", {"records": ["c-1"], name: 2})
 
 
 class _ListState(_BoardState):
@@ -544,9 +622,9 @@ async def test_a_notice_keeps_its_ids_when_the_channel_changes_them() -> None:
         change()
         assert notice.metadata is not None
         assert notice.metadata["inspect_swarm"]["lines"] == [
-            {"channel": "board", "records": ["b-1"]}
+            {"channel": "board", "ids": {"records": ["b-1"]}}
         ]
-        assert notified["records"] == ["b-1"]
+        assert notified["ids"] == {"records": ["b-1"]}
 
 
 # Wiring checks and the effective delivery mode, in the swarm's metrics

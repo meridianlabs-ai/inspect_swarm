@@ -16,7 +16,6 @@ from pydantic import JsonValue
 from .._bus._record import Record
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
-from .._evidence import NOTIFIED_FIELDS
 from .._registry import register_factory
 
 if TYPE_CHECKING:
@@ -98,14 +97,7 @@ class NoticeLine:
     """The line: a fixed template whose only variables are counts, swarm-assigned ids and roster names, never anything a member wrote or chose."""
 
     ids: Mapping[str, JsonValue]
-    """The swarm ids the line names, such as `{"files": [{"file": "f-2", "version": 3, "record": "w-7"}]}`, given in the notice's metadata and its `notified` evidence. They are fields of that evidence, so they cannot be named `version`, `type`, `kind`, `member`, `span_id`, `loop`, `nested`, `channel`, `notice` or `message`: a `NoticeLine` with one of these raises `ValueError`."""
-
-    def __post_init__(self) -> None:
-        reserved = sorted(NOTIFIED_FIELDS.intersection(self.ids))
-        if reserved:
-            raise ValueError(
-                f"A notice line's ids cannot be named {', '.join(reserved)}: these names are fields of its `notified` evidence."
-            )
+    """The swarm ids the line names, such as `{"files": [{"file": "f-2", "version": 3, "record": "w-7"}]}`, given as `ids` in the notice's metadata and in its `notified` evidence."""
 
 
 class ChannelState(Protocol):
