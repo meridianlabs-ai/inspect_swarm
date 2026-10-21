@@ -431,6 +431,9 @@ async def test_the_record_is_written_at_start_and_on_each_start_and_end() -> Non
         "submitted",
         "time",
         "sandbox",
+        "gate_checks",
+        "gate_passes",
+        "first_pass_time",
     }
     assert started.time is not None and started.time >= 0
     assert after_end.final.member == "started" and after_end.final.provisional

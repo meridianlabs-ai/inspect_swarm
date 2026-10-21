@@ -33,7 +33,13 @@ from .._member import (
     member_sandbox,
     run_member,
 )
-from .._metrics import MemberTimes, swarm_metrics
+from .._metrics import (
+    GateChecks,
+    MemberTimes,
+    first_scorer,
+    gate_checks,
+    swarm_metrics,
+)
 from .._record import MemberResult, MemberState
 
 if TYPE_CHECKING:
@@ -168,6 +174,8 @@ class MemberRun:
         # swarm times of its start and its end
         self.started: float | None = None
         self.time: float | None = None
+        # counted when it ends
+        self.gates = GateChecks()
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
         self.context = MemberContext(
@@ -199,6 +207,9 @@ class MemberRun:
             submitted=self.submitted,
             time=self.time,
             sandbox=self.sandbox,
+            gate_checks=self.gates.checks,
+            gate_passes=self.gates.passes,
+            first_pass_time=self.gates.first_pass_time,
         )
 
 
@@ -259,6 +270,9 @@ class SwarmRun:
         self._effective_grace = grace
         self._start = 0.0
         self._span_id: str | None = None
+        self._interval: LedgerInterval | None = None
+        # the scorer whose intermediate scores are gate checks
+        self._scorer: str | None = None
         self.stop_reason: str | None = None
 
     # SwarmControl
@@ -326,7 +340,8 @@ class SwarmRun:
         from .._bus._bus import current_bus
 
         timelines = MemberTimelines([m.name for m in self._members])
-        interval = LedgerInterval()
+        interval = self._interval = LedgerInterval()
+        self._scorer = first_scorer()
         self._start = anyio.current_time()
         # the swarm's span
         self._span_id = current_span_id()
@@ -434,6 +449,7 @@ class SwarmRun:
                     interval.events,
                     places,
                     [MemberTimes(m.name, m.started, m.time) for m in self._members],
+                    [m.gates for m in self._members],
                     wall_clock,
                     chosen.name if chosen is not None else None,
                 )
@@ -515,6 +531,11 @@ class SwarmRun:
         m.state = "ended"
         m.status = status
         m.time = anyio.current_time() - self._start
+        if m.context.span_id is not None:
+            assert self._interval is not None
+            m.gates = gate_checks(
+                self._interval.events, m.context.span_id, self._scorer, self._start
+            )
         # in the member's span, unless it ended before entering it
         evidence(
             "result",
