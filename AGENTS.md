@@ -32,7 +32,7 @@
 - `feat:`/`fix:` are for user-facing changes only: they headline the release notes and bump the version. `perf:`/`revert:` also appear in the notes (no bump); `docs:`, `refactor:`, `chore:`, `build:`, `ci:`, `test:`, `style:` are hidden
 - Body lines starting with `<type>:` are parsed as extra changelog entries—don't begin description lines with a conventional-commit prefix unless that's intended
 - Never edit `CHANGELOG.md`, version numbers, or `.release-please-manifest.json`—Release Please owns them
-- Depend on released `inspect-ai` versions (`inspect-ai>=X` in `pyproject.toml`), never a git reference. Raise the floor only when `src/` needs a newer release, and say in the PR which source line needs it; when only tests need a newer release, update `uv.lock` (`uv lock --upgrade-package inspect-ai`) instead
+- A release of inspect_swarm depends on a released `inspect-ai` (`inspect-ai>=X` in `pyproject.toml`), because PyPI rejects git dependencies. Between releases, never wait for an inspect_ai release: when a change needs an inspect_ai feature that is merged on inspect_ai `main` but not released, `pyproject.toml` may use a git reference to inspect_ai `main` (with `uv lock --upgrade-package inspect-ai`). That is a temporary workaround to unblock work; it goes back to a released floor before inspect_swarm is published. Raise the floor only when `src/` needs a newer release, and say in the PR which source line needs it; when only tests need a newer release, update `uv.lock` (`uv lock --upgrade-package inspect-ai`) instead
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines
 
 ## Python

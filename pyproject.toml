@@ -15,11 +15,13 @@ classifiers = [
     "Development Status :: 1 - Planning",
 ]
 dependencies = [
-    # Temporarily a git reference: the runtime needs tool_state_scope()
-    # (UKGovernmentBEIS/inspect_ai#5861) and suspend_store_events()
-    # (UKGovernmentBEIS/inspect_ai#5960), which no release has yet, so this
-    # tracks inspect_ai's `main`. Go back to a released `inspect-ai>=X` floor
-    # once a release has both (decision: Ransom, 2026-10-20).
+    # Temporarily a git reference, to unblock work: the runtime needs
+    # tool_state_scope() (UKGovernmentBEIS/inspect_ai#5861),
+    # suspend_store_events() (UKGovernmentBEIS/inspect_ai#5960) and
+    # background_target (UKGovernmentBEIS/inspect_ai#5965), which no release
+    # has yet, so this tracks inspect_ai's `main`. PyPI rejects git
+    # dependencies, so go back to a released `inspect-ai>=X` floor before
+    # inspect_swarm is published (decision: Ransom, 2026-10-20, 2026-10-21).
     "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",
 ]
 
