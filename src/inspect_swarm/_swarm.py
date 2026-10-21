@@ -28,12 +28,11 @@ from ._budget import (
     split_sentence,
 )
 from ._channel._channel import Channel
+from ._channel.filesystem import FilesystemChannel
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
 from ._member import Member, is_factory, member, member_names, member_sandbox
 from ._registry import resolve
-
-_FILESYSTEM = "inspect_swarm/filesystem"
 
 
 @agent
@@ -59,7 +58,7 @@ def swarm(
 
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
-        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet), some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, or the `filesystem` channel is given while members have their own sandboxes; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
+        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet), some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
     """
     records = _members(members)
     names = member_names(records)
@@ -146,7 +145,14 @@ def _preamble(
     if split is not None:
         parts.append(split)
     if own_sandboxes:
-        parts.append("You work in your own sandbox, which no other member can reach.")
+        if any(isinstance(c, FilesystemChannel) and c.shared_volume for c in channels):
+            parts.append(
+                "You work in your own sandbox, which no other member can reach, except for the shared directory described below."
+            )
+        else:
+            parts.append(
+                "You work in your own sandbox, which no other member can reach."
+            )
     for channel in channels:
         text = channel.instructions(member)
         if text:
@@ -301,23 +307,28 @@ def _check_bus_channels(
 
 
 # Whether the members have their own sandboxes. Then every member has one, no two
-# share one or reach another's, and the filesystem channel, which describes a shared
-# sandbox, is refused.
+# share one or reach another's, and the filesystem channel must describe a shared
+# volume rather than a shared sandbox; without them, it must not.
 def _check_member_sandboxes(
     runs: Sequence[tuple[Member, str]], channels: Sequence[Channel]
 ) -> bool:
     sandboxes = {name: member_sandbox(record, name) for record, name in runs}
     own = [name for name, sandbox in sandboxes.items() if sandbox is not None]
+    filesystems = [c for c in channels if isinstance(c, FilesystemChannel)]
     if not own:
+        if any(c.shared_volume for c in filesystems):
+            raise ValueError(
+                "swarm(): filesystem(shared_volume=True) describes members with their own sandboxes that mount one shared volume, and these members share the sample's sandbox. Use filesystem() without shared_volume, or give each member its own sandbox with member(..., sandbox=...)."
+            )
         return False
     shared = [name for name, sandbox in sandboxes.items() if sandbox is None]
     if shared:
         raise ValueError(
             f"swarm(): member {own[0]!r} has its own sandbox and {shared[0]!r} does not. Give every member its own sandbox, with member(..., sandbox=...), or none."
         )
-    if any(registry_info(channel).name == _FILESYSTEM for channel in channels):
+    if any(not c.shared_volume for c in filesystems):
         raise ValueError(
-            f"swarm(): the filesystem channel describes a sandbox the members share, and member {own[0]!r} has its own. Leave the channel out, with channels=[] or other channels."
+            f"swarm(): the filesystem channel describes a sandbox the members share, and member {own[0]!r} has its own. If the members' sandboxes each mount one shared volume, use filesystem(shared_volume=True) with shared= where it is mounted. Otherwise leave the channel out, with channels=[] or other channels."
         )
     owners: dict[str, str] = {}
     for name, sandbox in sandboxes.items():

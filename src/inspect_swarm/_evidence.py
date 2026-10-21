@@ -39,11 +39,12 @@ def evidence(
     )
 
 
-# Communication evidence: a `comm` event for each record that reached the bus (`sent`)
-# and for each one it delivered (`delivered`), written in the span the channel's tool
-# runs in. Its `member` and `span_id` are the sender's and the sender's member span,
-# even from a member's descendant; `loop` is the writing loop's agent span, and
-# `nested` whether that loop is not the member's own.
+# Communication evidence: a `comm` event for each record that reached the bus (`sent`),
+# for each one it delivered (`delivered`) and for each read of a channel's content
+# (`read`), written in the span the channel's tool runs in. Its `member` and `span_id`
+# are the acting member and its member span, even from a member's descendant; `loop` is
+# the agent span of the loop that acted, and `nested` whether that loop is not the
+# member's own.
 
 
 def comm_sent(
@@ -91,6 +92,34 @@ def comm_delivered(
         notify=list(notify),
         # a copy: the channel keeps its own
         result=None if result is None else copy.deepcopy(dict(result)),
+    )
+
+
+def comm_read(
+    span_id: str | None,
+    member: str,
+    channel: str,
+    read: str,
+    loop: str | None,
+    nested: bool,
+    tool_span_id: str | None,
+    files: list[JsonValue],
+    listing: bool,
+) -> None:
+    # a loop's tool was shown peer content: `files` names what it was shown, from the
+    # channel's state, never from the content
+    evidence(
+        "comm",
+        "read",
+        member=member,
+        span_id=span_id,
+        loop=loop,
+        nested=nested,
+        channel=channel,
+        read=read,
+        tool_span_id=tool_span_id,
+        files=files,
+        listing=listing,
     )
 
 

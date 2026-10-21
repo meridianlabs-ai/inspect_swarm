@@ -1,9 +1,15 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from inspect_ai.scorer import value_to_float
+from inspect_ai.scorer._score import _scorers  # pyright: ignore[reportPrivateUsage]
+from inspect_ai.scorer._scorer import unique_scorer_name
 from pydantic import BaseModel
 
 from ._ledger import EventLog, MemberLedger, SpanPlaces, SwarmLedger
+
+# react()'s default score_value
+_score_value = value_to_float()
 
 
 # One member's metrics.
@@ -18,6 +24,14 @@ class MemberMetrics(BaseModel):
     # with the same function and arguments. A signal, with no threshold. None for a
     # bridged member, whose tool calls leave no tool events.
     longest_identical_tool_run: int | None
+    # gate checks (`GateChecks`): the in-loop checks of the member's own submissions,
+    # those that passed, and the swarm time of the first that passed. Passes assume
+    # react()'s default score_value converter, value_to_float(), so a member with its
+    # own converter can record passes that differ from its own gate. The defaults load
+    # metrics written before these fields.
+    gate_checks: int = 0
+    gate_passes: int = 0
+    first_pass_time: float | None = None
 
 
 # The swarm's metrics for one run, written once, when the swarm ends, as an InfoEvent
@@ -56,11 +70,57 @@ class MemberTimes:
     ended: float | None
 
 
+# A member's gate checks: the in-loop checks of its own submissions, as react() makes
+# them with `attempts`. A check is an intermediate score event from the task's first
+# scorer, the one react() decides on, whose nearest enclosing agent span is the member's
+# own, not a subagent's; the task's other scorers' events for the same submission are
+# not checks. A pass is a check whose value is 1.0 under Inspect's default
+# value_to_float(), react()'s default score_value; a member that sets its own
+# score_value is read by the default too, so its passes can differ from its own gate
+# (decision: Ransom, 2026-10-20). react() does not score the submission that
+# uses up its last attempt, and an agent that checks submissions without score() makes
+# no checks.
+@dataclass(frozen=True)
+class GateChecks:
+    checks: int = 0
+    passes: int = 0
+    # swarm time of the first passing check; None without one
+    first_pass_time: float | None = None
+
+
+# The name score() gives the task's first scorer's events; None outside a task with a
+# scorer.
+def first_scorer() -> str | None:
+    scorers = _scorers.get(None)
+    return unique_scorer_name(scorers[0], []) if scorers else None
+
+
+# The gate checks of the member whose agent span is `member_span`, with `start` the
+# swarm's start on the runtime's clock. A task with no scorer (`scorer` None) has none.
+def gate_checks(
+    events: EventLog, member_span: str, scorer: str | None, start: float
+) -> GateChecks:
+    if scorer is None:
+        return GateChecks()
+    checks = passes = 0
+    first_pass: float | None = None
+    for score in events.scores:
+        if score.scorer != scorer or _agent_span(events, score.span_id) != member_span:
+            continue
+        checks += 1
+        if _score_value(score.value) == 1.0:
+            passes += 1
+            if first_pass is None:
+                first_pass = score.time - start
+    return GateChecks(checks, passes, first_pass)
+
+
 def swarm_metrics(
     ledger: SwarmLedger,
     events: EventLog,
     places: SpanPlaces,
     times: Sequence[MemberTimes],
+    gates: Sequence[GateChecks],
     wall_clock: float,
     answer: str | None,
 ) -> SwarmMetrics:
@@ -71,7 +131,7 @@ def swarm_metrics(
             tool_calls[member].append((tool.function, tool.arguments))
 
     members: list[MemberMetrics] = []
-    for line, member_times in zip(ledger.members, times, strict=True):
+    for line, member_times, gate in zip(ledger.members, times, gates, strict=True):
         running = (
             None
             if member_times.started is None
@@ -87,6 +147,9 @@ def swarm_metrics(
                 longest_identical_tool_run=None
                 if line.bridged
                 else _longest_run(tool_calls[line.name]),
+                gate_checks=gate.checks,
+                gate_passes=gate.passes,
+                first_pass_time=gate.first_pass_time,
             )
         )
     return SwarmMetrics(
@@ -105,6 +168,13 @@ def swarm_metrics(
 # Completed model calls in the member's spans, cache replays included.
 def _steps(line: MemberLedger) -> int:
     return line.calls.calls + line.calls.cache_replays
+
+
+# The nearest agent span enclosing `span`, itself included.
+def _agent_span(events: EventLog, span: str | None) -> str | None:
+    while span is not None and span not in events.agent_spans:
+        span = events.parents.get(span)
+    return span
 
 
 def _longest_run(calls: Sequence[tuple[str, str]]) -> int:

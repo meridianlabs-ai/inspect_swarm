@@ -85,9 +85,43 @@ solver = swarm(
 
 This swarm has four members: `solver-1` to `solver-3` and `reviewer`. The role is added to the member's preamble.
 
-- **Names.** A member is named after its agent (`react`, `deepagent`) unless you give `name`. With `count` above 1 the members are `name-1` to `name-k`. Names must be unique in the swarm. They cannot be `init`, `solvers` or `scorers`, and cannot contain `/` or `#`.
+- **Names.** A member is named after its agent (`react`, `deepagent`) unless you give `name`. With `count` above 1 the members are `name-1` to `name-k`. Default names are numbered across records ([Members that differ](#members-that-differ)). Names must be unique in the swarm. They cannot be `init`, `solvers` or `scorers`, and cannot contain `/` or `#`.
 - **Limits.** `limits` takes token, cost, turn, message and time limits for that member alone. Working limits are refused.
 - **A swarm of one.** `swarm(members=react(), channels=[])` is a single agent run under the swarm's rules, with the same records. Use it as the single-agent arm when you compare a swarm with one agent. Unlike a plain agent, it returns an empty output when its member does not submit.
+
+### Members that differ
+
+Members left on their default name are numbered across the whole roster, not per record. So one member with a different prompt and model takes two records:
+
+```python
+from inspect_ai.agent import react
+
+from inspect_swarm import member, swarm
+
+solver = swarm(
+    members=[
+        member(react, args={"prompt": "Solve the task."}, count=6),
+        member(
+            react,
+            args={
+                "prompt": "Check the others' work in /shared.",
+                "model": "openai/gpt-5",
+            },
+        ),
+    ],
+)
+```
+
+The first record makes `react-1` to `react-6` and the second `react-7`.
+
+When every copy differs, give each its own record. A list comprehension builds them:
+
+```python
+prompts = ["Try algebra.", "Try brute force.", "Try a proof by cases."]
+solver = swarm(members=[member(react, args={"prompt": p}) for p in prompts])
+```
+
+These are `react-1` to `react-3`. Names you give with `name` are not numbered across records, so give each record its own.
 
 Each member's events are in a timeline named after it, so the log viewer can show one member's trajectory.
 
@@ -111,9 +145,17 @@ solver = swarm(
 
 `agent-1` and `agent-2` run in the environments of those names. The sample's sandbox configuration provides them (for Docker, a compose service for each), and the swarm checks that they exist when it starts.
 
-- When one member has its own sandbox, every member must have one, and no two can have the same one. The `filesystem` channel describes a shared sandbox, so it is refused: pass `channels=[]`.
+- When one member has its own sandbox, every member must have one, and no two can have the same one. The `filesystem` channel describes a shared sandbox, so it is refused: pass `channels=[]`. If the members' sandboxes each mount one shared volume, pass `channels=[filesystem(shared_volume=True)]` instead (see [Controllers and channels](#controllers-and-channels)).
 - A member cannot see the sample's other environments, except those in its `visible_sandboxes`, such as a shared service. It reaches those only by name. Any member that lists a service can use it, so list only services every member may use.
 - The task's scorer runs outside every member, where `sandbox()` is the sample's `default`. A scorer that grades the members' work names each member's sandbox, as in `sandbox("agent-1")`. The result record's `sandbox` field says which member used which.
+
+### Background work
+
+Native members support `deepagent(background=True)` and integer background limits. Work started with `background()` belongs to its member and uses its limits and sandbox. A member limit or swarm cap ends the background task that reached it. A swarm cap also starts the swarm's soft stop; other work gets the effective grace period to finish calls already in flight.
+
+When the member's agent ends, its background work gets the swarm's grace period to finish work in flight. The swarm then cancels the rest and waits for its cleanup before the member ends. `Budget.grace=0` skips the grace wait.
+
+Start background work from the running agent, not its factory. A factory that starts it makes the member `errored`.
 
 ### How a member ends
 
@@ -145,6 +187,15 @@ from inspect_swarm import filesystem, member, swarm
 solver = swarm(
     members=member(react, count=4),
     channels=[filesystem(shared="/work/shared", scratch="/work/{member}")],
+)
+```
+
+When members have their own sandboxes and each sandbox mounts one shared volume, for example a named volume in each member's compose service, use `filesystem(shared_volume=True)`. Set `shared=` to the absolute path where the volume is mounted; `notes=` must be inside it. The preamble then says that `shared` and the notes file in it are the same in every member's sandbox, and gives no scratch directory, since each sandbox is already private. The swarm cannot check that the volume is mounted, and it refuses `shared_volume=True` when members share the sample's sandbox.
+
+```python
+solver = swarm(
+    members=member(react, name="agent", count=2, sandbox="{member}"),
+    channels=[filesystem(shared_volume=True)],
 )
 ```
 
@@ -202,7 +253,7 @@ A member's `state` is `pending` (never started), `running` or `ended`. `time` is
 
 When the swarm ends it writes two more store entries, each also logged as an `InfoEvent` with source `inspect_swarm`:
 
-- `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, the controller and the final step, model calls that errored or reported no usage, unpriced models, what stopped the swarm, and whether the sample resumed from a checkpoint.
+- `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, the controller and the final step, model calls that errored or reported no usage, unpriced models, what stopped the swarm, and whether the sample resumed from a checkpoint. See [The ledger](#the-ledger).
 - `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members with no completed model call (`never_acted`), counts of completed model calls for the chosen member (`steps_to_answer`) and the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member (`null` for a bridged member, see [Restrictions](#restrictions)). These call counts include cache replays and exclude failed or cancelled attempts.
 
 `inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`. `samples_df()` needs pandas and pyarrow, which neither install above includes:
@@ -231,7 +282,96 @@ df["score"] = df["score_match"].map(value_to_float(), na_action="ignore")
 df.groupby("log")[["score", "swarm_cost"]].mean()
 ```
 
-`swarm_cost` is the sample's recorded priced cost, including scorer calls. `swarm_complete` requires the swarm's ledger to mark its interval complete and all recorded model usage to be priced. It does not check for missing usage outside the swarm, including scorer calls. The `SwarmColumns` docstring lists every column.
+The columns:
+
+- `swarm_cost`: the sample's priced cost in dollars, from its `model_usage`, including scorer calls. Tokens are in `SampleSummary`'s `total_tokens`.
+- `swarm_complete`: no call is known to be missing from `swarm_cost`. The ledger marks the swarm's interval complete, and every model in the sample's `model_usage` is priced. Calls outside the swarm, including scorer calls, are not checked. `False` for a sample with no ledger.
+- `swarm_members`: members in the roster.
+- `swarm_resumed`: the sample resumed from a checkpoint, so the swarm restarted its caps from zero. `False` for a sample with no ledger.
+- `swarm_cost_cap`, `swarm_token_cap`, `swarm_time_cap`: the swarm's caps. The time cap is in seconds.
+- `swarm_errored`, `swarm_no_usage`, `swarm_unpriced`: model calls in the swarm that errored or were cancelled (retries included), that completed with no usage, and whose usage has no cost. Each makes the cost a lower bound.
+- `swarm_unpriced_models`: models with tokens and no cost, from the ledger and the sample's `model_usage`, as a JSON list.
+
+The columns read from the ledger are null for a sample with no ledger. A sample that runs two swarms keeps only the last one's ledger, while its `model_usage` covers both. The columns read the sample's `store` and `model_usage`, so do not exclude either with `samples_df(exclude_fields=...)`.
+
+The columns hold no per-member data. `swarm_ledger()` reads a sample's whole ledger as a `SwarmLedger`, whose `members` are `MemberLedger`s with a `Meter` and `Calls` each. All are in `inspect_swarm.analysis`, and `SwarmLedger.model_json_schema()` describes every field. For example, each member's cost:
+
+```python
+from inspect_ai.log import read_eval_log
+
+from inspect_swarm.analysis import swarm_ledger
+
+log = read_eval_log("logs/my-eval.eval")
+for sample in log.samples or []:
+    ledger = swarm_ledger(sample)
+    if ledger is not None:
+        for m in ledger.members:
+            print(sample.id, sample.epoch, m.name, m.meter.cost)
+```
+
+### The ledger
+
+The ledger of a two-member swarm with a cost cap of $1 and a time cap of 600 seconds:
+
+```json
+{
+  "version": 1,
+  "budget": {"cost": 1.0, "tokens": null, "time": 600.0, "reserve": 0.05, "split": "pool", "grace": 120.0},
+  "caps": {"cost": 1.0, "tokens": null, "time": 600.0},
+  "sample_limits": {"token": null, "cost": null, "message": null, "turn": null, "working": null, "time": null},
+  "members": [
+    {
+      "name": "react-1",
+      "status": "submitted",
+      "bridged": false,
+      "meter": {"usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.0081}, "cost": 0.0081, "suspended_cost": 0.0},
+      "calls": {"calls": 1, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
+      "cancelled": false,
+      "background_started": 0,
+      "background_cancelled": 0
+    },
+    {
+      "name": "react-2",
+      "status": "submitted",
+      "bridged": false,
+      "meter": {"usage": {"input_tokens": 1150, "output_tokens": 280, "total_tokens": 1430, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.00765}, "cost": 0.00765, "suspended_cost": 0.0},
+      "calls": {"calls": 1, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
+      "cancelled": false,
+      "background_started": 0,
+      "background_cancelled": 0
+    }
+  ],
+  "runtime": {"usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": null}, "cost": 0.0, "suspended_cost": 0.0},
+  "final": {"usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": null}, "cost": 0.0, "suspended_cost": 0.0},
+  "swarm": {"usage": {"input_tokens": 2350, "output_tokens": 580, "total_tokens": 2930, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.01575}, "cost": 0.01575, "suspended_cost": 0.0},
+  "calls": {"calls": 2, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
+  "unpriced_calls_recorded": 0,
+  "sample_delta": {"input_tokens": 2350, "output_tokens": 580, "total_tokens": 2930, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.01575},
+  "unattributed": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.0},
+  "unpriced_models": [],
+  "native_compaction_classes": [],
+  "overshoot": {},
+  "stop_reason": "all_done",
+  "ended_by": null,
+  "interrupted": false,
+  "final_cancelled": false,
+  "resumed": false,
+  "total_complete": true,
+  "attribution_complete": true
+}
+```
+
+- `budget` is the `Budget` as given. `caps` are the caps the swarm applied, derived from the sample's limits or given: `cost` in dollars, `tokens`, and `time` in seconds, `null` for no cap. `sample_limits` are the sample's limits when the swarm started.
+- `members` has one entry per member, in roster order. `status` is as in [How a member ends](#how-a-member-ends), `null` for a member never started. `cancelled` means the swarm or the sample cancelled the member, so calls it had in flight are unknown. A hard stop during a background drain also sets `cancelled`; the agent's returned status is kept. `background_started` counts the tasks the member started with `background()`, and `background_cancelled` those cancelled before they finished, whose calls in flight are unknown too.
+- `meter` is the usage and cost of what a member did. `suspended_cost` is the part spent while token counting was suspended, such as approval calls.
+- `calls` counts model calls: `calls` completed ones other than cache replays, `cache_replays` replayed from cache at no charge, `errored` attempts that errored or were cancelled (retries included), `no_usage` completed with no usage, and `unpriced` completed with usage but no cost.
+- `runtime` meters the controller's own calls, `final` the final step's (the default first-submission answer makes none), and `swarm` everything in the swarm: members, runtime and final step. The top-level `calls` counts every call in the swarm. `unpriced_calls_recorded` counts the unpriced calls the swarm's meter recorded.
+- `sample_delta` is the sample's usage while the swarm ran. `unattributed` is `sample_delta` minus `swarm`: usage no meter holds, such as the tokens of approval calls.
+- `unpriced_models` are models with tokens but no cost. `native_compaction_classes` are loaded model classes that can compact a conversation natively, which logs nothing, so their usage may be missing.
+- `overshoot` is how far usage went past each cap, for caps it passed. Calls in flight at a stop can carry usage past a cap.
+- `stop_reason` is why the swarm stopped itself: a controller's `all_done` (as `leaderless` returns), `verified` or `quiescence`, `controller:<reason>` for any other reason a controller returns, `swarm_cap` or `swarm_time`. `ended_by` is what ended it from outside: `sample_limit:<type>`, `operator` for an interrupt, or `unknown`. Each is `null` when it did not happen. Both are set when a sample limit ends the swarm during its own stop.
+- `interrupted` means an error (a member's, the controller's or the final step's) or a cancellation ended the swarm before it finished, `final_cancelled` that the final step was cancelled, and `resumed` that the sample resumed from a checkpoint.
+- `total_complete` means no call is known to be missing from the totals: nothing was cancelled or interrupted, every call reported priced usage, and no model class can compact natively. Otherwise the totals are lower bounds. `attribution_complete` adds that `unattributed` is zero.
 
 ## Logs and the store
 
@@ -241,7 +381,8 @@ If an error, limit or cancellation escapes the swarm and ends the sample, the lo
 
 ## Restrictions
 
-- **No background subagents.** A `deepagent()` member with `background=True` or an integer is refused. So are ACP agents.
+- **No background work in bridged members.** A member cannot combine background work with the agent bridge. `background()` raises in a bridged member, and a member that uses the bridge after starting background work ends `errored`.
+- **No ACP agents.** ACP agents wait for their caller to drive them, so they are refused.
 - **Tool state is per member.** Each member runs in its own tool-state scope. Built-in tools that keep state in the store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default.
   - Tool state that a setup solver prepared at the default instance is not carried into the members. They start with fresh state.
   - Tasks whose scorers read a member's tool state from the store are not supported. The keys inside a member's scope differ from the default ones.

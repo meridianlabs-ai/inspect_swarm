@@ -53,6 +53,7 @@ class Bus:
         self._stopping = False
         self._seq = 0
         self._ids: dict[str, int] = {}
+        self._reads = 0
         self._states: dict[str, ChannelState] = {}
         self._storms: dict[str, Storm] = {}
         self._prefixes: dict[str, str] = {}
@@ -97,10 +98,7 @@ class Bus:
         sender = context.name
         # the member's own span, for the evidence; the record keeps the writing loop's
         member_span = context.span_id
-        # written from a loop other than the member's own, such as a subagent's
-        nested = (
-            context.loop is not None and current_agent_channel() is not context.loop
-        )
+        nested = self.nested(context)
         if self._stopping:
             raise ToolError(_STOPPING)
         state = self._state(draft.channel)
@@ -152,6 +150,20 @@ class Bus:
         comm_delivered(member_span, record, nested, self._seq, notify, result)
         return Delivery(record, self._seq, list(notify), result)
 
+    def running(self, name: str) -> bool:
+        # whether the member has started and not yet ended
+        return self._by_name[name].state == "running"
+
+    def nested(self, context: MemberContext) -> bool:
+        # whether the caller runs in a loop other than the member's own, such as a
+        # subagent's
+        return context.loop is not None and current_agent_channel() is not context.loop
+
+    def read_id(self) -> str:
+        # the id of a read's evidence, numbered across the run's channels
+        self._reads += 1
+        return f"r-{self._reads}"
+
     def member(self) -> MemberContext | None:
         # the member the caller runs in or descends from, if it is one of this run's
         context = current_member.get()
@@ -198,7 +210,7 @@ class Bus:
         # step 0 checked the recipients and the stopping flag, and nothing has awaited
         # since; the sender is checked here, with evidence, since a task it left behind
         # can still run in its context after it ends
-        if self._by_name[record.sender].state != "running":
+        if not self.running(record.sender):
             return (
                 "liveness",
                 f"{record.sender} has ended, so its {record.kind} was not delivered.",

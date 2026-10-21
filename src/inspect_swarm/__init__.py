@@ -8,6 +8,7 @@ from ._bus._record import Record
 from ._bus._tools import swarm_tools
 from ._channel._channel import Channel, ChannelRun, ChannelState, swarm_channel
 from ._channel.filesystem import filesystem
+from ._channel.shared_memory import shared_memory
 from ._controller._control import (
     MemberEnded,
     MemberHandle,
@@ -53,6 +54,7 @@ __all__ = [
     "filesystem",
     "leaderless",
     "member",
+    "shared_memory",
     "swarm",
     "swarm_budget",
     "swarm_channel",

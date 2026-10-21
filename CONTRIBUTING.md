@@ -20,7 +20,7 @@ uv sync --group dev
 
 This installs the package in editable mode along with the dev tools (ruff, pyright, pytest).
 
-Inspect Swarm depends on released versions of `inspect_ai`: `pyproject.toml` sets a minimum version, and `uv.lock` pins the release that development and CI use. To move to a newer inspect_ai release, run `uv lock --upgrade-package inspect-ai && uv sync --group dev`.
+Inspect Swarm depends on `inspect_ai`: `pyproject.toml` sets a minimum released version, or between releases a git reference to inspect_ai `main` ([The inspect_ai version](#the-inspect_ai-version)), and `uv.lock` pins the version that development and CI use. To move to a newer inspect_ai, run `uv lock --upgrade-package inspect-ai && uv sync --group dev`.
 
 ## Checks and tests
 
@@ -71,7 +71,9 @@ Anything that isn't a user-facing feature or fix should avoid `feat:`/`fix:` so 
 
 ### The inspect_ai version
 
-The `inspect-ai` dependency is a minimum version, never a git reference, so a release can go to PyPI as it is. Raise the minimum only when code in `src/` needs a newer inspect_ai, and say in the PR which code needs it. When only tests need a newer release, update `uv.lock` instead. If a change needs an inspect_ai feature that is not released yet, it waits for that release.
+A release of Inspect Swarm needs a released inspect_ai, because PyPI rejects git dependencies: the `inspect-ai` dependency must be a minimum version (`inspect-ai>=X`) when Inspect Swarm is published. Raise the minimum only when code in `src/` needs a newer inspect_ai, and say in the PR which code needs it. When only tests need a newer release, update `uv.lock` instead.
+
+Work does not wait for an inspect_ai release. If a change needs an inspect_ai feature that is merged on inspect_ai `main` but not released yet, `pyproject.toml` may use a git reference to inspect_ai `main`, with `uv lock --upgrade-package inspect-ai` to lock the commit. This is a temporary workaround to unblock work: the dependency goes back to a released minimum before Inspect Swarm is published.
 
 ## Reporting issues
 
