@@ -1,5 +1,6 @@
 from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
+from typing import Literal
 
 import anyio
 import pytest
@@ -14,10 +15,12 @@ def _member() -> MemberContext:
     return MemberContext("m", bridged=False)
 
 
-def _limit_error(source: Limit | None) -> Callable[[], Awaitable[None]]:
+def _limit_error(
+    source: Limit | None, type: Literal["token", "custom"] = "token"
+) -> Callable[[], Awaitable[None]]:
     async def raises() -> None:
         await anyio.sleep(0.01)
-        raise LimitExceededError("token", value=2, limit=1, source=source)
+        raise LimitExceededError(type, value=2, limit=1, source=source)
 
     return raises
 
@@ -66,16 +69,18 @@ async def test_the_owner_runs_background_work_and_cancels_what_is_left() -> None
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "contained,raised",
+    "contained,type,raised",
     [
-        pytest.param(True, False, id="contained"),
+        pytest.param(True, "token", False, id="contained"),
         # a sample limit
-        pytest.param(False, True, id="outside-contain"),
-        pytest.param(None, True, id="sourceless"),
+        pytest.param(False, "token", True, id="outside-contain"),
+        pytest.param(None, "token", True, id="sourceless"),
+        # the task stopped itself
+        pytest.param(None, "custom", False, id="sourceless-custom"),
     ],
 )
 async def test_a_limit_from_a_contained_node_ends_only_its_task(
-    contained: bool | None, raised: bool
+    contained: bool | None, type: Literal["token", "custom"], raised: bool
 ) -> None:
     member_node, sample_node = token_limit(10), token_limit(10)
     source = None if contained is None else member_node if contained else sample_node
@@ -89,7 +94,7 @@ async def test_a_limit_from_a_contained_node_ends_only_its_task(
     owner = MemberBackground(_member(), contain=[member_node])
     with pytest.raises(LimitExceededError) if raised else nullcontext():
         async with owner:
-            background(_limit_error(source))
+            background(_limit_error(source, type))
             background(sibling)
             await anyio.sleep(0.1)
             block_done = True

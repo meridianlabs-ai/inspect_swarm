@@ -57,6 +57,7 @@ from .swarm_runtime import (
     statuses,
 )
 from .test_budget import _written_ledger
+from .test_member_sandboxes import _member_name, _name, environments
 
 # ---------------------------------------------------------------------------
 # Members whose agents start background work directly
@@ -439,6 +440,47 @@ async def test_a_member_message_limit_reached_in_a_child_ends_only_the_child() -
     assert statuses(outcome) == {"x": "submitted"}
 
 
+async def _stop_itself() -> None:
+    # how an agent stops itself, such as inspect_boltons' loop limits
+    raise LimitExceededError("custom", value=1, limit=1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("when", ["running", "drain"])
+async def test_a_custom_limit_raised_in_a_child_ends_only_the_child(when: str) -> None:
+    log: list[str] = []
+    model = scripted_model()
+    outcome = await run_swarm(
+        swarm(
+            member(
+                spawner(
+                    model,
+                    [
+                        _Child("stuck", [_sleep(0.02), _stop_itself]),
+                        # in the drain the lever refuses its calls, so it makes none
+                        _Child(
+                            "sibling",
+                            [_sleep(0.1), "call"]
+                            if when == "running"
+                            else [_sleep(0.1)],
+                        ),
+                    ],
+                    log,
+                    # the parent returns after or before the child stops itself
+                    steps=[_sleep(0.2), "call"] if when == "running" else [],
+                ),
+                name="x",
+            ),
+            channels=[],
+            budget=Budget(grace=2),
+        )
+    )
+    assert sorted(log) == ["sibling finished", "stuck stopped"]
+    assert statuses(outcome) == {"x": "submitted"}
+    [line] = _ledger(outcome).members
+    assert (line.background_started, line.background_cancelled) == (2, 0)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("when", ["running", "drain"])
 async def test_a_sample_limit_reached_in_a_child_ends_the_sample(
@@ -586,6 +628,50 @@ async def test_bridge_use_and_background_work_are_refused(declared: bool) -> Non
     assert (line.background_started, line.background_cancelled) == (
         (0, 0) if declared else (1, 1)
     )
+
+
+@agent
+def sandbox_prober(seen: dict[str, dict[str, str]]) -> Agent:
+    """Start a background task that records which sandboxes it reaches."""
+
+    async def execute(state: AgentState) -> AgentState:
+        name = _member_name(state)
+
+        async def probe() -> None:
+            reach = {"sandbox()": _name(sandbox())}
+            for other in ("agent-1", "agent-2"):
+                try:
+                    reach[other] = _name(sandbox(other))
+                except ValueError:
+                    reach[other] = "refused"
+            seen[name] = reach
+
+        background(probe)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_background_work_runs_in_its_members_sandbox() -> None:
+    seen: dict[str, dict[str, str]] = {}
+    with environments("default", "agent-1", "agent-2"):
+        await run_swarm(
+            swarm(
+                member(
+                    sandbox_prober,
+                    args={"seen": seen},
+                    name="agent",
+                    count=2,
+                    sandbox="{member}",
+                ),
+                channels=[],
+            )
+        )
+    assert seen == {
+        "agent-1": {"sandbox()": "agent-1", "agent-1": "agent-1", "agent-2": "refused"},
+        "agent-2": {"sandbox()": "agent-2", "agent-1": "refused", "agent-2": "agent-2"},
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,8 @@ def self_stop(error: BaseException) -> bool:
 # The owner of one member's background work: the target of inspect_ai's
 # background_target while the member runs, entered once. Leaving it cancels the tasks
 # still running and waits for them. A task that raises a bare limit error from one of
-# `contain` (the member's nodes and the swarm's caps) ends alone; any other error from
+# `contain` (the member's nodes and the swarm's caps), or a sourceless custom limit
+# error, which the task raised to stop itself, ends alone; any other error from
 # a task cancels the block and the other tasks and is raised from it, as from the
 # sample's task group. A bridged member's nodes cancel the whole member rather than
 # raise, so the owner refuses background work in a member found bridged.
@@ -116,7 +117,7 @@ class MemberBackground:
             self.cancelled += 1
             raise
         except LimitExceededError as ex:
-            if not any(ex.source is node for node in self._contain):
+            if not (self_stop(ex) or any(ex.source is node for node in self._contain)):
                 raise
         finally:
             self.running -= 1
