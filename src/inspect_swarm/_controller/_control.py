@@ -457,6 +457,7 @@ class SwarmRun:
                     [MemberTimes(m.name, m.started, m.time) for m in self._members],
                     [m.gates for m in self._members],
                     list(self.bus.states),
+                    self.bus.waits.max_wait is not None,
                     wall_clock,
                     chosen.name if chosen is not None else None,
                 )

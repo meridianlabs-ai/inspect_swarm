@@ -209,6 +209,7 @@ One `InfoEvent` per wait, written when it ends (in the synchronous `finally`, so
 | `path` | the filter as given, or `null` (grammar-checked, so safe to log) |
 | `timeout` | requested and effective seconds |
 | `started`, `duration` | swarm time of the call, and seconds until it returned (0 for an immediate return), returns to sleep included |
+| `idle` | seconds of the wait during which its member counted as waiting ([When a wait ends without news](#when-a-wait-ends-without-news)); 0 for a nested loop's wait |
 | `outcome` | `news`, `all_waiting`, `stopping`, `member_ending`, `timeout` or `cancelled` |
 | `woken_by` | the commit sequence numbers (`delivered.seq`) of the commits that released it for news, in order, including any whose news was gone at resume; `[]` when none did |
 | `files` | `[{"file", "version", "deleted"}]` the result named |
@@ -222,7 +223,7 @@ Not in M2-13: the wait metrics land in their own pull request after it (decision
 
 - `waits`: the number of `waited` events in the member's spans, and `waits_by_outcome`.
 - `wait_time`: the sum of their durations, across all the member's loops. Concurrent waits of different loops each count, so it can exceed the member's running time; it measures how much waiting the member's loops did.
-- `idle_time`: the sum of `idle`, the time the member as a whole did nothing but wait for peers (its own loop in `swarm_wait`, its waiter not released, no background work). This is swarm.md's idle time, made exact for members with subagents, which plan decision 12 asked for: it is not a sum of waits that ignores work running beside them.
+- `idle_time`: the sum of `idle`, the time the member as a whole did nothing but wait for peers (its own loop in `swarm_wait`, its waiter not released, no background work). This is swarm.md's idle time, made exact for members with subagents, which plan decision 12 asked for: it is not a sum of waits that ignores work running beside them. Like the all-waiting check, a wait's `idle` can run one scheduling step past its timeout or cancellation ([What a scheduling gap costs](#what-a-wait-returns)).
 
 Neither is Inspect's working time, and neither replaces per-member working time (still future work). `longest_identical_tool_run` is unchanged: a member that calls `swarm_wait` with the same arguments several times in a row has a run of identical calls, and the metric alone does not distinguish these runs from a suspected loop; analysis must inspect the logged tool calls to identify waits. Changing the metric stays deferred ([Not this design](#not-this-design)).
 

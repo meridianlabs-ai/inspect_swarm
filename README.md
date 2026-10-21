@@ -230,7 +230,11 @@ This swarm keeps the `filesystem` channel beside the board. `channels=[shared_me
 
 The number and size of files and each member's write rate are limited. See `shared_memory()`'s docstring for the limits, their defaults and the rules members follow.
 
-The swarm logs the members' writes and views as `InfoEvent`s with source `inspect_swarm` and type `comm`, so the log keeps the board's whole history. The [metrics](#metrics-and-analysis) count these events for each member.
+Members that get `shared_memory` also get `swarm_wait`, so a member that needs a peer's work waits instead of polling. A wait returns when a file under the `path` it watches (the whole board without one) has a change that the waiting agent did not write and has not viewed, or when another member ends. A subagent's write counts, so a member can wait for its own subagents. It returns at once if that is already so, and keeps returning while such a file stays unviewed. The result names the changed files by id and the ended members by name and status, never file content: the member views a file to read it.
+
+A wait also ends without news: when every member is waiting, has ended or has not started, when the swarm stops, when the member's own agent finishes, or after `timeout` seconds. `max_wait` sets the longest wait and the default `timeout`, 600 seconds unless you change it, for example `shared_memory(max_wait=300)`. A wait is time inside a tool call, so it counts towards the member's time limit, the swarm's time cap and the sample's time and working limits. It makes no model call, so it adds no tokens, cost or steps. A swarm with only the `filesystem` channel, or `channels=[]`, has no `swarm_wait`.
+
+The swarm logs the members' writes, views and waits as `InfoEvent`s with source `inspect_swarm` and type `comm`, so the log keeps the board's whole history. The [metrics](#metrics-and-analysis) count these events for each member.
 
 ## Budget
 
@@ -286,6 +290,15 @@ When the swarm ends it writes two more store entries, each also logged as an `In
 - `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members with no completed model call (`never_acted`), counts of completed model calls for the chosen member (`steps_to_answer`) and the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member (`null` for a bridged member, see [Restrictions](#restrictions)). These call counts include cache replays and exclude failed or cancelled attempts.
 
 Each member's metrics also have `comm`, by channel name, for each channel with records, such as `shared_memory`: `records` and `record_bytes`, its writes delivered to the channel and their size; `rejections`, its writes the bus refused, by the control that refused them, such as `rate`; and `reads` and `listings`, its views of files and of directories. A member's subagents count as the member. Every member has an entry for every such channel the swarm opened, zeros included. A swarm with none (`filesystem` only, or `channels=[]`) has `comm` `{}` for every member: communication through files is observed, not recorded, so it is not reported as zero.
+
+Each member's metrics also count its `swarm_wait` calls, its subagents' included:
+
+- `waits`: the number of waits.
+- `waits_by_outcome`: that number by what ended each wait: `news` (a changed file or an ended member), `all_waiting`, `stopping`, `member_ending`, `timeout` or `cancelled`. An outcome that ended no wait is left out.
+- `wait_time`: the waits' total seconds. Waits of a member's subagents that overlap each count.
+- `idle_time`: the seconds the member did nothing but wait: its own agent in `swarm_wait`, not yet released, and none of its background work running. A subagent's wait adds to `wait_time` but not to `idle_time`.
+
+In a swarm with no `swarm_wait` (`filesystem` only, or `channels=[]`) the four are `null`, so 0 means the wait was offered and unused.
 
 `inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`. `samples_df()` needs pandas and pyarrow, which neither install above includes:
 

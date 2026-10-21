@@ -139,7 +139,7 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
         [span] = _tool_spans(transcript, "swarm_wait")
         assert event.span_id == span
         data = cast(dict[str, Any], event.data)
-        timing = {k: data.pop(k) for k in ("started", "duration")}
+        timing = {k: data.pop(k) for k in ("started", "duration", "idle")}
         assert data == {
             "version": 1,
             "type": "comm",
@@ -159,6 +159,8 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
         }
         assert timing["started"] >= 0
         assert timing["duration"] >= 0.04
+        # the member's own loop waited with nothing else of it running
+        assert 0.04 <= timing["idle"] <= timing["duration"]
 
 
 @pytest.mark.anyio
@@ -171,6 +173,28 @@ async def test_a_nested_waits_evidence_names_its_loop() -> None:
         [data] = waited(transcript)
         assert (data["loop"], data["nested"]) == ("w-1/child", True)
         assert data["duration"] >= 0.04
+        # a subagent's wait does not make its member waiting
+        assert data["idle"] == 0
+
+
+@pytest.mark.anyio
+async def test_a_wait_is_idle_only_while_none_of_its_members_background_work_runs() -> (
+    None
+):
+    async with run() as (r, transcript):
+        context = r.members["w-1"].context
+        context.background_running = 1
+        async with anyio.create_task_group() as tg:
+            await start(tg, r, "w-1")
+            await anyio.sleep(0.05)
+            # as the owner does when the member's last background work ends
+            context.background_running = 0
+            r.bus.recheck()
+            await anyio.sleep(0.05)
+            await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
+        [data] = waited(transcript)
+        assert data["idle"] >= 0.04
+        assert data["duration"] - data["idle"] >= 0.04
 
 
 @pytest.mark.anyio
