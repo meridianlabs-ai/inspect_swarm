@@ -111,7 +111,7 @@ solver = swarm(
 
 `agent-1` and `agent-2` run in the environments of those names. The sample's sandbox configuration provides them (for Docker, a compose service for each), and the swarm checks that they exist when it starts.
 
-- When one member has its own sandbox, every member must have one, and no two can have the same one. The `filesystem` channel describes a shared sandbox, so it is refused: pass `channels=[]`.
+- When one member has its own sandbox, every member must have one, and no two can have the same one. The `filesystem` channel describes a shared sandbox, so it is refused: pass `channels=[]`. If the members' sandboxes each mount one shared volume, pass `channels=[filesystem(shared_volume=True)]` instead (see [Controllers and channels](#controllers-and-channels)).
 - A member cannot see the sample's other environments, except those in its `visible_sandboxes`, such as a shared service. It reaches those only by name. Any member that lists a service can use it, so list only services every member may use.
 - The task's scorer runs outside every member, where `sandbox()` is the sample's `default`. A scorer that grades the members' work names each member's sandbox, as in `sandbox("agent-1")`. The result record's `sandbox` field says which member used which.
 
@@ -145,6 +145,15 @@ from inspect_swarm import filesystem, member, swarm
 solver = swarm(
     members=member(react, count=4),
     channels=[filesystem(shared="/work/shared", scratch="/work/{member}")],
+)
+```
+
+When members have their own sandboxes and each sandbox mounts one shared volume, for example a named volume in each member's compose service, use `filesystem(shared_volume=True)`. Set `shared=` to where the volume is mounted. The preamble then says that `shared` and the notes file in it are the same in every member's sandbox, and gives no scratch directory, since each sandbox is already private. The swarm cannot check that the volume is mounted, and it refuses `shared_volume=True` when members share the sample's sandbox.
+
+```python
+solver = swarm(
+    members=member(react, name="agent", count=2, sandbox="{member}"),
+    channels=[filesystem(shared_volume=True)],
 )
 ```
 

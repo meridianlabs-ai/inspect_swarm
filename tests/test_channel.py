@@ -119,6 +119,11 @@ def test_filesystem_refuses_a_scratch_template_without_exactly_the_member_placeh
         filesystem(scratch=scratch)
 
 
+def test_filesystem_refuses_a_scratch_with_a_shared_volume() -> None:
+    with pytest.raises(ValueError, match="scratch is not used with shared_volume=True"):
+        filesystem(scratch="/tmp/{member}", shared_volume=True)
+
+
 @agent
 def notes_writer(notes: str) -> Agent:
     async def execute(state: AgentState) -> AgentState:
