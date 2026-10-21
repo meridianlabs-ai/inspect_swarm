@@ -104,6 +104,10 @@ class MemberBackground:
         self.started += 1
         self.running += 1
         self._member.background_running += 1
+        if self._member.background_running == 1 and self._bus is not None:
+            # the member is no longer waiting, as when another of its tasks starts
+            # work while its own loop waits
+            self._bus.recheck()
 
     # returns once no task is running, including tasks started while waiting
     async def wait(self) -> None:

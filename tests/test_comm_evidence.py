@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -194,6 +195,26 @@ async def test_a_wait_is_idle_only_while_none_of_its_members_background_work_run
             await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
         [data] = waited(transcript)
         assert data["idle"] >= 0.04
+        assert data["duration"] - data["idle"] >= 0.04
+
+
+@pytest.mark.anyio
+async def test_a_released_wait_is_not_idle_until_it_sleeps_again() -> None:
+    async with run() as (r, transcript):
+        async with anyio.create_task_group() as tg:
+            await start(tg, r, "w-1", path=_p("r"))
+            await anyio.sleep(0.05)
+            await r.sm("w-2", "create", path=_p("r/a.md"), file_text="x")
+            # released, and held this long before its task resumes, by which time the
+            # news is gone and it sleeps again
+            time.sleep(0.05)
+            await r.sm("w-2", "delete", path=_p("r/a.md"))
+            await anyio.sleep(0.05)
+            await r.sm("w-2", "create", path=_p("r/b.md"), file_text="x")
+        [data] = waited(transcript)
+        assert (data["outcome"], data["woken_by"]) == ("news", [1, 3])
+        # idle before the first release and after the return to sleep, not between
+        assert data["idle"] >= 0.09
         assert data["duration"] - data["idle"] >= 0.04
 
 

@@ -126,8 +126,9 @@ class Waits:
             self._release(waiter, "stopping")
 
     def recheck(self) -> None:
-        # the all-waiting check, run whenever a member can have become waiting
-        self._start_idle()
+        # the all-waiting check, run whenever a member can have become waiting or its
+        # background work started
+        self._clock_idle()
         unreleased = self._unreleased()
         if not unreleased:
             return
@@ -322,16 +323,19 @@ class Waits:
             and self._contexts[waiter.spec.member].background_running == 0
         )
 
-    # the idle clock. A member starts counting as waiting only where the all-waiting
-    # check runs (a registration, a member's background work dropping to none), and
-    # stops only when its waiter is released or unregistered: background work cannot
-    # start while its own loop waits.
+    # the idle clock. A waiter's clock runs while it makes its member waiting: it starts
+    # or stops where the all-waiting check runs (a registration, a member's background
+    # work starting or dropping to none), and stops when the waiter is released or
+    # unregistered.
 
-    def _start_idle(self) -> None:
+    def _clock_idle(self) -> None:
         now = anyio.current_time()
         for waiter in self._waiters.values():
-            if waiter.idle_since is None and self._idle(waiter):
-                waiter.idle_since = now
+            if self._idle(waiter):
+                if waiter.idle_since is None:
+                    waiter.idle_since = now
+            else:
+                self._stop_idle(waiter)
 
     def _stop_idle(self, waiter: _Waiter) -> None:
         if waiter.idle_since is not None:
