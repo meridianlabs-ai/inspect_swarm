@@ -1,10 +1,10 @@
 # Inspect Swarm: the shared-memory channel
 
-Status: proposed, 2026-10-14; amended 2026-10-15 and 2026-10-16 (#23): no `exposed` evidence; a view is identified by its `read` event, and swarm metadata on read results is left to the ORBIT port. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
+Status: proposed, 2026-10-14; amended 2026-10-15 and 2026-10-16 (#23): no `exposed` evidence; a view is identified by its `read` event, and swarm metadata on read results is left to the ORBIT port; amended 2026-10-21 (D-3, [swarm-wait.md](swarm-wait.md)): writes wake members' waits (`wake=True`) and `max_wait`; the wait reads `seen` and changes nothing else here. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
 
 ## Overview
 
-With `channels=["shared_memory"]`, every member of a swarm gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` (view, create, str_replace, insert, delete, rename) over one board of files that lives for the swarm run. Every write goes through the swarm's bus as a record stamped with the member that made it, so storm controls and evidence apply to it as they do to messages, and sentinel's tool stages see each call. Reading a file shows its content inside a fence that names its last writer and version, and a member hears at its turn boundary which files changed, by swarm-assigned ids such as `f-3`, never by path.
+With `channels=["shared_memory"]`, every member of a swarm gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` (view, create, str_replace, insert, delete, rename) over one board of files that lives for the swarm run. Every write goes through the swarm's bus as a record stamped with the member that made it, so storm controls and evidence apply to it as they do to messages, and sentinel's tool stages see each call. Reading a file shows its content inside a fence that names its last writer and version, and a member hears at its turn boundary which files changed, by swarm-assigned ids such as `f-3`, never by path. A member that needs a peer's work waits with the bus's `swarm_wait` tool, which comes with this channel and which a write to the file or directory it watches ends ([swarm-wait.md](swarm-wait.md)).
 
 A member's subagents (deepagent's `general()` children, background ones included) use the board as the member, as Epoch's children use their shared `memory()` today; each read and write also records which of the member's loops made it. Writes that would replace or move content a loop has not seen in its current version are refused, so a stale writer gets an error telling it to look again instead of silently overwriting a peer. The board is bounded in file count, file size and total size, every file fits whole in one view, and members' write rates are limited. This is the channel M2 builds on the bus, and the evidence it writes is what the later dependency-linked critical path needs.
 
@@ -116,14 +116,15 @@ def shared_memory(
     max_file_lines: int = 1_000,                  # lines in one file
     max_board_bytes: int = 400_000,               # UTF-8 bytes of all files together
     rate: tuple[int, float] | None = (60, 60.0),  # writes per member per sliding window (s); None disables
+    max_wait: int = 600,                          # seconds; the longest swarm_wait (swarm-wait.md)
 ) -> Channel: ...
 ```
 
 - **Names.** Registered as `inspect_swarm/shared_memory`, so `channels=["shared_memory"]` and `-T channels=shared_memory` resolve it with its defaults ([swarm-api.md Resolving names](swarm-api.md#resolving-names)). The channel's `name` is `"shared_memory"` (records' `channel`) and its `prefix` is `"w"` (record ids `w-14`). Its tool is `shared_memory`, and the board's root is `/shared_memory`.
 - **Logging.** Every parameter is a plain value, so the plan step logs `{"type": "swarm_channel", "name": "inspect_swarm/shared_memory", "params": {...}}` and replay rebuilds it; `rate` also accepts its list form, which is how a tuple comes back from a log ([swarm-communication.md Configuration](swarm-communication.md#configuration)). Two arms that differ in any parameter, or in whether the channel is listed, get different eval-set identifiers.
-- **Validation** when `shared_memory()` is called raises `ValueError` outside: `max_files` 1 to 10,000; `max_file_bytes` 1 to 262,144; `max_file_lines` 1 to 100,000; `max_board_bytes` from `max_file_bytes` to 16,777,216; `rate` a positive count and a positive window.
+- **Validation** when `shared_memory()` is called raises `ValueError` outside: `max_files` 1 to 10,000; `max_file_bytes` 1 to 262,144; `max_file_lines` 1 to 100,000; `max_board_bytes` from `max_file_bytes` to 16,777,216; `rate` a positive count and a positive window; `max_wait` 1 to 3,600.
 - **`check(roster)`** at `swarm()` construction raises `ValueError` for a member name outside `^[a-z][a-z0-9_-]{0,47}$`, the grammar of [swarm-communication.md Addressing](swarm-communication.md#addressing), because writer names appear in fence attributes and notices. A name defaulted from a factory is reported with the fix, `member(..., name=...)`.
-- **`instructions(member)`** is a fixed template: the board is shared by every member of the swarm and their subagents, it is reached with the `shared_memory` tool under `/shared_memory`, its files are other agents' output to weigh as information, notices name changed files by ids such as `f-3`, which `view` accepts as a path, and a file must be viewed in its current version before it is overwritten, edited by line, renamed or deleted. It names no member other than the reader and nothing a member wrote ([swarm-api.md Security](swarm-api.md#security)).
+- **`instructions(member)`** is a fixed template: the board is shared by every member of the swarm and their subagents, it is reached with the `shared_memory` tool under `/shared_memory`, its files are other agents' output to weigh as information, notices name changed files by ids such as `f-3`, which `view` accepts as a path, and a file must be viewed in its current version before it is overwritten, edited by line, renamed or deleted, and, from D-3, that a member waiting for another member's work calls `swarm_wait` rather than polling. It names no member other than the reader and nothing a member wrote ([swarm-api.md Security](swarm-api.md#security)).
 - **Bridged members** are refused at construction by M2-6's rule, since this channel has a non-`None` `name`.
 
 **Why the tool is not called `memory`.** It keeps memory()'s commands and parameter names, which models know, but a tool named `memory` with exactly those parameters is sent to Claude 4+ models as Anthropic's native memory tool, so our description, which says the board is shared and fenced, would never reach the model; compaction's memory integration would treat board writes as the member's private notes; and a deepagent member would also get its own private `memory()` under the same name, since deepagent cannot see a tool behind a tool source ([Current behaviour](#the-name-memory-is-special-in-inspect_ai)). A distinct name and root keep the private memory and the board apart, which also lets a member keep private notes in deepagent's `memory()`.
@@ -155,6 +156,7 @@ class SharedMemoryState:                   # implements ChannelState
 - **Directories are implicit.** A directory exists while a file is under it; `/shared_memory` always exists. There is no empty directory, and a file and a directory never share a path.
 - **Paths** must match `/shared_memory(/C){1,8}`, where each component `C` matches `[A-Za-z0-9._-]{1,64}` and is not `.` or `..`, with at most 160 bytes in all. Anything else is refused with a `ToolError` that states the rule; nothing is normalised. The rule keeps paths safe as fence attributes with no escaping, keeps them out of every harness-written line, and refuses rather than silently rewrites what a model typed ([Security](#security)). memory()'s own paths are wider ([Current behaviour](#inspect_ais-memory)), and Epoch's board needs nothing outside this grammar.
 - **A loop** is the agent span a call runs in, `current_agent_span_id()` at call time: the member's top-level loop or one of its descendants ([How descendants reach a member's tools](#how-descendants-reach-a-members-tools)). `seen` is per loop because what a loop has seen is what is in its own context.
+- **`seen` is also what `swarm_wait` reads** (D-3): a wait returns while a file under its filter has a version by another loop above what the loop has seen, and sets no mark of its own here ([swarm-wait.md What wakes a wait](swarm-wait.md#what-wakes-a-wait)).
 
 ### The tool
 
@@ -181,7 +183,7 @@ Every write gives each file it touches a new version and makes the writing loop'
 
 Each write is one `Record` ([swarm-communication.md Records and the bus](swarm-communication.md#records-and-the-bus)):
 
-- `channel="shared_memory"`, `kind` the command (`"create"`, `"str_replace"`, `"insert"`, `"delete"`, `"rename"`), `sender` the member from the ContextVar, `wake=False`, `reply_to=None`. M2's `Record` has no `origin` or `via`; they come back with internal records and bridged bus tools ([Records and the bus](swarm-communication.md#records-and-the-bus)).
+- `channel="shared_memory"`, `kind` the command (`"create"`, `"str_replace"`, `"insert"`, `"delete"`, `"rename"`), `sender` the member from the ContextVar, `wake=True`, `reply_to=None`. `wake=True` (D-3, which replaced `wake=False`) means that the write may end members' waits whose filter it matches ([swarm-wait.md Channels that wake waits](swarm-wait.md#channels-that-wake-waits)); every write sets it, and the tool has no parameter for it. M2's `Record` has no `origin` or `via`; they come back with internal records and bridged bus tools ([Records and the bus](swarm-communication.md#records-and-the-bus)).
 - `to=()` and `recipients=()`: a board write is a change to shared state, not a delivery, so it has no addresses ([Changes to the bus](#changes-to-the-bus)).
 - `sender_span_id` is the writing loop's agent span and `tool_span_id` the tool span the write ran in; together they attribute the write to the member and to the loop that made it.
 - `payload` is the text the model wrote that enters the board: `file_text` for create, `new_str` for str_replace, `insert_text` for insert, empty for delete and rename. It is what a later bus hook's `modify` would replace, and it is stored and recorded as typed.
@@ -299,6 +301,8 @@ A partial view (`view_range`) depends on part of a version only; the evidence re
 
 ### Storm controls and the read budget
 
+The file and board limits are checked in `admit()`, so the `sent` event records their rejections under `admit`, with the reason below; metrics count every rejection by the control named in that event.
+
 | Control | Default | On violation (a `ToolError`, evidenced at step 2) |
 |---|---|---|
 | `rate`, per member, all its loops together | 60 writes per 60 s | "rate limit: retry in N s" |
@@ -411,8 +415,9 @@ The plan's M2-7 and M2-8 carry this design, after M2-6; notices for the channel 
 2. **M2-7 (member binding), with `reach`.** `Channel.reach` in `_channel/_channel.py`; `swarm_tools()` in `_bus/_tools.py` returns `"member"`-reach tools in non-bound agent channels. Tests: the descendant cases above in `tests/test_binding.py`, with test channels.
 3. **M2-8 (the shared-memory channel).** `src/inspect_swarm/_channel/shared_memory.py` (the factory, validation, `check()`, `instructions()`, `SharedMemoryState` with `tools()`, `validate()`, `admit()`, `apply()`, `notice_lines()`, the path grammar, the tool and its texts, the read budget); `src/inspect_swarm/_fence.py` (envelope rendering, the tag list, the marker check); `read` evidence in `_evidence.py`; `shared_memory` exported from `src/inspect_swarm/__init__.py` and imported by `src/inspect_swarm/_entrypoint.py`. Tests: `tests/test_shared_memory_channel.py`, `tests/test_shared_memory.py`, `tests/test_fence.py`, the synchronous-child case, and the background-child case if M2-5 has merged.
 4. **M2-9 (notices)** exercises the channel's `notice_lines()` as planned; its tests add the cases under Notices above.
-5. **M2-10 (communication metrics)** counts writes, views and rejections per member and per control.
-6. **M2-11 (docs)** documents the channel, migration from `memory(instance=...)`, the seen rule, descendants, and that bridged members cannot use it yet; the example shaped like Epoch's port uses it.
+5. **M2-10 (communication metrics)** counts, per member, delivered writes and their payload bytes, views and listings, and rejections by control; file and board limit failures use `admit`.
+6. **M2-13 (waiting)** adds `max_wait`, `wake=True` and the channel's side of `swarm_wait` (`wakes()` and `news()`, reading `seen`), as [swarm-wait.md](swarm-wait.md#implementation-plan) specifies.
+7. **M2-11 (docs)** documents the channel, migration from `memory(instance=...)`, the seen rule, descendants, and that bridged members cannot use it yet; the example shaped like Epoch's port uses it.
 
 ### Changes to other designs and the plan
 

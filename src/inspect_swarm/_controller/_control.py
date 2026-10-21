@@ -465,7 +465,7 @@ class SwarmRun:
                         )
                         for m in self._members
                     ],
-                    bool(self.bus.states),
+                    list(self.bus.states),
                     wall_clock,
                     chosen.name if chosen is not None else None,
                 )

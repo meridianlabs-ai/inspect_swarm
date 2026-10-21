@@ -3,10 +3,17 @@ import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 import anyio
-from inspect_ai.event import Event, ModelEvent, ScoreEvent, SpanBeginEvent, ToolEvent
+from inspect_ai.event import (
+    Event,
+    InfoEvent,
+    ModelEvent,
+    ScoreEvent,
+    SpanBeginEvent,
+    ToolEvent,
+)
 from inspect_ai.log._samples import sample_active
 from inspect_ai.log._transcript import transcript
 from inspect_ai.model import ModelAPI, ModelUsage
@@ -14,9 +21,10 @@ from inspect_ai.model._model import sample_model_usage
 from inspect_ai.scorer import Value
 from inspect_ai.util import Limit, current_span_id, sample_limits
 from inspect_ai.util._span import AGENT_SPAN_TYPE
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 from ._budget import Budget, CostPair, cost_node, token_node
+from ._fence import utf8_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -231,11 +239,26 @@ class ScoreRecord:
     time: float
 
 
-# The spans, model events, tool events and intermediate score events the transcript
-# reports during the swarm's interval, kept as they happen rather than read back from
-# the history: a bounded transcript serializes an event at its last update, which can
-# come before Inspect prices its usage. Tool and score events are kept in the order
-# they began.
+# A communication evidence event (`comm`, written by `_evidence.py`): its kind, the
+# acting member and the channel; for `sent` and `delivered`, the record's id; for
+# `sent`, the control that rejected the record, if one did, and otherwise its payload's
+# UTF-8 bytes; for `read`, whether it showed a listing.
+@dataclass(frozen=True)
+class CommRecord:
+    kind: str
+    member: str
+    channel: str
+    record: str | None
+    rejected: str | None
+    payload_bytes: int
+    listing: bool
+
+
+# The spans, model events, tool events, intermediate score events and communication
+# evidence the transcript reports during the swarm's interval, kept as they happen
+# rather than read back from the history: a bounded transcript serializes an event at
+# its last update, which can come before Inspect prices its usage, and can evict it.
+# Tool, score and communication events are kept in the order they began.
 class EventLog:
     def __init__(self) -> None:
         self.parents: dict[str, str | None] = {}
@@ -243,6 +266,7 @@ class EventLog:
         self.calls: dict[str, CallRecord] = {}
         self.tools: dict[str, ToolRecord] = {}
         self.scores: list[ScoreRecord] = []
+        self.comms: list[CommRecord] = []
 
     def __call__(self, event: Event) -> None:
         if isinstance(event, SpanBeginEvent):
@@ -279,6 +303,38 @@ class EventLog:
                     time=anyio.current_time(),
                 )
             )
+        elif (
+            isinstance(event, InfoEvent)
+            and event.source == "inspect_swarm"
+            and isinstance(event.data, dict)
+            and event.data.get("type") == "comm"
+        ):
+            self.comms.append(_comm_record(event.data))
+
+
+def _comm_record(data: dict[str, JsonValue]) -> CommRecord:
+    kind = cast(str, data["kind"])
+    record = data.get("record")
+    rejected = data.get("rejected")
+    payload_bytes = 0
+    if kind == "sent":
+        # the full record, which its id stands for; only an accepted payload is
+        # measured, since a rejected one can be text no UTF-8 encoder takes
+        assert isinstance(record, dict)
+        if isinstance(rejected, dict):
+            rejected = rejected["control"]
+        else:
+            payload_bytes = utf8_bytes(cast(str, record["payload"]))
+        record = record["id"]
+    return CommRecord(
+        kind=kind,
+        member=cast(str, data["member"]),
+        channel=cast(str, data["channel"]),
+        record=cast(str | None, record),
+        rejected=cast(str | None, rejected),
+        payload_bytes=payload_bytes,
+        listing=data.get("listing") is True,
+    )
 
 
 # The ledger's view of the swarm's interval: what it reads when the swarm starts, and
