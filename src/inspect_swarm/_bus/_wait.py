@@ -1,4 +1,3 @@
-import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
@@ -36,9 +35,12 @@ _ALL_WAITING = (
 _STOPPING = "The swarm is stopping."
 
 
-# One call of swarm_wait while it is registered: its event and release reason, the
-# commits that released it for news, and its idle clock. A waiter is released when its
-# reason is set; it goes back to sleep with its reason cleared and a new event.
+# One call of swarm_wait while it is registered: its event and release reason, and the
+# commits that released it for news. A waiter is released when its reason is set; it
+# goes back to sleep with its reason cleared and a new event. Its own task, when it
+# resumes, decides how the wait ended: the bus does not look at its timeout or
+# cancellation, so a release or the all-waiting check can count a waiter whose timeout
+# or cancellation has fired but whose task has not yet resumed.
 @dataclass(eq=False)
 class _Waiter:
     spec: WaitSpec
@@ -46,18 +48,11 @@ class _Waiter:
     channels: list[str]
     event: anyio.Event = field(default_factory=anyio.Event)
     reason: Outcome | None = None
-    # the waiting task, and the earliest deadline it waits under, so that a wait whose
-    # timeout or cancellation has fired counts as over before its task resumes
-    task: anyio.TaskInfo | None = None
-    deadline: float = math.inf
     woken_by: list[int] = field(default_factory=list[int])
-    # the start of the open idle interval, and the idle time of the closed ones
-    idle_since: float | None = None
-    idle: float = 0.0
 
 
 # The bus's waits: the registered waiters, the ends each loop has been told of, the
-# members draining, the all-waiting check and the idle clock. Everything but `wait()`
+# members draining and the all-waiting check. Everything but `wait()`
 # is synchronous, so a release, a registration and the checks between them never
 # interleave with a commit or an end.
 class Waits:
@@ -102,14 +97,14 @@ class Waits:
         state = self._states.get(record.channel)
         if state is None or not record.wake:
             return
-        for waiter in self._live():
+        for waiter in self._unreleased():
             if record.channel in waiter.channels and state.wakes(waiter.spec, record):
                 waiter.woken_by.append(seq)
                 self._release(waiter, "news")
 
     def member_ended(self, name: str, status: str) -> None:
         self._ended.append((name, status))
-        for waiter in self._live():
+        for waiter in self._unreleased():
             if waiter.spec.member != name:
                 self._release(waiter, "news")
         self.recheck()
@@ -126,12 +121,8 @@ class Waits:
             self._release(waiter, "stopping")
 
     def recheck(self) -> None:
-        # open the idle interval of each member now waiting, then the all-waiting check
-        now = anyio.current_time()
-        for waiter in self._unreleased():
-            if waiter.idle_since is None and self._idle(waiter):
-                waiter.idle_since = now
-        unreleased = self._live()
+        # the all-waiting check
+        unreleased = self._unreleased()
         if not unreleased:
             return
         if any(
@@ -171,12 +162,7 @@ class Waits:
         self._count += 1
 
         started = anyio.current_time()
-        waiter = _Waiter(
-            spec,
-            channels,
-            task=anyio.get_current_task(),
-            deadline=min(started + effective, anyio.current_effective_deadline()),
-        )
+        waiter = _Waiter(spec, channels)
         outcome: Outcome | None = None
         files: list[JsonValue] = []
         ended: list[JsonValue] = []
@@ -248,7 +234,6 @@ class Waits:
                     timeout={"requested": timeout, "effective": effective},
                     started=started - self.start,
                     duration=anyio.current_time() - started,
-                    idle=waiter.idle,
                     outcome=outcome,
                     woken_by=list(waiter.woken_by),
                     files=files,
@@ -305,53 +290,22 @@ class Waits:
 
     def _unregister(self, waiter: _Waiter) -> None:
         self._waiters.pop(waiter.spec.id, None)
-        _close_idle(waiter)
 
     def _unreleased(self) -> list[_Waiter]:
         return [w for w in self._waiters.values() if w.reason is None]
 
-    def _live(self) -> list[_Waiter]:
-        # the waiters news and the all-waiting check may release: not those whose
-        # timeout or cancellation has fired, which return as such when they resume
-        return [w for w in self._unreleased() if not _fired(w)]
-
     def _release(self, waiter: _Waiter, reason: Outcome) -> None:
         # a released waiter no longer makes its member waiting
         waiter.reason = reason
-        _close_idle(waiter)
         waiter.event.set()
 
-    def _idle(self, waiter: _Waiter) -> bool:
-        # the waiter makes its member waiting: its own loop's, unreleased, with none of
-        # the member's background work running
-        return (
-            waiter.spec.own
-            and waiter.reason is None
-            and not _fired(waiter)
-            and self._contexts[waiter.spec.member].background_running == 0
-        )
-
     def _waiting(self, name: str) -> bool:
-        return any(
-            w.spec.member == name and self._idle(w) for w in self._waiters.values()
+        # the member's own loop has an unreleased waiter, and none of the member's
+        # background work is running
+        return self._contexts[name].background_running == 0 and any(
+            w.spec.member == name and w.spec.own and w.reason is None
+            for w in self._waiters.values()
         )
-
-
-def _fired(waiter: _Waiter) -> bool:
-    # the wait's timeout or a deadline around it has passed, or its task has a
-    # cancellation pending, though the task has not resumed yet
-    return anyio.current_time() >= waiter.deadline or (
-        waiter.task is not None and waiter.task.has_pending_cancellation()
-    )
-
-
-def _close_idle(waiter: _Waiter) -> None:
-    # an interval ends at the wait's deadline at the latest, since the member stops
-    # counting as waiting then, though the task may resume later
-    if waiter.idle_since is not None:
-        end = min(anyio.current_time(), waiter.deadline)
-        waiter.idle += max(0.0, end - waiter.idle_since)
-        waiter.idle_since = None
 
 
 def _ends_line(ends: Sequence[tuple[str, str]]) -> str:

@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from inspect_ai.scorer import value_to_float
 from inspect_ai.scorer._score import _scorers  # pyright: ignore[reportPrivateUsage]
@@ -53,16 +53,6 @@ class MemberMetrics(BaseModel):
     # swarm opened with records, in the order given, zeros included, and none for a
     # swarm without one. The default loads metrics written before this field.
     comm: dict[str, CommMetrics] = {}
-    # waits (`waited` events), from all the member's loops: their number, their number
-    # by outcome (an outcome with none is left out), the sum of their durations, and the
-    # sum of their idle time, when the member as a whole did nothing but wait. Waits of
-    # different loops can overlap, so `wait_time` can exceed the running time. None in
-    # a swarm that offered no wait (no channel wakes waits); the defaults load metrics
-    # written before these fields.
-    waits: int | None = None
-    waits_by_outcome: dict[str, int] = {}
-    wait_time: float | None = None
-    idle_time: float | None = None
 
 
 # The swarm's metrics for one run, written once, when the swarm ends, as an InfoEvent
@@ -155,7 +145,6 @@ def swarm_metrics(
     channels: Sequence[str],
     wall_clock: float,
     answer: str | None,
-    wait: bool,
 ) -> SwarmMetrics:
     tool_calls: dict[str, list[tuple[str, str]]] = {m.name: [] for m in ledger.members}
     for tool in events.tools.values():
@@ -163,7 +152,6 @@ def swarm_metrics(
         if member is not None:
             tool_calls[member].append((tool.function, tool.arguments))
     comm = _comm_metrics(events, [m.name for m in ledger.members], channels)
-    waits = _wait_metrics(events, [m.name for m in ledger.members])
 
     members: list[MemberMetrics] = []
     for line, member_times, gate in zip(ledger.members, times, gates, strict=True):
@@ -186,10 +174,6 @@ def swarm_metrics(
                 gate_passes=gate.passes,
                 first_pass_time=gate.first_pass_time,
                 comm=comm[line.name],
-                waits=waits[line.name].waits if wait else None,
-                waits_by_outcome=waits[line.name].by_outcome,
-                wait_time=waits[line.name].time if wait else None,
-                idle_time=waits[line.name].idle if wait else None,
             )
         )
     return SwarmMetrics(
@@ -236,30 +220,6 @@ def _comm_metrics(
                 # notices (`notified` events) are not counted yet
                 pass
     return comm
-
-
-# One member's waits, as `MemberMetrics` gives them.
-@dataclass
-class _Waits:
-    waits: int = 0
-    by_outcome: dict[str, int] = field(default_factory=dict[str, int])
-    time: float = 0.0
-    idle: float = 0.0
-
-
-# Each member's waits, from the `waited` events that name one of the members, as for
-# `_comm_metrics`.
-def _wait_metrics(events: EventLog, members: Sequence[str]) -> dict[str, _Waits]:
-    waits = {name: _Waits() for name in members}
-    for event in events.waits:
-        metrics = waits.get(event.member)
-        if metrics is None:
-            continue
-        metrics.waits += 1
-        metrics.by_outcome[event.outcome] = metrics.by_outcome.get(event.outcome, 0) + 1
-        metrics.time += event.duration
-        metrics.idle += event.idle
-    return waits
 
 
 # Completed model calls in the member's spans, cache replays included.

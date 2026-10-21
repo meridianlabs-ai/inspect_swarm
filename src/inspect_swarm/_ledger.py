@@ -254,16 +254,6 @@ class CommRecord:
     listing: bool
 
 
-# A `waited` communication event: the waiting member, what ended the wait, its seconds
-# and the seconds of it during which the member counted as waiting.
-@dataclass(frozen=True)
-class WaitRecord:
-    member: str
-    outcome: str
-    duration: float
-    idle: float
-
-
 # The spans, model events, tool events, intermediate score events and communication
 # evidence the transcript reports during the swarm's interval, kept as they happen
 # rather than read back from the history: a bounded transcript serializes an event at
@@ -277,7 +267,6 @@ class EventLog:
         self.tools: dict[str, ToolRecord] = {}
         self.scores: list[ScoreRecord] = []
         self.comms: list[CommRecord] = []
-        self.waits: list[WaitRecord] = []
 
     def __call__(self, event: Event) -> None:
         if isinstance(event, SpanBeginEvent):
@@ -319,11 +308,10 @@ class EventLog:
             and event.source == "inspect_swarm"
             and isinstance(event.data, dict)
             and event.data.get("type") == "comm"
+            # waits are not counted yet, and name no one channel
+            and event.data.get("kind") != "waited"
         ):
-            if event.data.get("kind") == "waited":
-                self.waits.append(_wait_record(event.data))
-            else:
-                self.comms.append(_comm_record(event.data))
+            self.comms.append(_comm_record(event.data))
 
 
 def _comm_record(data: dict[str, JsonValue]) -> CommRecord:
@@ -348,15 +336,6 @@ def _comm_record(data: dict[str, JsonValue]) -> CommRecord:
         rejected=cast(str | None, rejected),
         payload_bytes=payload_bytes,
         listing=data.get("listing") is True,
-    )
-
-
-def _wait_record(data: dict[str, JsonValue]) -> WaitRecord:
-    return WaitRecord(
-        member=cast(str, data["member"]),
-        outcome=cast(str, data["outcome"]),
-        duration=cast(float, data["duration"]),
-        idle=cast(float, data["idle"]),
     )
 
 

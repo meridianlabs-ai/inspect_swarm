@@ -1,4 +1,3 @@
-import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -140,7 +139,7 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
         [span] = _tool_spans(transcript, "swarm_wait")
         assert event.span_id == span
         data = cast(dict[str, Any], event.data)
-        timing = {k: data.pop(k) for k in ("started", "duration", "idle")}
+        timing = {k: data.pop(k) for k in ("started", "duration")}
         assert data == {
             "version": 1,
             "type": "comm",
@@ -159,33 +158,19 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
             "ended": [],
         }
         assert timing["started"] >= 0
-        assert 0.04 <= timing["idle"] <= timing["duration"]
+        assert timing["duration"] >= 0.04
 
 
 @pytest.mark.anyio
-async def test_a_nested_wait_has_no_idle_time() -> None:
+async def test_a_nested_waits_evidence_names_its_loop() -> None:
     async with run() as (r, transcript):
         async with anyio.create_task_group() as tg:
             await start(tg, r, "w-1", "child")
             await anyio.sleep(0.05)
             await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
         [data] = waited(transcript)
-        assert (data["loop"], data["nested"], data["idle"]) == ("w-1/child", True, 0)
+        assert (data["loop"], data["nested"]) == ("w-1/child", True)
         assert data["duration"] >= 0.04
-
-
-@pytest.mark.anyio
-async def test_idle_time_stops_at_the_release_and_duration_at_the_return() -> None:
-    async with run() as (r, transcript):
-        async with anyio.create_task_group() as tg:
-            await start(tg, r, "w-1")
-            await anyio.sleep(0.05)
-            await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
-            # the released waiter cannot resume while this task holds the loop
-            time.sleep(0.05)
-        [data] = waited(transcript)
-        assert data["idle"] >= 0.04
-        assert data["duration"] - data["idle"] >= 0.04
 
 
 @pytest.mark.anyio

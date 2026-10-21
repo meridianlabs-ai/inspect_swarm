@@ -1,4 +1,3 @@
-import time
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
@@ -477,40 +476,6 @@ async def test_a_cancelled_wait_no_longer_counts_its_member_as_waiting() -> None
 
 
 @pytest.mark.anyio
-async def test_a_wait_cancelled_before_it_resumes_does_not_count_as_waiting() -> None:
-    # w-2's wait is called after w-1's is cancelled and before w-1's task resumes
-    async with run(max_wait=1) as (r, transcript):
-        scope = anyio.CancelScope()
-
-        async def first() -> None:
-            with scope:
-                await r.wait("w-1")
-
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(first)
-            await anyio.wait_all_tasks_blocked()
-            scope.cancel()
-            assert await r.wait("w-2") == "Nothing you waited for happened in 1 s."
-        assert {w["member"]: w["outcome"] for w in waited(transcript)} == {
-            "w-1": "cancelled",
-            "w-2": "timeout",
-        }
-
-
-@pytest.mark.anyio
-async def test_a_wait_past_its_timeout_does_not_count_as_waiting() -> None:
-    # w-2's wait is called after w-1's timeout and before w-1's task resumes
-    async with run(max_wait=1) as (r, transcript):
-        async with anyio.create_task_group() as tg:
-            first = await start(tg, r, "w-1")
-            # holds the event loop past w-1's deadline
-            time.sleep(1.05)
-            assert await r.wait("w-2") == "Nothing you waited for happened in 1 s."
-            assert await first.value() == "Nothing you waited for happened in 1 s."
-        assert [w["outcome"] for w in waited(transcript)] == ["timeout", "timeout"]
-
-
-@pytest.mark.anyio
 @pytest.mark.parametrize("returns", ["news", "stop", "drain"])
 async def test_a_wait_called_with_a_cancellation_pending_names_nothing(
     returns: str,
@@ -533,61 +498,6 @@ async def test_a_wait_called_with_a_cancellation_pending_names_nothing(
         )
         # the end is still reported to the loop's next wait
         assert (await r.wait("w-1")).startswith("w-3 ended (submitted).")
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("late", ["write", "end"])
-async def test_news_after_the_timeout_does_not_replace_it(late: str) -> None:
-    # the news comes after w-1's deadline and before its task resumes
-    async with run(("w-1", "w-2", "w-3"), max_wait=1) as (r, transcript):
-        async with anyio.create_task_group() as tg:
-            pending = await start(tg, r, "w-1")
-            # holds the event loop past w-1's deadline
-            time.sleep(1.2)
-            if late == "write":
-                await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
-                named = changed("f-1 new", "w-2", "f-1")
-            else:
-                r.end("w-3")
-                named = "w-3 ended (submitted)."
-            assert await pending.value() == (
-                f"{named}\nNothing you waited for happened in 1 s."
-            )
-        [record] = waited(transcript)
-        assert (record["outcome"], record["woken_by"]) == ("timeout", [])
-
-
-@pytest.mark.anyio
-async def test_idle_time_ends_at_the_waits_timeout() -> None:
-    async with run(max_wait=1) as (r, transcript):
-        async with anyio.create_task_group() as tg:
-            pending = await start(tg, r, "w-1")
-            # the task resumes well after its deadline
-            time.sleep(1.6)
-            await pending.value()
-        [record] = waited(transcript)
-        assert record["outcome"] == "timeout"
-        assert record["duration"] >= 1.55
-        assert 0.95 <= record["idle"] <= 1.05
-
-
-@pytest.mark.anyio
-async def test_idle_time_ends_at_an_enclosing_deadline() -> None:
-    async with run() as (r, transcript):
-
-        async def limited() -> None:
-            with anyio.move_on_after(0.3):
-                await r.wait("w-1")
-
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(limited)
-            await anyio.wait_all_tasks_blocked()
-            # the task resumes well after the deadline around it
-            time.sleep(0.5)
-        [record] = waited(transcript)
-        assert record["outcome"] == "cancelled"
-        assert record["duration"] >= 0.45
-        assert 0.25 <= record["idle"] <= 0.35
 
 
 @pytest.mark.anyio
@@ -635,21 +545,6 @@ async def nested_loop(name: str) -> AsyncGenerator[dict[str, Tool]]:
     # a loop of the member other than its own, with its swarm tools
     async with span(name, type="agent"), agent_channel():
         yield await resolve()
-
-
-@agent
-def writes_after(delay: float) -> Agent:
-    """Write a file after `delay` seconds."""
-
-    async def execute(state: AgentState) -> AgentState:
-        tools = await resolve()
-        await anyio.sleep(delay)
-        await tools["shared_memory"](
-            command="create", path="/shared_memory/a.md", file_text="x"
-        )
-        return state
-
-    return execute
 
 
 @agent

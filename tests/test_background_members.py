@@ -8,7 +8,7 @@ from typing import Any, Literal
 import anyio
 import pytest
 from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
-from inspect_ai.agent import Agent, AgentState, agent, deepagent, general
+from inspect_ai.agent import Agent, AgentState, agent, deepagent, general, run
 from inspect_ai.agent._bridge.util import bridge_model_generate
 from inspect_ai.dataset import Sample
 from inspect_ai.event import (
@@ -39,7 +39,7 @@ from inspect_ai.util import (
     token_limit,
 )
 
-from inspect_swarm import Budget, SwarmControl, member, swarm
+from inspect_swarm import Budget, SwarmControl, member, shared_memory, swarm
 from inspect_swarm._controller._control import SwarmRun
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import SwarmLedger
@@ -56,11 +56,12 @@ from .swarm_runtime import (
     run_swarm,
     sample,
     scripted_model,
+    sleeper,
     statuses,
 )
 from .test_budget import _written_ledger
 from .test_member_sandboxes import _member_name, _name, environments
-from .test_wait import nested_loop, resolve, writes_after
+from .test_wait import nested_loop, resolve
 
 # ---------------------------------------------------------------------------
 # Members whose agents start background work directly
@@ -1081,22 +1082,46 @@ async def test_a_member_whose_child_works_is_not_waiting_until_it_ends() -> None
     [record] = evidence(outcome.transcript, "waited")
     assert record["outcome"] == "all_waiting"
     assert record["duration"] >= 0.15
-    assert record["idle"] < 0.1
+
+
+@agent
+def waits_after_a_nested_swarm(inner: Agent) -> Agent:
+    """Run a nested swarm whose controller starts background work, then wait."""
+
+    async def execute(state: AgentState) -> AgentState:
+        tools = await resolve()
+        await run(inner, "inner task")
+        await tools["swarm_wait"]()
+        return state
+
+    return execute
 
 
 @pytest.mark.anyio
-async def test_idle_time_starts_when_the_members_child_ends() -> None:
-    # the child works for 0.2 s, and the peer writes at 0.5 s
-    outcome = await run_swarm(
-        swarm(
-            [
-                member(waits_beside_a_child(0.2), name="m"),
-                member(writes_after(0.5), name="p"),
-            ],
-            channels=["shared_memory"],
-        )
+async def test_a_child_started_by_a_nested_swarms_controller_rechecks_its_owners_bus() -> (
+    None
+):
+    # the inner controller runs with the inner bus, but its background work belongs to
+    # the outer member, whose wait becomes all-waiting when that work ends
+    async def run_inner(control: SwarmControl) -> str:
+        background(anyio.sleep, 0.2)
+        control.start("inner")
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    inner = swarm(
+        member(sleeper(0), name="inner"),
+        controller=controller(run_inner, "nested_background_controller"),
+        channels=[],
     )
-    [record] = evidence(outcome.transcript, "waited")
-    assert record["outcome"] == "news"
-    assert record["duration"] >= 0.45
-    assert 0.2 <= record["idle"] <= record["duration"] - 0.15
+    outer = swarm(
+        member(waits_after_a_nested_swarm(inner), name="m"),
+        channels=[shared_memory(max_wait=5)],
+    )
+    # two swarms in one sample, so not run_swarm(), which reads one final event
+    async with sample() as transcript:
+        await run(outer, "task")
+    [record] = evidence(transcript, "waited")
+    assert record["outcome"] == "all_waiting"
+    assert record["duration"] < 1

@@ -459,7 +459,6 @@ class SwarmRun:
                     list(self.bus.states),
                     wall_clock,
                     chosen.name if chosen is not None else None,
-                    wait=self.bus.waits.max_wait is not None,
                 )
             )
             timelines.fill(places)
