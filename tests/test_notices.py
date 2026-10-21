@@ -30,7 +30,14 @@ from inspect_ai.model import (
 )
 from inspect_ai.tool import Tool, ToolChoice, ToolInfo, tool
 
-from inspect_swarm import member, shared_memory, swarm, swarm_on_continue, swarm_tools
+from inspect_swarm import (
+    NoticeLine,
+    member,
+    shared_memory,
+    swarm,
+    swarm_on_continue,
+    swarm_tools,
+)
 from inspect_swarm._evidence import METRICS_KEY
 
 ROOT = "/shared_memory"
@@ -302,6 +309,54 @@ async def test_a_member_that_stops_gets_no_notice(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_a_member_that_stops_after_its_subagents_write_is_not_unwired(
+    tmp_path: Path,
+) -> None:
+    # the subagent's prompt has no preamble, so _Turns names it ""
+    turns = _Turns(
+        {
+            "w": [_call("agent", prompt="child task")],
+            "": [
+                _call(
+                    "shared_memory",
+                    command="create",
+                    path=f"{ROOT}/a.md",
+                    file_text="x",
+                )
+            ],
+        }
+    )
+
+    async def stop(state: AgentState) -> bool:
+        return False
+
+    log = await _eval(
+        swarm(
+            member(
+                deepagent,
+                args={
+                    "model": turns.model(),
+                    "tools": [noop(), swarm_tools()],
+                    "subagents": [general()],
+                    "todo_write": False,
+                    "on_continue": swarm_on_continue(stop),
+                },
+                name="w",
+            ),
+            channels=[shared_memory()],
+        ),
+        tmp_path,
+    )
+
+    # the child's write was news to the parent, which stopped at its first boundary
+    [create] = _comm(log, "delivered")
+    assert create["notify"] == ["w"]
+    assert len(turns.inputs["w"]) == 1
+    assert _comm(log, "notified") == []
+    assert _metrics(log)["notify_unwired"] == []
+
+
+@pytest.mark.anyio
 async def test_a_poll_member_gets_the_status_line_and_no_notice(
     tmp_path: Path,
 ) -> None:
@@ -410,6 +465,26 @@ async def test_a_subagents_deletion_is_news_to_its_parent_once(
     [delete_event] = [d for d in _comm(log, "delivered") if d["record"] == "w-2"]
     assert delete_event["nested"] is True and delete_event["notify"] == ["w"]
     assert delete_event["loop"] != notified["loop"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "version",
+        "type",
+        "kind",
+        "member",
+        "span_id",
+        "loop",
+        "nested",
+        "channel",
+        "notice",
+        "message",
+    ],
+)
+def test_a_notice_line_cannot_name_an_id_after_an_evidence_field(name: str) -> None:
+    with pytest.raises(ValueError, match=name):
+        NoticeLine("[Swarm notice] 1 change.", {"records": ["c-1"], name: 2})
 
 
 # Wiring checks and the effective delivery mode, in the swarm's metrics

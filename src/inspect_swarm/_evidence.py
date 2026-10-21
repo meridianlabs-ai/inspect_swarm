@@ -124,6 +124,24 @@ def comm_read(
     )
 
 
+# the fields of a `notified` event besides a notice line's ids, which therefore cannot
+# name one of them
+NOTIFIED_FIELDS = frozenset(
+    {
+        "version",
+        "type",
+        "kind",
+        "member",
+        "span_id",
+        "loop",
+        "nested",
+        "channel",
+        "notice",
+        "message",
+    }
+)
+
+
 def comm_notified(
     span_id: str | None,
     member: str,

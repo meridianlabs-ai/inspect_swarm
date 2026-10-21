@@ -378,11 +378,12 @@ In M2 the notice is the only swarm text that enters a member's context outside a
 
 - **Template.** Fixed text; its only variables are counts, channel kinds and roster names. Later channels add fixed-template lines with swarm-assigned ids (`1 task assigned to you: t-12`). It never contains a payload, subject, title, or any member-chosen name.
 - **When.** `swarm_on_continue` runs at the member's turn boundary. It adds a notice when the member, in `notify` mode, has unread records not covered by an earlier notice. One notice lists all unread, then marks them covered. There is no periodic reminder in M2; a member that ignores a notice gets the next one when something new arrives. Reminders are an opt-in after M2 ([Reminders](#reminders)).
-- **How.** The wrapper first computes its continuation result ([Tools reach members](#tools-reach-members-through-a-tool-source)). Unless that result is `False`, it appends `ChatMessageUser(content=notice, metadata={"inspect_swarm": {"version": 1, "type": "notice", "id": "n-3", "records": ["m-9", "m-14", "m-15"]}})` and returns the result unchanged:
+- **How.** The wrapper first computes its continuation result ([Tools reach members](#tools-reach-members-through-a-tool-source)). Unless that result is `False`, it appends `ChatMessageUser(content=notice, metadata={"inspect_swarm": {"version": 1, "type": "notice", "id": "n-3", "lines": [{"channel": "messages", "records": ["m-9", "m-14", "m-15"]}]}})` and returns the result unchanged:
   - `True` or a string: the notice is appended to the conversation in place; react then appends its continue message after it, if it would have anyway;
   - an `AgentState` from the inner hook: the notice is appended to that state's messages instead, since react will adopt them;
   - `False`: no notice; the member is stopping, and a pending message does not keep a member going that would have stopped.
   *(spike: a notice appended this way, with this metadata, appeared in the next `ModelEvent`'s input with its metadata intact)*
+- **Metadata.** `lines` has an entry for each channel's line of the notice, with the swarm ids that line names: a messages line carries `records`, a shared memory line carries `files` (`[{"file": "f-2", "version": 3, "record": "w-7"}]`, [swarm-memory-channel.md](swarm-memory-channel.md#notices-and-the-status-line)). Each line also has its own `notified` event ([Evidence](#evidence-and-provenance)).
 - **Role.** The user role, as deepagent's notice and react's continue prompt are. It carries no `source`; provenance is the metadata ([Evidence](#evidence-and-provenance)). It is harness text, not peer text, so peer text stays out of the user role in M2 and in every arm that does not opt into injection.
 - **Status line.** Every swarm tool's result ends with `You have N unread messages.` when N > 0. This is tool output, carries only a count, and is how `poll` members and bridged members learn of messages without polling blindly.
 - **Modes.** `notify` (default) gets notices and the status line; `poll` gets only the status line. ORBIT's `auto` (bodies injected) is not offered in M2; after M2 it is the opt-in mode `inject` ([Content injection](#content-injection)).
@@ -443,7 +444,7 @@ Monitoring aligns with inspect_sentinel, with no swarm monitor type (decision: R
 |---|---|---|---|
 | `sent` | step 3, every attempt that reached the bus | sender's tool span (or agent span via the bridge) | full record; `rejected` (`control` and `reason` when the attempt was refused; control is `liveness`, `payload`, `max_bytes`, `rate` or `admit`; `null` on a commit). Later, with the bus hook: `decision` (action, explanation), `original_payload` when modified, and controls for the hook's rejections and failures |
 | `delivered` | step 4 | same span | record id, recipients, `seq` (the commit sequence number), the result `apply()` returned |
-| `notified` | a notice is added | recipient's agent span | notice id, the notice message's id, record ids |
+| `notified` | a notice is added, one event per channel line | recipient's agent span | notice id, the notice message's id, the line's ids (`records` for messages, `files` for shared memory) |
 | `read` | `read_messages` returns | reader's tool span | read id, record ids, reader, `tool_span_id`, through which the result message's tool call id is found ([Records in model input](#records-and-the-bus)) |
 
 Common fields: `kind`, `channel`, `record` or `records`, `member` (whose span it is), and the member's `span_id`.
@@ -529,6 +530,11 @@ class ChannelState(Protocol):                                       # per run
     def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]: ...  # step 4, synchronous, cannot fail; members to notify, result for `delivered`
     def notice_lines(self, member: str) -> list[NoticeLine]: ...    # fixed-template lines with counts and swarm ids
     def quiescent(self) -> bool: ...                                # for the runtime's quiescence check (later)
+
+@dataclass(frozen=True)
+class NoticeLine:                                                   # one channel's line of a notice
+    text: str                              # counts, swarm ids and roster names only
+    ids: Mapping[str, JsonValue]           # e.g. {"records": [...]}: the line's entry in the metadata and its `notified` event
 ```
 
 - **When states open.** The runtime calls `open()` for each channel when the swarm starts in a sample, before any member starts, and keeps the states on the run's bus. At construction, `swarm()` rejects two record-producing channels with the same non-`None` `name` or the same non-`None` `prefix`, since their records and ids would collide. Channels with `name=None` produce no records and are never compared this way. This check is separate from swarm-api.md's rejection of a channel listed twice, which stays keyed on the channel's registered identity, so `filesystem()` with a distinct instructions-only channel such as `lockfiles()` is accepted.

@@ -4,8 +4,9 @@ from inspect_ai.agent import AgentContinue, AgentState
 from inspect_ai.model import ChatMessageUser
 from inspect_ai.util._span import current_agent_span_id
 
+from .._budget import MemberContext
 from .._evidence import comm_notified
-from ._bus import current_bus
+from ._bus import Bus, current_bus
 
 
 def swarm_on_continue(
@@ -37,21 +38,22 @@ def swarm_on_continue(
 
     async def execute(state: AgentState) -> bool | str | AgentState:
         result = await continuation(state)
+        bus = current_bus.get()
+        context = bus.member() if bus is not None else None
+        if bus is None or context is None or bus.nested(context):
+            return result
+        # the member's own loop has the hook, whether or not it goes on
+        context.hooked = True
         # a pending notice does not keep a member going that would have stopped
         if result is not False:
-            _notice(result if isinstance(result, AgentState) else state)
+            _notice(bus, context, result if isinstance(result, AgentState) else state)
         return result
 
     return execute
 
 
 # Appends the member's notice, if it has one, to the conversation its loop goes on with.
-def _notice(state: AgentState) -> None:
-    bus = current_bus.get()
-    context = bus.member() if bus is not None else None
-    if bus is None or context is None or bus.nested(context):
-        return
-    context.hooked = True
+def _notice(bus: Bus, context: MemberContext, state: AgentState) -> None:
     # a loop that has not resolved swarm_tools() cannot act on a notice
     if context.delivery_effective != "notify" or context.loop is None:
         return
