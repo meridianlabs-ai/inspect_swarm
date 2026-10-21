@@ -52,6 +52,7 @@ from .swarm_runtime import (
     scripted_model,
     sleeper,
 )
+from .test_wait import nested_loop, resolve, writes_after
 
 
 def _metrics(transcript: Transcript) -> SwarmMetrics:
@@ -554,6 +555,72 @@ async def test_a_member_name_taken_while_the_swarm_runs_is_refused_there(
         [timeline] = t.timelines
         assert timeline.name == "a"
         assert len(_model_events(timeline.root)) == 1
+
+
+# ---------------------------------------------------------------------------
+# waits
+
+
+@agent
+def waits_twice() -> Agent:
+    """Wait for any change, twice, in the member's own loop."""
+
+    async def execute(state: AgentState) -> AgentState:
+        tools = await resolve()
+        for _ in range(2):
+            await tools["swarm_wait"]()
+        return state
+
+    return execute
+
+
+@agent
+def waits_in_a_subagent(work: float) -> Agent:
+    """Wait in a nested loop while the member's own loop works for `work` seconds."""
+
+    async def execute(state: AgentState) -> AgentState:
+        await resolve()
+
+        async def child() -> None:
+            async with nested_loop("child") as tools:
+                await tools["swarm_wait"]()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(child)
+            await anyio.sleep(work)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_waits_wait_time_and_idle_time_come_from_the_waits() -> None:
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(waits_twice(), name="a"),
+                member(writes_after(0.2), name="b"),
+                member(waits_in_a_subagent(0.4), name="c"),
+            ],
+            channels=["shared_memory"],
+        )
+    )
+    a, b, c = _metrics(outcome.transcript).members
+    # a's first wait ends at b's write, its second at b's end
+    assert (a.waits, a.waits_by_outcome) == (2, {"news": 2})
+    assert a.idle_time is not None and a.wait_time is not None
+    assert 0.15 <= a.idle_time <= a.wait_time
+    assert (b.waits, b.waits_by_outcome, b.wait_time, b.idle_time) == (0, {}, 0, 0)
+    # c's subagent waited while its own loop worked: wait time, and no idle time
+    assert (c.waits, c.waits_by_outcome, c.idle_time) == (1, {"news": 1}, 0)
+    assert c.wait_time is not None and c.wait_time >= 0.15
+
+
+@pytest.mark.anyio
+async def test_a_swarm_without_a_wait_has_no_wait_metrics() -> None:
+    outcome = await run_swarm(swarm(sleeper(0), channels=["filesystem"]))
+    [metrics] = _metrics(outcome.transcript).members
+    assert (metrics.waits, metrics.wait_time, metrics.idle_time) == (None, None, None)
 
 
 # ---------------------------------------------------------------------------

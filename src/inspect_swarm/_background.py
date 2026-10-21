@@ -97,6 +97,7 @@ class MemberBackground:
         self._tg.start_soon(self._run, func, args)
         self.started += 1
         self.running += 1
+        self._member.background_running += 1
 
     # returns once no task is running, including tasks started while waiting
     async def wait(self) -> None:
@@ -121,6 +122,15 @@ class MemberBackground:
                 raise
         finally:
             self.running -= 1
+            self._member.background_running -= 1
             assert self._changed is not None
             self._changed.set()
             self._changed = anyio.Event()
+            if self._member.background_running == 0:
+                # deferred: the bus imports the runtime, which imports this module
+                from ._bus._bus import current_bus
+
+                # the member may now be waiting, and so may every member
+                bus = current_bus.get()
+                if bus is not None:
+                    bus.recheck()

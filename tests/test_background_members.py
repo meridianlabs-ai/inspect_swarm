@@ -50,6 +50,7 @@ from .swarm_runtime import (
     Outcome,
     Script,
     controller,
+    evidence,
     generator,
     output,
     run_swarm,
@@ -59,6 +60,7 @@ from .swarm_runtime import (
 )
 from .test_budget import _written_ledger
 from .test_member_sandboxes import _member_name, _name, environments
+from .test_wait import nested_loop, resolve, writes_after
 
 # ---------------------------------------------------------------------------
 # Members whose agents start background work directly
@@ -1019,3 +1021,82 @@ async def test_a_cap_reached_in_a_childs_tool_call_stops_the_swarm_while_the_par
         assert sorted(log) == ["capper cancelled", "other cancelled"]
         assert line.status == "cancelled"
         assert line.background_cancelled == 2
+
+
+# ---------------------------------------------------------------------------
+# Waits and background work
+
+
+@agent
+def waits_in_a_child(results: list[str]) -> Agent:
+    """Return while a background child waits; the child then waits again."""
+
+    async def execute(state: AgentState) -> AgentState:
+        await resolve()
+
+        async def child() -> None:
+            async with nested_loop("child") as tools:
+                for _ in range(2):
+                    results.append(str(await tools["swarm_wait"]()))
+
+        background(child)
+        # the child's wait is registered
+        await anyio.wait_all_tasks_blocked()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_the_drain_releases_a_childs_wait_and_its_later_waits() -> None:
+    results: list[str] = []
+    outcome = await run_swarm(
+        swarm(member(waits_in_a_child(results), name="m"), channels=["shared_memory"])
+    )
+    assert results == ["m is ending: its own agent has finished."] * 2
+    assert [w["outcome"] for w in evidence(outcome.transcript, "waited")] == [
+        "member_ending"
+    ] * 2
+
+
+@agent
+def waits_beside_a_child(work: float) -> Agent:
+    """Wait in the member's own loop while a background child works for `work` seconds."""
+
+    async def execute(state: AgentState) -> AgentState:
+        tools = await resolve()
+        background(anyio.sleep, work)
+        await tools["swarm_wait"]()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_member_whose_child_works_is_not_waiting_until_it_ends() -> None:
+    outcome = await run_swarm(
+        swarm(member(waits_beside_a_child(0.2), name="m"), channels=["shared_memory"])
+    )
+    # the all-waiting release came when the child ended, not when the wait began
+    [record] = evidence(outcome.transcript, "waited")
+    assert record["outcome"] == "all_waiting"
+    assert record["duration"] >= 0.15
+    assert record["idle"] < 0.1
+
+
+@pytest.mark.anyio
+async def test_idle_time_starts_when_the_members_child_ends() -> None:
+    # the child works for 0.2 s, and the peer writes at 0.5 s
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(waits_beside_a_child(0.2), name="m"),
+                member(writes_after(0.5), name="p"),
+            ],
+            channels=["shared_memory"],
+        )
+    )
+    [record] = evidence(outcome.transcript, "waited")
+    assert record["outcome"] == "news"
+    assert record["duration"] >= 0.45
+    assert 0.2 <= record["idle"] <= record["duration"] - 0.15
