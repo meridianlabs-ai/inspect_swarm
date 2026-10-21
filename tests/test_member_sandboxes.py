@@ -293,8 +293,8 @@ async def test_the_filesystem_channel_describes_a_shared_volume_beside_own_sandb
     assert sorted(seen) == ["agent-1", "agent-2"]
     for reach in seen.values():
         assert reach["preamble"].endswith(
-            "You work in your own sandbox, which no other member can reach.\n\n"
-            f"Your sandbox is your own except for {shared}, which is the same directory in every member's sandbox. "
+            "You work in your own sandbox, which no other member can reach, except for the shared directory described below.\n\n"
+            f"{shared} is the same directory in every member's sandbox. "
             "Share files with the other members there. They use it at the same time as you, so files they change there can change under you. "
             f"Read {notes} before you start and again as you work, and add what you learn or decide to the end of it, without changing what others wrote."
         )

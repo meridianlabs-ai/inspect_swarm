@@ -145,7 +145,14 @@ def _preamble(
     if split is not None:
         parts.append(split)
     if own_sandboxes:
-        parts.append("You work in your own sandbox, which no other member can reach.")
+        if any(isinstance(c, FilesystemChannel) and c.shared_volume for c in channels):
+            parts.append(
+                "You work in your own sandbox, which no other member can reach, except for the shared directory described below."
+            )
+        else:
+            parts.append(
+                "You work in your own sandbox, which no other member can reach."
+            )
     for channel in channels:
         text = channel.instructions(member)
         if text:

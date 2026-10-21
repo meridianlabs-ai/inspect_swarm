@@ -148,7 +148,7 @@ solver = swarm(
 )
 ```
 
-When members have their own sandboxes and each sandbox mounts one shared volume, for example a named volume in each member's compose service, use `filesystem(shared_volume=True)`. Set `shared=` to where the volume is mounted. The preamble then says that `shared` and the notes file in it are the same in every member's sandbox, and gives no scratch directory, since each sandbox is already private. The swarm cannot check that the volume is mounted, and it refuses `shared_volume=True` when members share the sample's sandbox.
+When members have their own sandboxes and each sandbox mounts one shared volume, for example a named volume in each member's compose service, use `filesystem(shared_volume=True)`. Set `shared=` to where the volume is mounted; `notes=` must be inside it. The preamble then says that `shared` and the notes file in it are the same in every member's sandbox, and gives no scratch directory, since each sandbox is already private. The swarm cannot check that the volume is mounted, and it refuses `shared_volume=True` when members share the sample's sandbox.
 
 ```python
 solver = swarm(

@@ -20,7 +20,7 @@ class FilesystemChannel(Channel):
         notes = f"Read {self.notes} before you start and again as you work, and add what you learn or decide to the end of it, without changing what others wrote."
         if self.shared_volume:
             return (
-                f"Your sandbox is your own except for {self.shared}, which is the same directory in every member's sandbox. "
+                f"{self.shared} is the same directory in every member's sandbox. "
                 "Share files with the other members there. They use it at the same time as you, so files they change there can change under you. "
                 f"{notes}"
             )
@@ -49,7 +49,7 @@ def filesystem(
 
     Args:
         shared: The directory for files members share.
-        notes: The notes file members read and append to, relative to `shared` (or an absolute path).
+        notes: The notes file members read and append to, relative to `shared` (or an absolute path). With `shared_volume=True` it must be inside `shared`.
         scratch: Each member's own directory. `{member}` is replaced by the member's name. Not used with `shared_volume=True`.
         shared_volume: Whether members have their own sandboxes that each mount one shared volume at `shared`. `swarm()` accepts the channel beside per-member sandboxes only with `True`, and refuses `True` when members share the sample's sandbox.
 
@@ -57,11 +57,15 @@ def filesystem(
         The channel.
 
     Raises:
-        ValueError: If `scratch` has no `{member}` placeholder, or has another placeholder, or is other than the default with `shared_volume=True`.
+        ValueError: If `scratch` has no `{member}` placeholder, or has another placeholder, or is other than the default with `shared_volume=True`; or if `notes` is outside `shared` with `shared_volume=True`.
     """
     if shared_volume and scratch != _SCRATCH:
         raise ValueError(
             f"filesystem(): scratch is not used with shared_volume=True, since each member's sandbox is already its own, got {scratch!r}. Leave scratch out."
+        )
+    if shared_volume and not _inside(posixpath.join(shared, notes), shared):
+        raise ValueError(
+            f"filesystem(): with shared_volume=True, notes must be inside shared ({shared!r}), the only directory members share, got {notes!r}."
         )
     try:
         fields = [
@@ -75,6 +79,11 @@ def filesystem(
     if not fields or any(field != ("member", "", None) for field in fields):
         raise _bad_scratch(scratch)
     return FilesystemChannel(shared, notes, scratch, shared_volume)
+
+
+def _inside(path: str, directory: str) -> bool:
+    directory = posixpath.normpath(directory).rstrip("/")
+    return posixpath.normpath(path).startswith(f"{directory}/")
 
 
 def _bad_scratch(scratch: str) -> ValueError:
