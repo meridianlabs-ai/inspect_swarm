@@ -51,6 +51,7 @@ from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
 
 from .swarm_runtime import evidence, sample
 from .test_bus import _as, _Board, _BoardState, _bus, _send
+from .test_shared_memory import _board
 
 ROOT = "/shared_memory"
 
@@ -647,6 +648,40 @@ async def test_a_subagents_deletion_is_news_to_its_parent_once(
     [delete_event] = [d for d in _comm(log, "delivered") if d["record"] == "w-2"]
     assert delete_event["nested"] is True and delete_event["notify"] == ["w"]
     assert delete_event["loop"] != notified["loop"]
+
+
+@pytest.mark.anyio
+async def test_a_hook_in_a_nested_loop_leaves_the_members_news_for_its_own_loop() -> (
+    None
+):
+    async with _board() as (board, transcript):
+        context = board.members["w-2"].context
+        token = current_bus.set(board.bus)
+        try:
+            async with agent_channel() as loop:
+                context.loop = loop
+                await board("w-1", "create", path=f"{ROOT}/a.md", file_text="x")
+                # a subagent of w-2 runs the hook in its own loop
+                child = AgentState(messages=[])
+                child.output = _text()
+                async with agent_channel():
+                    with _as(context):
+                        assert await swarm_on_continue()(child) is True
+                assert _notices(child.messages) == []
+                assert evidence(transcript, "notified") == []
+                # the member's own loop, at its next boundary
+                state = AgentState(messages=[])
+                state.output = _call("noop")
+                with _as(context):
+                    assert await swarm_on_continue()(state) is True
+        finally:
+            current_bus.reset(token)
+
+    [notice] = _notices(state.messages)
+    [notified] = evidence(transcript, "notified")
+    files = [{"file": "f-1", "version": 1, "record": "w-1"}]
+    assert notified["ids"] == {"files": files}
+    assert notified["message"] == notice.id
 
 
 class _ListState(_BoardState):
