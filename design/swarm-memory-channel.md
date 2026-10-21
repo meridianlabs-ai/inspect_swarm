@@ -301,6 +301,8 @@ A partial view (`view_range`) depends on part of a version only; the evidence re
 
 ### Storm controls and the read budget
 
+The file and board limits are checked in `admit()`, so the `sent` event records their rejections under `admit`, with the reason below; metrics count every rejection by the control named in that event.
+
 | Control | Default | On violation (a `ToolError`, evidenced at step 2) |
 |---|---|---|
 | `rate`, per member, all its loops together | 60 writes per 60 s | "rate limit: retry in N s" |
@@ -413,7 +415,7 @@ The plan's M2-7 and M2-8 carry this design, after M2-6; notices for the channel 
 2. **M2-7 (member binding), with `reach`.** `Channel.reach` in `_channel/_channel.py`; `swarm_tools()` in `_bus/_tools.py` returns `"member"`-reach tools in non-bound agent channels. Tests: the descendant cases above in `tests/test_binding.py`, with test channels.
 3. **M2-8 (the shared-memory channel).** `src/inspect_swarm/_channel/shared_memory.py` (the factory, validation, `check()`, `instructions()`, `SharedMemoryState` with `tools()`, `validate()`, `admit()`, `apply()`, `notice_lines()`, the path grammar, the tool and its texts, the read budget); `src/inspect_swarm/_fence.py` (envelope rendering, the tag list, the marker check); `read` evidence in `_evidence.py`; `shared_memory` exported from `src/inspect_swarm/__init__.py` and imported by `src/inspect_swarm/_entrypoint.py`. Tests: `tests/test_shared_memory_channel.py`, `tests/test_shared_memory.py`, `tests/test_fence.py`, the synchronous-child case, and the background-child case if M2-5 has merged.
 4. **M2-9 (notices)** exercises the channel's `notice_lines()` as planned; its tests add the cases under Notices above.
-5. **M2-10 (communication metrics)** counts writes, views and rejections per member and per control.
+5. **M2-10 (communication metrics)** counts, per member, delivered writes and their payload bytes, views and listings, and rejections by control; file and board limit failures use `admit`.
 6. **M2-13 (waiting)** adds `max_wait`, `wake=True` and the channel's side of `swarm_wait` (`wakes()` and `news()`, reading `seen`), as [swarm-wait.md](swarm-wait.md#implementation-plan) specifies.
 7. **M2-11 (docs)** documents the channel, migration from `memory(instance=...)`, the seen rule, descendants, and that bridged members cannot use it yet; the example shaped like Epoch's port uses it.
 
