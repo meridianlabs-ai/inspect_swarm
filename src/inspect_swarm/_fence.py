@@ -1,33 +1,19 @@
 import re
 from collections.abc import Sequence
 
-# Every fence tag a swarm channel uses. Peer text is cleaned of all of them, so that no
-# channel's content can forge another channel's fence; a channel with a new tag adds it
-# here.
+# Every fence tag a swarm channel uses. Peer text holding any of them is refused, so
+# that no channel's content can forge another channel's fence; a channel with a new tag
+# adds it here.
 FENCE_TAGS = ("peer_message", "peer_file", "peer_listing")
 
-_MARKER = "|".join(f"</?{re.escape(tag)}" for tag in FENCE_TAGS)
-_MARKERS = re.compile(_MARKER, re.IGNORECASE)
-_MARKER_AT_END = re.compile(f"(?:{_MARKER})\\Z", re.IGNORECASE)
-_LONGEST = max(len(f"</{tag}") for tag in FENCE_TAGS)
+_MARKERS = re.compile(
+    "|".join(f"</?{re.escape(tag)}" for tag in FENCE_TAGS), re.IGNORECASE
+)
 
 
-# Peer text with every opening and closing fence marker removed, case-insensitively,
-# until none remain, so that nested fragments such as `<peer_<peer_filefile` cannot
-# reassemble a marker. Each marker is removed as soon as the kept text ends with it, so
-# the work is linear in the text: removing one marker at a time from the whole text was
-# quadratic. Markers start with `<` and hold no other, so no two overlap, and the
-# result is the same in whatever order they are removed.
-def remove_markers(text: str) -> str:
-    if not _MARKERS.search(text):
-        return text
-    kept: list[str] = []
-    for char in text:
-        kept.append(char)
-        marker = _MARKER_AT_END.search("".join(kept[-_LONGEST:]))
-        if marker:
-            del kept[len(kept) - len(marker.group()) :]
-    return "".join(kept)
+# Whether text holds an opening or closing fence marker, in any letter case.
+def has_marker(text: str) -> bool:
+    return _MARKERS.search(text) is not None
 
 
 # Peer text between a fence's tags. Attribute values are swarm-generated, roster names

@@ -12,7 +12,7 @@ from .._bus._record import Draft, FrozenJson, Record, thaw_json
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
 from .._evidence import comm_read
-from .._fence import fence, fence_bytes, remove_markers, utf8_bytes
+from .._fence import FENCE_TAGS, fence, fence_bytes, has_marker, utf8_bytes
 from ._channel import Channel, ChannelRun, ChannelState, swarm_channel
 
 CHANNEL = "shared_memory"
@@ -28,6 +28,8 @@ _COMPONENT = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _MAX_COMPONENTS = 8
 _MAX_PATH_BYTES = 160
 _PATH_RULE = f"paths are {ROOT} followed by 1 to {_MAX_COMPONENTS} components separated by /, each 1 to 64 of the characters A-Z a-z 0-9 . _ - and not . or .., with at most {_MAX_PATH_BYTES} bytes in all"
+_TAGS = [f"<{tag}" for tag in FENCE_TAGS]
+_MARKER_RULE = f"Files on the board cannot contain a {', '.join(_TAGS[:-1])} or {_TAGS[-1]} tag, opening or closing, in any letter case."
 
 _FILE_ID = re.compile(r"f-[1-9][0-9]{0,13}")
 
@@ -524,10 +526,6 @@ class _SharedMemoryState:
                     new_path=_required(new_path, "new_path", command),
                 )
                 payload = ""
-        # the record holds no fence marker; line endings are normalised in the file the
-        # write composes, as memory() does, since a carriage return at the payload's end
-        # joins the newline after it
-        payload = remove_markers(payload)
         changes = self._plan(command, args, payload, loop, None)
         delivery = await self._bus.deliver(
             Draft(
@@ -538,7 +536,7 @@ class _SharedMemoryState:
             )
         )
         applied = self._applied.pop(delivery.record.id)
-        return _acknowledgment(command, args, payload, applied)
+        return _acknowledgment(command, args, applied)
 
     # computing a write
 
@@ -556,7 +554,7 @@ class _SharedMemoryState:
         match command:
             case "create":
                 return [
-                    self._plan_create(_path(args.path), _clean(payload), loop, new_id)
+                    self._plan_create(_path(args.path), _content(payload), loop, new_id)
                 ]
             case "str_replace":
                 f = self._file_at(_path(args.path))
@@ -576,7 +574,7 @@ class _SharedMemoryState:
                     raise ToolError(
                         f"No replacement was performed. Multiple occurrences of old_str `{old}` in lines {lines}. Please ensure it is unique"
                     )
-                return [_edit(f, _clean(content.replace(old, payload)))]
+                return [_edit(f, _content(content.replace(old, payload)))]
             case "insert":
                 f = self._file_at(_path(args.path))
                 self._require_seen(loop, f, "inserting into it")
@@ -587,7 +585,7 @@ class _SharedMemoryState:
                         f"Invalid `insert_line` parameter: {at}. It should be within the range of lines of the file: {[0, len(lines)]}"
                     )
                 inserted = lines[:at] + payload.split("\n") + lines[at:]
-                return [_edit(f, _clean("\n".join(inserted)))]
+                return [_edit(f, _content("\n".join(inserted)))]
             case "delete":
                 path = _path(args.path)
                 if path == ROOT:
@@ -896,10 +894,15 @@ def _required(value: str | None, name: str, command: str, empty: bool = False) -
     return value
 
 
-def _clean(content: str) -> str:
-    # a file as it enters the board: line endings as memory() normalises them, and no
-    # fence marker
-    return remove_markers(content.replace("\r\n", "\n").replace("\r", "\n"))
+def _content(composed: str) -> str:
+    # a file as a write composes it: line endings normalised as memory() does, in the
+    # whole file since a carriage return at the payload's end joins the newline after
+    # it; and refused with a fence marker, which str_replace can assemble from old and
+    # new text
+    content = composed.replace("\r\n", "\n").replace("\r", "\n")
+    if has_marker(content):
+        raise ToolError(_MARKER_RULE)
+    return content
 
 
 def _is_path(path: str) -> bool:
@@ -994,9 +997,7 @@ def _status(count: int, labels: str) -> str:
     return f"Shared memory: {_files_changed(count)} ({labels})."
 
 
-def _acknowledgment(
-    command: str, args: _Args, payload: str, changes: Sequence[_Change]
-) -> str:
+def _acknowledgment(command: str, args: _Args, changes: Sequence[_Change]) -> str:
     # names only the caller's own paths and the board's ids and versions, never content
     first = changes[0]
     match command:
@@ -1007,9 +1008,7 @@ def _acknowledgment(
         case "str_replace":
             return f"Edited {first.path} ({first.file}, now version {first.version})."
         case "insert":
-            # the lines of `insert_text` as memory() splits it
-            count = len(payload.split("\n"))
-            return f"Inserted {count} line{'' if count == 1 else 's'} after line {args.insert_line} of {first.path} ({first.file}, now version {first.version})."
+            return f"Inserted text after line {args.insert_line} of {first.path} ({first.file}, now version {first.version})."
         case "delete" if len(changes) == 1 and first.old_path == args.path:
             return f"Deleted {args.path} ({first.file})."
         case "delete":

@@ -1,5 +1,4 @@
 import re
-import time
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -19,7 +18,7 @@ from inspect_swarm._bus._bus import Bus
 from inspect_swarm._channel.shared_memory import (
     _SharedMemoryState,  # pyright: ignore[reportPrivateUsage]
 )
-from inspect_swarm._fence import utf8_bytes
+from inspect_swarm._fence import FENCE_TAGS, utf8_bytes
 
 from .swarm_runtime import evidence, sample
 
@@ -241,7 +240,7 @@ async def test_writes_return_no_content_and_record_no_read() -> None:
         ]
         assert results == [
             "Edited /shared_memory/a.md (f-1, now version 2).",
-            "Inserted 2 lines after line 1 of /shared_memory/a.md (f-1, now version 3).",
+            "Inserted text after line 1 of /shared_memory/a.md (f-1, now version 3).",
         ]
         assert len(evidence(transcript, "read")) == reads
 
@@ -562,73 +561,92 @@ async def test_a_view_is_fenced_with_the_last_writer_version_and_record() -> Non
         )
 
 
+# Fence markers: a write is refused if the file it composes holds a marker of any
+# channel, in any letter case, including one assembled from old and new text; text
+# with none is stored as typed.
+
+_MARKER_RULE = "Files on the board cannot contain a <peer_message, <peer_file or <peer_listing tag, opening or closing, in any letter case."
+
 MARKERS: list[Any] = [
+    *[
+        pytest.param([], ("create", {"file_text": f"a {marker} b"}), id=f"{tag}-{name}")
+        for tag in FENCE_TAGS
+        for name, marker in (
+            ("open", f"<{tag} id='f-9'>"),
+            ("close-upper-case", f"</{tag.upper()}>"),
+        )
+    ],
     pytest.param(
-        [("create", {"file_text": "a <peer_file id='f-9'> b </PEER_FILE> c"})],
-        "a  id='f-9'> b > c",
-        id="payload",
-    ),
-    pytest.param(
-        [("create", {"file_text": "x <peer_message from='lead'>"})],
-        "x  from='lead'>",
-        id="other-channels-tag",
-    ),
-    pytest.param(
-        [("create", {"file_text": "<peer_<peer_filefile"})], "", id="nested-fragments"
-    ),
-    pytest.param(
-        [
-            ("create", {"file_text": "<peer_X>"}),
-            ("str_replace", {"old_str": "X", "new_str": "file"}),
-        ],
-        ">",
+        [("create", {"file_text": "<peer_X>"})],
+        ("str_replace", {"old_str": "X", "new_str": "file"}),
         id="str_replace-assembles-a-tag",
     ),
     pytest.param(
-        [
-            ("create", {"file_text": "<peer_\nlisting>"}),
-            ("str_replace", {"old_str": "\n", "new_str": ""}),
-        ],
-        ">",
+        [("create", {"file_text": "<peer_\nlisting>"})],
+        ("str_replace", {"old_str": "\n", "new_str": ""}),
         id="str_replace-assembles-across-lines",
     ),
     pytest.param(
-        [
-            ("create", {"file_text": "</peer_\nmessage>"}),
-            ("view", dict[str, Any]()),
-            ("insert", {"insert_line": 1, "insert_text": "x"}),
-        ],
-        "</peer_\nx\nmessage>",
-        id="insert-keeps-lines-apart",
+        [("create", {"file_text": "x"})],
+        ("str_replace", {"old_str": "x", "new_str": "<Peer_Message>"}),
+        id="str_replace-payload",
+    ),
+    pytest.param(
+        [("create", {"file_text": "x"})],
+        ("insert", {"insert_line": 1, "insert_text": "</peer_listing>"}),
+        id="insert-payload",
     ),
 ]
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("steps,content", MARKERS)
-async def test_fence_markers_are_removed_from_what_enters_the_board(
+@pytest.mark.parametrize("setup,write", MARKERS)
+async def test_a_write_that_would_put_a_fence_marker_on_the_board_is_refused(
+    setup: list[tuple[str, dict[str, Any]]], write: tuple[str, dict[str, Any]]
+) -> None:
+    async with _board() as (board, transcript):
+        for command, args in setup:
+            await board("w-1", command, path=_p("a.md"), **args)
+        before = board.files()
+        command, args = write
+        with pytest.raises(ToolError) as refused:
+            await board("w-1", command, path=_p("a.md"), **args)
+        assert str(refused.value) == _MARKER_RULE
+        assert board.files() == before
+        # refused at the tool, before a record exists
+        assert len(evidence(transcript, "sent")) == len(setup)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "steps,content",
+    [
+        pytest.param(
+            [("create", {"file_text": "<peer_ file <peer-file peer_file>"})],
+            "<peer_ file <peer-file peer_file>",
+            id="near-misses",
+        ),
+        pytest.param(
+            [
+                ("create", {"file_text": "</peer_\nmessage>"}),
+                ("insert", {"insert_line": 1, "insert_text": "x"}),
+            ],
+            "</peer_\nx\nmessage>",
+            id="insert-keeps-lines-apart",
+        ),
+    ],
+)
+async def test_text_without_a_fence_marker_is_stored_as_typed(
     steps: list[tuple[str, dict[str, Any]]], content: str
 ) -> None:
     async with _board() as (board, transcript):
         for command, args in steps:
             await board("w-1", command, path=_p("a.md"), **args)
         assert board.files() == {_p("a.md"): content}
-        # the record holds the cleaned payload
-        assert "peer_file" not in evidence(transcript, "sent")[0]["record"]["payload"]
-
-
-@pytest.mark.anyio
-async def test_removing_nested_markers_from_a_large_write_is_quick() -> None:
-    # removing one marker per pass over the whole text took about 8 seconds here; the
-    # write is admitted as an empty file
-    n = 20_000
-    async with _board() as (board, _):
-        start = time.perf_counter()
-        await board(
-            "w-1", "create", path=_p("a.md"), file_text="<peer_" * n + "file" * n
+        assert (
+            evidence(transcript, "sent")[0]["record"]["payload"]
+            == steps[0][1]["file_text"]
         )
-        assert time.perf_counter() - start < 2
-        assert board.files() == {_p("a.md"): ""}
 
 
 # The read budget: every accepted file, and the listing of a full board, fits whole in
