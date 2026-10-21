@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from inspect_ai.scorer import value_to_float
 from inspect_ai.scorer._score import _scorers  # pyright: ignore[reportPrivateUsage]
@@ -32,6 +33,9 @@ class MemberMetrics(BaseModel):
     gate_checks: int = 0
     gate_passes: int = 0
     first_pass_time: float | None = None
+    # the member's effective delivery mode: notify (notices and the status line) or
+    # poll (the status line only). None in metrics written before it.
+    delivery_effective: Literal["notify", "poll"] | None = None
 
 
 # The swarm's metrics for one run, written once, when the swarm ends, as an InfoEvent
@@ -49,6 +53,13 @@ class SwarmMetrics(BaseModel):
     # harness validity: members with no completed model call in their spans, in roster
     # order
     never_acted: list[str]
+    # harness validity, in roster order: members in notify mode with two or more
+    # completed model calls, to whose own loop a record was news, whose own loop never
+    # ran swarm_on_continue(); and, in a swarm with channels that have tools, members
+    # with a completed model call whose loops never resolved swarm_tools(). The
+    # defaults load metrics written before these fields.
+    notify_unwired: list[str] = []
+    tools_unwired: list[str] = []
     # critical path, the simple definition: a member's steps are the completed model
     # calls in its spans, cache replays included, from its ledger line, so they cover
     # everything it did through its end. Calls a member makes concurrently (parallel
@@ -68,6 +79,18 @@ class MemberTimes:
     started: float | None
     # None for a member that has not ended, as when its task was cancelled before it ran
     ended: float | None
+
+
+# How a member was wired to the swarm's channels, as the runtime saw it.
+@dataclass(frozen=True)
+class MemberWiring:
+    delivery_effective: Literal["notify", "poll"]
+    # swarm_tools() was resolved in one of its loops
+    tools: bool
+    # swarm_on_continue() ran in a loop of its other than a nested one
+    hooked: bool
+    # a record was news to its own loop
+    news: bool
 
 
 # A member's gate checks: the in-loop checks of its own submissions, as react() makes
@@ -121,6 +144,8 @@ def swarm_metrics(
     places: SpanPlaces,
     times: Sequence[MemberTimes],
     gates: Sequence[GateChecks],
+    wiring: Sequence[MemberWiring],
+    channel_tools: bool,
     wall_clock: float,
     answer: str | None,
 ) -> SwarmMetrics:
@@ -131,7 +156,9 @@ def swarm_metrics(
             tool_calls[member].append((tool.function, tool.arguments))
 
     members: list[MemberMetrics] = []
-    for line, member_times, gate in zip(ledger.members, times, gates, strict=True):
+    for line, member_times, gate, wired in zip(
+        ledger.members, times, gates, wiring, strict=True
+    ):
         running = (
             None
             if member_times.started is None
@@ -150,6 +177,7 @@ def swarm_metrics(
                 gate_checks=gate.checks,
                 gate_passes=gate.passes,
                 first_pass_time=gate.first_pass_time,
+                delivery_effective=wired.delivery_effective,
             )
         )
     return SwarmMetrics(
@@ -158,6 +186,20 @@ def swarm_metrics(
         wall_clock=wall_clock,
         members=members,
         never_acted=[m.name for m in ledger.members if _steps(m) == 0],
+        notify_unwired=[
+            m.name
+            for m, w in zip(ledger.members, wiring, strict=True)
+            if w.delivery_effective == "notify"
+            and w.news
+            and not w.hooked
+            and _steps(m) >= 2
+        ],
+        # react() resolves its tools before its first model call
+        tools_unwired=[
+            m.name
+            for m, w in zip(ledger.members, wiring, strict=True)
+            if channel_tools and not w.tools and _steps(m) >= 1
+        ],
         steps_to_answer=None
         if answer is None
         else next(_steps(m) for m in ledger.members if m.name == answer),

@@ -4,9 +4,16 @@ Experimental and under development; the API may change.
 """
 
 from ._budget import Budget, BudgetUsage, SwarmBudget, swarm_budget
+from ._bus._notice import swarm_on_continue
 from ._bus._record import Record
 from ._bus._tools import swarm_tools
-from ._channel._channel import Channel, ChannelRun, ChannelState, swarm_channel
+from ._channel._channel import (
+    Channel,
+    ChannelRun,
+    ChannelState,
+    NoticeLine,
+    swarm_channel,
+)
 from ._channel.filesystem import filesystem
 from ._channel.shared_memory import shared_memory
 from ._controller._control import (
@@ -45,6 +52,7 @@ __all__ = [
     "MemberHandle",
     "MemberInfo",
     "MemberState",
+    "NoticeLine",
     "Record",
     "StopReason",
     "SwarmBudget",
@@ -59,6 +67,7 @@ __all__ = [
     "swarm_budget",
     "swarm_channel",
     "swarm_controller",
+    "swarm_on_continue",
     "swarm_resources",
     "swarm_tools",
 ]

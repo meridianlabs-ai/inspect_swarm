@@ -36,6 +36,7 @@ from .._member import (
 from .._metrics import (
     GateChecks,
     MemberTimes,
+    MemberWiring,
     first_scorer,
     gate_checks,
     swarm_metrics,
@@ -450,6 +451,16 @@ class SwarmRun:
                     places,
                     [MemberTimes(m.name, m.started, m.time) for m in self._members],
                     [m.gates for m in self._members],
+                    [
+                        MemberWiring(
+                            m.context.delivery_effective,
+                            tools=m.context.loop is not None,
+                            hooked=m.context.hooked,
+                            news=m.context.news,
+                        )
+                        for m in self._members
+                    ],
+                    bool(self.bus.states),
                     wall_clock,
                     chosen.name if chosen is not None else None,
                 )
