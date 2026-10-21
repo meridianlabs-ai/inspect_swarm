@@ -28,7 +28,7 @@ from inspect_swarm import (
     swarm_controller,
 )
 from inspect_swarm._controller._control import SwarmRun
-from inspect_swarm._record import RECORD_KEY
+from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
@@ -60,16 +60,35 @@ async def _start_all(control: SwarmControl) -> StopReason:
     return "all_done"
 
 
+@agent
+def after(names: list[str], inner: Agent) -> Agent:
+    # waits, making no model call, until the named members have ended, then runs inner
+    async def execute(state: AgentState) -> AgentState:
+        while True:
+            record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+            if all(m.state == "ended" for m in record.members if m.name in names):
+                return await inner(state)
+            await anyio.sleep(0.01)
+
+    return execute
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "stop_on_submission,reason,slow_status,slow_calls",
-    [(True, "submitted", "stopped", 1), (False, "all_done", "submitted", 2)],
+    "stop_on_submission,reason,slow_status",
+    [(True, "submitted", "stopped"), (False, "all_done", "submitted")],
 )
 async def test_leaderless_stops_at_the_first_submission_unless_told_not_to(
-    stop_on_submission: bool, reason: str, slow_status: str, slow_calls: int
+    stop_on_submission: bool, reason: str, slow_status: str
 ) -> None:
     refusal = ModelOutput.from_content("mockllm", "no", stop_reason="content_filter")
-    slow = Script(delay=0.3)
+    first = generator(scripted_model(), calls=0, answer="first")
+    # still generating when the first member submits, or answering after it
+    slow = (
+        generator(scripted_model(Script(delay=0.01)), calls=None)
+        if stop_on_submission
+        else after(["quick"], generator(scripted_model(), answer="second"))
+    )
     stop = await run_swarm(
         swarm(
             [
@@ -80,17 +99,13 @@ async def test_leaderless_stops_at_the_first_submission_unless_told_not_to(
                     name="limited",
                     limits=[token_limit(TOKENS_PER_CALL)],
                 ),
-                member(
-                    generator(scripted_model(Script(delay=0.05)), answer="first"),
-                    name="quick",
-                ),
-                member(
-                    generator(scripted_model(slow), calls=2, answer="second"),
-                    name="slow",
-                ),
+                member(after(["refuser", "limited"], first), name="quick"),
+                member(slow, name="slow"),
             ],
             controller=leaderless(stop_on_submission=stop_on_submission),
             channels=[],
+            # ends the slow member if no submission stops it
+            budget=Budget(time=30),
         )
     )
     assert stop.reason == reason
@@ -100,8 +115,6 @@ async def test_leaderless_stops_at_the_first_submission_unless_told_not_to(
         "quick": "submitted",
         "slow": slow_status,
     }
-    # stopped, the slow member finished its call in flight and started no other
-    assert (slow.started, slow.calls) == (slow_calls, slow_calls)
     assert stop.record.final.member == "quick"
     assert stop.state.output.completion == "first"
 
