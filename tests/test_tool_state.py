@@ -100,6 +100,42 @@ async def test_deepagent_copies_have_their_own_memory_shared_with_a_readwrite_su
 
 
 @pytest.mark.anyio
+async def test_background_subagents_keep_their_members_memory(tmp_path: Path) -> None:
+    plan = _Plan(
+        parent=[
+            (
+                "memory",
+                {"command": "create", "path": "/memories/{name}.md", "file_text": "x"},
+            ),
+            ("agent", {"prompt": "child of {name}", "background": True}),
+            ("agent_wait", {"agent_ids": ["AGENT-1"]}),
+        ],
+        child=[("memory", {"command": "view", "path": "/memories"})],
+    )
+    model = scripted_model(Script(respond=plan))
+    await _eval(
+        swarm(
+            member(
+                deepagent,
+                args={
+                    "model": model,
+                    "subagents": [general(memory="readwrite")],
+                    "todo_write": False,
+                    "background": True,
+                },
+                count=2,
+            ),
+            channels=[],
+        ),
+        tmp_path,
+    )
+    for name, other in (("deepagent-1", "deepagent-2"), ("deepagent-2", "deepagent-1")):
+        # the background child's view, from its member's tool-state scope
+        listing = plan.results[(f"child of {name}", 1)]
+        assert f"{name}.md" in listing and f"{other}.md" not in listing
+
+
+@pytest.mark.anyio
 async def test_deepagent_members_general_subagents_have_their_own_installed_skills(
     tmp_path: Path,
 ) -> None:

@@ -99,7 +99,13 @@ class MemberLedger(BaseModel):
     """Model events in the member's spans."""
 
     cancelled: bool
-    """The member's agent was cancelled: by the hard stop after a grace period, a member time limit or a cancellation from outside the swarm. A bridged member is also cancelled at once when it reaches a cap, its share or one of its own limits, or makes a call after the swarm stopped it."""
+    """The member's agent was cancelled, or the swarm's hard stop cancelled its background drain after the agent had returned. A hard stop during the drain keeps the agent's status, so `cancelled` can be `True` with `status="submitted"`. The agent is cancelled by the hard stop after a grace period, a member time limit or a cancellation from outside the swarm. A bridged member is also cancelled at once when it reaches a cap, its share or one of its own limits, or makes a call after the swarm stopped it."""
+
+    background_started: int = 0
+    """Tasks the member's agent started with `background()`, such as `deepagent()` background subagents."""
+
+    background_cancelled: int = 0
+    """Of `background_started`, the tasks that were cancelled: still running when the member's drain ended, or cancelled by an error from the member's work or by the hard stop."""
 
 
 class SwarmLedger(BaseModel):
@@ -173,7 +179,7 @@ class SwarmLedger(BaseModel):
     """The sample resumed from a checkpoint, so the swarm restarted its caps from zero."""
 
     total_complete: bool
-    """No call is known to be missing from the swarm's usage and cost: no member or final step was cancelled, the swarm was not interrupted, every call completed with priced usage, every model in `sample_delta` is priced, and no loaded model class compacts natively."""
+    """No call is known to be missing from the swarm's usage and cost: no member, member background task or final step was cancelled, the swarm was not interrupted, every call completed with priced usage, every model in `sample_delta` is priced, and no loaded model class compacts natively."""
 
     attribution_complete: bool
     """`total_complete`, and the swarm meter recorded all the sample used over the swarm's lifetime: `unattributed` is zero, to within rounding."""
@@ -189,6 +195,8 @@ class MemberAccount:
     # None for a member never started
     span_id: str | None
     cancelled: bool
+    background_started: int
+    background_cancelled: int
 
 
 # A model event as it last stood, with its live usage object.
@@ -348,11 +356,15 @@ class LedgerInterval:
                 meter=_meter(m.lever),
                 calls=member_calls.get(m.name, Calls()),
                 cancelled=m.cancelled,
+                background_started=m.background_started,
+                background_cancelled=m.background_cancelled,
             )
             for m in members
         ]
         total_complete = (
-            not any(m.cancelled for m in members)
+            # a cancelled agent loop, background ones included, may have had work in
+            # flight that left no trace
+            not any(m.cancelled or m.background_cancelled for m in members)
             and not interrupted
             and not final_cancelled
             and calls.errored == 0

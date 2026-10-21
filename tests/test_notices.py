@@ -344,56 +344,49 @@ async def test_a_poll_member_gets_the_status_line_and_no_notice(
     assert _comm(log, "notified") == []
 
 
-# A member's conversation for a deepagent member, scripted as test_binding.py's: the top
-# loop's calls in order, then its subagent's when the top loop dispatches "child".
-class _Plan:
-    def __init__(self, parent: list[ModelOutput], child: list[ModelOutput]) -> None:
-        self.parent = parent
-        self.child = child
-        self.parent_inputs: list[list[ChatMessage]] = []
-
-    def __call__(
-        self,
-        input: list[ChatMessage],
-        tools: list[ToolInfo],
-        tool_choice: ToolChoice,
-        config: GenerateConfig,
-    ) -> ModelOutput:
-        users = "\n".join(m.text for m in input if isinstance(m, ChatMessageUser))
-        if "child task" in users:
-            plan = self.child
-        else:
-            plan = self.parent
-            self.parent_inputs.append(list(input))
-        step = len([m for m in input if isinstance(m, ChatMessageTool)])
-        return plan[step] if step < len(plan) else _submit()
-
-
+@pytest.mark.parametrize("background", [False, True], ids=["sync", "background"])
 @pytest.mark.anyio
-async def test_a_subagents_deletion_is_news_to_its_parent_once(tmp_path: Path) -> None:
+async def test_a_subagents_deletion_is_news_to_its_parent_once(
+    background: bool, tmp_path: Path
+) -> None:
+    # the subagent's prompt has no preamble, so _Turns names it ""
     path = f"{ROOT}/a.md"
-    plan = _Plan(
-        parent=[
-            _call("shared_memory", command="create", path=path, file_text="x"),
-            _call("agent", prompt="child task"),
-            _call("noop"),
-        ],
-        child=[
-            _call("shared_memory", command="view", path=path),
-            _call("shared_memory", command="delete", path=path),
-        ],
-    )
+    create = _call("shared_memory", command="create", path=path, file_text="x")
+    view = _call("shared_memory", command="view", path=path)
+    delete = _call("shared_memory", command="delete", path=path)
+    if background:
+        # the child deletes while the parent's third turn waits for it
+        turns = _Turns(
+            {
+                "w": [
+                    create,
+                    _call("agent", prompt="child task", background=True),
+                    (_call("noop"), ":3"),
+                    _call("noop"),
+                ],
+                "": [view, (delete, "w:3")],
+            }
+        )
+        expected = [0, 0, 0, 1, 1]
+    else:
+        # the child runs inside the parent's second turn
+        turns = _Turns(
+            {
+                "w": [create, _call("agent", prompt="child task"), _call("noop")],
+                "": [view, delete],
+            }
+        )
+        expected = [0, 0, 1, 1]
     log = await _eval(
         swarm(
             member(
                 deepagent,
                 args={
-                    "model": get_model(
-                        "mockllm/model", memoize=False, custom_outputs=plan
-                    ),
+                    "model": turns.model(),
                     "tools": [noop(), swarm_tools()],
                     "subagents": [general()],
                     "todo_write": False,
+                    "background": background,
                     "on_continue": swarm_on_continue(),
                 },
                 name="w",
@@ -403,20 +396,20 @@ async def test_a_subagents_deletion_is_news_to_its_parent_once(tmp_path: Path) -
         tmp_path,
     )
 
-    texts = [[n.text for n in _notices(i)] for i in plan.parent_inputs]
-    deleted = (
+    # the board's last file, deleted by the child: news to the parent at its next
+    # boundary, and once only
+    notices = [_notices(i) for i in turns.inputs["w"]]
+    assert [len(n) for n in notices] == expected
+    assert notices[-1][0].text == (
         "[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 deleted; by w). "
         'View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
     )
-    # the board's last file, deleted by the child: news to the parent at its next
-    # boundary, and once only
-    assert texts == [[], [], [deleted], [deleted]]
     [notified] = _comm(log, "notified")
     assert notified["files"] == [{"file": "f-1", "version": 2, "record": "w-2"}]
     # attributed to the child's loop
-    [delete] = [d for d in _comm(log, "delivered") if d["record"] == "w-2"]
-    assert delete["nested"] is True and delete["notify"] == ["w"]
-    assert delete["loop"] != notified["loop"]
+    [delete_event] = [d for d in _comm(log, "delivered") if d["record"] == "w-2"]
+    assert delete_event["nested"] is True and delete_event["notify"] == ["w"]
+    assert delete_event["loop"] != notified["loop"]
 
 
 # Wiring checks and the effective delivery mode, in the swarm's metrics
