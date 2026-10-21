@@ -245,7 +245,7 @@ The parameters, with their defaults:
 
 Other rules:
 
-- Paths are `/shared_memory/` followed by 1 to 8 components separated by `/`, each 1 to 64 of the characters `A-Z a-z 0-9 . _ -` and not `.` or `..`, with at most 160 bytes in all.
+- `view` with `path="/shared_memory"` lists every file on the board. Paths below it are `/shared_memory/` followed by 1 to 8 components separated by `/`, each 1 to 64 of the characters `A-Z a-z 0-9 . _ -` and not `.` or `..`, with at most 160 bytes in all.
 - Files cannot contain a `<peer_message`, `<peer_file` or `<peer_listing` tag, opening or closing, in any letter case.
 - Member names must start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`. `swarm()` refuses other names when the swarm has the channel.
 - Bridged members cannot use the channel. `swarm()` refuses a bridged member in a swarm with it.
