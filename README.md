@@ -177,7 +177,7 @@ A member's status says how it ended:
 
 `controller=` decides which members start and when the swarm is done. The only built-in controller is `leaderless`, the default. It starts every member with the sample's input and ends the swarm when all have ended.
 
-`channels=` decides how members share information. The only built-in channel is `filesystem`, the default. It adds no tools. It tells each member, in its preamble, to share files in `/shared`, to read and append to `/shared/notes.md`, and to keep its own work in `/scratch/<member>`. It does not create these directories. Change the paths with `filesystem(...)`:
+`channels=` decides how members share information. The default channel is `filesystem`. It adds no tools. It tells each member, in its preamble, to share files in `/shared`, to read and append to `/shared/notes.md`, and to keep its own work in `/scratch/<member>`. It does not create these directories. Change the paths with `filesystem(...)`:
 
 ```python
 from inspect_ai.agent import react
@@ -205,22 +205,21 @@ You can write your own with `@swarm_controller` and `@swarm_channel`. See their 
 
 ### Notices
 
-`shared_memory()` is a second built-in channel: a board of files that members read and write with a `shared_memory` tool. A member gets the tool from `swarm_tools()` in its tools. To hear about other agents' changes to the board between turns, a member also needs `swarm_on_continue()` as its agent's `on_continue`:
+`shared_memory()` is a second built-in channel: a board of files that members read and write with a `shared_memory` tool. A member gets the tool from `swarm_tools()` in its tools. To hear about other agents' changes to the board between turns, a member also needs `swarm_on_continue()` as its agent's `on_continue`. Call both inside a member builder registered with `@agent`, as here. The log records a builder by name and arguments, so the swarm can be rebuilt from the log; it cannot rebuild `swarm_tools()` or `swarm_on_continue()` passed in `args`.
 
 ```python
-from inspect_ai.agent import react
+from inspect_ai.agent import Agent, agent, react
 from inspect_ai.tool import bash
 
 from inspect_swarm import member, shared_memory, swarm, swarm_on_continue, swarm_tools
 
-solver = swarm(
-    members=member(
-        react,
-        args={"tools": [bash(), swarm_tools()], "on_continue": swarm_on_continue()},
-        count=3,
-    ),
-    channels=[shared_memory()],
-)
+
+@agent
+def worker() -> Agent:
+    return react(tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
+
+
+solver = swarm(members=member(worker, name="w", count=3), channels=[shared_memory()])
 ```
 
 At each turn boundary where other agents have changed files since its last notice, the member's conversation gets one user message, such as:
@@ -229,7 +228,7 @@ At each turn boundary where other agents have changed files since its last notic
 [Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".
 ```
 
-- A notice holds only counts, file ids and member names, never a path or what a member wrote. Its metadata, under `inspect_swarm`, gives the notice's id and, for each channel's line, the ids it names. Each line is also logged as a `comm` event of kind `notified`.
+- A notice holds counts, file ids, member names and fixed instructions, never a member-chosen file path or file contents. Its metadata, under `inspect_swarm`, gives the notice's id and, for each channel's line, the ids it names. Each line is also logged as a `comm` event of kind `notified`.
 - The member continues or stops exactly as it would without the hook. If it has a hook of its own, wrap it: `swarm_on_continue(my_hook)`. For `react(submit=False)`, which stops after a turn without tool calls, pass `swarm_on_continue(no_tool_calls="stop")`.
 - A member that is stopping gets no notice. Neither do a member's subagents: only its own loop does.
 - `member(..., delivery="poll")` turns notices off for that member. It still learns of changes from the status line that ends a shared memory result.
