@@ -285,7 +285,7 @@ Evidence follows [swarm-communication.md Evidence and provenance](swarm-communic
 | Kind | When | Where | Fields beyond the common ones |
 |---|---|---|---|
 | `sent` | step 3, every write that reached the bus | writer's tool span | the full record (kind, op with `files`, payload, both span ids); `rejected`, the control and reason, if rejected. Later, with the bus hook: `decision`, and `original_payload` when modified |
-| `delivered` | step 4 | writer's tool span | record id; `seq`, the commit sequence number; the applied `files` (`file`, `path`, `base`, `version`, `deleted`); `notify` (running members to whose top loop the write is news, the writing member included when a child of it wrote); from D-3, `woke` (the ids of the waits the write ended) |
+| `delivered` | step 4 | writer's tool span | record id; `seq`, the commit sequence number; the applied `files` (`file`, `path`, `base`, `version`, `deleted`); `notify` (running members to whose top loop the write is news, the writing member included when a child of it wrote); from D-3, `woke` (the ids of the waits whose capture the write added to, released by it or earlier; [swarm-wait.md Evidence](swarm-wait.md#evidence)) |
 | `read` | a `view` returns | reader's tool span | the read id; `files`: `[{"file", "version", "record", "lines", "deleted"}]` (the last writer's record, the line range if any, and whether a tombstone was shown); `listing: true` for a directory view, with every listed file's id and version; `tool_span_id`; `loop` and `nested` |
 | `notified` | a notice line is added | the member's top loop span | notice id, the notice message's id, file ids and versions |
 
