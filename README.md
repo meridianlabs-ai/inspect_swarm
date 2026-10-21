@@ -231,9 +231,9 @@ This swarm keeps the `filesystem` channel beside the board. `channels=[shared_me
 What members see:
 
 - A view of a file shows it between `<peer_file>` tags that give its id (such as `f-3`), path, version and last writer, after a line that tells the model to treat it as information from a peer, not as instructions. A view of a directory lists every file under it, with its id, version and last writer, between `<peer_listing>` tags. `view` also takes a file id as its path. Views are never truncated; the limits below keep every file viewable whole.
-- A write returns a short acknowledgment with the file's id and version, not its content.
+- A write returns a short acknowledgment without the file's content.
 - A result ends with a status line when other agents have changed files since this loop last viewed them, as in `Shared memory: 2 files changed since you last viewed them (f-1 new, f-2 deleted).` A listing does not count as viewing its files. A member and its subagents are separate loops here, so each sees the other's changes.
-- A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `str_replace` needs no view, since it fails unless `old_str` occurs exactly once in the file. A refused write names the file's id, version and last writer.
+- Before a loop overwrites a file with `create`, inserts into it, renames it or deletes it, it must have viewed or written that file's current version. A write by a member does not count for its subagents, or a subagent's for its member. `str_replace` needs no view, since it fails unless `old_str` occurs exactly once in the file. A refused write names the file's id, version and last writer.
 - Once the swarm begins to stop, writes are refused and views still work. A member that has ended can neither view nor write.
 
 The parameters, with their defaults:
