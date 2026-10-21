@@ -203,6 +203,38 @@ solver = swarm(
 
 You can write your own with `@swarm_controller` and `@swarm_channel`. See their docstrings.
 
+### Notices
+
+`shared_memory()` is a second built-in channel: a board of files that members read and write with a `shared_memory` tool. A member gets the tool from `swarm_tools()` in its tools. To hear about other agents' changes to the board between turns, a member also needs `swarm_on_continue()` as its agent's `on_continue`:
+
+```python
+from inspect_ai.agent import react
+from inspect_ai.tool import bash
+
+from inspect_swarm import member, shared_memory, swarm, swarm_on_continue, swarm_tools
+
+solver = swarm(
+    members=member(
+        react,
+        args={"tools": [bash(), swarm_tools()], "on_continue": swarm_on_continue()},
+        count=3,
+    ),
+    channels=[shared_memory()],
+)
+```
+
+At each turn boundary where other agents have changed files since its last notice, the member's conversation gets one user message, such as:
+
+```
+[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".
+```
+
+- A notice holds only counts, file ids and member names, never a path or what a member wrote. Its metadata, under `inspect_swarm`, gives the notice's id and, for each channel's line, the ids it names. Each line is also logged as a `comm` event of kind `notified`.
+- The member continues or stops exactly as it would without the hook. If it has a hook of its own, wrap it: `swarm_on_continue(my_hook)`. For `react(submit=False)`, which stops after a turn without tool calls, pass `swarm_on_continue(no_tool_calls="stop")`.
+- A member that is stopping gets no notice. Neither do a member's subagents: only its own loop does.
+- `member(..., delivery="poll")` turns notices off for that member. It still learns of changes from the status line that ends a shared memory result.
+- A custom agent gets notices only if it calls an `on_continue` hook at each turn boundary, as `react()` and `deepagent()` do. If it does not, give its member `delivery="poll"`, so the metrics do not list it in `notify_unwired`.
+
 ## Budget
 
 By default the swarm takes its budget from the sample's cost, token and time limits. It stops its members at 95% of each, holding back 5% for calls already in flight. After a stop, members have up to `grace` seconds (default 120) to finish calls already in flight. If the sample has a time limit, this period is capped at half its remaining time. Members still running are then cancelled.
@@ -255,6 +287,14 @@ When the swarm ends it writes two more store entries, each also logged as an `In
 
 - `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, the controller and the final step, model calls that errored or reported no usage, unpriced models, what stopped the swarm, and whether the sample resumed from a checkpoint. See [The ledger](#the-ledger).
 - `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members with no completed model call (`never_acted`), counts of completed model calls for the chosen member (`steps_to_answer`) and the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member (`null` for a bridged member, see [Restrictions](#restrictions)). These call counts include cache replays and exclude failed or cancelled attempts.
+
+The metrics also check that members are wired to the channels ([Notices](#notices)):
+
+- `notify_unwired`: members in `notify` mode whose own loop, not a subagent's, completed two or more model calls, to whose own loop a change was news, and whose own loop never ran `swarm_on_continue()`. It is a heuristic: two own calls usually mean the member reached a turn boundary. A first turn with a refusal retry, an overflow recovery or an interrupt makes two calls before any boundary, so a correctly wired member that ends there can be listed.
+- `tools_unwired`: in a swarm with a channel that has tools, members with a completed model call whose loops never resolved `swarm_tools()`.
+- Each member's `delivery_effective`: `notify` or `poll`, the mode it ran in.
+
+Each member's metrics also have `comm`, its communication over each channel with records, by channel name. Its `notices` counts the notices the member got with a line for that channel (`notified` events).
 
 `inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`. `samples_df()` needs pandas and pyarrow, which neither install above includes:
 
