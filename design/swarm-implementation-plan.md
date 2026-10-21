@@ -72,6 +72,7 @@ M2's test is Epoch's LeanOpenProblems swarm: an external team could port that ex
 
 - **What the port needs:** per-member sandboxes (Recommendation 1), an agent-raised custom limit that ends only the member (Recommendation 2), and background deepagent members, which need a private inspect_ai seam for where `background()` starts work and an owner per member in inspect_swarm (Recommendation 3; [swarm-background-members.md](swarm-background-members.md)). Without the first two the port cannot express the experiment. Without the third a port must run `deepagent()` synchronously, so each subagent call blocks its member, which changes the experiment and makes its results not comparable to Epoch's. With them it runs with its scorer unchanged ([With recommendations 1 and 2 it can](swarm-lean-open-problems.md#could-inspect_swarm-express-their-experiment)).
 - **What the port gains:** members that can see the budget that will stop them (Recommendation 4), gate checks as metrics (Recommendation 5), and a shared-memory channel through the bus (Recommendation 7).
+- **Waiting for other members:** a wait owned by the bus, `swarm_wait`, which the shared-memory channel's writes and members' ends wake, so members working together need not poll ([swarm-wait.md](swarm-wait.md), D-3; decision: Ransom, 2026-10-21, [Decisions](#decisions), item 13).
 - **The bus**, because the shared-memory channel runs through it: `deliver()`, storm controls, evidence, member binding, notices and communication metrics ([swarm-communication.md](swarm-communication.md#implementation-plan), steps 1, 2, 4 and 5), with a construction-time refusal of bridged members in a swarm that has a bus channel (M2-6).
 - **What any external release needs:** user docs, examples (among them the `until_proved` controller of Recommendation 6), a statement of which API is supported and which is experimental, packaging, the Python floor, and a first PyPI release that depends on released inspect_ai.
 
@@ -106,6 +107,7 @@ Each item a deep dive assigns to a milestone, with the milestone it is in and wh
 | Per-member sandboxes in the scoring contract | [Lean Rec. 8](swarm-lean-open-problems.md#8-after-m2-per-member-sandboxes-in-the-scoring-contract) | Future | Decision: Ransom, 2026-10-14. The port runs with its own scorer; Rec. 8 builds on the result contract, which is future work |
 | Result contract, `member_scores`, `baseline()`, analysis helper | [swarm-scoring.md Part 2](swarm-scoring.md#implementation-plan-after-m2) steps 1, 4, 5 | Future | Decision: Ransom, 2026-10-14. Optional gains for the port, not needs; M2's "Done means" asks for none of them |
 | Bus core, binding, notices, communication metrics | [swarm-communication.md](swarm-communication.md#implementation-plan) steps 1, 2, 4, 5 | M2 | The shared-memory channel needs them |
+| Waiting for other members (`swarm_wait`) | [swarm-wait.md](swarm-wait.md) | M2 | Decision: Ransom, 2026-10-21. Members working together often wait on each other; without a wait they poll, which inflates steps, cost and the critical path |
 | The bus hook (`policy=`) | [swarm-communication.md Monitoring](swarm-communication.md#monitoring-sentinel-first-the-bus-hook-for-the-rest) | Future | Decision: Ransom, 2026-10-19. Every M2 record is a native tool call that sentinel sees; the hook is for bridged bus tools and internal records |
 | The `messages` channel; bus tools for bridged members | swarm-communication.md steps 3, 6 | Future | Decision: Ransom, 2026-10-14. Not needed by the external port; bridged members are refused in a swarm with a bus channel (M2-6) |
 
@@ -301,7 +303,9 @@ flowchart LR
   M2_7 --> M2_8[M2-8 memory channel]
   M2_8 --> M2_9[M2-9 notices]
   M2_8 --> M2_10[M2-10 comm metrics]
-  M2_1 & M2_2 & M2_3 & M2_4 & M2_5 & M2_9 & M2_10 --> M2_11[M2-11 docs and examples]
+  D3[D-3 wait design] --> M2_13
+  M2_8 --> M2_13[M2-13 waiting for members]
+  M2_1 & M2_2 & M2_3 & M2_4 & M2_5 & M2_9 & M2_10 & M2_13 --> M2_11[M2-11 docs and examples]
   M2_11 --> M2_12[M2-12 API statement, packaging, first release]
 ```
 
@@ -309,7 +313,7 @@ flowchart LR
 
 - **Isolation and limits:** M2-1, M2-2, M2-3 and M2-4, each alone.
 - **Background members:** D-2 → AI-5 → M2-5. D-2 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-background-members.md](swarm-background-members.md), #28).
-- **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8. D-1 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-memory-channel.md](swarm-memory-channel.md), #22).
+- **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10, M2-13}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8, and D-3 before M2-13. D-1 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-memory-channel.md](swarm-memory-channel.md), #22). D-3 started on 2026-10-21 ([swarm-wait.md](swarm-wait.md)).
 - **Release:** M2-11 and M2-12, after the three strands above.
 
 ### Designs
@@ -323,6 +327,11 @@ flowchart LR
 - Files: `design/swarm-background-members.md`.
 - Depends on: nothing.
 - Implements: nothing itself; specifies [swarm.md Members](swarm.md#members) ("Lifting the restriction") and [Lean Rec. 3](swarm-lean-open-problems.md#3-m2-background-deepagent-members), built by AI-5 and M2-5.
+
+**D-3. Design: waiting for other members.** [swarm-wait.md](swarm-wait.md) (decision: Ransom, 2026-10-21; [Decisions](#decisions), item 13). One wait owned by the bus, `swarm_wait`, which the shared-memory channel is the first to wake and the later messages channel joins: what wakes it (a board change under a path, another member's end), what it returns (file ids and member names, never content), how it ends without news (no member active, the stop, the member's drain, a clamped timeout, cancellation), whether a subagent's wait counts as its member waiting (no), what filesystem-only swarms get (no wait in M2; its open question), how waiting counts as time, the idle-time metric and the `waited` evidence. It amends [swarm-memory-channel.md](swarm-memory-channel.md) (board writes set `wake=True`; `max_wait`; per-loop `told` marks) and the Wake section of [swarm-communication.md](swarm-communication.md#wake-and-turn-boundaries) (`read_messages` no longer waits).
+- Files: `design/swarm-wait.md`, and the amendments to `design/swarm-memory-channel.md`, `design/swarm-communication.md`, `design/swarm-limits.md`, `design/swarm.md`, `design/swarm-api.md` and this plan.
+- Depends on: nothing; it builds on D-1 and the merged bus (M2-6, M2-7).
+- Implements: nothing itself; specifies M2-13.
 
 ### inspect_ai
 
@@ -403,13 +412,19 @@ None in M2, and none in M1.
 **M2-10. Communication metrics.** Record counts and sizes per member, rejections per control, wait time and read counts, from the live evidence (`sent`, `delivered`, `notified`, `read`); the swarm writes no exposure or proposal events ([swarm-communication.md Alternatives considered](swarm-communication.md#alternatives-considered)).
 - Files: `src/inspect_swarm/_metrics.py`.
 - Tests: `tests/test_comm_evidence.py`, the counting cases.
-- Depends on: M2-8, M1-10.
+- Depends on: M2-8, M1-10. The wait metrics (`waits`, `waits_by_outcome`, `wait_time`, `idle_time`, from `waited` events; [swarm-wait.md Metrics](swarm-wait.md#metrics)) land with whichever of M2-10 and M2-13 merges second.
 - Implements: swarm-communication.md step 5; [Evidence and provenance](swarm-communication.md#evidence-and-provenance); [swarm-memory-channel.md Evidence](swarm-memory-channel.md#evidence).
 
-**M2-11. User docs and examples.** A Quarto site in `docs/`, as inspect_sentinel and inspect_flow keep, and runnable `examples/`: getting started; members, controllers and channels; budgets, splits and the ledger; sandbox topologies (shared, per member) with sizing guidance; the shared-memory channel, monitoring it with sentinel, and the filesystem observation limit (swarm-communication.md step 7's content for what M2 builds), and that bridged members cannot use it yet; scoring: the task's own scorers, the result record, and with per-member sandboxes a scorer that names each member's sandbox; the result record's store key `inspect_swarm:result` is owned by the runtime, task code must not write it, and a tool reading it gives members a view of each other's results, a channel outside the bus (decision: Ransom, 2026-10-14); comparisons with epochs through Inspect's own reducers ([swarm-scoring.md Comparisons in M1](swarm-scoring.md#comparisons-in-m1)); writing a controller, including `until_proved` with its precondition ([Lean Rec. 6](swarm-lean-open-problems.md#6-m1-tighten-submitted-m2-document-stopping-on-the-first-proof), second part); and an example shaped like Epoch's port, which uses the shared-memory channel ([Lean, A port, sketch](swarm-lean-open-problems.md#a-port-sketch)). The shared-memory pages cover migration from `memory(instance=...)`, the seen rule and descendants ([swarm-memory-channel.md Relation to `memory(instance="...")`](swarm-memory-channel.md#relation-to-memoryinstance)).
+**M2-13. Waiting for other members.** As D-3 specifies ([swarm-wait.md Implementation plan](swarm-wait.md#implementation-plan)): the bus's waiter registry and the `swarm_wait` tool (`parallel=False`, offered by `swarm_tools()` with a channel that wakes waits), the releases (news, ends, no member active, `bus.close()`, the drain, timeout, cancellation), `Channel.max_wait` and `WaitingState`, `Draft.wake`; the shared-memory channel's `max_wait`, `told` marks, `wake=True` writes and wait methods; `SwarmRun._end()` telling the bus; `waited` evidence and `delivered.woke`.
+- Files: `src/inspect_swarm/_bus/_wait.py` (new), `_bus/_bus.py`, `_bus/_record.py`, `_bus/_tools.py`, `src/inspect_swarm/_channel/_channel.py`, `_channel/shared_memory.py`, `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_evidence.py`. With whichever of M2-5 and M2-13 merges second: `MemberContext.background_running` (`_budget.py`), the owner's `Bus.recheck()` (`_background.py`) and `Bus.member_ending()` in the drain (`_member.py`). With whichever of M2-10 and M2-13 merges second: the wait metrics (`_metrics.py`).
+- Tests: `tests/test_wait.py`, with cases in `tests/test_shared_memory_channel.py`, `tests/test_bus.py`, `tests/test_comm_evidence.py`, and, with M2-5, `tests/test_background_members.py`; mockllm on both backends, no Docker ([swarm-wait.md Testing](swarm-wait.md#testing)).
+- Depends on: M2-8, D-3.
+- Implements: [swarm-wait.md](swarm-wait.md).
+
+**M2-11. User docs and examples.** A Quarto site in `docs/`, as inspect_sentinel and inspect_flow keep, and runnable `examples/`: getting started; members, controllers and channels; budgets, splits and the ledger; sandbox topologies (shared, per member) with sizing guidance; the shared-memory channel and waiting for other members with `swarm_wait` (what wakes it, that waiting counts as time, the idle-time metric, and that filesystem-only swarms have no wait), monitoring it with sentinel, and the filesystem observation limit (swarm-communication.md step 7's content for what M2 builds), and that bridged members cannot use it yet; scoring: the task's own scorers, the result record, and with per-member sandboxes a scorer that names each member's sandbox; the result record's store key `inspect_swarm:result` is owned by the runtime, task code must not write it, and a tool reading it gives members a view of each other's results, a channel outside the bus (decision: Ransom, 2026-10-14); comparisons with epochs through Inspect's own reducers ([swarm-scoring.md Comparisons in M1](swarm-scoring.md#comparisons-in-m1)); writing a controller, including `until_proved` with its precondition ([Lean Rec. 6](swarm-lean-open-problems.md#6-m1-tighten-submitted-m2-document-stopping-on-the-first-proof), second part); and an example shaped like Epoch's port, which uses the shared-memory channel ([Lean, A port, sketch](swarm-lean-open-problems.md#a-port-sketch)). The shared-memory pages cover migration from `memory(instance=...)`, the seen rule and descendants ([swarm-memory-channel.md Relation to `memory(instance="...")`](swarm-memory-channel.md#relation-to-memoryinstance)).
 - Files: `docs/` (new), `examples/` (new), `README.md`.
 - Tests: examples run on mockllm in CI where they need no sandbox; the rest are marked slow.
-- Depends on: the functional M2 pull requests it documents (M2-1 to M2-10).
+- Depends on: the functional M2 pull requests it documents (M2-1 to M2-10, and M2-13).
 - Implements: the documentation parts of every M2 item; swarm-communication.md step 7 for the memory channel.
 
 **M2-12. API statement, packaging and the first release.** The README and the package docstring state which API is supported and which is experimental, as decided ([Decisions](#decisions), item 6); classifiers move from "Development Status :: 1 - Planning"; `requires-python` stays at M1-0's 3.11; the `push` trigger is restored in `release.yaml`, so Release Please opens the 0.1.0 release pull request.
@@ -490,7 +505,7 @@ Each pull request carries the tests listed with it, from its design's Testing se
 
 ## Decisions
 
-Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his words quoted), his decisions of 2026-10-19 (item 11) and 2026-10-20 (item 12), and one point settled from the code. [Open questions](#open-questions) holds the one still open.
+Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his words quoted), his decisions of 2026-10-19 (item 11), 2026-10-20 (item 12) and 2026-10-21 (item 13), and one point settled from the code. [Open questions](#open-questions) holds the one still open.
 
 1. **M1's final answer is `first` plus the per-member record.** The brief's "final-answer modes, the result contract" is read as M1 ([swarm-scoring.md Part 1](swarm-scoring.md#part-1-m1)). Ransom: "OQ1 - yes". With item 8, the result contract is future work rather than M2.
 2. **M2 has the bus without direct messages.** M2 has the bus core, binding, notices, communication evidence and the shared-memory channel; the `messages` channel and bridged members' bus tools are future work, and a swarm that gives a bridged member a bus channel is refused at construction (M2-6). Ransom: "OQ2 agree with the recommendation".
@@ -508,6 +523,8 @@ Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his wor
 11. **No `StoreEvent`s inside a swarm** (2026-10-19). The swarm enters an inspect_ai switch that turns span store tracking off, always, a swarm of one included; the swarm's span still logs the net change. Per-member stores were considered and not adopted for now, and meridianlabs-ai/inspect_ai#589's general fix is still wanted upstream but no longer a swarm dependency ([swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)). This adds AI-7 and M1-14.
 
 12. **M1-10 measures no per-member idle or waiting time** (2026-10-20). Per-member timing metrics must match Inspect's working-time accounting (`src/inspect_ai/_util/working.py`): a sample's working time is its elapsed time minus the merged intervals of every wait Inspect knows about (connection slot acquisition, retried attempts, retry backoff, the provider SDK's own failed requests and retry sleeps, the pause gate, human approval and review, and `suspend_working_limit()`). That is hard to do per member. A member can run subagents and parallel tool calls, so one of its tasks can be waiting while another works, and a total of the member's waits is misleading on its own. The meaningful figure is per-member working time, which needs Inspect's interval accounting attributed to each member, likely through private API or an inspect_ai change. It comes back when an experiment needs it. Until then M1 records the swarm's wall clock and each member's running time, and Inspect's sample working and waiting time cover the swarm as a whole. Idle time keeps its designed meaning, the time members spend in the bus's read waits ([swarm-communication.md](swarm-communication.md)), which M2 adds. Ransom chose to drop idle time from M1 rather than give it an M1 meaning, and said of connection waits: "Since a member can have multiple subagents / do work in parallel, the calculation will need to match the working time accounting in Inspect - just computing waiting time does not give an accurate picture."
+
+13. **Waiting for other members is in M2** (2026-10-21). The first internal user's members, done with their own part, polled the board with `sleep 60; cat /shared/notes.md`, a tool turn per check. Ransom: "I think it will be common for members to wait on other members if they are working together." So waiting is a first-class M2 case, not deferred to the messages channel or persistent members. This adds D-3 and M2-13 ([swarm-wait.md](swarm-wait.md)).
 
 One more decision shapes this plan: the result record's store key is documented as owned by the runtime and readable by member code (Ransom: "yes, add the docs line"; M1-13, M2-11 and [swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records)).
 

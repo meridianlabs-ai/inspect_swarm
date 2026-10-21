@@ -636,7 +636,7 @@ def leaderless(final: FinalSpec | None = None, stop_on_verified: bool = False) -
     return Controller(run, final=final)
 ```
 
-**A coordinator swarm (later: coordinator topologies, on the later messages channel).** A lead and three workers. All start together; workers wait for the lead's instructions with `read_messages(wait_seconds=...)`, and the lead's submission is the answer. Members with hooks and tool sources are registered builders, passed uncalled, so the log can name them and each member gets its own hooks ([Members](#tool-state-and-member-builders)).
+**A coordinator swarm (later: coordinator topologies, on the later messages channel).** A lead and three workers. All start together; workers wait for the lead's instructions with `swarm_wait` ([swarm-wait.md](swarm-wait.md)), and the lead's submission is the answer. Members with hooks and tool sources are registered builders, passed uncalled, so the log can name them and each member gets its own hooks ([Members](#tool-state-and-member-builders)).
 
 ```python
 from inspect_ai.agent import Agent, agent, react
