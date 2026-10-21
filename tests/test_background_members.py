@@ -335,6 +335,8 @@ class _ChildLimit:
     # the sample's cost limit, which a cost cap needs
     sample_cost: float | None = None
     reason: str | None = None
+    # a second member, still running when the child stops, which submits
+    peer: bool = False
 
 
 def _cap_running(log: list[str]) -> tuple[Model, list[_Child], list[Step]]:
@@ -442,6 +444,7 @@ _CHILD_LIMITS = [
         ["greedy stopped", "parent continued"],
         "member_limit:token",
         limits=[token_limit(3 * TOKENS_PER_CALL)],
+        peer=True,
     ),
     _ChildLimit(
         "member-message-limit",
@@ -472,24 +475,22 @@ async def test_a_limit_reached_in_a_child_ends_only_that_child(
 ) -> None:
     log: list[str] = []
     model, children, steps = case.scenario(log)
+    members = [
+        member(spawner(model, children, log, steps=steps), name="x", limits=case.limits)
+    ]
+    if case.peer:
+        peer = generator(scripted_model(Script(delay=0.1)), calls=3)
+        members.append(member(peer, name="y"))
     outcome = await run_swarm(
-        swarm(
-            member(
-                spawner(model, children, log, steps=steps),
-                name="x",
-                limits=case.limits,
-            ),
-            channels=[],
-            budget=case.budget,
-        ),
-        cost=case.sample_cost,
+        swarm(members, channels=[], budget=case.budget), cost=case.sample_cost
     )
     if case.reason is not None:
         assert outcome.reason == case.reason
-    assert statuses(outcome) == {"x": case.status}
+    expected = {"x": case.status} | ({"y": "submitted"} if case.peer else {})
+    assert statuses(outcome) == expected
     assert sorted(log) == case.log
     ledger = _ledger(outcome)
-    [line] = ledger.members
+    line = ledger.members[0]
     assert (line.background_started, line.background_cancelled) == (len(children), 0)
     # siblings' calls in flight finished
     assert ledger.calls.errored == 0
