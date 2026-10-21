@@ -198,6 +198,21 @@ async def test_a_wait_is_idle_only_while_none_of_its_members_background_work_run
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("ending", ["timeout", "cancelled"])
+async def test_a_wait_never_released_is_idle_until_it_ends(ending: str) -> None:
+    async with run() as (r, transcript):
+        async with anyio.create_task_group() as tg:
+            # w-2 is running and not waiting, so nothing releases w-1's wait
+            await start(tg, r, "w-1", timeout=1)
+            if ending == "cancelled":
+                await anyio.sleep(0.05)
+                tg.cancel_scope.cancel()
+        [data] = waited(transcript)
+        assert data["outcome"] == ending
+        assert 0.04 <= data["idle"] <= data["duration"]
+
+
+@pytest.mark.anyio
 async def test_a_wait_released_then_cancelled_names_nothing() -> None:
     async with run() as (r, transcript):
         async with anyio.create_task_group() as tg:
