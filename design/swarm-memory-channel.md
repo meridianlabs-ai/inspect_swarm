@@ -1,6 +1,6 @@
 # Inspect Swarm: the shared-memory channel
 
-Status: proposed, 2026-10-14; amended 2026-10-15 and 2026-10-16 (#23): no `exposed` evidence; a view is identified by its `read` event, and swarm metadata on read results is left to the ORBIT port; amended 2026-10-21 (D-3, [swarm-wait.md](swarm-wait.md)): writes wake members' waits, `max_wait`, and per-loop `told` marks. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
+Status: proposed, 2026-10-14; amended 2026-10-15 and 2026-10-16 (#23): no `exposed` evidence; a view is identified by its `read` event, and swarm metadata on read results is left to the ORBIT port; amended 2026-10-21 (D-3, [swarm-wait.md](swarm-wait.md)): writes wake members' waits (`wake=True`) and `max_wait`; the wait reads `seen` and changes nothing else here. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
 
 ## Overview
 
@@ -148,8 +148,7 @@ class BoardFile:
 class SharedMemoryState:                   # implements ChannelState
     files: dict[str, BoardFile]            # by id, tombstones included; live paths indexed separately
     seen: dict[str, dict[str, int]]        # loop agent span id -> file id -> version that loop has seen
-    covered: dict[str, dict[str, int]]     # member -> file id -> version its last notice, or from D-3 its own loop's last wait, covered
-    told: dict[str, dict[str, int]]        # loop agent span id -> file id -> highest version the loop was told of (D-3)
+    covered: dict[str, dict[str, int]]     # member -> file id -> version its last notice covered
     commits: int                           # the last commit sequence number given out
 ```
 
@@ -157,7 +156,7 @@ class SharedMemoryState:                   # implements ChannelState
 - **Directories are implicit.** A directory exists while a file is under it; `/shared_memory` always exists. There is no empty directory, and a file and a directory never share a path.
 - **Paths** must match `/shared_memory(/C){1,8}`, where each component `C` matches `[A-Za-z0-9._-]{1,64}` and is not `.` or `..`, with at most 160 bytes in all. Anything else is refused with a `ToolError` that states the rule; nothing is normalised. The rule keeps paths safe as fence attributes with no escaping, keeps them out of every harness-written line, and refuses rather than silently rewrites what a model typed ([Security](#security)). memory()'s own paths are wider ([Current behaviour](#inspect_ais-memory)), and Epoch's board needs nothing outside this grammar.
 - **A loop** is the agent span a call runs in, `current_agent_span_id()` at call time: the member's top-level loop or one of its descendants ([How descendants reach a member's tools](#how-descendants-reach-a-members-tools)). `seen` is per loop because what a loop has seen is what is in its own context.
-- **Told** (D-3) is what `swarm_wait` compares against: a loop is told of a version when a status line or a wait result names it (views and writes are in `seen`). A wait result in the member's own loop also sets `covered`, as a notice does, so a wait-reported version leaves that loop's next notice and status lines as a notice-covered one does. A wait reports a file under its filter whose current version, by another loop, is above what the loop has seen, been told of and (own loop) had covered ([swarm-wait.md What wakes a wait](swarm-wait.md#what-wakes-a-wait)).
+- **`seen` is also what `swarm_wait` reads** (D-3): a wait returns while a file under its filter has a version by another loop above what the loop has seen, and sets no mark of its own here ([swarm-wait.md What wakes a wait](swarm-wait.md#what-wakes-a-wait)).
 
 ### The tool
 
@@ -249,7 +248,7 @@ A directory view lists, inside `<peer_listing path="/shared_memory/notes">`, one
 
 ### Notices and the status line
 
-- **Notice lines** (`notice_lines(member)`, merged into the one notice per boundary by `swarm_on_continue()`, M2-9) go to the member's top-level loop only, as every notice does ([swarm-communication.md Notices](swarm-communication.md#notices)). A file is **news** to a loop when its current version (a tombstone's included) is above the version the loop has seen, the write that produced that version was by a different loop, and, for a tombstone, the loop has seen, been notified of, or (from D-3) been told of by a status line or a wait some earlier version of it (a file created and deleted by peers before this loop ever heard of it is not news). A notice line covers the files that are news to the top loop and that no earlier notice covered at their current version, and then sets `covered` to those versions:
+- **Notice lines** (`notice_lines(member)`, merged into the one notice per boundary by `swarm_on_continue()`, M2-9) go to the member's top-level loop only, as every notice does ([swarm-communication.md Notices](swarm-communication.md#notices)). A file is **news** to a loop when its current version (a tombstone's included) is above the version the loop has seen, the write that produced that version was by a different loop, and, for a tombstone, the loop has seen or been notified of some earlier version of it (a file created and deleted by peers before this loop ever heard of it is not news). A notice line covers the files that are news to the top loop and that no earlier notice covered at their current version, and then sets `covered` to those versions:
 
   ```
   [Swarm notice] 3 shared memory files changed since you last viewed them (f-2, f-5 new, f-9 deleted; by worker-2, worker-4). View one with shared_memory(command="view", path="f-2"), or list them with path="/shared_memory".
@@ -258,7 +257,7 @@ A directory view lists, inside `<peer_listing path="/shared_memory/notes">`, one
   The template's only variables are counts, file ids with the fixed markers `new` and `deleted`, and roster names; at most ten ids are listed, then "and N more", and the root listing shows every live file. It never contains a path, a file's content, or anything a member chose. A loop's own writes are never news to it; its children's writes are, deletions included, since they are not in its context until the child reports: a child that deletes the board's last file makes that tombstone news to its parent, attributed to the child's loop.
 - **Deletions are one-shot.** A tombstone's version is final, so once a notice covers it, or the loop views its id (which marks the tombstone seen), it is never news again; a status line lists it until the loop views the id or the top loop is notified of it, whichever applies to that loop.
 - **File ids are how notices refer to files** because paths are member-chosen ([swarm-communication.md How channels plug into the bus](swarm-communication.md#how-channels-plug-into-the-bus), "Names a member chooses ... are payload ... never in notices"). That is why `view` accepts an id as its path: a notice is actionable in one call without the harness repeating a path.
-- **The status line** ends every `shared_memory` result, in every loop: `Shared memory: N files changed since you last viewed them (f-2, f-9 deleted).` when N > 0, listing the files that are news to that loop, up to ten ids. It reports and does not cover: a file stays in it until the loop views that file or id. For the top loop it also leaves out what a notice has already covered, so a member is not told twice. From D-3, naming a file in a status line marks that version told for the loop, so a later `swarm_wait` does not return for it again, and a version a wait reported to the member's own loop is covered, so that loop's status lines leave it out as they leave out notice-covered versions; a file stays in other loops' status lines until viewed ([swarm-wait.md](swarm-wait.md#what-wakes-a-wait)). It is how descendants, which get no notices, learn of changes, and how a member without `swarm_on_continue()` does.
+- **The status line** ends every `shared_memory` result, in every loop: `Shared memory: N files changed since you last viewed them (f-2, f-9 deleted).` when N > 0, listing the files that are news to that loop, up to ten ids. It reports and does not cover: a file stays in it until the loop views that file or id. For the top loop it also leaves out what a notice has already covered, so a member is not told twice. It is how descendants, which get no notices, learn of changes, and how a member without `swarm_on_continue()` does.
 
 ### Descendants
 
@@ -285,7 +284,7 @@ Evidence follows [swarm-communication.md Evidence and provenance](swarm-communic
 | Kind | When | Where | Fields beyond the common ones |
 |---|---|---|---|
 | `sent` | step 3, every write that reached the bus | writer's tool span | the full record (kind, op with `files`, payload, both span ids); `rejected`, the control and reason, if rejected. Later, with the bus hook: `decision`, and `original_payload` when modified |
-| `delivered` | step 4 | writer's tool span | record id; `seq`, the commit sequence number; the applied `files` (`file`, `path`, `base`, `version`, `deleted`); `notify` (running members to whose top loop the write is news, the writing member included when a child of it wrote); from D-3, `woke` (the ids of the waits whose capture the write added to, released by it or earlier; [swarm-wait.md Evidence](swarm-wait.md#evidence)) |
+| `delivered` | step 4 | writer's tool span | record id; `seq`, the commit sequence number; the applied `files` (`file`, `path`, `base`, `version`, `deleted`); `notify` (running members to whose top loop the write is news, the writing member included when a child of it wrote) |
 | `read` | a `view` returns | reader's tool span | the read id; `files`: `[{"file", "version", "record", "lines", "deleted"}]` (the last writer's record, the line range if any, and whether a tombstone was shown); `listing: true` for a directory view, with every listed file's id and version; `tool_span_id`; `loop` and `nested` |
 | `notified` | a notice line is added | the member's top loop span | notice id, the notice message's id, file ids and versions |
 
@@ -413,7 +412,7 @@ The plan's M2-7 and M2-8 carry this design, after M2-6; notices for the channel 
 3. **M2-8 (the shared-memory channel).** `src/inspect_swarm/_channel/shared_memory.py` (the factory, validation, `check()`, `instructions()`, `SharedMemoryState` with `tools()`, `validate()`, `admit()`, `apply()`, `notice_lines()`, the path grammar, the tool and its texts, the read budget); `src/inspect_swarm/_fence.py` (envelope rendering, the tag list, marker removal); `read` evidence in `_evidence.py`; `shared_memory` exported from `src/inspect_swarm/__init__.py` and imported by `src/inspect_swarm/_entrypoint.py`. Tests: `tests/test_shared_memory_channel.py`, `tests/test_shared_memory.py`, `tests/test_fence.py`, the synchronous-child case, and the background-child case if M2-5 has merged.
 4. **M2-9 (notices)** exercises the channel's `notice_lines()` as planned; its tests add the cases under Notices above.
 5. **M2-10 (communication metrics)** counts writes, views and rejections per member and per control.
-6. **M2-13 (waiting)** adds `max_wait`, `told`, `wake=True` and the channel's side of `swarm_wait`, as [swarm-wait.md](swarm-wait.md#implementation-plan) specifies.
+6. **M2-13 (waiting)** adds `max_wait`, `wake=True` and the channel's side of `swarm_wait` (`wakes()` and `news()`, reading `seen`), as [swarm-wait.md](swarm-wait.md#implementation-plan) specifies.
 7. **M2-11 (docs)** documents the channel, migration from `memory(instance=...)`, the seen rule, descendants, and that bridged members cannot use it yet; the example shaped like Epoch's port uses it.
 
 ### Changes to other designs and the plan
