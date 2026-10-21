@@ -38,13 +38,14 @@ def swarm_on_continue(
         return await inner(state)
 
     async def execute(state: AgentState) -> bool | str | AgentState:
-        result = await continuation(state)
         bus = current_bus.get()
         context = bus.member() if bus is not None else None
         if bus is None or context is None or bus.nested(context):
-            return result
-        # the member's own loop has the hook, whether or not it goes on
+            return await continuation(state)
+        # the member's own loop has the hook, whether it goes on, stops or the inner
+        # hook raises
         context.hooked = True
+        result = await continuation(state)
         # a pending notice does not keep a member going that would have stopped
         if result is not False:
             _notice(bus, context, result if isinstance(result, AgentState) else state)

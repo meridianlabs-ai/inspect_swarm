@@ -7,7 +7,7 @@ from inspect_ai.scorer._score import _scorers  # pyright: ignore[reportPrivateUs
 from inspect_ai.scorer._scorer import unique_scorer_name
 from pydantic import BaseModel
 
-from ._ledger import EventLog, MemberLedger, SpanPlaces, SwarmLedger
+from ._ledger import Calls, EventLog, MemberLedger, SpanPlaces, SwarmLedger, count_call
 
 # react()'s default score_value
 _score_value = value_to_float()
@@ -28,6 +28,9 @@ class CommMetrics(BaseModel):
     # a listing of it
     reads: int = 0
     listings: int = 0
+    # notices added to the member's own loop with a line for the channel (`notified`
+    # events)
+    notices: int = 0
 
 
 # One member's metrics.
@@ -74,9 +77,9 @@ class SwarmMetrics(BaseModel):
     # harness validity: members with no completed model call in their spans, in roster
     # order
     never_acted: list[str]
-    # harness validity, in roster order: members in notify mode with two or more
-    # completed model calls, to whose own loop a record was news, whose own loop never
-    # ran swarm_on_continue(); and, in a swarm with channels that have tools, members
+    # harness validity, in roster order: members in notify mode whose own loop, not a
+    # subagent's, completed two or more model calls, to whose own loop a record was
+    # news, and whose own loop never ran swarm_on_continue(); and, in a swarm with channels that have tools, members
     # with a completed model call whose loops never resolved swarm_tools(). The
     # defaults load metrics written before these fields.
     notify_unwired: list[str] = []
@@ -112,6 +115,8 @@ class MemberWiring:
     hooked: bool
     # a record was news to its own loop
     news: bool
+    # completed model calls in its own loop, not its subagents' (`own_steps`)
+    own_steps: int
 
 
 # A member's gate checks: the in-loop checks of its own submissions, as react() makes
@@ -157,6 +162,16 @@ def gate_checks(
             if first_pass is None:
                 first_pass = score.time - start
     return GateChecks(checks, passes, first_pass)
+
+
+# The completed model calls, cache replays included, whose nearest enclosing agent span
+# is `member_span`: the member's own loop's, not its subagents', as for gate checks.
+def own_steps(events: EventLog, member_span: str) -> int:
+    calls = Calls()
+    for call in events.calls.values():
+        if _agent_span(events, call.span_id) == member_span:
+            count_call(calls, call)
+    return calls.calls + calls.cache_replays
 
 
 def swarm_metrics(
@@ -215,7 +230,7 @@ def swarm_metrics(
             if w.delivery_effective == "notify"
             and w.news
             and not w.hooked
-            and _steps(m) >= 2
+            and w.own_steps >= 2
         ],
         # react() resolves its tools before its first model call
         tools_unwired=[
@@ -257,8 +272,9 @@ def _comm_metrics(
                 metrics.listings += 1
             case "read":
                 metrics.reads += 1
+            case "notified":
+                metrics.notices += 1
             case _:
-                # notices (`notified` events) are not counted yet
                 pass
     return comm
 

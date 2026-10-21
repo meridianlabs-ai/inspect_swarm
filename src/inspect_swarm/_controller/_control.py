@@ -40,6 +40,7 @@ from .._metrics import (
     MemberWiring,
     first_scorer,
     gate_checks,
+    own_steps,
     swarm_metrics,
 )
 from .._record import MemberResult, MemberState
@@ -462,6 +463,9 @@ class SwarmRun:
                             tools=m.context.loop is not None,
                             hooked=m.context.hooked,
                             news=m.context.news,
+                            own_steps=0
+                            if m.context.span_id is None
+                            else own_steps(interval.events, m.context.span_id),
                         )
                         for m in self._members
                     ],

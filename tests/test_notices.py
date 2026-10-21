@@ -31,6 +31,7 @@ from inspect_ai.model import (
     get_model,
 )
 from inspect_ai.tool import Tool, ToolChoice, ToolInfo, tool
+from inspect_ai.util import LimitExceededError, time_limit
 from pydantic import JsonValue
 
 from inspect_swarm import (
@@ -46,6 +47,7 @@ from inspect_swarm import (
 )
 from inspect_swarm._bus._bus import current_bus
 from inspect_swarm._evidence import METRICS_KEY
+from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
 
 from .swarm_runtime import evidence, sample
 from .test_bus import _as, _Board, _BoardState, _bus, _send
@@ -413,9 +415,29 @@ async def test_a_member_that_stops_gets_no_notice(tmp_path: Path) -> None:
     assert _comm(log, "notified") == []
 
 
+async def _stop(state: AgentState) -> bool:
+    return False
+
+
+async def _stuck(state: AgentState) -> bool:
+    # stops a stuck agent, as inspect_boltons' loop limits do
+    raise LimitExceededError("custom", value=1, limit=1, message="stuck")
+
+
+def _status(log: EvalLog, name: str) -> str | None:
+    assert log.samples is not None
+    record = SwarmResultRecord.model_validate(log.samples[0].store[RECORD_KEY])
+    return next(m.status for m in record.members if m.name == name)
+
+
+@pytest.mark.parametrize(
+    ("inner", "status"),
+    [(_stop, "submitted"), (_stuck, "member_limit:custom")],
+    ids=["false", "custom_limit"],
+)
 @pytest.mark.anyio
 async def test_a_member_that_stops_after_its_subagents_write_is_not_unwired(
-    tmp_path: Path,
+    inner: AgentContinue, status: str, tmp_path: Path
 ) -> None:
     # the subagent's prompt has no preamble, so _Turns names it ""
     turns = _Turns(
@@ -431,10 +453,6 @@ async def test_a_member_that_stops_after_its_subagents_write_is_not_unwired(
             ],
         }
     )
-
-    async def stop(state: AgentState) -> bool:
-        return False
-
     log = await _eval(
         swarm(
             member(
@@ -444,7 +462,7 @@ async def test_a_member_that_stops_after_its_subagents_write_is_not_unwired(
                     "tools": [noop(), swarm_tools()],
                     "subagents": [general()],
                     "todo_write": False,
-                    "on_continue": swarm_on_continue(stop),
+                    "on_continue": swarm_on_continue(inner),
                 },
                 name="w",
             ),
@@ -457,7 +475,56 @@ async def test_a_member_that_stops_after_its_subagents_write_is_not_unwired(
     [create] = _comm(log, "delivered")
     assert create["notify"] == ["w"]
     assert len(turns.inputs["w"]) == 1
+    assert _status(log, "w") == status
     assert _comm(log, "notified") == []
+    assert _metrics(log)["notify_unwired"] == []
+
+
+@pytest.mark.anyio
+async def test_a_member_limited_in_its_first_turn_is_not_unwired(
+    tmp_path: Path,
+) -> None:
+    # the child writes, then waits until the member's time limit ends the member
+    # inside its first turn, so the member's own loop reaches no boundary
+    turns = _Turns(
+        {
+            "w": [_call("agent", prompt="child task")],
+            "": [
+                _call(
+                    "shared_memory",
+                    command="create",
+                    path=f"{ROOT}/a.md",
+                    file_text="x",
+                ),
+                (_call("noop"), "never"),
+            ],
+        }
+    )
+    log = await _eval(
+        swarm(
+            member(
+                deepagent,
+                args={
+                    "model": turns.model(),
+                    "tools": [noop(), swarm_tools()],
+                    "subagents": [general()],
+                    "todo_write": False,
+                    "on_continue": swarm_on_continue(),
+                },
+                name="w",
+                limits=[time_limit(0.5)],
+            ),
+            channels=[shared_memory()],
+        ),
+        tmp_path,
+    )
+
+    # two completed calls and news to the member, whose hook never ran; one call was
+    # the child's
+    assert _status(log, "w") == "member_limit:time"
+    [create] = _comm(log, "delivered")
+    assert create["notify"] == ["w"]
+    assert len(turns.inputs["w"]) == 1
     assert _metrics(log)["notify_unwired"] == []
 
 
