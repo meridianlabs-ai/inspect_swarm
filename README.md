@@ -151,7 +151,7 @@ solver = swarm(
 
 ### Background work
 
-Native members support `deepagent(background=True)` and integer background limits. Work started with `background()` belongs to its member and uses its limits and sandbox. A member limit or swarm cap that the work reaches ends only that piece of work.
+Native members support `deepagent(background=True)` and integer background limits. Work started with `background()` belongs to its member and uses its limits and sandbox. A member limit or swarm cap ends the background task that reached it. A swarm cap also starts the swarm's soft stop; other work gets the effective grace period to finish calls already in flight.
 
 When the member's agent ends, its background work gets the swarm's grace period to finish work in flight. The swarm then cancels the rest and waits for its cleanup before the member ends. `Budget.grace=0` skips the grace wait.
 
