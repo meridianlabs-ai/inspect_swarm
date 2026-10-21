@@ -27,7 +27,7 @@ from inspect_ai.util._sandbox.context import (
 )
 from pydantic import BaseModel
 
-from inspect_swarm import Member, member, swarm
+from inspect_swarm import Member, filesystem, member, swarm
 from inspect_swarm._record import RECORD_KEY
 
 from .swarm_runtime import evidence, run_swarm
@@ -274,6 +274,34 @@ async def test_the_preamble_says_whether_members_share_a_sandbox() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
+    "channel,shared,notes",
+    [
+        (filesystem(shared_volume=True), "/shared", "/shared/notes.md"),
+        (
+            filesystem(shared="/mnt/team", notes="log.md", shared_volume=True),
+            "/mnt/team",
+            "/mnt/team/log.md",
+        ),
+    ],
+)
+async def test_the_filesystem_channel_describes_a_shared_volume_beside_own_sandboxes(
+    channel: Any, shared: str, notes: str
+) -> None:
+    seen: dict[str, dict[str, str]] = {}
+    with environments("default", "agent-1", "agent-2"):
+        await run_swarm(swarm(_probers(seen), channels=[channel]))
+    assert sorted(seen) == ["agent-1", "agent-2"]
+    for reach in seen.values():
+        assert reach["preamble"].endswith(
+            "You work in your own sandbox, which no other member can reach, except for the shared directory described below.\n\n"
+            f"{shared} is the same directory in every member's sandbox. "
+            "Share files with the other members there. They use it at the same time as you, so files they change there can change under you. "
+            f"Read {notes} before you start and again as you work, and add what you learn or decide to the end of it, without changing what others wrote."
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
     "names,visible,missing",
     [
         (
@@ -307,7 +335,12 @@ async def test_a_sandbox_the_sample_lacks_is_refused_at_swarm_start(
         (
             lambda: member(idle, count=2, sandbox="{member}"),
             ["filesystem"],
-            "the filesystem channel describes a sandbox the members share",
+            r"the filesystem channel describes a sandbox the members share, .* use filesystem\(shared_volume=True\)",
+        ),
+        (
+            lambda: member(idle, count=2),
+            [filesystem(shared_volume=True)],
+            r"filesystem\(shared_volume=True\) describes members with their own sandboxes",
         ),
         (
             lambda: [member(idle, name="a", sandbox="a"), member(idle, name="b")],
@@ -330,7 +363,7 @@ async def test_a_sandbox_the_sample_lacks_is_refused_at_swarm_start(
     ],
 )
 def test_swarm_refuses_rosters_whose_members_do_not_each_have_their_own_sandbox(
-    members: Callable[[], Any], channels: list[str], match: str
+    members: Callable[[], Any], channels: list[Any], match: str
 ) -> None:
     with pytest.raises(ValueError, match=match):
         swarm(members(), channels=channels)

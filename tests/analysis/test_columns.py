@@ -14,14 +14,21 @@ from inspect_ai.log import (
     EvalLog,
     EvalSample,
     EvalSpec,
+    read_eval_log,
     write_eval_log,
 )
 from inspect_ai.model import ModelUsage
 
 from inspect_swarm import Budget, member, swarm
 from inspect_swarm._evidence import LEDGER_KEY
-from inspect_swarm._ledger import Calls, MemberLedger, Meter, SwarmLedger
-from inspect_swarm.analysis import SwarmColumns
+from inspect_swarm.analysis import (
+    Calls,
+    MemberLedger,
+    Meter,
+    SwarmColumns,
+    SwarmLedger,
+    swarm_ledger,
+)
 from tests.swarm_runtime import generator, scripted_model
 
 
@@ -231,3 +238,47 @@ def test_swarm_columns_read_the_ledger_a_swarm_writes(tmp_path: Path) -> None:
         swarm_unpriced=0,
         swarm_unpriced_models="[]",
     )
+
+
+def test_swarm_ledger_reads_the_ledger_a_swarm_writes(tmp_path: Path) -> None:
+    model = scripted_model(cost=1.5)
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            member(generator, args={"model": model, "answer": "42"}, name="m", count=2),
+            channels=[],
+        ),
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    [sample] = read_eval_log(log.location).samples or []
+    ledger = swarm_ledger(sample)
+    assert isinstance(ledger, SwarmLedger)
+    assert [m.name for m in ledger.members] == ["m-1", "m-2"]
+    assert [m.meter.cost for m in ledger.members] == [
+        pytest.approx(1.5),
+        pytest.approx(1.5),
+    ]
+
+
+def test_swarm_ledger_is_none_without_a_ledger() -> None:
+    assert swarm_ledger(_sample(1, {})) is None
+
+
+def test_swarm_ledger_refuses_a_ledger_it_cannot_read() -> None:
+    sample = _sample(1, {}, {**_ledger(), "version": 2})
+    with pytest.raises(
+        ValueError, match="Sample 1 .*ledger this inspect_swarm cannot read"
+    ):
+        swarm_ledger(sample)
+
+
+def test_ledger_schema_describes_every_field() -> None:
+    schema = SwarmLedger.model_json_schema()
+    models = {"SwarmLedger": schema} | {
+        name: schema["$defs"][name]
+        for name in ("MemberLedger", "Meter", "Calls", "Budget")
+    }
+    for name, model in models.items():
+        assert model.get("description"), name
+        for field, prop in model["properties"].items():
+            assert prop.get("description"), f"{name}.{field}"

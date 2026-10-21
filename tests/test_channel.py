@@ -119,6 +119,42 @@ def test_filesystem_refuses_a_scratch_template_without_exactly_the_member_placeh
         filesystem(scratch=scratch)
 
 
+def test_filesystem_refuses_a_scratch_with_a_shared_volume() -> None:
+    with pytest.raises(ValueError, match="scratch is not used with shared_volume=True"):
+        filesystem(scratch="/tmp/{member}", shared_volume=True)
+
+
+_OUTSIDE = "notes must be inside shared"
+_RELATIVE = "shared must be an absolute path"
+
+
+@pytest.mark.parametrize(
+    "shared,notes,shared_volume,refused",
+    [
+        ("/shared", "notes.md", True, None),
+        ("/shared", "team/notes.md", True, None),
+        ("/shared", "/shared/notes.md", True, None),
+        ("/shared", "../notes.md", True, _OUTSIDE),
+        ("/shared", "/tmp/notes.md", True, _OUTSIDE),
+        ("/shared", ".", True, _OUTSIDE),
+        # "../../notes.md" would start with "../"
+        ("..", "../notes.md", True, _RELATIVE),
+        ("team", "notes.md", True, _RELATIVE),
+        # without a shared volume the whole sandbox is shared
+        ("/shared", "/tmp/notes.md", False, None),
+        ("team", "notes.md", False, None),
+    ],
+)
+def test_filesystem_with_a_shared_volume_refuses_paths_outside_it(
+    shared: str, notes: str, shared_volume: bool, refused: str | None
+) -> None:
+    if refused is None:
+        filesystem(shared=shared, notes=notes, shared_volume=shared_volume)
+    else:
+        with pytest.raises(ValueError, match=refused):
+            filesystem(shared=shared, notes=notes, shared_volume=shared_volume)
+
+
 @agent
 def notes_writer(notes: str) -> Agent:
     async def execute(state: AgentState) -> AgentState:
