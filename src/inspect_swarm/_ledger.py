@@ -11,7 +11,7 @@ from inspect_ai.log._transcript import transcript
 from inspect_ai.model import ModelAPI, ModelUsage
 from inspect_ai.model._model import sample_model_usage
 from inspect_ai.util import Limit, current_span_id, sample_limits
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ._budget import Budget, CostPair, cost_node, token_node
 
@@ -33,106 +33,147 @@ _TOKEN_FIELDS = (
 )
 
 
-# A cost pair's figures: its token-tree node's usage (every non-suspended call recorded
-# in its context) and its accumulated cost (priced calls, suspended ones included).
 class Meter(BaseModel):
+    """Usage and cost recorded by one of the swarm's meters.
+
+    A meter counts the model calls made in its context: one member's, the runtime's, the final step's, or the whole swarm's.
+    """
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
     usage: ModelUsage
+    """Token usage of the calls recorded, except those made while token metering was suspended (approval and review calls)."""
+
     cost: float
-    # cost recorded while token metering was suspended (approval and review calls)
+    """Cost in dollars of the priced calls recorded, suspended calls included."""
+
     suspended_cost: float
+    """The part of `cost` recorded while token metering was suspended (approval and review calls)."""
 
 
-# Counts of the model events in an interval.
 class Calls(BaseModel):
-    # completed, non-cache model calls
-    calls: int = 0
-    # events with cache="read": charged zero
-    cache_replays: int = 0
-    # attempts that ended in an error, cancellation included, and the requests a
-    # provider's client retried inside one call: usage unknown
-    errored: int = 0
-    # completed with output but no usage
-    no_usage: int = 0
-    # completed with usage whose total_cost is None
-    unpriced: int = 0
+    """Counts of the model events in the swarm, or in one member's spans.
 
-    def count(self, call: "CallRecord") -> None:
-        if call.cache_read:
-            self.cache_replays += 1
-            return
-        # each retry follows a failed request whose usage the event does not keep
-        self.errored += call.retries
-        if call.errored or call.pending:
-            # an event still pending once the swarm has drained never completed
-            self.errored += 1
-        else:
-            self.calls += 1
-            if call.usage is None:
-                self.no_usage += 1
-            elif call.usage.total_cost is None:
-                # read when the swarm ends: Inspect prices a call's usage in place,
-                # after its event's last update when the call reaches a limit
-                self.unpriced += 1
+    `errored`, `no_usage` and `unpriced` count calls whose cost is missing, so any of them above zero makes the cost a lower bound.
+    """
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    calls: int = 0
+    """Model calls that completed, cache replays excluded."""
+
+    cache_replays: int = 0
+    """Model events replayed from the cache (`cache="read"`). They cost nothing."""
+
+    errored: int = 0
+    """Model calls that ended in an error or were cancelled, plus the requests a provider's client retried inside one call. Their usage is unknown."""
+
+    no_usage: int = 0
+    """Model calls that completed with output but no usage."""
+
+    unpriced: int = 0
+    """Model calls that completed with usage but no cost (`total_cost` is `None`)."""
 
 
 class MemberLedger(BaseModel):
+    """One member's entry in the swarm's ledger."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
     name: str
-    # the member's status, or None for a member never started
+    """The member's name."""
+
     status: str | None
+    """How the member ended (`submitted`, `swarm_cap`, ...), or `None` for a member never started."""
+
     bridged: bool
-    # the member's lever
+    """The member runs a CLI agent through Inspect's agent bridge."""
+
     meter: Meter
-    # events in the member's spans
+    """Usage and cost of the calls made in the member's context."""
+
     calls: Calls
-    # the member's scope was cancelled (hard stop, time limit, bridged branch)
+    """Model events in the member's spans."""
+
     cancelled: bool
+    """The member's agent was cancelled: by the hard stop after a grace period, a member time limit, or a cancellation from outside the swarm."""
 
 
-# Realized usage and cost of one run of the swarm, and how complete they are. Written
-# once, when the swarm ends, as an InfoEvent and a store entry.
 class SwarmLedger(BaseModel):
+    """Realized usage and cost of one run of the swarm, and how complete they are.
+
+    The swarm writes its ledger once, when it ends, to the sample store as `inspect_swarm:ledger` and as an `InfoEvent` with source `inspect_swarm`. Read it from a sample with `swarm_ledger()`.
+
+    The store entry's shape follows `version`. This inspect_swarm reads version 1 only.
+    """
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
     version: Literal[1] = 1
-    # as configured
+    """Format version of the ledger."""
+
     budget: Budget
-    # derived or explicit, per kind
+    """The swarm's budget as configured."""
+
     caps: dict[str, float | None]
-    # at swarm start
+    """The swarm's caps, derived or explicit, keyed by `cost` (dollars), `tokens` and `time` (seconds). `None` for a kind with no cap."""
+
     sample_limits: dict[str, float | None]
+    """The sample's limits when the swarm started, keyed by `token`, `cost`, `message`, `turn`, `working` and `time`. `None` for a limit not set."""
+
     members: list[MemberLedger]
-    # the runtime lever: controller and in-run verifier calls
+    """Each member, in roster order."""
+
     runtime: Meter
-    # the final meter
+    """Calls made by the swarm's runtime, such as the controller's."""
+
     final: Meter
-    # members, runtime, final step, anything else in the swarm's context
+    """Calls made by the final step, which chooses the answer."""
+
     swarm: Meter
-    # every event in the swarm's span tree: members, runtime, final step
+    """Every call in the swarm's context: the members, the runtime, the final step and anything else."""
+
     calls: Calls
-    # per-call count from the swarm meter's token-tree record()
+    """Model events in the swarm's span tree: the members, the runtime and the final step."""
+
     unpriced_calls_recorded: int
-    # the sample's model usage over the swarm's lifetime
+    """Calls the swarm meter recorded with usage but no cost."""
+
     sample_delta: ModelUsage
-    # tokens: sample_delta minus swarm.usage; cost: sample_delta's cost minus swarm.cost
+    """The sample's model usage over the swarm's lifetime, summed over its models."""
+
     unattributed: ModelUsage
-    # models in sample_delta with tokens but no cost
+    """What the sample used over the swarm's lifetime that the swarm meter did not record: tokens are `sample_delta` minus `swarm.usage`, and `total_cost` is `sample_delta`'s cost minus `swarm.cost`."""
+
     unpriced_models: list[str]
-    # loaded ModelAPI classes that override compact(), at start or end
+    """Models in `sample_delta` with tokens but no cost."""
+
     native_compaction_classes: list[str]
-    # per capped kind: usage at the end minus the cap, if positive
+    """Loaded `ModelAPI` classes that override `compact()`, when the swarm started or ended. Native compaction emits no event, so the ledger cannot count its calls."""
+
     overshoot: dict[str, float]
-    # the reason of the swarm's own stop, the first one begun; None when none began
+    """How far usage at the end went past each cap, keyed by `cost`, `tokens` and `time`. Only kinds over their cap appear."""
+
     stop_reason: str | None
-    # the sample limit (sample_limit:<type>) or operator interrupt that ended the swarm,
-    # even during its stop; "unknown" when an outside cause may have ended it but
-    # cannot be attributed; None when nothing from outside ended it
+    """The reason the swarm stopped its members, from the first stop begun. `None` when no stop began."""
+
     ended_by: str | None
-    # a foreign error or outside cancellation ended the swarm
+    """The sample limit (`sample_limit:<type>`) or operator interrupt (`operator`) that ended the swarm, even during its own stop. `unknown` when an outside cause may have ended it but cannot be named. `None` when nothing from outside ended it."""
+
     interrupted: bool
-    # the final step was cancelled
+    """The swarm did not finish: an error, a limit or a cancellation ended it before or during its final step."""
+
     final_cancelled: bool
-    # the sample resumed from a checkpoint
+    """The final step was cancelled."""
+
     resumed: bool
+    """The sample resumed from a checkpoint, so the swarm restarted its caps from zero."""
+
     total_complete: bool
+    """No call is known to be missing from the swarm's usage and cost: no member or final step was cancelled, the swarm was not interrupted, every call completed with priced usage, every model in `sample_delta` is priced, and no loaded model class compacts natively."""
+
     attribution_complete: bool
+    """`total_complete`, and the swarm meter recorded all the sample used over the swarm's lifetime: `unattributed` is zero, to within rounding."""
 
 
 # What the ledger needs to know about one member when the swarm ends.
@@ -359,10 +400,30 @@ def count_calls(events: EventLog, places: SpanPlaces) -> tuple[Calls, dict[str, 
     for call in events.calls.values():
         inside, member = places(call.span_id)
         if inside:
-            total.count(call)
+            _count(total, call)
         if member is not None:
-            per_member.setdefault(member, Calls()).count(call)
+            _count(per_member.setdefault(member, Calls()), call)
     return total, per_member
+
+
+# Counts one model event, as it last stood.
+def _count(calls: Calls, call: CallRecord) -> None:
+    if call.cache_read:
+        calls.cache_replays += 1
+        return
+    # each retry follows a failed request whose usage the event does not keep
+    calls.errored += call.retries
+    if call.errored or call.pending:
+        # an event still pending once the swarm has drained never completed
+        calls.errored += 1
+    else:
+        calls.calls += 1
+        if call.usage is None:
+            calls.no_usage += 1
+        elif call.usage.total_cost is None:
+            # read when the swarm ends: Inspect prices a call's usage in place,
+            # after its event's last update when the call reaches a limit
+            calls.unpriced += 1
 
 
 # Every loaded ModelAPI class that overrides compact(), built-in or custom. Native

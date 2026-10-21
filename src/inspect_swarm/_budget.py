@@ -37,7 +37,9 @@ class Budget(BaseModel):
     Every field is a plain value, so each can be a task parameter, and two budgets that differ in any field are logged as different arguments.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(
+        frozen=True, extra="forbid", use_attribute_docstrings=True
+    )
 
     cost: float | None = None
     """Swarm cost cap in dollars. `None` derives it from the sample's cost limit."""

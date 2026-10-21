@@ -231,7 +231,22 @@ df["score"] = df["score_match"].map(value_to_float(), na_action="ignore")
 df.groupby("log")[["score", "swarm_cost"]].mean()
 ```
 
-`swarm_cost` is the sample's recorded priced cost, including scorer calls. `swarm_complete` requires the swarm's ledger to mark its interval complete and all recorded model usage to be priced. It does not check for missing usage outside the swarm, including scorer calls. The `SwarmColumns` docstring lists every column.
+`swarm_cost` is the sample's recorded priced cost, including scorer calls. `swarm_complete` requires the swarm's ledger to mark its interval complete and all recorded model usage to be priced. It does not check for missing usage outside the swarm, including scorer calls. The `inspect_swarm.analysis` module docstring lists every column.
+
+The columns hold no per-member data. `swarm_ledger()` reads a sample's whole ledger as a `SwarmLedger`, whose `members` are `MemberLedger`s with a `Meter` and `Calls` each. All are in `inspect_swarm.analysis`, and `SwarmLedger.model_json_schema()` describes every field. For example, each member's cost:
+
+```python
+from inspect_ai.log import read_eval_log
+
+from inspect_swarm.analysis import swarm_ledger
+
+log = read_eval_log("logs/my-eval.eval")
+for sample in log.samples or []:
+    ledger = swarm_ledger(sample)
+    if ledger is not None:
+        for m in ledger.members:
+            print(sample.id, sample.epoch, m.name, m.meter.cost)
+```
 
 ## Logs and the store
 
