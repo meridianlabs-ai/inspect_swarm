@@ -295,7 +295,6 @@ class _SharedMemoryState:
         self._applied: dict[str, list[_Change]] = {}
         self._tool: Tool | None = None
         self.read_budget = _read_budget(limits, self._roster)
-        self.news_budget = _news_budget(self._roster)
 
     def tools(self) -> list[Tool]:
         if self._tool is None:
@@ -1149,17 +1148,3 @@ def _read_budget(limits: _Limits, roster: Sequence[str]) -> int:
     )
     tombstone = utf8_bytes(f"{'x' * _ID_BYTES} was deleted by {'x' * writer}.")
     return max(file_view, listing, tombstone) + status
-
-
-def _news_budget(roster: Sequence[str]) -> int:
-    # the most UTF-8 bytes of a wait's line for this roster: a count and ids of up to
-    # 16 bytes, deleted markers, and every member as a writer
-    count = "9" * _ID_BYTES
-    return utf8_bytes(
-        _changed_where_you_waited(
-            int(count),
-            _id_list([f"{'x' * _ID_BYTES} deleted"] * (_LISTED_IDS + 1), int(count)),
-            ", ".join(roster),
-            "x" * _ID_BYTES,
-        )
-    )

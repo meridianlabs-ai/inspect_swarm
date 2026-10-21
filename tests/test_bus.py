@@ -761,8 +761,6 @@ async def test_a_stop_refuses_records_from_members_still_running() -> None:
 
 class _WakingState(_BoardState):
     # reports to a wait every applied record whose payload names the waiting member
-    news_budget = 100
-
     def wait_check(self, spec: WaitSpec) -> None:
         return None
 
@@ -792,6 +790,11 @@ class _LongerWaking(_Waking):
 
 class _WakingWithoutWaits(_Board):
     max_wait = 10
+
+
+class _WakingWithoutState(Channel):
+    # opens no state, as an instructions-only channel does
+    max_wait = 3600
 
 
 @pytest.mark.anyio
@@ -826,9 +829,25 @@ async def test_only_a_record_with_wake_releases_a_wait() -> None:
 
 
 @pytest.mark.anyio
-async def test_a_channel_with_max_wait_needs_a_waiting_state() -> None:
+@pytest.mark.parametrize(
+    "channels",
+    [
+        pytest.param(lambda: [_WakingWithoutWaits()], id="state-without-waits"),
+        pytest.param(lambda: [_WakingWithoutState()], id="no-state"),
+        pytest.param(lambda: [_Waking(), _WakingWithoutState()], id="no-state-beside"),
+    ],
+)
+async def test_a_channel_with_max_wait_needs_a_waiting_state(
+    channels: Callable[[], list[Channel]],
+) -> None:
     with pytest.raises(TypeError, match="does not implement WaitingState"):
-        _bus(channels=[_WakingWithoutWaits()])
+        _bus(channels=channels())
+
+
+@pytest.mark.anyio
+async def test_an_instructions_only_channel_needs_no_waiting_state() -> None:
+    bus, _ = _bus(channels=[_Locks(), _Waking()])
+    assert bus.waits.max_wait == 5
 
 
 @agent(name="inspect_swe/bus_test_cli")

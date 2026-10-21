@@ -1,3 +1,4 @@
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
@@ -10,7 +11,6 @@ from pydantic import JsonValue
 from .._budget import MemberContext
 from .._channel._channel import WaitingState, WaitSpec
 from .._evidence import comm_waited
-from .._fence import utf8_bytes
 from ._record import Record
 
 if TYPE_CHECKING:
@@ -35,10 +35,6 @@ _ALL_WAITING = (
 )
 _STOPPING = "The swarm is stopping."
 
-# a member's status is given at most this many bytes when the wait budget is computed:
-# `member_limit:` and a limit type
-_STATUS_BYTES = len("member_limit:") + 16
-
 
 # One call of swarm_wait while it is registered: its event and release reason, the
 # commits that released it for news, and its idle clock. A waiter is released when its
@@ -50,6 +46,10 @@ class _Waiter:
     channels: list[str]
     event: anyio.Event = field(default_factory=anyio.Event)
     reason: Outcome | None = None
+    # the waiting task, and the earliest deadline it waits under, so that a wait whose
+    # timeout or cancellation has fired counts as over before its task resumes
+    task: anyio.TaskInfo | None = None
+    deadline: float = math.inf
     woken_by: list[int] = field(default_factory=list[int])
     # the start of the open idle interval, and the idle time of the closed ones
     idle_since: float | None = None
@@ -83,9 +83,6 @@ class Waits:
         self._tool: Tool | None = None
         # the swarm's start on the runtime's clock, for the evidence's swarm times
         self.start = 0.0
-        self.budget = (
-            0 if max_wait is None else _wait_budget(self._roster, states, max_wait)
-        )
 
     def tool(self) -> Tool | None:
         if self.max_wait is None:
@@ -134,7 +131,8 @@ class Waits:
         for waiter in self._unreleased():
             if waiter.idle_since is None and self._idle(waiter):
                 waiter.idle_since = now
-        unreleased = self._unreleased()
+        # a wait whose timeout or cancellation has fired is about to return
+        unreleased = [w for w in self._unreleased() if not _fired(w)]
         if not unreleased:
             return
         if any(
@@ -174,7 +172,12 @@ class Waits:
         self._count += 1
 
         started = anyio.current_time()
-        waiter = _Waiter(spec, channels)
+        waiter = _Waiter(
+            spec,
+            channels,
+            task=anyio.get_current_task(),
+            deadline=min(started + effective, anyio.current_effective_deadline()),
+        )
         outcome: Outcome | None = None
         files: list[JsonValue] = []
         ended: list[JsonValue] = []
@@ -272,7 +275,7 @@ class Waits:
             },
             # alone in its loop's turn, so a loop in a wait is doing nothing else
             parallel=False,
-            # the wait budget bounds every result
+            # results are fixed lines of ids and names, which nothing should cut
             max_output=0,
         ).as_tool()
 
@@ -319,6 +322,7 @@ class Waits:
         return (
             waiter.spec.own
             and waiter.reason is None
+            and not _fired(waiter)
             and self._contexts[waiter.spec.member].background_running == 0
         )
 
@@ -326,6 +330,14 @@ class Waits:
         return any(
             w.spec.member == name and self._idle(w) for w in self._waiters.values()
         )
+
+
+def _fired(waiter: _Waiter) -> bool:
+    # the wait's timeout or a deadline around it has passed, or its task has a
+    # cancellation pending, though the task has not resumed yet
+    return anyio.current_time() >= waiter.deadline or (
+        waiter.task is not None and waiter.task.has_pending_cancellation()
+    )
 
 
 def _close_idle(waiter: _Waiter) -> None:
@@ -350,20 +362,3 @@ def _release_line(outcome: Outcome, name: str, effective: int) -> str | None:
             return f"Nothing you waited for happened in {effective} s."
         case _:
             return None
-
-
-def _wait_budget(
-    roster: Sequence[str], states: Mapping[str, WaitingState], max_wait: int
-) -> int:
-    # the most UTF-8 bytes a wait can return for this configuration and roster: each
-    # channel's news, an ends line naming every member with the longest status, and the
-    # longest release line, each on its line
-    name = max(utf8_bytes(n) for n in roster)
-    ends = utf8_bytes(_ends_line([(n, "x" * _STATUS_BYTES) for n in roster]))
-    release = max(
-        utf8_bytes(line)
-        for outcome in ("all_waiting", "stopping", "member_ending", "timeout")
-        if (line := _release_line(outcome, "x" * name, max_wait)) is not None
-    )
-    news = sum(state.news_budget + 1 for state in states.values())
-    return news + ends + 1 + release

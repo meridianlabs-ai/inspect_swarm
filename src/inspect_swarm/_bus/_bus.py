@@ -67,6 +67,13 @@ class Bus:
         )
         for channel in channels:
             state = channel.open(run)
+            if channel.max_wait is not None and not all(
+                callable(getattr(state, method, None))
+                for method in ("wait_check", "wakes", "news")
+            ):
+                raise TypeError(
+                    f"{type(channel).__name__} sets max_wait, but the state its open() returned does not implement WaitingState."
+                )
             if state is None:
                 continue
             if channel.name is None or channel.prefix is None:
@@ -78,13 +85,6 @@ class Bus:
             self._prefixes[channel.name] = channel.prefix
             self._reach[channel.name] = channel.reach
             if channel.max_wait is not None:
-                if not isinstance(getattr(state, "news_budget", None), int) or not all(
-                    callable(getattr(state, method, None))
-                    for method in ("wait_check", "wakes", "news")
-                ):
-                    raise TypeError(
-                        f"{type(channel).__name__} sets max_wait, but the state its open() returned does not implement WaitingState."
-                    )
                 waiting[channel.name] = cast(WaitingState, state)
                 max_wait = max(max_wait or 0, channel.max_wait)
         self._waits = Waits(self, self._contexts, waiting, max_wait)

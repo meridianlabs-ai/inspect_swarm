@@ -173,11 +173,6 @@ class WaitingState(ChannelState, Protocol):
     The bus calls these methods with no `await` around them. None of them marks anything: a loop acknowledges what a wait names by reading it with the channel's own tool.
     """
 
-    @property
-    def news_budget(self) -> int:
-        """The most UTF-8 bytes `news()` can return in its lines for this run, newlines between them included."""
-        ...
-
     def wait_check(self, spec: WaitSpec) -> None:
         """Check a wait's filter when the wait is called.
 
