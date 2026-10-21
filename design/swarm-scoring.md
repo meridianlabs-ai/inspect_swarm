@@ -99,7 +99,7 @@ In inspect_ai unless noted.
   - For `react()` that is a submit; for a bridged agent it is the agent returning.
   - A member that ended with any other status (stopped, its own or the swarm's limit, cancelled, errored) has an output but no submission.
   - A member with background work ends after its drain (M2-5). A foreign error from one of its background children during the drain makes it `errored`, even when its agent had submitted, so that submission never enters the provisional answer, which holds only ended members' submissions ([swarm-background-members.md Statuses, ended, and the record](swarm-background-members.md#statuses-ended-and-the-record)).
-  - Each member submits at most once in M1, because a member runs once and `react()`'s internal attempts are not visible outside it.
+  - Each member submits at most once in M1, because a member runs once and `react()`'s internal attempts are not visible outside it. From M2 a member's own retries are visible and counted as gate checks: each submission `react()` checks with the task's first scorer, in the member's own agent span, is one (`gate_checks`, `gate_passes` and `first_pass_time` on `MemberResult` and in the metrics, passes read with the default `value_to_float()`; [swarm-lean-open-problems.md Recommendation 5](swarm-lean-open-problems.md#5-m2-gate-checks-as-metrics)). The submission is still the member's output when it ends.
 - **Not started.** A member the controller never started stays `pending`. It has no output and no submission.
 - **Final answer.** What the swarm returns as its `AgentState.output`.
 - **Swarm time.** Seconds on the runtime's clock (`anyio.current_time()`) from the swarm's start. Every ordering by time, in the swarm and in the analysis, uses it.
@@ -136,6 +136,9 @@ class MemberResult(BaseModel):
     status: str | None                # the limits deep dive's status once ended, else None
     submitted: bool                   # status == "submitted"
     time: float | None                # swarm time when the member ended, after any background drain (M2-5)
+    gate_checks: int = 0              # M2: its own submissions checked in its loop by the task's first scorer
+    gate_passes: int = 0              # M2: those checks that passed under the default value_to_float()
+    first_pass_time: float | None = None  # M2: swarm time of its first passing check
 
 class FinalRecord(BaseModel):
     mode: str | None                  # the mode that produced the answer: "first" in M1
@@ -152,6 +155,7 @@ class SwarmResultRecord(BaseModel):
 - **When it is written.** The runtime writes the record when the swarm starts, with every roster member `pending` and a provisional final record with `reason="no_submissions"`. It updates the record when a member starts, when one ends (adding its status and time) and when the provisional answer changes. It finalises the record after the stop procedure.
   - An outer limit that ends the sample early therefore leaves an accurate record with `provisional: true`.
   - Members the controller never started stay `pending` in the final record, which is how the evidence records them as not started.
+  - The gate fields are filled in when the member ends, so a member that has not ended has 0, 0 and `None`. Records written before M2 load with those defaults. A pass assumes `react()`'s default `score_value` converter, `value_to_float()`, so a member with its own converter can record passes that differ from its own gate (decision: Ransom, 2026-10-20).
 - **Why the store.** It is in the store, not only in events, because re-scoring rebuilds `TaskState.store` and nothing else from the run (`src/inspect_ai/_eval/score.py:461-475`). Part 2's scorers read it from there.
 - **Owned by the runtime, readable by member code.** Only the runtime writes `inspect_swarm:result`; task code (tools, member builders, controllers, scorers, Sentinel protocols) must not write it. Every member's Python code shares the sample's one store, so it can read the record while the swarm runs. Models cannot reach the store themselves, and built-in tools read only their own namespaces, but a tool written to read this key gives the members that call it a view of each other's results: a channel between members outside the bus, with none of its fencing or evidence. In M1 that view is each peer's state, status and time, not its output; Part 2's record adds outputs ([What the record adds](#what-the-record-adds)). The user docs say so (decision: Ransom, 2026-10-14).
 - **Evidence events.** Each member's end and the final selection also produce an evidence `InfoEvent` with `source="inspect_swarm"` and the payload shape swarm-communication.md uses for its own evidence:

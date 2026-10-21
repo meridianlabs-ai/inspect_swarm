@@ -5,12 +5,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from inspect_ai.event import Event, ModelEvent, SpanBeginEvent, ToolEvent
+import anyio
+from inspect_ai.event import Event, ModelEvent, ScoreEvent, SpanBeginEvent, ToolEvent
 from inspect_ai.log._samples import sample_active
 from inspect_ai.log._transcript import transcript
 from inspect_ai.model import ModelAPI, ModelUsage
 from inspect_ai.model._model import sample_model_usage
+from inspect_ai.scorer import Value
 from inspect_ai.util import Limit, current_span_id, sample_limits
+from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import BaseModel
 
 from ._budget import Budget, CostPair, cost_node, token_node
@@ -174,19 +177,35 @@ class ToolRecord:
     arguments: str
 
 
-# The spans, model events and tool events the transcript reports during the swarm's
-# interval, kept as they happen rather than read back from the history: a bounded
-# transcript serializes an event at its last update, which can come before Inspect
-# prices its usage. Tool events are kept in the order they began.
+# An intermediate score event, from one task scorer in a call to score().
+@dataclass(frozen=True)
+class ScoreRecord:
+    span_id: str | None
+    # the scorer's name, as score() names it
+    scorer: str | None
+    value: Value
+    # the runtime's clock (anyio.current_time()) when it was reported
+    time: float
+
+
+# The spans, model events, tool events and intermediate score events the transcript
+# reports during the swarm's interval, kept as they happen rather than read back from
+# the history: a bounded transcript serializes an event at its last update, which can
+# come before Inspect prices its usage. Tool and score events are kept in the order
+# they began.
 class EventLog:
     def __init__(self) -> None:
         self.parents: dict[str, str | None] = {}
+        self.agent_spans: set[str] = set()
         self.calls: dict[str, CallRecord] = {}
         self.tools: dict[str, ToolRecord] = {}
+        self.scores: list[ScoreRecord] = []
 
     def __call__(self, event: Event) -> None:
         if isinstance(event, SpanBeginEvent):
             self.parents[event.id] = event.parent_id
+            if event.type == AGENT_SPAN_TYPE:
+                self.agent_spans.add(event.id)
         elif isinstance(event, ModelEvent):
             # the transcript gives every event a uuid before it reports it
             assert event.uuid is not None
@@ -206,6 +225,16 @@ class EventLog:
                 arguments=json.dumps(
                     event.arguments, sort_keys=True, separators=(",", ":")
                 ),
+            )
+        elif isinstance(event, ScoreEvent) and event.intermediate:
+            # score() reports its events from the scoring task, so the clock is there
+            self.scores.append(
+                ScoreRecord(
+                    span_id=event.span_id,
+                    scorer=event.scorer,
+                    value=event.score.value,
+                    time=anyio.current_time(),
+                )
             )
 
 
