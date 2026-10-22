@@ -314,6 +314,10 @@ class MemberContext:
     # first resolved, and whether ACP was bound to that channel then
     loop: AgentChannel | None = None
     acp_bound: bool | None = None
+    # for the wiring checks: whether swarm_on_continue() has run in a loop of the
+    # member's other than a nested one, and whether a record was news to the member
+    hooked: bool = False
+    news: bool = False
     # set when the member starts background work, which bridged members cannot have
     background: bool = False
     # the member's background tasks not yet finished, kept by its owner, for the bus's

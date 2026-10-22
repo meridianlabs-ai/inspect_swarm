@@ -17,6 +17,7 @@ from ._channel import (
     Channel,
     ChannelRun,
     ChannelState,
+    NoticeLine,
     WaitNews,
     WaitSpec,
     swarm_channel,
@@ -386,7 +387,7 @@ class _SharedMemoryState:
             "files": [change.entry(record.kind) for change in changes],
         }
 
-    def notice_lines(self, member: str) -> list[str]:
+    def notice_lines(self, member: str) -> list[NoticeLine]:
         # the files whose current versions are news to the member's own loop and no
         # earlier notice covered, which this notice then covers
         files = self._news(member, self._top_loop(member), own=True)
@@ -398,8 +399,16 @@ class _SharedMemoryState:
             covered[f.id] = f.version
         writers = ", ".join(sorted({f.writer for f in files}))
         return [
-            f"[Swarm notice] {_files_changed(len(files), 'shared memory ')} ({labels}; by {writers}). "
-            f'View one with shared_memory(command="view", path="{files[0].id}"), or list them with path="{ROOT}".'
+            NoticeLine(
+                f"[Swarm notice] {_files_changed(len(files), 'shared memory ')} ({labels}; by {writers}). "
+                f'View one with shared_memory(command="view", path="{files[0].id}"), or list them with path="{ROOT}".',
+                {
+                    "files": [
+                        {"file": f.id, "version": f.version, "record": f.record}
+                        for f in files
+                    ]
+                },
+            )
         ]
 
     # waiting: what a swarm_wait of a loop watches, by D-1's `seen` alone; nothing here

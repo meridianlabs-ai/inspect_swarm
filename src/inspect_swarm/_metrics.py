@@ -1,12 +1,13 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
 from inspect_ai.scorer import value_to_float
 from inspect_ai.scorer._score import _scorers  # pyright: ignore[reportPrivateUsage]
 from inspect_ai.scorer._scorer import unique_scorer_name
 from pydantic import BaseModel
 
-from ._ledger import EventLog, MemberLedger, SpanPlaces, SwarmLedger
+from ._ledger import Calls, EventLog, MemberLedger, SpanPlaces, SwarmLedger, count_call
 
 # react()'s default score_value
 _score_value = value_to_float()
@@ -27,6 +28,9 @@ class CommMetrics(BaseModel):
     # a listing of it
     reads: int = 0
     listings: int = 0
+    # notices added to the member's own loop with a line for the channel (`notified`
+    # events)
+    notices: int = 0
 
 
 # One member's metrics.
@@ -49,6 +53,10 @@ class MemberMetrics(BaseModel):
     gate_checks: int = 0
     gate_passes: int = 0
     first_pass_time: float | None = None
+    # the member's effective delivery mode: notify (notices) or poll (no notices; the
+    # member still has shared memory's status line and swarm_wait's results). None in
+    # metrics written before it.
+    delivery_effective: Literal["notify", "poll"] | None = None
     # communication (`CommMetrics`), by channel name: an entry for each channel the
     # swarm opened with records, in the order given, zeros included, and none for a
     # swarm without one. The default loads metrics written before this field.
@@ -81,6 +89,17 @@ class SwarmMetrics(BaseModel):
     # harness validity: members with no completed model call in their spans, in roster
     # order
     never_acted: list[str]
+    # harness validity, in roster order: members in notify mode whose own loop, not a
+    # subagent's, completed two or more model calls, to whose own loop a record was
+    # news, and whose own loop never ran swarm_on_continue(); and, in a swarm with
+    # channels that have tools, members with a completed model call whose loops never
+    # resolved swarm_tools(). The defaults load metrics written before these fields.
+    # notify_unwired is a heuristic: two own calls stand for a turn boundary, where the
+    # hook would have run. Any extra completed model call in the member's own span
+    # before its first turn boundary can list a correctly wired member falsely
+    # (decision: Ransom, 2026-10-22).
+    notify_unwired: list[str] = []
+    tools_unwired: list[str] = []
     # critical path, the simple definition: a member's steps are the completed model
     # calls in its spans, cache replays included, from its ledger line, so they cover
     # everything it did through its end. Calls a member makes concurrently (parallel
@@ -100,6 +119,20 @@ class MemberTimes:
     started: float | None
     # None for a member that has not ended, as when its task was cancelled before it ran
     ended: float | None
+
+
+# How a member was wired to the swarm's channels, as the runtime saw it.
+@dataclass(frozen=True)
+class MemberWiring:
+    delivery_effective: Literal["notify", "poll"]
+    # swarm_tools() was resolved in one of its loops
+    tools: bool
+    # swarm_on_continue() ran in a loop of its other than a nested one
+    hooked: bool
+    # a record was news to its own loop
+    news: bool
+    # completed model calls in its own loop, not its subagents' (`own_steps`)
+    own_steps: int
 
 
 # A member's gate checks: the in-loop checks of its own submissions, as react() makes
@@ -147,12 +180,23 @@ def gate_checks(
     return GateChecks(checks, passes, first_pass)
 
 
+# The completed model calls, cache replays included, whose nearest enclosing agent span
+# is `member_span`: the member's own loop's, not its subagents', as for gate checks.
+def own_steps(events: EventLog, member_span: str) -> int:
+    calls = Calls()
+    for call in events.calls.values():
+        if _agent_span(events, call.span_id) == member_span:
+            count_call(calls, call)
+    return calls.calls + calls.cache_replays
+
+
 def swarm_metrics(
     ledger: SwarmLedger,
     events: EventLog,
     places: SpanPlaces,
     times: Sequence[MemberTimes],
     gates: Sequence[GateChecks],
+    wiring: Sequence[MemberWiring],
     channels: Sequence[str],
     waits_offered: bool,
     wall_clock: float,
@@ -167,7 +211,9 @@ def swarm_metrics(
     waits = _waits(events, [m.name for m in ledger.members]) if waits_offered else None
 
     members: list[MemberMetrics] = []
-    for line, member_times, gate in zip(ledger.members, times, gates, strict=True):
+    for line, member_times, gate, wired in zip(
+        ledger.members, times, gates, wiring, strict=True
+    ):
         wait = None if waits is None else waits[line.name]
         running = (
             None
@@ -187,6 +233,7 @@ def swarm_metrics(
                 gate_checks=gate.checks,
                 gate_passes=gate.passes,
                 first_pass_time=gate.first_pass_time,
+                delivery_effective=wired.delivery_effective,
                 comm=comm[line.name],
                 waits=None if wait is None else wait.waits,
                 waits_by_outcome=None if wait is None else wait.by_outcome,
@@ -200,6 +247,20 @@ def swarm_metrics(
         wall_clock=wall_clock,
         members=members,
         never_acted=[m.name for m in ledger.members if _steps(m) == 0],
+        notify_unwired=[
+            m.name
+            for m, w in zip(ledger.members, wiring, strict=True)
+            if w.delivery_effective == "notify"
+            and w.news
+            and not w.hooked
+            and w.own_steps >= 2
+        ],
+        # react() resolves its tools before its first model call
+        tools_unwired=[
+            m.name
+            for m, w in zip(ledger.members, wiring, strict=True)
+            if channels and not w.tools and _steps(m) >= 1
+        ],
         steps_to_answer=None
         if answer is None
         else next(_steps(m) for m in ledger.members if m.name == answer),
@@ -234,8 +295,9 @@ def _comm_metrics(
                 metrics.listings += 1
             case "read":
                 metrics.reads += 1
+            case "notified":
+                metrics.notices += 1
             case _:
-                # notices (`notified` events) are not counted yet
                 pass
     return comm
 

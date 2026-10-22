@@ -55,6 +55,7 @@ class Bus:
         self._seq = 0
         self._ids: dict[str, int] = {}
         self._reads = 0
+        self._notices = 0
         self._states: dict[str, ChannelState] = {}
         self._storms: dict[str, Storm] = {}
         self._prefixes: dict[str, str] = {}
@@ -184,6 +185,8 @@ class Bus:
         self._seq += 1
         notify, result = state.apply(record)
         storm.commit(record)
+        for name in notify:
+            self._contexts[name].news = True
         comm_delivered(member_span, record, nested, self._seq, notify, result)
         self._waits.delivered(record, self._seq)
         return Delivery(record, self._seq, list(notify), result)
@@ -201,6 +204,11 @@ class Bus:
         # the id of a read's evidence, numbered across the run's channels
         self._reads += 1
         return f"r-{self._reads}"
+
+    def notice_id(self) -> str:
+        # the id of a notice, numbered across the run's members
+        self._notices += 1
+        return f"n-{self._notices}"
 
     def member(self) -> MemberContext | None:
         # the member the caller runs in or descends from, if it is one of this run's

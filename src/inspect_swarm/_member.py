@@ -117,7 +117,7 @@ class Member(BaseModel):
     """Whether the member's agent is bridged. `None` counts agents in the `inspect_swe/` namespace as bridged."""
 
     delivery: Literal["notify", "poll"] | None = None
-    """The member's configured delivery mode: `notify` or `poll`. `None` selects `notify`. It is logged but does not yet add notices or change the member's conversation."""
+    """The member's configured delivery mode: `notify` or `poll`. `None` selects `notify`. In `notify` mode, `swarm_on_continue()` adds notices to the member's conversation; in `poll` mode it adds none, and the member learns of changes from the status line that ends a shared memory result and from `swarm_wait` results."""
 
     sandbox: str | None = None
     """The member's own sandbox environment, where `{member}` stands for the member's name. `None` shares the sample's sandbox."""
@@ -240,7 +240,7 @@ def member(
         count: How many members this record stands for. Above 1 needs a factory.
         limits: The member's own token, cost, turn, message or time limits.
         bridged: Whether the agent is bridged (runs a CLI in the sandbox through Inspect's agent bridge). `None` counts inspect_swe's agents as bridged and others as native. Pass `True` for any other bridged agent: the swarm stops a bridged member by cancelling it, because a limit error raised inside the bridge would end the sample, and it must know before the member's first model request. Bridged members cannot use channels with tools and records yet, and `swarm()` refuses one beside such a channel. A bridged agent that is not declared and not in the `inspect_swe/` namespace is not refused: it cannot reach those channels' tools, so it runs without them. Pass `True` to have it refused instead.
-        delivery: The member's configured delivery mode: `notify` or `poll`. `None` selects `notify`. This setting is logged but does not yet add notices or change the member's conversation. A member declared or identified as bridged before it starts has effective mode `poll`. Bridge use detected later leaves its configured mode unchanged.
+        delivery: The member's configured delivery mode: `notify` or `poll`. `None` selects `notify`. In `notify` mode, `swarm_on_continue()` adds notices to the member's conversation; in `poll` mode it adds none, and the member learns of changes from the status line that ends a shared memory result and from `swarm_wait` results. A member declared or identified as bridged before it starts has effective mode `poll`. Bridge use detected later leaves its configured mode unchanged.
         sandbox: The name of the member's own sandbox environment. `{member}` stands for the member's name. `None` shares the sample's sandbox.
         visible_sandboxes: Other sandbox environments the member can reach by name, such as a shared service. Only with `sandbox`. It cannot include `default`, which inside the member is the member's own sandbox.
 

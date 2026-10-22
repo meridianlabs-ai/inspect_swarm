@@ -1009,10 +1009,10 @@ async def test_notice_lines_name_files_by_id_and_cover_each_version_once() -> No
         await board("w-2", "create", path=_p("c.md"), file_text="")
         await board("w-2", "delete", path=_p("c.md"))
         [line] = state.notice_lines("w-1")
-        assert line == (
+        assert line.text == (
             '[Swarm notice] 2 shared memory files changed since you last viewed them (f-1 new, f-2; by w-2, w-3). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
         )
-        assert "IGNORE" not in line
+        assert "IGNORE" not in line.text
         assert state.notice_lines("w-1") == []
         # the status line leaves out what a notice covered
         assert "Shared memory:" not in await board("w-1", "view", path=ROOT)
@@ -1022,7 +1022,7 @@ async def test_notice_lines_name_files_by_id_and_cover_each_version_once() -> No
         [line] = state.notice_lines("w-1")
         assert (
             "1 shared memory file changed since you last viewed it (f-1 deleted; by w-2)"
-            in line
+            in line.text
         )
         assert state.notice_lines("w-1") == []
 

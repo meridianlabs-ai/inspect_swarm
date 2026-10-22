@@ -9,13 +9,20 @@ import anyio
 import pytest
 from anyio.abc import TaskGroup
 from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
-from inspect_ai.agent import Agent, react
+from inspect_ai.agent import Agent, deepagent, general, react
 from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent, SpanBeginEvent
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import ModelOutput
 
-from inspect_swarm import leaderless, member, shared_memory, swarm, swarm_tools
+from inspect_swarm import (
+    leaderless,
+    member,
+    shared_memory,
+    swarm,
+    swarm_on_continue,
+    swarm_tools,
+)
 from inspect_swarm._background import MemberBackground
 from inspect_swarm._bus._bus import current_bus
 from inspect_swarm._metrics import CommMetrics, MemberMetrics, SwarmMetrics
@@ -108,6 +115,59 @@ async def test_records_rejections_and_reads_are_counted_per_member_and_channel(
             )
         },
         "w": {"shared_memory": CommMetrics(listings=1)},
+        "q": {"shared_memory": CommMetrics()},
+    }
+
+
+@pytest.mark.anyio
+async def test_notices_are_counted_per_member_and_channel(tmp_path: Path) -> None:
+    def call(function: str, **arguments: Any) -> ModelOutput:
+        return ModelOutput.for_tool_call("mockllm", function, arguments)
+
+    def create(path: str) -> ModelOutput:
+        return call(
+            "shared_memory",
+            command="create",
+            path=f"/shared_memory/{path}",
+            file_text="x",
+        )
+
+    # w's synchronous child writes in each of w's first two turns, so each is news to
+    # w at the boundary after it; the calls are made in this order
+    script = Script(
+        [
+            call("agent", prompt="child task"),
+            create("a.md"),
+            call("submit", answer="done"),
+            call("agent", prompt="child task"),
+            create("b.md"),
+            call("submit", answer="done"),
+            call("submit", answer="done"),
+        ]
+    )
+    metrics = await _members(
+        swarm(
+            [
+                member(
+                    deepagent,
+                    args={
+                        "model": scripted_model(script),
+                        "tools": [swarm_tools()],
+                        "subagents": [general()],
+                        "todo_write": False,
+                        "on_continue": swarm_on_continue(),
+                    },
+                    name="w",
+                ),
+                _member("q"),
+            ],
+            channels=[shared_memory()],
+            controller=leaderless(stop_on_submission=False),
+        ),
+        tmp_path,
+    )
+    assert {m.name: m.comm for m in metrics} == {
+        "w": {"shared_memory": CommMetrics(records=2, record_bytes=2, notices=2)},
         "q": {"shared_memory": CommMetrics()},
     }
 

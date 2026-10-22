@@ -45,7 +45,9 @@ def evidence(
 
 # Communication evidence: a `comm` event for each record that reached the bus (`sent`),
 # for each one it delivered (`delivered`), for each read of a channel's content
-# (`read`) and for each wait (`waited`), written in the span the channel's tool runs in. Its `member` and `span_id`
+# (`read`) and for each wait (`waited`), written in the span the channel's tool runs
+# in, and for each channel's line of a notice (`notified`), written in the loop the
+# notice is added to. Its `member` and `span_id`
 # are the acting member and its member span, even from a member's descendant; `loop` is
 # the agent span of the loop that acted, and `nested` whether that loop is not the
 # member's own.
@@ -124,6 +126,31 @@ def comm_read(
         tool_span_id=tool_span_id,
         files=files,
         listing=listing,
+    )
+
+
+def comm_notified(
+    span_id: str | None,
+    member: str,
+    channel: str,
+    notice: str,
+    message: str | None,
+    loop: str | None,
+    ids: Mapping[str, JsonValue],
+) -> None:
+    # a channel's line of a notice added to the member's own loop: the notice's id, its
+    # message's id and the swarm ids the line names
+    evidence(
+        "comm",
+        "notified",
+        member=member,
+        span_id=span_id,
+        loop=loop,
+        nested=False,
+        channel=channel,
+        notice=notice,
+        message=message,
+        ids=copy.deepcopy(dict(ids)),
     )
 
 

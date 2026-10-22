@@ -236,13 +236,13 @@ async def test_status_lines_and_notices_mark_nothing_for_the_wait() -> None:
                 assert await r.wait("w-1", path=_p("d")) == changed(
                     "f-1 new", "w-2", "f-1"
                 )
-            seen.extend(r.state.notice_lines("w-1"))
+            seen.extend(line.text for line in r.state.notice_lines("w-1"))
             await r.sm("w-2", "create", path=_p("d/b.md"), file_text="x")
             if with_waits:
                 assert await r.wait("w-1", path=_p("d")) == changed(
                     "f-1 new, f-2 new", "w-2", "f-1", count=2
                 )
-            seen.extend(r.state.notice_lines("w-1"))
+            seen.extend(line.text for line in r.state.notice_lines("w-1"))
             seen.append(await r.sm("w-1", "view", path=ROOT))
             return seen
 

@@ -37,8 +37,10 @@ from .._member import (
 from .._metrics import (
     GateChecks,
     MemberTimes,
+    MemberWiring,
     first_scorer,
     gate_checks,
+    own_steps,
     swarm_metrics,
 )
 from .._record import MemberResult, MemberState
@@ -456,6 +458,18 @@ class SwarmRun:
                     places,
                     [MemberTimes(m.name, m.started, m.time) for m in self._members],
                     [m.gates for m in self._members],
+                    [
+                        MemberWiring(
+                            m.context.delivery_effective,
+                            tools=m.context.loop is not None,
+                            hooked=m.context.hooked,
+                            news=m.context.news,
+                            own_steps=0
+                            if m.context.span_id is None
+                            else own_steps(interval.events, m.context.span_id),
+                        )
+                        for m in self._members
+                    ],
                     list(self.bus.states),
                     self.bus.waits.max_wait is not None,
                     wall_clock,

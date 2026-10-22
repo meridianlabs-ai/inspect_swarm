@@ -521,14 +521,14 @@ def count_calls(events: EventLog, places: SpanPlaces) -> tuple[Calls, dict[str, 
     for call in events.calls.values():
         inside, member = places(call.span_id)
         if inside:
-            _count(total, call)
+            count_call(total, call)
         if member is not None:
-            _count(per_member.setdefault(member, Calls()), call)
+            count_call(per_member.setdefault(member, Calls()), call)
     return total, per_member
 
 
 # Counts one model event, as it last stood.
-def _count(calls: Calls, call: CallRecord) -> None:
+def count_call(calls: Calls, call: CallRecord) -> None:
     if call.cache_read:
         calls.cache_replays += 1
         return
