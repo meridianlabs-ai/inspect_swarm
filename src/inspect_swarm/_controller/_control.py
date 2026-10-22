@@ -471,6 +471,7 @@ class SwarmRun:
                         for m in self._members
                     ],
                     list(self.bus.states),
+                    self.bus.waits.max_wait is not None,
                     wall_clock,
                     chosen.name if chosen is not None else None,
                 )

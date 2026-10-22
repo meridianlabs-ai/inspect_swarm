@@ -254,11 +254,22 @@ class CommRecord:
     listing: bool
 
 
+# A wait's evidence event (`comm` of kind `waited`): the waiting member, what ended the
+# wait, its duration and the seconds of it during which the member counted as waiting.
+@dataclass(frozen=True)
+class WaitRecord:
+    member: str
+    outcome: str
+    duration: float
+    idle: float
+
+
 # The spans, model events, tool events, intermediate score events and communication
 # evidence the transcript reports during the swarm's interval, kept as they happen
 # rather than read back from the history: a bounded transcript serializes an event at
 # its last update, which can come before Inspect prices its usage, and can evict it.
-# Tool, score and communication events are kept in the order they began.
+# Tool, score and communication events are kept in the order they began; waits, which
+# name no one channel, are kept apart from the other communication events.
 class EventLog:
     def __init__(self) -> None:
         self.parents: dict[str, str | None] = {}
@@ -267,6 +278,7 @@ class EventLog:
         self.tools: dict[str, ToolRecord] = {}
         self.scores: list[ScoreRecord] = []
         self.comms: list[CommRecord] = []
+        self.waits: list[WaitRecord] = []
 
     def __call__(self, event: Event) -> None:
         if isinstance(event, SpanBeginEvent):
@@ -308,10 +320,20 @@ class EventLog:
             and event.source == "inspect_swarm"
             and isinstance(event.data, dict)
             and event.data.get("type") == "comm"
-            # waits are not counted yet, and name no one channel
-            and event.data.get("kind") != "waited"
         ):
-            self.comms.append(_comm_record(event.data))
+            if event.data.get("kind") == "waited":
+                self.waits.append(_wait_record(event.data))
+            else:
+                self.comms.append(_comm_record(event.data))
+
+
+def _wait_record(data: dict[str, JsonValue]) -> WaitRecord:
+    return WaitRecord(
+        member=cast(str, data["member"]),
+        outcome=cast(str, data["outcome"]),
+        duration=cast(float, data["duration"]),
+        idle=cast(float, data["idle"]),
+    )
 
 
 def _comm_record(data: dict[str, JsonValue]) -> CommRecord:

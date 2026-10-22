@@ -35,7 +35,7 @@ from inspect_ai.tool import Tool, tool
 from inspect_ai.util import store
 from inspect_ai.util._span import AGENT_SPAN_TYPE
 
-from inspect_swarm import SwarmControl, member, swarm
+from inspect_swarm import SwarmControl, member, shared_memory, swarm
 from inspect_swarm._evidence import METRICS_KEY
 from inspect_swarm._ledger import EventLog, ScoreRecord
 from inspect_swarm._metrics import GateChecks, SwarmMetrics, gate_checks
@@ -52,6 +52,7 @@ from .swarm_runtime import (
     scripted_model,
     sleeper,
 )
+from .test_wait import _p, nested_loop, resolve  # pyright: ignore[reportPrivateUsage]
 
 
 def _metrics(transcript: Transcript) -> SwarmMetrics:
@@ -716,3 +717,102 @@ def test_records_written_before_gate_checks_load() -> None:
             0,
             None,
         )
+
+
+# ---------------------------------------------------------------------------
+# waits
+
+
+@agent
+def waiting_peer(ready: anyio.Event, finish: anyio.Event) -> Agent:
+    """Wait for a peer's file, for that peer's end, for the last member's end, and alone."""
+
+    async def execute(state: AgentState) -> AgentState:
+        wait = (await resolve())["swarm_wait"]
+        ready.set()
+        # released by working's write
+        await wait(path=_p("r"))
+        # by working's end, which held hears of first
+        await wait(path=_p("none"))
+        finish.set()
+        # by held's end
+        await wait(path=_p("none"))
+        # no other member is running
+        await wait(path=_p("none"))
+        return state
+
+    return execute
+
+
+@agent
+def working(ready: anyio.Event) -> Agent:
+    """Work while a subagent waits, then write the file that ends both waits."""
+
+    async def execute(state: AgentState) -> AgentState:
+        memory = (await resolve())["shared_memory"]
+        await ready.wait()
+
+        async def subagent() -> None:
+            async with nested_loop("child") as tools:
+                await tools["swarm_wait"]()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(subagent)
+            await anyio.sleep(0.2)
+            await memory(command="create", path=_p("r/a.md"), file_text="x")
+        return state
+
+    return execute
+
+
+@agent
+def held(finish: anyio.Event) -> Agent:
+    """Run until told to finish."""
+
+    async def execute(state: AgentState) -> AgentState:
+        await finish.wait()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_waits_wait_time_and_idle_time() -> None:
+    ready, finish = anyio.Event(), anyio.Event()
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(waiting_peer(ready, finish), name="p"),
+                member(working(ready), name="q"),
+                member(held(finish), name="r"),
+            ],
+            channels=[shared_memory()],
+        )
+    )
+    p, q, r = _metrics(outcome.transcript).members
+    assert (p.waits, p.waits_by_outcome) == (4, {"news": 3, "all_waiting": 1})
+    assert p.wait_time is not None and p.idle_time is not None
+    # p's own loop waited through q's work, with nothing else of p running
+    assert 0.15 <= p.idle_time <= p.wait_time
+    assert p.running_time is not None and p.idle_time <= p.running_time
+    # q's subagent waited while q's own loop worked: wait time, but no idle time
+    assert (q.waits, q.waits_by_outcome, q.idle_time) == (1, {"news": 1}, 0)
+    assert q.wait_time is not None and q.wait_time >= 0.15
+    assert (r.waits, r.waits_by_outcome, r.wait_time, r.idle_time) == (0, {}, 0, 0)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("channels", [["filesystem"], []])
+async def test_a_swarm_that_offers_no_wait_has_no_wait_metrics(
+    channels: list[str],
+) -> None:
+    outcome = await run_swarm(
+        swarm(member(generator(scripted_model()), name="a"), channels=channels)
+    )
+    [a] = _metrics(outcome.transcript).members
+    assert (a.waits, a.waits_by_outcome, a.wait_time, a.idle_time) == (
+        None,
+        None,
+        None,
+        None,
+    )
