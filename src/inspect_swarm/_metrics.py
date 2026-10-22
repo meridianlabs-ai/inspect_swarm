@@ -83,10 +83,9 @@ class SwarmMetrics(BaseModel):
     # channels that have tools, members with a completed model call whose loops never
     # resolved swarm_tools(). The defaults load metrics written before these fields.
     # notify_unwired is a heuristic: two own calls stand for a turn boundary, where the
-    # hook would have run. A first turn with a refusal retry (`retry_refusals`),
-    # overflow recovery or an interrupt makes two own calls before any boundary, so a
-    # correctly wired member that then ends can be listed falsely (decision: Ransom,
-    # 2026-10-21).
+    # hook would have run. Any extra completed model call in the member's own span
+    # before its first turn boundary can list a correctly wired member falsely
+    # (decision: Ransom, 2026-10-22).
     notify_unwired: list[str] = []
     tools_unwired: list[str] = []
     # critical path, the simple definition: a member's steps are the completed model

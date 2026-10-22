@@ -774,6 +774,10 @@ async def test_unwired_members_are_reported_in_the_metrics(tmp_path: Path) -> No
         ("poll", "poll"),
         ("no-tools", "notify"),
     ]
+    # no-tools ran the hook with news pending, but has no tool to act on a notice
+    assert len(turns.inputs["no-tools"]) == 2
+    assert all(_notices(i) == [] for i in _model_inputs(log, "no-tools"))
+    assert [n for n in _comm(log, "notified") if n["member"] == "no-tools"] == []
 
 
 @pytest.mark.anyio

@@ -318,7 +318,7 @@ When the swarm ends it writes two more store entries, each also logged as an `In
 
 The metrics also check that members are wired to the channels ([Notices](#notices)):
 
-- `notify_unwired`: members in `notify` mode whose own loop, not a subagent's, completed two or more model calls, to whose own loop a change was news, and whose own loop never ran `swarm_on_continue()`. It is a heuristic: two own calls usually mean the member reached a turn boundary. A first turn with a refusal retry, an overflow recovery or an interrupt makes two calls before any boundary, so a correctly wired member that ends there can be listed.
+- `notify_unwired`: members in `notify` mode whose own loop, not a subagent's, completed two or more model calls, to whose own loop a change was news, and whose own loop never ran `swarm_on_continue()`. It is a heuristic: two own calls usually mean the member reached a turn boundary. Any extra completed model call in the member's own span before its first turn boundary can list a correctly wired member.
 - `tools_unwired`: in a swarm with a channel that has tools, members with a completed model call whose loops never resolved `swarm_tools()`.
 - Each member's `delivery_effective`: `notify` or `poll`, the mode it ran in.
 
