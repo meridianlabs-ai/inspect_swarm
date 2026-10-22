@@ -50,7 +50,7 @@ solver = swarm(
 )
 ```
 
-`agent-1` and `agent-2` run in the environments of those names. The sample's sandbox configuration provides them (for Docker, a compose service for each), and the swarm checks that they exist when it starts:
+`agent-1` and `agent-2` run in the environments of those names. With `count=1` the member's name has no number, so `{member}` is `agent`; a task whose member count is a parameter can give each member its own record, `[member(..., name=f"agent-{i}", sandbox=f"agent-{i}") for i in range(1, k + 1)]`, so the names match the environments for every count. The sample's sandbox configuration provides them (for Docker, a compose service for each), and the swarm checks that they exist when it starts:
 
 ```yaml
 services:

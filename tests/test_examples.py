@@ -212,33 +212,82 @@ def test_shared_sandbox(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_proof_swarm(tmp_path: Path) -> None:
+def test_proof_swarm_scores_each_members_sandbox(tmp_path: Path) -> None:
     def policy(name: str, messages: list[ChatMessage]) -> ModelOutput:
-        # agent-1 tries 39, which is no proof, and agent-2 tries 40, which is
-        n = 39 if name == "agent-1" else 40
+        # agent-1 leaves a directory where its answer should be; agent-2 proves 40
+        write = (
+            "mkdir /workspace/answer.txt"
+            if name == "agent-1"
+            else "echo 40 > /workspace/answer.txt"
+        )
         match _turn(messages):
             case 0:
                 return _call(
                     "shared_memory",
                     command="append",
                     path="/shared_memory/ruled_out.md",
-                    append_text=f"{name} is testing {n}",
+                    append_text=f"{name} is testing",
                 )
             case 1:
-                return _call("bash", command=f"echo {n} > /workspace/answer.txt")
+                return _call("bash", command=write)
             case 2:
                 return _call("check")
             case _:
-                return _call("submit", answer=str(n))
+                return _call("submit", answer="40")
 
-    [sample] = _run("proof_swarm.py@proof_swarm", _model(policy), tmp_path, k=2)
+    # every member runs to its end, so both artifacts are there to score
+    [sample] = _run(
+        "proof_swarm.py@proof_swarm", _model(policy), tmp_path, k=2, stop="all_done"
+    )
     assert sample.scores is not None
     [score] = sample.scores.values()
     assert score.value == "C"
     assert score.metadata is not None
     assert score.metadata["agent-2"]["check"].startswith("PASS")
     assert score.metadata["agent-1"]["check"].startswith("FAIL")
+    assert "IsADirectoryError" in score.metadata["agent-1"]["check"]
     record = _record(sample)
     assert record.final.member == "agent-2"
-    assert [m.sandbox for m in record.members] == ["agent-1", "agent-2"]
-    assert record.members[0].status in ("member_limit:custom", "stopped")
+    assert [(m.sandbox, m.status) for m in record.members] == [
+        ("agent-1", "member_limit:custom"),
+        ("agent-2", "submitted"),
+    ]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "writes,status,stop_reason,value",
+    [
+        # a passing check, then a submission: the first proof stops the swarm
+        (["40"], "submitted", "controller:proved", "C"),
+        # a passing check, then the answer replaced with no further check: the answer
+        # it leaves is checked again, and fails
+        (["40", "39"], "member_limit:custom", "all_done", "I"),
+    ],
+)
+def test_proof_swarm_of_one_checks_the_answer_it_leaves(
+    tmp_path: Path, writes: list[str], status: str, stop_reason: str, value: str
+) -> None:
+    def policy(name: str, messages: list[ChatMessage]) -> ModelOutput:
+        script = [
+            _call("bash", command=f"echo {writes[0]} > /workspace/answer.txt"),
+            _call("check"),
+            *(
+                _call("bash", command=f"echo {n} > /workspace/answer.txt")
+                for n in writes[1:]
+            ),
+            _call("submit", answer=writes[0]),
+        ]
+        return script[min(_turn(messages), len(script) - 1)]
+
+    [sample] = _run("proof_swarm.py@proof_swarm", _model(policy), tmp_path, k=1)
+    [member] = _record(sample).members
+    assert (member.name, member.sandbox, member.status) == (
+        "agent-1",
+        "agent-1",
+        status,
+    )
+    ledger = swarm_ledger(sample)
+    assert ledger is not None and ledger.stop_reason == stop_reason
+    assert sample.scores is not None
+    assert [s.value for s in sample.scores.values()] == [value]

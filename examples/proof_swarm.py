@@ -4,10 +4,10 @@ Its shape follows a port of Epoch AI's LeanOpenProblems swarm, with a toy proble
 
 - Each member works in its own container (`sandbox="{member}"`) and reaches one shared service, the `comparator` that checks answers, by name (`visible_sandboxes`).
 - Members share what they learn on a `shared_memory()` board, the only channel between them: they share no files.
-- `prover()` is a member builder registered with `@agent`. It builds each member's own `check` tool and raises a member-local custom limit when its agent returns without a passing check, so `submitted` means checked and `until_proved()` can stop the swarm at the first proof.
+- `prover()` is a member builder registered with `@agent`. It gives each member a `check` tool, checks the member's answer file again when its agent returns, and raises a member-local custom limit when that check fails. So `submitted` means the answer the member leaves passes, and `until_proved()` can stop the swarm at the first proof.
 - The scorer names each member's sandbox, from the swarm's result record, and checks every member's answer again.
 
-Needs Docker. `proof_swarm.yaml` has three member containers, so `k` is at most 3.
+Needs Docker. `proof_swarm.yaml` has a container for each of `agent-1` to `agent-3`, so `k` is from 1 to 3.
 """
 
 from typing import Any, Literal
@@ -26,7 +26,7 @@ from inspect_ai.scorer import (
 )
 from inspect_ai.solver import TaskState
 from inspect_ai.tool import ToolDef, bash
-from inspect_ai.util import LimitExceededError, sandbox
+from inspect_ai.util import LimitExceededError, OutputLimitExceededError, sandbox
 from stop_on_proof import until_proved
 
 from inspect_swarm import (
@@ -45,6 +45,9 @@ Write n, and nothing else, to /workspace/answer.txt, then call the check tool, w
 """
 
 ANSWER = "/workspace/answer.txt"
+
+# proof_swarm.yaml has a container for each of agent-1 to agent-3
+MEMBERS = 3
 
 # the comparator's check, run in its own container
 VERIFY = """\
@@ -70,6 +73,16 @@ async def run_check(answer_sandbox: str | None) -> tuple[str | None, str]:
         answer = (await sandbox(answer_sandbox).read_file(ANSWER)).strip()
     except FileNotFoundError:
         return None, f"FAIL: {ANSWER} does not exist"
+    # what a member left there is not a readable text file
+    except (
+        IsADirectoryError,
+        PermissionError,
+        UnicodeDecodeError,
+        OutputLimitExceededError,
+    ) as ex:
+        return None, f"FAIL: {ANSWER} cannot be read as text ({type(ex).__name__})"
+    if len(answer) > 20:
+        return None, "FAIL: the answer is not a whole number from 1 to 100"
     result = await sandbox("comparator").exec(
         ["python3", "-c", VERIFY, answer], timeout=60
     )
@@ -78,10 +91,7 @@ async def run_check(answer_sandbox: str | None) -> tuple[str | None, str]:
 
 @agent
 def prover() -> Agent:
-    """A member that may return normally only after a passing check."""
-    # the swarm calls this builder once for each member in each sample, so the tool
-    # and `verified` belong to one member
-    verified = False
+    """A member that may return normally only when the answer it leaves passes the check."""
 
     async def check() -> str:
         """Check the answer in /workspace/answer.txt.
@@ -89,9 +99,7 @@ def prover() -> Agent:
         Returns:
             PASS or FAIL, and why.
         """
-        nonlocal verified
         _, result = await run_check(None)
-        verified = verified or result.startswith("PASS")
         return result
 
     inner = react(
@@ -101,10 +109,15 @@ def prover() -> Agent:
 
     async def execute(state: AgentState) -> AgentState:
         state = await inner(state)
-        if not verified:
+        # the answer as the member leaves it, not as it was at an earlier check
+        _, result = await run_check(None)
+        if not result.startswith("PASS"):
             # with no `source`, this ends only this member, as member_limit:custom
             raise LimitExceededError(
-                "custom", value=0, limit=0, message="returned without a passing check"
+                "custom",
+                value=0,
+                limit=0,
+                message=f"returned without a proof: {result}",
             )
         return state
 
@@ -141,16 +154,22 @@ def any_member_proved() -> Scorer:
 def proof_swarm(
     k: int = 3, stop: Literal["first_proof", "all_done"] = "first_proof"
 ) -> Task:
+    if not 1 <= k <= MEMBERS:
+        raise ValueError(f"proof_swarm: k must be from 1 to {MEMBERS}, got {k}.")
     return Task(
         dataset=[Sample(input=PROMPT)],
         solver=swarm(
-            members=member(
-                prover,
-                name="agent",
-                count=k,
-                sandbox="{member}",
-                visible_sandboxes=["comparator"],
-            ),
+            # one record per member, so that every k names its members, and their
+            # containers, agent-1 to agent-k (a count of 1 would name it `agent`)
+            members=[
+                member(
+                    prover,
+                    name=f"agent-{i}",
+                    sandbox=f"agent-{i}",
+                    visible_sandboxes=["comparator"],
+                )
+                for i in range(1, k + 1)
+            ],
             controller=until_proved()
             if stop == "first_proof"
             else leaderless(stop_on_submission=False),

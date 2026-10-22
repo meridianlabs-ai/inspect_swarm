@@ -80,7 +80,7 @@ def any_member_proved() -> Scorer:
     return score
 ```
 
-`run_check()` reads the answer file from the named sandbox and checks it in the shared `comparator` service. A member that wrote a valid answer but was stopped before it submitted still passes this check, which is why the scorer grades every member's sandbox rather than only the chosen member's.
+`run_check()` reads the answer file from the named sandbox and checks it in the shared `comparator` service. A file that is missing, a directory or not text fails the check, so one member's broken artifact does not stop the scorer from grading the others. A member that wrote a valid answer but was stopped before it submitted still passes this check, which is why the scorer grades every member's sandbox rather than only the chosen member's.
 
 ## Checks during the run
 
