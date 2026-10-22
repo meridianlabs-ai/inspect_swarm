@@ -633,12 +633,7 @@ def _status_for(error: LimitExceededError) -> str:
 def classify_errors(
     error: BaseException, caps: Sequence[Limit], own: Sequence[Limit]
 ) -> tuple[bool, LimitExceededError | None, BaseException | None]:
-    group = (
-        cast(BaseExceptionGroup[BaseException], error)
-        if isinstance(error, BaseExceptionGroup)
-        else BaseExceptionGroup("swarm", [error])
-    )
-    cap_errors, rest = group.split(lambda e: _source_in(e, caps))
+    cap_errors, rest = as_group(error).split(lambda e: _source_in(e, caps))
     owned, foreign = (
         rest.split(lambda e: _source_in(e, own)) if rest is not None else (None, None)
     )
@@ -649,6 +644,13 @@ def classify_errors(
         owned_leaf,
         unwrap(foreign) if foreign is not None else None,
     )
+
+
+# An error as a group to split: a group as it is, any other error in a group of its own.
+def as_group(error: BaseException) -> BaseExceptionGroup[BaseException]:
+    if isinstance(error, BaseExceptionGroup):
+        return cast(BaseExceptionGroup[BaseException], error)
+    return BaseExceptionGroup("swarm", [error])
 
 
 # A group with a single leaf as that leaf, as collect() raises it; others unchanged.

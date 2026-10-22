@@ -29,6 +29,7 @@ from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
     Member,
     MemberOutcome,
+    as_group,
     classify_errors,
     member_nodes,
     member_sandbox,
@@ -673,12 +674,7 @@ def _exhaustion(error: BaseException | None) -> str | None:
 
 # An error without its cancellations, or None when it has nothing else.
 def _errors(error: BaseException) -> BaseException | None:
-    group = (
-        cast(BaseExceptionGroup[BaseException], error)
-        if isinstance(error, BaseExceptionGroup)
-        else BaseExceptionGroup("swarm", [error])
-    )
-    return group.split(anyio.get_cancelled_exc_class())[1]
+    return as_group(error).split(anyio.get_cancelled_exc_class())[1]
 
 
 # The outside cause the sample shows, or None.

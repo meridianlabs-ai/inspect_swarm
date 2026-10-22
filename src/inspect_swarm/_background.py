@@ -5,6 +5,7 @@ from typing import Any, TypeVarTuple, Unpack
 
 import anyio
 from anyio.abc import TaskGroup
+from inspect_ai._util._async import unwrap_exception_group
 from inspect_ai.util import Limit, LimitExceededError
 from inspect_ai.util._background import BackgroundTarget, background_target
 
@@ -68,19 +69,12 @@ class MemberBackground:
         assert self._tg is not None and self._token is not None
         background_target.reset(self._token)
         self._tg.cancel_scope.cancel()
-        single: BaseException | None = None
         try:
-            await self._tg.__aexit__(exc_type, exc, tb)
-        except BaseExceptionGroup as ex:
             # a task group wraps whatever ends it: one exception is raised bare
-            if len(ex.exceptions) != 1:
-                raise
-            single = ex.exceptions[0]
+            with unwrap_exception_group():
+                await self._tg.__aexit__(exc_type, exc, tb)
         finally:
             self._ended = True
-        if single is not None:
-            # outside the handler, so the exception keeps its own cause and context
-            raise single
         # the group's own cancel would absorb a cancellation from outside (the hard
         # stop) that reached the block; keep it
         if isinstance(exc, anyio.get_cancelled_exc_class()):
