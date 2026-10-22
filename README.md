@@ -207,18 +207,29 @@ You can write your own with `@swarm_controller` and `@swarm_channel`. See their 
 
 `shared_memory()` gives the swarm one board of files that every member reads and writes with a `shared_memory` tool. The tool has the commands of Inspect's `memory()` tool, over files under `/shared_memory`, and one more, `append`. A member must view a file before it replaces, inserts into, renames or deletes it. `append` needs no view: it adds text on a new line at the end of a file, and creates the file if needed, so it suits a log or list that many members write to. A view shows what other members wrote, marked as information from a peer, and each result names the files others have changed since the member last viewed them. Each sample has its own board, which is gone when the swarm ends.
 
-Members get the tool from `swarm_tools()`, which gives a member the tools of the swarm's channels. Put it in the member's tools, in the factory or the built form:
+Members get the tool from `swarm_tools()`, which gives a member the tools of the swarm's channels. Call it inside a member builder registered with `@agent`, and pass the builder to `member()` without calling it. The log records a builder by name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild `swarm_tools()` passed in `args` or in an agent you built.
 
 ```python
-from inspect_ai.agent import deepagent, react
+from inspect_ai.agent import Agent, agent, deepagent, react
 from inspect_ai.tool import bash
 
 from inspect_swarm import filesystem, member, shared_memory, swarm, swarm_tools
 
+
+@agent
+def solver_member() -> Agent:
+    return react(tools=[bash(), swarm_tools()])
+
+
+@agent
+def reviewer_member() -> Agent:
+    return deepagent(tools=[bash(), swarm_tools()])
+
+
 solver = swarm(
     members=[
-        member(react, args={"tools": [bash(), swarm_tools()]}, name="solver", count=3),
-        member(deepagent(tools=[bash(), swarm_tools()]), name="reviewer"),
+        member(solver_member, name="solver", count=3),
+        member(reviewer_member, name="reviewer"),
     ],
     channels=[filesystem(), shared_memory()],
 )
@@ -230,7 +241,42 @@ This swarm keeps the `filesystem` channel beside the board. `channels=[shared_me
 
 The number and size of files and each member's write rate are limited. See `shared_memory()`'s docstring for the limits, their defaults and the rules members follow.
 
-The swarm logs the members' writes and views as `InfoEvent`s with source `inspect_swarm` and type `comm`, so the log keeps the board's whole history. The [metrics](#metrics-and-analysis) count these events for each member.
+Members that get `shared_memory` also get `swarm_wait`, so a member that needs a peer's work waits instead of polling. A wait returns when a file under the `path` it watches (the whole board without one) has a change that the waiting agent did not write and has not viewed, or when another member ends. A subagent's write counts, so a member can wait for its own subagents. It returns at once if that is already so, and keeps returning while such a file stays unviewed. The result names the changed files by id and the ended members by name and status, never file content: the member views a file to read it.
+
+A wait also ends without news: when every member is waiting, has ended or has not started, when the swarm stops, when the member's own agent finishes, or after `timeout` seconds. `max_wait` sets the longest wait and the default `timeout`, 600 seconds unless you change it, for example `shared_memory(max_wait=300)`. A wait is time inside a tool call, so it counts towards the member's time limit, the swarm's time cap and the sample's time and working limits. It makes no model call, so it adds no tokens, cost or steps. A swarm with only the `filesystem` channel, or `channels=[]`, has no `swarm_wait`.
+
+The swarm logs the members' writes, views and waits as `InfoEvent`s with source `inspect_swarm` and type `comm`, so the log keeps the board's whole history. The [metrics](#metrics-and-analysis) count these events for each member.
+
+#### Notices
+
+To hear about other agents' changes to the board between turns, a member also needs `swarm_on_continue()` as its agent's `on_continue`. Call it and `swarm_tools()` inside a member builder registered with `@agent`, as here. The log records a builder by name and arguments, so the swarm can be rebuilt from the log; it cannot rebuild `swarm_tools()` or `swarm_on_continue()` passed in `args`.
+
+```python
+from inspect_ai.agent import Agent, agent, react
+from inspect_ai.tool import bash
+
+from inspect_swarm import member, shared_memory, swarm, swarm_on_continue, swarm_tools
+
+
+@agent
+def worker() -> Agent:
+    return react(tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
+
+
+solver = swarm(members=member(worker, name="w", count=3), channels=[shared_memory()])
+```
+
+At each turn boundary where other agents have changed files since its last notice, the member's conversation gets one user message, such as:
+
+```
+[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".
+```
+
+- A notice holds counts, file ids, member names and fixed instructions, never a member-chosen file path or file contents. Its metadata, under `inspect_swarm`, gives the notice's id and, for each channel's line, the ids it names. Each line is also logged as a `comm` event of kind `notified`.
+- The member continues or stops exactly as it would without the hook. If it has a hook of its own, wrap it: `swarm_on_continue(my_hook)`. For `react(submit=False)`, which stops after a turn without tool calls, pass `swarm_on_continue(no_tool_calls="stop")`.
+- A member that is stopping gets no notice. Neither do a member's subagents: only its own loop does.
+- `member(..., delivery="poll")` turns notices off for that member. It still learns of changes from the status line that ends a shared memory result.
+- A custom agent gets notices only if it calls an `on_continue` hook at each turn boundary, as `react()` and `deepagent()` do. If it does not, give its member `delivery="poll"`, so the metrics do not list it in `notify_unwired`.
 
 ## Budget
 
@@ -285,7 +331,22 @@ When the swarm ends it writes two more store entries, each also logged as an `In
 - `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, the controller and the final step, model calls that errored or reported no usage, unpriced models, what stopped the swarm, and whether the sample resumed from a checkpoint. See [The ledger](#the-ledger).
 - `inspect_swarm:metrics`: tokens, cost and wall-clock time for the swarm, and tokens, cost and running time for each member. Also members with no completed model call (`never_acted`), counts of completed model calls for the chosen member (`steps_to_answer`) and the busiest member (`longest_member_steps`), and the longest run of identical tool calls by each member (`null` for a bridged member, see [Restrictions](#restrictions)). These call counts include cache replays and exclude failed or cancelled attempts.
 
-Each member's metrics also have `comm`, by channel name, for each channel with records, such as `shared_memory`: `records` and `record_bytes`, its writes delivered to the channel and their size; `rejections`, its writes the bus refused, by the control that refused them, such as `rate`; and `reads` and `listings`, its views of files and of directories. A member's subagents count as the member. Every member has an entry for every such channel the swarm opened, zeros included. A swarm with none (`filesystem` only, or `channels=[]`) has `comm` `{}` for every member: communication through files is observed, not recorded, so it is not reported as zero.
+The metrics also check that members are wired to the channels ([Notices](#notices)):
+
+- `notify_unwired`: members in `notify` mode whose own loop, not a subagent's, completed two or more model calls, to whose own loop a change was news, and whose own loop never ran `swarm_on_continue()`. It is a heuristic: two own calls usually mean the member reached a turn boundary. Any extra completed model call in the member's own span before its first turn boundary can list a correctly wired member.
+- `tools_unwired`: in a swarm with a channel that has tools, members with a completed model call whose loops never resolved `swarm_tools()`.
+- Each member's `delivery_effective`: `notify` or `poll`, the mode it ran in.
+
+Each member's metrics also have `comm`, by channel name, for each channel with records, such as `shared_memory`: `records` and `record_bytes`, its writes delivered to the channel and their size; `rejections`, its writes the bus refused, by the control that refused them, such as `rate`; `reads` and `listings`, its views of files and of directories; and `notices`, the notices it got with a line for the channel (`notified` events, [Notices](#notices)). A member's subagents count as the member. Every member has an entry for every such channel the swarm opened, zeros included. A swarm with none (`filesystem` only, or `channels=[]`) has `comm` `{}` for every member: communication through files is observed, not recorded, so it is not reported as zero.
+
+Each member's metrics also count its `swarm_wait` calls, its subagents' included:
+
+- `waits`: the number of waits.
+- `waits_by_outcome`: that number by what ended each wait: `news` (a changed file or an ended member), `all_waiting`, `stopping`, `member_ending`, `timeout` or `cancelled`. An outcome that ended no wait is left out.
+- `wait_time`: the waits' total seconds. Waits of a member's subagents that overlap each count.
+- `idle_time`: the seconds the member did nothing but wait: its own agent in `swarm_wait`, not yet released, and none of its background work running. A subagent's wait adds to `wait_time` but not to `idle_time`.
+
+In a swarm with no `swarm_wait` (`filesystem` only, or `channels=[]`) the four are `null`, so 0 means the wait was offered and unused.
 
 `inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`. `samples_df()` needs pandas and pyarrow, which neither install above includes:
 

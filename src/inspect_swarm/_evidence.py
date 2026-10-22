@@ -45,7 +45,9 @@ def evidence(
 
 # Communication evidence: a `comm` event for each record that reached the bus (`sent`),
 # for each one it delivered (`delivered`), for each read of a channel's content
-# (`read`) and for each wait (`waited`), written in the span the channel's tool runs in. Its `member` and `span_id`
+# (`read`) and for each wait (`waited`), written in the span the channel's tool runs
+# in, and for each channel's line of a notice (`notified`), written in the loop the
+# notice is added to. Its `member` and `span_id`
 # are the acting member and its member span, even from a member's descendant; `loop` is
 # the agent span of the loop that acted, and `nested` whether that loop is not the
 # member's own.
@@ -127,6 +129,31 @@ def comm_read(
     )
 
 
+def comm_notified(
+    span_id: str | None,
+    member: str,
+    channel: str,
+    notice: str,
+    message: str | None,
+    loop: str | None,
+    ids: Mapping[str, JsonValue],
+) -> None:
+    # a channel's line of a notice added to the member's own loop: the notice's id, its
+    # message's id and the swarm ids the line names
+    evidence(
+        "comm",
+        "notified",
+        member=member,
+        span_id=span_id,
+        loop=loop,
+        nested=False,
+        channel=channel,
+        notice=notice,
+        message=message,
+        ids=copy.deepcopy(dict(ids)),
+    )
+
+
 def comm_waited(
     span_id: str | None,
     spec: "WaitSpec",
@@ -136,13 +163,15 @@ def comm_waited(
     timeout: dict[str, JsonValue],
     started: float,
     duration: float,
+    idle: float,
     outcome: str,
     woken_by: list[int],
     files: list[JsonValue],
     ended: list[JsonValue],
 ) -> None:
     # one swarm_wait, when it returns or is cancelled: what ended it, the commits that
-    # released it for news (`delivered.seq`), and the files and ends its result named
+    # released it for news (`delivered.seq`), and the files and ends its result named;
+    # `idle` is the seconds of it during which its member counted as waiting
     evidence(
         "comm",
         "waited",
@@ -156,6 +185,7 @@ def comm_waited(
         timeout=timeout,
         started=started,
         duration=duration,
+        idle=idle,
         outcome=outcome,
         woken_by=list(woken_by),
         files=files,

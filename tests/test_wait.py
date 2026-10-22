@@ -254,13 +254,13 @@ async def test_status_lines_and_notices_mark_nothing_for_the_wait() -> None:
                 assert await r.wait("w-1", path=_p("d")) == changed(
                     "f-1 new", "w-2", "f-1"
                 )
-            seen.extend(r.state.notice_lines("w-1"))
+            seen.extend(line.text for line in r.state.notice_lines("w-1"))
             await r.sm("w-2", "create", path=_p("d/b.md"), file_text="x")
             if with_waits:
                 assert await r.wait("w-1", path=_p("d")) == changed(
                     "f-1 new, f-2 new", "w-2", "f-1", count=2
                 )
-            seen.extend(r.state.notice_lines("w-1"))
+            seen.extend(line.text for line in r.state.notice_lines("w-1"))
             seen.append(await r.sm("w-1", "view", path=ROOT))
             return seen
 
@@ -577,6 +577,57 @@ async def test_refusals() -> None:
         with pytest.raises(ToolError, match="w-1 has ended"):
             await r.wait("w-1")
         assert waited(transcript) == []
+
+
+@pytest.mark.anyio
+async def test_a_members_own_loop_waits_once_at_a_time() -> None:
+    async with run() as (r, transcript):
+        async with anyio.create_task_group() as tg:
+            await start(tg, r, "w-1")
+            # as an agent calling the tool from two tasks of its own loop would
+            with pytest.raises(ToolError, match="w-1 is already waiting"):
+                await r.wait("w-1")
+            # nested loops' waits, beside each other and the own loop's
+            await start(tg, r, "w-1", "child-1")
+            await start(tg, r, "w-1", "child-2")
+            await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
+        # sorted: the released waits resume in any order
+        assert sorted(
+            (d["wait"], d["loop"], d["outcome"]) for d in waited(transcript)
+        ) == [
+            ("x-1", "w-1/top", "news"),
+            ("x-2", "w-1/child-1", "news"),
+            ("x-3", "w-1/child-2", "news"),
+        ]
+
+
+@pytest.mark.anyio
+async def test_a_wait_that_found_news_counts_as_the_own_loops_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with run() as (r, transcript):
+        await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
+        # holds the first wait at the checkpoint before it returns its news
+        resume = anyio.Event()
+
+        async def held() -> None:
+            await resume.wait()
+
+        async with anyio.create_task_group() as tg:
+            with monkeypatch.context() as m:
+                m.setattr(anyio.lowlevel, "checkpoint", held)
+                first = await start(tg, r, "w-1")
+            # another task of the loop views the news, so the first wait will sleep
+            # when it resumes, and then waits itself
+            await r.sm("w-1", "view", path=_p("a.md"))
+            with pytest.raises(ToolError, match="w-1 is already waiting"):
+                await r.wait("w-1")
+            resume.set()
+            await anyio.wait_all_tasks_blocked()
+            await r.sm("w-2", "create", path=_p("b.md"), file_text="x")
+            assert "f-2 new" in await first.value()
+        [data] = waited(transcript)
+        assert (data["wait"], data["woken_by"]) == ("x-1", [2])
 
 
 @pytest.mark.anyio

@@ -34,6 +34,7 @@ from inspect_swarm import (
     Channel,
     ChannelRun,
     ChannelState,
+    NoticeLine,
     Record,
     member,
     swarm,
@@ -76,6 +77,9 @@ class _WriteState:
 
     def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
         return [], None
+
+    def notice_lines(self, member: str) -> list[NoticeLine]:
+        return []
 
 
 class _Loop(Channel):
