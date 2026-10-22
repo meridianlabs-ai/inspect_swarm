@@ -14,6 +14,7 @@ from inspect_ai.model import (
     ModelOutput,
 )
 from inspect_ai.util import (
+    LimitExceededError,
     message_limit,
     span_id_provider,
     store,
@@ -815,6 +816,77 @@ async def test_a_controller_chooses_the_answer_in_place_of_its_final_rule() -> N
     assert stop.state.messages[-1].metadata == {
         "inspect_swarm": {"final": {"mode": "controller", "member": "b"}}
     }
+
+
+@agent
+def after_choice(inner: Agent) -> Agent:
+    # waits, making no model call, until the controller has chosen, then runs inner
+    async def execute(state: AgentState) -> AgentState:
+        while _record().final.mode != "controller":
+            await anyio.sleep(0.01)
+        return await inner(state)
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_controllers_choice_is_the_provisional_answer_at_once() -> None:
+    seen: dict[str, tuple[str, SwarmResultRecord]] = {}
+    state = AgentState(messages=[ChatMessageUser(content="task")])
+
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        async for event in control.events():
+            if event.member == "b":
+                # `last` would answer with b
+                control.choose_answer("a", reason="earlier")
+                seen["chosen"] = (state.output.completion, _record())
+            elif event.member == "c":
+                seen["later"] = (state.output.completion, _record())
+        return "all_done"
+
+    @swarm_controller(name="final_test_choose_provisional")
+    def chooser() -> Controller:
+        return Controller(run, final="last")
+
+    agent_swarm = swarm(
+        [
+            member(generator(scripted_model(), calls=0, answer="a"), name="a"),
+            member(
+                after(["a"], generator(scripted_model(), calls=0, answer="b")),
+                name="b",
+            ),
+            # submits after the choice, so `last` alone would answer with it
+            member(
+                after_choice(generator(scripted_model(), calls=0, answer="c")),
+                name="c",
+            ),
+            # still running when the sample's message limit ends the swarm
+            member(after(["c"], generator(scripted_model(), calls=None)), name="busy"),
+        ],
+        controller=chooser(),
+        channels=[],
+    )
+    # c waits on the choice's record, so a choice that is not recorded at once hangs
+    with anyio.fail_after(10):
+        async with sample(messages=6):
+            with pytest.raises(LimitExceededError):
+                await agent_swarm(state)
+            record = _record()
+    expected = {
+        "mode": "controller",
+        "member": "a",
+        "reason": "earlier",
+        "provisional": True,
+    }
+    for completion, provisional in seen.values():
+        assert completion == "a"
+        assert provisional.final.model_dump() == expected
+    assert set(seen) == {"chosen", "later"}
+    # the sample's limit ended the swarm before finalisation
+    assert state.output.completion == "a"
+    assert record.final.model_dump() == expected
 
 
 @pytest.mark.anyio
