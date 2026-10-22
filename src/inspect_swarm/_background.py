@@ -33,7 +33,13 @@ def self_stop(error: BaseException) -> bool:
 # raise, so the owner refuses background work in a member found bridged.
 class MemberBackground:
     def __init__(self, member: MemberContext, contain: Sequence[Limit]) -> None:
+        # deferred: the bus imports the runtime, which imports this module
+        from ._bus._bus import current_bus
+
         self._member = member
+        # the bus of the member's run, which work the member starts may not inherit, as
+        # when a nested swarm's controller starts it
+        self._bus = current_bus.get()
         self._contain = list(contain)
         # tasks background() has started in this owner
         self.started = 0
@@ -97,6 +103,7 @@ class MemberBackground:
         self._tg.start_soon(self._run, func, args)
         self.started += 1
         self.running += 1
+        self._member.background_running += 1
 
     # returns once no task is running, including tasks started while waiting
     async def wait(self) -> None:
@@ -121,6 +128,10 @@ class MemberBackground:
                 raise
         finally:
             self.running -= 1
+            self._member.background_running -= 1
             assert self._changed is not None
             self._changed.set()
             self._changed = anyio.Event()
+            if self._member.background_running == 0 and self._bus is not None:
+                # the member may now be waiting, and so may every member
+                self._bus.recheck()

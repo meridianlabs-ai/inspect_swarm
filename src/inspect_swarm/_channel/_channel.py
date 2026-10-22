@@ -44,6 +44,9 @@ class Channel:
     storm: StormControls = StormControls()
     """The storm controls the bus applies to the channel's records. By default there are none."""
 
+    max_wait: int | None = None
+    """This channel's contribution to the longest `swarm_wait`, in seconds, or `None` (the default) for a channel whose records wake no waits. A channel that sets it opens a state that implements `WaitingState`. The bus's effective maximum is the largest `max_wait` of the run's open channels that set it."""
+
     def check(self, roster: Sequence[MemberInfo]) -> None:
         """Check the roster when `swarm()` is called.
 
@@ -129,6 +132,78 @@ class ChannelState(Protocol):
 
         Returns:
             The members to notify, and a JSON mapping for the record's `delivered` evidence, or `None`.
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class WaitSpec:
+    """One call of `swarm_wait`, as the bus asks a `WaitingState` about it."""
+
+    id: str
+    """The wait's id (`"x-4"`), numbered per run."""
+
+    member: str
+    """The waiting member's name."""
+
+    loop: str | None
+    """The agent span of the loop that waits."""
+
+    own: bool
+    """Whether that loop is the member's own, not one of its subagents'."""
+
+    path: str | None
+    """The shared memory's filter as the model gave it, or `None` for the whole board. Later channels add filters of their own."""
+
+
+@dataclass(frozen=True)
+class WaitNews:
+    """What a channel has for a waiting loop to look at."""
+
+    lines: list[str]
+    """The channel's lines for the wait's result. Fixed templates with ids and member names, never content."""
+
+    files: list[dict[str, JsonValue]]
+    """What `lines` name, for the `waited` evidence."""
+
+
+class WaitingState(ChannelState, Protocol):
+    """The state of a channel whose records wake waits (one that sets `Channel.max_wait`).
+
+    The bus calls these methods with no `await` around them. None of them marks anything: a loop acknowledges what a wait names by reading it with the channel's own tool.
+    """
+
+    def wait_check(self, spec: WaitSpec) -> None:
+        """Check a wait's filter when the wait is called.
+
+        Args:
+            spec: The wait.
+
+        Raises:
+            ToolError: If the filter is malformed.
+        """
+        ...
+
+    def wakes(self, spec: WaitSpec, record: Record) -> bool:
+        """Whether a record the channel has just applied made something reportable to a wait.
+
+        Args:
+            spec: The wait.
+            record: The applied record, which has `wake` set.
+
+        Returns:
+            Whether the wait should be released.
+        """
+        ...
+
+    def news(self, spec: WaitSpec) -> WaitNews | None:
+        """What is reportable to a wait now.
+
+        Args:
+            spec: The wait.
+
+        Returns:
+            The lines and what they name, or `None` when nothing matching the wait's filter is reportable.
         """
         ...
 

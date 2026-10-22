@@ -1,5 +1,6 @@
 import copy
 from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING
 
 from inspect_ai.event import Event, Timeline, timeline_build
 from inspect_ai.log import transcript
@@ -9,6 +10,9 @@ from pydantic import JsonValue
 from ._bus._record import Record, thaw_json
 from ._ledger import SpanPlaces, SwarmLedger
 from ._metrics import SwarmMetrics
+
+if TYPE_CHECKING:
+    from ._channel._channel import WaitSpec
 
 LEDGER_KEY = "inspect_swarm:ledger"
 METRICS_KEY = "inspect_swarm:metrics"
@@ -40,8 +44,8 @@ def evidence(
 
 
 # Communication evidence: a `comm` event for each record that reached the bus (`sent`),
-# for each one it delivered (`delivered`) and for each read of a channel's content
-# (`read`), written in the span the channel's tool runs in. Its `member` and `span_id`
+# for each one it delivered (`delivered`), for each read of a channel's content
+# (`read`) and for each wait (`waited`), written in the span the channel's tool runs in. Its `member` and `span_id`
 # are the acting member and its member span, even from a member's descendant; `loop` is
 # the agent span of the loop that acted, and `nested` whether that loop is not the
 # member's own.
@@ -120,6 +124,42 @@ def comm_read(
         tool_span_id=tool_span_id,
         files=files,
         listing=listing,
+    )
+
+
+def comm_waited(
+    span_id: str | None,
+    spec: "WaitSpec",
+    *,
+    nested: bool,
+    channels: list[str],
+    timeout: dict[str, JsonValue],
+    started: float,
+    duration: float,
+    outcome: str,
+    woken_by: list[int],
+    files: list[JsonValue],
+    ended: list[JsonValue],
+) -> None:
+    # one swarm_wait, when it returns or is cancelled: what ended it, the commits that
+    # released it for news (`delivered.seq`), and the files and ends its result named
+    evidence(
+        "comm",
+        "waited",
+        member=spec.member,
+        span_id=span_id,
+        loop=spec.loop,
+        nested=nested,
+        wait=spec.id,
+        channels=list(channels),
+        path=spec.path,
+        timeout=timeout,
+        started=started,
+        duration=duration,
+        outcome=outcome,
+        woken_by=list(woken_by),
+        files=files,
+        ended=ended,
     )
 
 

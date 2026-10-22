@@ -52,7 +52,7 @@ class Record:
     """The channel's operation data, if any, as JSON that cannot be changed: objects are read-only mappings and arrays are tuples. A record is shared by the channel and the sender's tool, so neither can change what the other sees."""
 
     wake: bool
-    """Whether the record ends a recipient's wait."""
+    """Whether the record can end a member's wait (`swarm_wait`)."""
 
     reply_to: str | None
     """The id of a record this one answers."""
@@ -66,7 +66,8 @@ class Record:
 
 # What a channel's tool hands to `Bus.deliver()`, which makes the `Record`: the
 # channel's name, the record's kind, member names to deliver to (`()` for an unaddressed
-# record), the payload and the channel's operation data.
+# record), the payload, the channel's operation data, and whether the record can end a
+# wait.
 @dataclass(frozen=True)
 class Draft:
     channel: str
@@ -74,6 +75,7 @@ class Draft:
     to: tuple[str, ...] = ()
     payload: str = ""
     op: dict[str, JsonValue] | None = None
+    wake: bool = False
 
 
 # A record's operation data, detached from the draft's and read-only at every depth.

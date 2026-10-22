@@ -2,7 +2,7 @@ import json
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.agent._channel import current_agent_channel
@@ -12,11 +12,12 @@ from inspect_ai.util._span import current_agent_span_id, current_span_id
 from pydantic import JsonValue
 
 from .._budget import MemberContext, current_member
-from .._channel._channel import Channel, ChannelRun, ChannelState
+from .._channel._channel import Channel, ChannelRun, ChannelState, WaitingState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_sent
 from ._record import Draft, FrozenJson, Record, freeze_json, thaw_json
 from ._storm import Storm
+from ._wait import Waits
 
 if TYPE_CHECKING:
     from .._controller._control import MemberHandle
@@ -58,11 +59,21 @@ class Bus:
         self._storms: dict[str, Storm] = {}
         self._prefixes: dict[str, str] = {}
         self._reach: dict[str, Literal["loop", "member"]] = {}
+        # the states of the channels that wake waits, and their longest wait
+        waiting: dict[str, WaitingState] = {}
+        max_wait: int | None = None
         run = ChannelRun(
             bus=self, roster=[MemberInfo(name=m.name, role=m.role) for m in members]
         )
         for channel in channels:
             state = channel.open(run)
+            if channel.max_wait is not None and not all(
+                callable(getattr(state, method, None))
+                for method in ("wait_check", "wakes", "news")
+            ):
+                raise TypeError(
+                    f"{type(channel).__name__} sets max_wait, but the state its open() returned does not implement WaitingState."
+                )
             if state is None:
                 continue
             if channel.name is None or channel.prefix is None:
@@ -73,6 +84,10 @@ class Bus:
             self._storms[channel.name] = Storm(channel.storm)
             self._prefixes[channel.name] = channel.prefix
             self._reach[channel.name] = channel.reach
+            if channel.max_wait is not None:
+                waiting[channel.name] = cast(WaitingState, state)
+                max_wait = max(max_wait or 0, channel.max_wait)
+        self._waits = Waits(self, self._contexts, waiting, max_wait)
 
     @property
     def states(self) -> Mapping[str, ChannelState]:
@@ -88,9 +103,31 @@ class Bus:
     def stopping(self) -> bool:
         return self._stopping
 
+    @property
+    def waits(self) -> Waits:
+        return self._waits
+
     def close(self) -> None:
-        # the first act of the swarm's stop: records not yet committed are refused
+        # the first act of the swarm's stop: records not yet committed are refused, and
+        # every wait is released
         self._stopping = True
+        self._waits.close()
+
+    async def wait(self, path: str | None, timeout: int | None) -> str:
+        # the swarm_wait tool's body
+        return await self._waits.wait(path, timeout)
+
+    def member_ended(self, name: str, status: str) -> None:
+        # from the runtime, right after it marks the member ended
+        self._waits.member_ended(name, status)
+
+    def member_ending(self, name: str) -> None:
+        # from the member's drain, once its own agent has returned
+        self._waits.member_ending(name)
+
+    def recheck(self) -> None:
+        # from a member's background owner, when none of its work is running
+        self._waits.recheck()
 
     async def deliver(self, draft: Draft) -> Delivery:
         # step 0: bind and resolve, before a record exists
@@ -115,7 +152,7 @@ class Bus:
             payload=draft.payload,
             # detached from the tool's own dict, and read-only at every depth
             op=None if draft.op is None else _frozen_op(draft),
-            wake=False,
+            wake=draft.wake,
             reply_to=None,
             sender_span_id=current_agent_span_id(),
             tool_span_id=current_span_id(),
@@ -148,6 +185,7 @@ class Bus:
         notify, result = state.apply(record)
         storm.commit(record)
         comm_delivered(member_span, record, nested, self._seq, notify, result)
+        self._waits.delivered(record, self._seq)
         return Delivery(record, self._seq, list(notify), result)
 
     def running(self, name: str) -> bool:

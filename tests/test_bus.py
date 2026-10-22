@@ -28,6 +28,8 @@ from inspect_swarm import (
     Record,
     StopReason,
     SwarmControl,
+    WaitNews,
+    WaitSpec,
     member,
     swarm,
     swarm_channel,
@@ -752,6 +754,100 @@ async def test_a_stop_refuses_records_from_members_still_running() -> None:
     [bus] = buses
     assert _board(bus).applied == []
     assert _comm(outcome.transcript) == []
+
+
+# Waits: the bus releases a wait for a channel whose records wake waits
+
+
+class _WakingState(_BoardState):
+    # reports to a wait every applied record whose payload names the waiting member
+    def wait_check(self, spec: WaitSpec) -> None:
+        return None
+
+    def wakes(self, spec: WaitSpec, record: Record) -> bool:
+        return record.payload == spec.member
+
+    def news(self, spec: WaitSpec) -> WaitNews | None:
+        if any(r.payload == spec.member for r in self.applied):
+            return WaitNews([f"a note for {spec.member}"], [])
+        return None
+
+
+class _Waking(_Board):
+    name = "waking"
+    prefix = "k"
+    max_wait = 5
+
+    def open(self, run: ChannelRun) -> ChannelState | None:
+        return _WakingState(None)
+
+
+class _LongerWaking(_Waking):
+    name = "longer"
+    prefix = "l"
+    max_wait = 30
+
+
+class _WakingWithoutWaits(_Board):
+    max_wait = 10
+
+
+class _WakingWithoutState(Channel):
+    # opens no state, as an instructions-only channel does
+    max_wait = 3600
+
+
+@pytest.mark.anyio
+async def test_only_a_record_with_wake_releases_a_wait() -> None:
+    bus, members = _bus(channels=[_Waking(), _LongerWaking()])
+    # the largest of the waking channels' max_wait
+    assert bus.waits.max_wait == 30
+    results: list[str] = []
+
+    async def wait() -> None:
+        with _as(members["w-2"].context):
+            results.append(await bus.wait(None, None))
+
+    async def send(wake: bool) -> None:
+        with _as(members["w-1"].context):
+            await bus.deliver(Draft("waking", "note", payload="w-2", wake=wake))
+
+    async with sample() as transcript:
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(wait)
+                await anyio.wait_all_tasks_blocked()
+                await send(False)
+                await anyio.wait_all_tasks_blocked()
+                assert results == []
+                await send(True)
+    assert results == ["a note for w-2"]
+    sent = [c["record"]["wake"] for c in _comm(transcript) if c["kind"] == "sent"]
+    assert sent == [False, True]
+    [waited] = [c for c in _comm(transcript) if c["kind"] == "waited"]
+    assert (waited["channels"], waited["woken_by"]) == (["waking", "longer"], [2])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "channels",
+    [
+        pytest.param(lambda: [_WakingWithoutWaits()], id="state-without-waits"),
+        pytest.param(lambda: [_WakingWithoutState()], id="no-state"),
+        pytest.param(lambda: [_Waking(), _WakingWithoutState()], id="no-state-beside"),
+    ],
+)
+async def test_a_channel_with_max_wait_needs_a_waiting_state(
+    channels: Callable[[], list[Channel]],
+) -> None:
+    with pytest.raises(TypeError, match="does not implement WaitingState"):
+        _bus(channels=channels())
+
+
+@pytest.mark.anyio
+async def test_an_instructions_only_channel_needs_no_waiting_state() -> None:
+    bus, _ = _bus(channels=[_Locks(), _Waking()])
+    assert bus.waits.max_wait == 5
 
 
 @agent(name="inspect_swe/bus_test_cli")

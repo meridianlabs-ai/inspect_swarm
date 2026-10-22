@@ -6,7 +6,15 @@ Experimental and under development; the API may change.
 from ._budget import Budget, BudgetUsage, SwarmBudget, swarm_budget
 from ._bus._record import Record
 from ._bus._tools import swarm_tools
-from ._channel._channel import Channel, ChannelRun, ChannelState, swarm_channel
+from ._channel._channel import (
+    Channel,
+    ChannelRun,
+    ChannelState,
+    WaitingState,
+    WaitNews,
+    WaitSpec,
+    swarm_channel,
+)
 from ._channel.filesystem import filesystem
 from ._channel.shared_memory import shared_memory
 from ._controller._control import (
@@ -50,6 +58,9 @@ __all__ = [
     "SwarmBudget",
     "SwarmControl",
     "SwarmEvent",
+    "WaitNews",
+    "WaitSpec",
+    "WaitingState",
     "__version__",
     "filesystem",
     "leaderless",

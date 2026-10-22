@@ -308,6 +308,8 @@ class EventLog:
             and event.source == "inspect_swarm"
             and isinstance(event.data, dict)
             and event.data.get("type") == "comm"
+            # waits are not counted yet, and name no one channel
+            and event.data.get("kind") != "waited"
         ):
             self.comms.append(_comm_record(event.data))
 

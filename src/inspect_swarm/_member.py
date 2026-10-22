@@ -537,7 +537,7 @@ async def _run_member(
                     if foreign is not None:
                         # no drain: leaving the owner cancels the background work
                         raise foreign
-                    await _drain(owner, lever, grace)
+                    await _drain(name, owner, lever, grace)
             finally:
                 # after the owner has ended its work, so its cancellations are counted
                 outcome.background_started = owner.started
@@ -555,13 +555,20 @@ async def _run_member(
 
 
 # The member's background work, once its agent has returned: refused new model calls,
-# given the effective grace to finish what it has in flight, then cancelled by leaving
-# the owner.
+# released from its waits, given the effective grace to finish what it has in flight,
+# then cancelled by leaving the owner.
 async def _drain(
-    owner: MemberBackground, lever: Lever, grace: Callable[[], float]
+    name: str, owner: MemberBackground, lever: Lever, grace: Callable[[], float]
 ) -> None:
+    # deferred: the bus imports the runtime, which imports this module
+    from ._bus._bus import current_bus
+
     # a stop that already closed the lever keeps its reason
     lever.close("member_ended")
+    # the member's waits end, and its later ones return at once
+    bus = current_bus.get()
+    if bus is not None:
+        bus.member_ending(name)
     with anyio.move_on_after(grace()):
         await owner.wait()
 

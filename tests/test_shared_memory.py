@@ -12,7 +12,7 @@ from inspect_ai.tool._tools._memory import MemoryStore
 from inspect_ai.util import store_as
 from inspect_ai.util._span import span
 
-from inspect_swarm import Channel, MemberState, shared_memory
+from inspect_swarm import Channel, MemberState, WaitSpec, shared_memory
 from inspect_swarm._budget import MemberContext, current_member
 from inspect_swarm._bus._bus import Bus
 from inspect_swarm._channel.shared_memory import (
@@ -682,6 +682,27 @@ async def test_a_largest_file_is_viewed_whole_within_the_budget(content: str) ->
         assert _fenced(result) == "\n".join(
             f"{n + 1:6}\t{line}" for n, line in enumerate(content.split("\n"))
         )
+
+
+@pytest.mark.anyio
+async def test_a_waits_news_line_stays_within_a_fixed_bound() -> None:
+    # ten ids with deleted markers and a count, and every other member as a writer,
+    # for names of the longest the channel takes
+    names = ["a" * 48, "b" * 48, "c" * 48]
+    async with _board(members=names) as (board, _):
+        a, b, c = names
+        for n in range(12):
+            writer = b if n % 2 else c
+            await board(writer, "create", path=_p(f"{n}"), file_text="x")
+            await board(a, "view", path=f"f-{n + 1}")
+            await board(writer, "view", path=f"f-{n + 1}")
+            await board(writer, "delete", path=_p(f"{n}"))
+        news = board.state.news(WaitSpec("x-1", a, f"{a}/top", True, None))
+        assert news is not None
+        [line] = news.lines
+        assert line.startswith("12 shared memory files changed where you waited")
+        assert ", and 2 more; by " in line
+        assert utf8_bytes(line) <= 512
 
 
 @pytest.mark.anyio
