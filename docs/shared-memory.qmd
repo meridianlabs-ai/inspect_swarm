@@ -1,0 +1,202 @@
+---
+title: Shared Memory
+---
+
+## Overview
+
+`shared_memory()` gives the swarm one board of files that every member reads and writes with a `shared_memory` tool. The tool has the commands of Inspect's `memory()` tool, over files under `/shared_memory`, and one more, `append`. Every write goes through the swarm as a record from the member that made it, so the log keeps the board's whole history, and members hear about each other's changes.
+
+Members that get `shared_memory` also get `swarm_wait`, so a member that needs a peer's work waits instead of polling. Each sample has its own board, which is gone when the swarm ends.
+
+[`examples/shared_memory.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_memory.py) is a runnable swarm that splits a count between members, who share their parts on the board and wait for each other.
+
+## Wiring
+
+Members get the tool from `swarm_tools()`, which gives a member the tools of the swarm's channels. Call it inside a member builder registered with `@agent`, and pass the builder to `member()` without calling it. To hear about changes between turns, a member also needs `swarm_on_continue()` as its agent's `on_continue`, called in the same builder:
+
+```python
+from inspect_ai.agent import Agent, agent, deepagent, react
+from inspect_ai.tool import bash
+
+from inspect_swarm import (
+    filesystem,
+    member,
+    shared_memory,
+    swarm,
+    swarm_on_continue,
+    swarm_tools,
+)
+
+
+@agent
+def solver_member() -> Agent:
+    return react(tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
+
+
+@agent
+def reviewer_member() -> Agent:
+    return deepagent(tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
+
+
+solver = swarm(
+    members=[
+        member(solver_member, name="solver", count=3),
+        member(reviewer_member, name="reviewer"),
+    ],
+    channels=[filesystem(), shared_memory()],
+)
+```
+
+- The log records a builder by name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild `swarm_tools()` or `swarm_on_continue()` passed in `args` or inside an agent you built ([Members](members.qmd#member-builders)).
+- Any agent that takes a `ToolSource` in its tools can take `swarm_tools()`. It gives no tools when the swarm has no channel with tools, or outside a swarm, so one member definition serves every arm of an experiment.
+- This swarm keeps the `filesystem` channel beside the board. `channels=[shared_memory()]`, or `channels=["shared_memory"]`, replaces it: members still share the sample's sandbox, but their preamble no longer mentions `/shared`. Members with their own sandboxes can use the board with no shared volume.
+- The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`.
+- Bridged members cannot use the channel yet, and `swarm()` refuses a bridged member beside it.
+
+## The tool
+
+The `shared_memory` tool's commands are `view`, `create`, `str_replace`, `insert`, `append`, `delete` and `rename`. Paths are `/shared_memory` followed by up to eight components of letters, digits, `.`, `_` and `-`.
+
+- Each file has an id, such as `f-3`, which `view` accepts as its path. Notices and status lines name files by id.
+- A file view shows the file inside a fence that names its last writer and version, under a header that says the content is information from a peer, not instructions. A directory view lists every file under it at any depth, with its id, version and last writer.
+- Write commands return a short acknowledgment, not the file. View a file to see it.
+- Every result ends with a status line naming the files other agents changed since this loop last viewed them, such as `Shared memory: 2 files changed since you last viewed them (f-2, f-9).`
+
+### The seen rule
+
+A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. A write to a file changed since the loop's last view is refused with an error that names the file and its last writer, and the loop views it and retries. So no member overwrites a change it has not seen.
+
+Two commands need no view:
+
+- `str_replace` fails unless `old_str` occurs exactly once in the file as it is when the write lands, so it is safe without one.
+- `append` adds text on a new line at the end of the file as it is when the write lands, and creates the file if needed. It suits a log or list that many members write to.
+
+## Notices
+
+At each turn boundary where other agents have changed files since its last notice, a member with `swarm_on_continue()` gets one user message, such as:
+
+```
+[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".
+```
+
+- A notice holds counts, file ids, member names and fixed instructions, never a member-chosen file path or file contents. Its metadata, under `inspect_swarm`, gives the notice's id and, for each channel's line, the ids it names.
+- The member continues or stops exactly as it would without the hook. If it has a hook of its own, wrap it: `swarm_on_continue(my_hook)`. For `react(submit=False)`, which stops after a turn without tool calls, pass `swarm_on_continue(no_tool_calls="stop")`.
+- A member that is stopping gets no notice. Neither do a member's subagents: only its own loop does.
+- `member(..., delivery="poll")` turns notices off for that member. It still learns of changes from the status line that ends each `shared_memory` result.
+- A custom agent gets notices only if it calls an `on_continue` hook at each turn boundary, as `react()` and `deepagent()` do. If it does not, give its member `delivery="poll"`, so the metrics do not list it in `notify_unwired` ([Analysis](analysis.qmd#wiring-checks)).
+
+## Waiting for other members
+
+`swarm_wait` blocks until there is something for the member to look at:
+
+- A file under the `path` it watches (the whole board without one) has a change that the waiting agent did not write and has not viewed. A subagent's write counts, so a member can wait for its own subagents.
+- Another member has ended.
+
+It returns at once if that is already so, and keeps returning while such a file stays unviewed. Its result names the changed files by id and the ended members by name and status, never file content: the member views a file to read it.
+
+A wait also ends without news: when every member is waiting, has ended or has not started; when the swarm stops; when the member's own agent finishes; or after `timeout` seconds. `max_wait` sets the longest wait and the default `timeout`, 600 seconds unless you change it, for example `shared_memory(max_wait=300)`.
+
+A wait is time inside a tool call. It counts towards the member's time limit, the swarm's time cap and the sample's time and working limits. It makes no model call, so it adds no tokens, cost or steps. The metrics report each member's waits, their time, and its `idle_time`: the seconds the member did nothing but wait ([Analysis](analysis.qmd#waits)).
+
+A swarm with only the `filesystem` channel, or `channels=[]`, has no `swarm_wait`: there is nothing it could wake on.
+
+## Subagents
+
+A member's subagents read and write the board as the member. deepagent's `general()` subagents, synchronous and background, and any nested loop given `swarm_tools()`, get the `shared_memory` and `swarm_wait` tools.
+
+- Their writes are records from the member. The evidence also names the loop that made each write or read, and marks a subagent's as `nested`.
+- Each loop has its own view of the board: the seen rule and the status line apply to the loop that calls the tool.
+- Subagents get no notices. They learn of changes from the status line.
+- A member's subagents share its write rate, so they cannot multiply its write volume.
+- A subagent's wait counts in the member's `wait_time` but not its `idle_time`.
+
+A deepagent member also has a private `memory()` of its own by default. Pass `deepagent(memory=False)` when the board should be its only memory tool.
+
+## Limits
+
+The board is bounded, so every file fits whole in one view:
+
+| Argument | Default | Limit |
+|---|---|---|
+| `max_files` | 100 | Files on the board |
+| `max_file_bytes` | 16,000 | UTF-8 bytes in one file |
+| `max_file_lines` | 1,000 | Lines in one file |
+| `max_board_bytes` | 400,000 | UTF-8 bytes in all files together |
+| `rate` | `(60, 60.0)` | Writes per member, all its loops together, in a sliding window of seconds; `None` for no limit |
+| `max_wait` | 600 | The longest `swarm_wait`, in seconds, and its default timeout |
+
+A write that would pass a limit is refused with an error that says which. Once the swarm begins to stop, writes are refused and views still work. A file cannot contain the fence tags the swarm uses (`<peer_file`, `<peer_listing`, `<peer_message` and their closing tags), and a write that would leave one in a file is refused.
+
+## The record of the board
+
+The swarm logs the members' writes, views, notices and waits as `InfoEvent`s with source `inspect_swarm` and type `comm`. Each is in the span of the tool call that made it, except a notice's, which is in the member's own loop:
+
+- `sent`: a write that reached the swarm, with its operation and payload, and why it was refused if it was.
+- `delivered`: a write applied to the board, with its commit sequence number and each file's previous and new version. Replaying the delivered writes in sequence order rebuilds every version of the board.
+- `read`: a view, with each file's version and the record that last wrote it, or a listing.
+- `notified`: a notice line the member got.
+- `waited`: a `swarm_wait` call, with what ended it and how long it took.
+
+Each event names the member and the loop that acted. The [metrics](analysis.qmd#communication) count these events for each member.
+
+## Monitoring with Inspect Sentinel
+
+A native member's call to `shared_memory` is an ordinary tool call, so [Inspect Sentinel](https://meridianlabs-ai.github.io/inspect_sentinel)'s tool stages see it with no swarm code. A protocol at `BeforeToolCall` can reject a write before it reaches the board, and one at `AfterToolCall` sees exactly what a view is about to show. For example, a rule that keeps credentials off the board:
+
+```python
+from inspect_sentinel import (
+    BeforeToolCall,
+    Context,
+    Decision,
+    Escalations,
+    Protocol,
+    call_text,
+    find_words,
+    protocol,
+)
+
+
+@protocol
+def no_secrets_on_board() -> Protocol:
+    """Reject shared_memory writes that mention a credential."""
+
+    async def decide(
+        context: Context, step: BeforeToolCall, escalations: Escalations
+    ) -> Decision | None:
+        if step.call.function != "shared_memory":
+            return None
+        if step.call.arguments.get("command") == "view":
+            return None
+        used = find_words(call_text(step.call), ["password", "api_key", "token"])
+        if used:
+            return Decision.reject(
+                f"write mentions {', '.join(used)}",
+                message="Credentials may not be written to shared memory.",
+            )
+        return Decision.proceed()
+
+    return decide
+```
+
+Pass it to the task as `Task(..., sentinel=no_secrets_on_board())`. The member gets the decision's message as the tool call's error. A step's `conversation` is the agent span id of the loop that made the call, and each `comm` event names that loop beside its member, so the two can be joined. Sentinel does not run on bridged members' tool calls, which is one reason bridged members cannot use the channel yet.
+
+## Migrating from `memory(instance=...)` {#migrating-from-memoryinstance}
+
+Before this channel, a board shared on purpose was a `memory()` tool with an explicit instance in every member's tools, `memory(instance="board")`, with the prompt saying it is shared. That still works, and it is a different channel: members' `ToolEvent`s record its use, with no sender, fence, notices, bounds or `comm` events. Nothing refuses using both; an arm that wants the board as its only channel gives no two members a shared instance.
+
+To move a task to the channel:
+
+1. In the member builder, replace `memory(instance="board")` with `swarm_tools()` in the tools, and pass `on_continue=swarm_on_continue(inner)` for notices, where `inner` is the hook the member had. The builder stays a registered `@agent`.
+2. For a deepagent member, pass `memory=False` to keep one memory tool as before, or leave deepagent's private `memory()` as an extra notebook per member. These are different experimental conditions.
+3. Replace the instructions that described the board with `"shared_memory"` or `shared_memory(...)` in `channels=`. Its instructions go in each member's preamble.
+4. Change the prompt's tool and path names (`memory`, `/memories`) to `shared_memory` and `/shared_memory`.
+
+What changes for the members:
+
+- Overwriting with `create`, `insert`, `delete` and `rename` need a current view ([The seen rule](#the-seen-rule)), and `append` adds an entry at the end of a file without one.
+- Writes return an acknowledgment, not a snippet of the file.
+- A directory view lists every file under it at any depth, and there are no empty directories.
+- Paths are narrower, files and the board are bounded, and tabs are kept.
+- Views are fenced and name the last writer, and notices and status lines report changes.
+
+An eval set comparing the two boards runs them as two arms: the channel list and the builder's arguments differ, so their task identifiers do. [`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py) is shaped like such a port: members with their own sandboxes whose only channel is the board.

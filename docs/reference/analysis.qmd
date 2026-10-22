@@ -1,0 +1,17 @@
+---
+title: Analysis Reference
+description: Python API reference for the inspect_swarm.analysis module.
+reference: inspect_swarm.analysis
+---
+
+## Columns
+
+### SwarmColumns
+
+## The ledger
+
+### swarm_ledger
+### SwarmLedger
+### MemberLedger
+### Meter
+### Calls

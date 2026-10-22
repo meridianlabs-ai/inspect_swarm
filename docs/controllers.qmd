@@ -1,0 +1,158 @@
+---
+title: Controllers
+---
+
+## Overview
+
+`controller=` decides which members start, when and with what input, and when the swarm is done. The swarm's answer is the first submission whatever the controller ([Scoring](scoring.qmd#the-answer)), so a controller decides who runs and when to stop, not which answer wins.
+
+## leaderless
+
+The only built-in controller is `leaderless`, the default. It starts every member with the sample's input and stops the swarm when the first member submits, since that submission is the answer. The other members finish the calls they have in flight and stop. Those still running after the grace period are cancelled. If no member submits, the swarm ends when all have ended.
+
+Pass `leaderless(stop_on_submission=False)` to let every member run to its end:
+
+```python
+from inspect_ai.agent import react
+
+from inspect_swarm import leaderless, member, swarm
+
+solver = swarm(
+    members=member(react, count=4),
+    controller=leaderless(stop_on_submission=False),
+)
+```
+
+Use it when:
+
+- The scorer reads what members leave in the sandbox, where members still working change what is scored ([Scoring](scoring.qmd#scoring-what-members-leave)).
+- You measure each member's result, as for team@k.
+- Your agent returns normally when it gives up, which would count as a submission and stop the swarm.
+
+`leaderless` returns the stop reason `submitted` when a submission stopped the swarm and `all_done` when every member ended. The ledger records it as `stop_reason` ([Analysis](analysis.qmd#the-ledger)).
+
+## Writing a controller
+
+A controller is a factory decorated with `@swarm_controller` that returns a `Controller`. Its `run` function is called once per sample with a `SwarmControl`, through which it starts members and receives their events. It returns a stop reason, and returning requests the stop.
+
+```python
+from collections.abc import Sequence
+from contextlib import aclosing
+
+from inspect_swarm import (
+    Controller,
+    MemberInfo,
+    StopReason,
+    SwarmControl,
+    swarm_controller,
+)
+
+
+@swarm_controller
+def escalate(first: str = "fast") -> Controller:
+    """Start one member; start the others only if it ends without a submission."""
+
+    def check(roster: Sequence[MemberInfo]) -> None:
+        if first not in [m.name for m in roster]:
+            raise ValueError(f"escalate(): no member is named {first!r}.")
+
+    async def run(swarm: SwarmControl) -> StopReason:
+        swarm.start(first)
+        async with aclosing(swarm.events()) as events:
+            async for event in events:
+                if event.submitted:
+                    return "submitted"
+        for m in swarm.members:
+            if m.state == "pending":
+                swarm.start(m)
+        async with aclosing(swarm.events()) as events:
+            async for event in events:
+                if event.submitted:
+                    return "submitted"
+        return "all_done"
+
+    return Controller(run, check=check)
+```
+
+- `swarm.members` are the members in roster order, as `MemberHandle`s: name, role, state (`pending`, `running` or `ended`), status and whether it submitted. A controller never sees what a member wrote.
+- `swarm.start(member, input=None)` starts a member and returns at once. `input` replaces the swarm's input for that member; `None` gives it the swarm's input. The member's preamble follows either. A member runs once, and starting one after the stop has begun raises.
+- `swarm.events()` yields each event once, in order from the swarm's start. Its only kind is `MemberEnded`, with the member's name, status and whether it submitted. The iterator ends when no member is running and no event is waiting, so a member started later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
+- `check`, if given, is called with the roster when `swarm()` is called. Raise `ValueError` for a roster the controller cannot run.
+- The stop reasons `all_done`, `submitted`, `verified` and `quiescence` are recorded as they are. Any other is recorded as `controller:<reason>`.
+
+A `Controller` holds configuration only: one object serves every sample, so keep per-sample state in `run`'s local variables. The factory's arguments are logged with the controller, so it can be rebuilt from the log. Pass the controller to the swarm, `swarm(..., controller=escalate("fast"))`, or by its registered name with its default arguments, `controller="escalate"`.
+
+## Stopping on the first proof
+
+Some tasks have a checker, such as a proof checker or a test suite, and the experiment wants to stop when the first member's answer passes it. [`examples/stop_on_proof.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/stop_on_proof.py) has such a controller:
+
+```python
+from contextlib import aclosing
+
+from inspect_swarm import Controller, StopReason, SwarmControl, swarm_controller
+
+
+@swarm_controller
+def until_proved() -> Controller:
+    """Start every member, and stop the swarm when the first one ends `submitted`.
+
+    Valid only when a member's normal return means a passed check, as `checked_solver()` makes it.
+    """
+
+    async def run(swarm: SwarmControl) -> StopReason:
+        for m in swarm.members:
+            swarm.start(m)
+        async with aclosing(swarm.events()) as events:
+            async for event in events:
+                if event.submitted:
+                    return "proved"
+        return "all_done"
+
+    return Controller(run)
+```
+
+It records the stop reason `controller:proved`. But it is right only under a precondition: a member's normal return must mean that its answer passed the check. A `react()` member also returns normally when it runs out of attempts, after three refusals, or after a context overflow it could not recover from. Without the precondition, `until_proved` can stop every member on a member that gave up, and record `controller:proved` with nothing proved.
+
+The member's builder makes the precondition hold. It raises a member-local custom limit when its agent returns without a passing check, which ends that member as `member_limit:custom` while the others continue:
+
+```python
+from inspect_ai.agent import Agent, AgentAttempts, AgentState, agent, react
+from inspect_ai.scorer import Value, value_to_float
+from inspect_ai.util import LimitExceededError
+
+
+@agent
+def checked_solver(attempts: int = 5) -> Agent:
+    """A `react()` member that returns normally only when one of its submissions passed the task's scorer."""
+    passed = False
+    to_float = value_to_float()
+
+    def score_value(value: Value) -> float:
+        nonlocal passed
+        result = to_float(value)
+        passed = passed or result == 1.0
+        return result
+
+    inner = react(attempts=AgentAttempts(attempts, score_value=score_value))
+
+    async def execute(state: AgentState) -> AgentState:
+        state = await inner(state)
+        if not passed:
+            # with no `source`, this ends only this member, as member_limit:custom
+            raise LimitExceededError(
+                "custom",
+                value=0,
+                limit=0,
+                message="returned without a passing check",
+            )
+        return state
+
+    return execute
+```
+
+- The check here is the task's own scorer, which `react(attempts=...)` runs on each submission but the last. A last submission is never checked, so it is not a proof.
+- The builder is called once for each member in each sample, so `passed` belongs to one member.
+- With this builder, the default `leaderless` would stop at the first proof too, recording `submitted` rather than `controller:proved`.
+- With background work, a controller sees a member's end only after the member's background work has drained ([Members](members.qmd#background-work)), so the other members stop up to one grace period later.
+
+[`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py) uses the same controller with a checking service in its own container, a `check` tool built per member, and per-member sandboxes.

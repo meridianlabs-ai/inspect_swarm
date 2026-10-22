@@ -1,0 +1,51 @@
+project:
+  type: meridianlabs-ai/inspect-docs
+
+inspect-docs:
+  title: Inspect Swarm
+  description: |
+    Run a swarm of agents on one sample of an Inspect task.
+  url: https://meridianlabs-ai.github.io/inspect_swarm
+  module: inspect_swarm
+  repo: meridianlabs-ai/inspect_swarm
+  org: Meridian Labs
+  navbar:
+    left:
+      - text: User Guide
+        menu:
+          - text: Basics
+            href: index.qmd
+          - text: Communication
+            href: channels.qmd
+          - text: Resources
+            href: budget.qmd
+          - text: Results
+            href: scoring.qmd
+      - text: Reference
+        href: reference/index.qmd
+  navigation:
+    - text: Basics
+      contents:
+        - text: Getting Started
+          href: index.qmd
+        - href: members.qmd
+        - href: controllers.qmd
+    - text: Communication
+      contents:
+        - href: channels.qmd
+        - href: shared-memory.qmd
+    - text: Resources
+      contents:
+        - href: budget.qmd
+        - href: sandboxes.qmd
+    - text: Results
+      contents:
+        - href: scoring.qmd
+        - href: analysis.qmd
+        - href: restrictions.qmd
+  sidebar: unified
+  external_refs:
+    inspect_ai: https://inspect.aisi.org.uk
+
+execute:
+  enabled: false

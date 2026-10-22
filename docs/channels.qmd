@@ -1,0 +1,74 @@
+---
+title: Channels
+---
+
+## Overview
+
+`channels=` decides how members share information. There are two built-in channels:
+
+- `filesystem`, the default: a convention for sharing files in a sandbox, stated in each member's preamble. It adds no tools.
+- `shared_memory`: a board of files that members read and write with a tool, with a record of every write and read. See [Shared Memory](shared-memory.qmd).
+
+`channels=[]` gives members no channel instructions. Channels change what members are told and what tools they get, not what they can reach: members share the sample's sandbox whatever the channels, unless they have their own ([Sandboxes](sandboxes.qmd)).
+
+A channel is given as an object, `filesystem(...)`, or by its registered name with its default arguments, `"filesystem"`. Each channel can be given once.
+
+## The filesystem channel
+
+`filesystem` tells each member, in its preamble, to share files in `/shared`, to read and append to `/shared/notes.md`, and to keep its own work in `/scratch/<member>`. It does not create these directories. Change the paths with `filesystem(...)`:
+
+```python
+from inspect_ai.agent import react
+
+from inspect_swarm import filesystem, member, swarm
+
+solver = swarm(
+    members=member(react, count=4),
+    channels=[filesystem(shared="/work/shared", scratch="/work/{member}")],
+)
+```
+
+When members have their own sandboxes and each sandbox mounts one shared volume, use `filesystem(shared_volume=True)`. Set `shared=` to the absolute path where the volume is mounted; `notes=` must be inside it. The preamble then says that `shared` and the notes file in it are the same in every member's sandbox, and gives no scratch directory, since each sandbox is already private. The swarm cannot check that the volume is mounted, and it refuses `shared_volume=True` when members share the sample's sandbox. See [Sandboxes](sandboxes.qmd#a-shared-volume).
+
+[`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) runs `bash()` members in one container with this channel.
+
+## Shared files are observed, not recorded
+
+The filesystem channel opens no state and offers no tools, so no tool of the swarm's carries file traffic. What the log has is each member's own tool calls (`bash()`, `python()`, `text_editor()`), as `ToolEvent`s.
+
+Those tool calls are evidence that members may have communicated through files, not a complete record. Processes a member starts in the sandbox can read and write files between logged tool calls, and after the member has ended. A bridged member's file operations are the CLI's own tools, which leave no `ToolEvent` at all. An experiment that attributes communication to the filesystem must state this limit, or add its own instrumentation, such as filesystem snapshots or audit logs in the sandbox.
+
+The same holds for every other path between members that the swarm does not carry:
+
+- A built-in tool given the same explicit `instance` in several members, such as `memory(instance="board")`, shares its state through the sample store. Members' `ToolEvent`s record its use, and nothing else does. See [Members](members.qmd#tool-state).
+- A tool that reads the swarm's result record gives members a view of each other's state, status and time ([Scoring](scoring.qmd#the-result-record)).
+
+Channels limit what members are told, not what they can do. An arm meant to have one channel only, or none, needs members that cannot reach each other otherwise: their own sandboxes, and no shared tool instances.
+
+## Writing a channel
+
+A channel is a factory decorated with `@swarm_channel` that returns a `Channel`. A channel that only adds instructions, as `filesystem` does, subclasses `Channel` and overrides `instructions()`:
+
+```python
+from inspect_swarm import Channel, MemberInfo, swarm_channel
+
+
+class LeadChannel(Channel):
+    def __init__(self, lead: str) -> None:
+        self.lead = lead
+
+    def instructions(self, member: MemberInfo) -> str | None:
+        if member.name == self.lead:
+            return "Write the plan to /shared/plan.md before you start."
+        return f"Read /shared/plan.md, which {self.lead} writes, before you start."
+
+
+@swarm_channel
+def lead(name: str) -> Channel:
+    """Tell members that one of them writes a plan for the others."""
+    return LeadChannel(name)
+```
+
+`instructions()` returns text for the member's preamble, or `None` to add nothing. `check()`, if overridden, is called with the roster when `swarm()` is called and raises `ValueError` for a roster the channel cannot serve. A `Channel` holds configuration only: one object serves every sample. The factory's arguments are logged with the channel.
+
+A channel with tools and records, as `shared_memory` is, also sets `name` and `prefix` and returns a `ChannelState` from `open()` for each run of the swarm; its records go through the swarm's bus. See the docstrings of `Channel`, `ChannelState` and `WaitingState` in the [reference](reference/index.qmd).

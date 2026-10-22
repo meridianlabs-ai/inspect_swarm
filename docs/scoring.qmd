@@ -1,0 +1,124 @@
+---
+title: Scoring
+---
+
+## Overview
+
+A swarm is scored by the task's own scorers. The swarm is the task's solver, so the scorers run after it, on the swarm's output and on whatever the members left in the sandbox, as they would after a single agent. Inspect Swarm adds no scorer of its own; it records what the swarm did, so analysis can read it beside the scores.
+
+## The answer and the result record
+
+### The answer
+
+The swarm's answer is the first submission: the member that submitted earliest, by the swarm's clock, with ties broken by roster order. A member that ended any other way is never chosen ([Members](members.qmd#how-a-member-ends)). When no member submitted, the answer is empty.
+
+The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the chosen member. Each member's own conversation is in its timeline.
+
+### The result record
+
+The swarm keeps a record of what it did in the sample store under `inspect_swarm:result`:
+
+```json
+{
+  "version": 1,
+  "members": [
+    {"name": "react-1", "role": null, "state": "ended", "status": "submitted", "submitted": true, "time": 41.2, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null},
+    {"name": "react-2", "role": null, "state": "ended", "status": "swarm_cap", "submitted": false, "time": 57.9, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null}
+  ],
+  "final": {"mode": "first", "member": "react-1", "reason": null, "provisional": false}
+}
+```
+
+- A member's `state` is `pending` (never started), `running` or `ended`, and `status` says how it ended ([Members](members.qmd#how-a-member-ends)).
+- `time` is seconds from the swarm's start to the member's end.
+- `sandbox` is the member's own sandbox, or `null` when it shares the sample's.
+- `gate_checks`, `gate_passes` and `first_pass_time` count the member's in-loop checks ([Checks during the run](#checks-during-the-run)).
+- `final.mode` is `first`, and `final.member` the member whose output is the answer. With no answer, `final.member` is `null` and `final.reason` is `"no_submissions"`.
+
+The record is updated as members start and end. If a limit or error ends the sample before the swarm finishes, the record keeps the first submission so far with `provisional: true`, and that submission is the sample's output.
+
+### The record belongs to the swarm
+
+Only the swarm writes `inspect_swarm:result`. Task code (tools, member builders, controllers, scorers) must not write it.
+
+Any code can read it. A scorer that reads it after the swarm is how a task finds each member's sandbox ([Per-member sandboxes](#per-member-sandboxes)). But a tool that reads it while the swarm runs gives members a view of each other's state, status and time. That is a channel between members outside the swarm's channels, and the swarm records no evidence of it.
+
+## Scoring what members leave
+
+A scorer that reads the sandbox, rather than the answer, scores what every member left there. With the default `leaderless`, the swarm stops the other members at the first submission, so what they were doing is left half done. When the scorer reads a shared artifact, let every member run to its end with `leaderless(stop_on_submission=False)` ([Controllers](controllers.qmd#leaderless)). The swarm returns after every member and its background work have ended, so the scorer sees the sandbox as the members left it.
+
+[`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) scores a script that the members build together in a shared container.
+
+## Per-member sandboxes
+
+With per-member sandboxes, the scorer still runs outside every member, where `sandbox()` is the sample's `default`. A scorer that grades the members' work names each member's sandbox. The result record says which member used which, so the scorer can read it rather than repeat the roster. From [`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py):
+
+```python
+@scorer(metrics=[accuracy()])
+def any_member_proved() -> Scorer:
+    """Check every member's answer file again, in its own sandbox."""
+
+    async def score(state: TaskState, target: Target) -> Score:
+        # the swarm's result record; task code reads it but never writes it
+        record: dict[str, Any] = state.store.get("inspect_swarm:result")
+        checks: dict[str, dict[str, str | None]] = {}
+        for m in record["members"]:
+            answer, result = await run_check(m["sandbox"])
+            checks[m["name"]] = {"answer": answer, "check": result}
+        proved = [
+            name for name, c in checks.items() if (c["check"] or "").startswith("PASS")
+        ]
+        return Score(
+            value=CORRECT if proved else INCORRECT,
+            answer=state.output.completion,
+            explanation=f"proved by {', '.join(proved)}"
+            if proved
+            else "no member proved it",
+            metadata=checks,
+        )
+
+    return score
+```
+
+`run_check()` reads the answer file from the named sandbox and checks it in the shared `comparator` service. A member that wrote a valid answer but was stopped before it submitted still passes this check, which is why the scorer grades every member's sandbox rather than only the chosen member's.
+
+## Checks during the run
+
+A task's scorer can also run inside a member, as `react(attempts=...)` runs it on each submission. For each member, the swarm counts these checks of its own submissions, made in its own loop with the task's first scorer:
+
+- `gate_checks`: how many submissions were checked.
+- `gate_passes`: how many of those passed, a score of 1.0 under Inspect's default `value_to_float()`.
+- `first_pass_time`: the swarm time of the first pass.
+
+They are in the result record and the [metrics](analysis.qmd#metrics). A member with its own `score_value` can pass its own gate where the count does not, since the count assumes the default converter. Inside a member, a scorer's `sandbox()` is the member's own.
+
+## Comparisons
+
+The swarm's score is the task's scorer on the swarm's answer, or on what the members left for a scorer that reads the sandbox. Compare it with:
+
+- A single agent at the same budget. A swarm of one, `swarm(members=agent, channels=[])`, runs one agent under the swarm's rules with the same records ([Members](members.qmd#a-swarm-of-one)), so both arms have a ledger. Unlike a plain agent, it returns an empty output when its member does not submit.
+- Epochs of a single agent, through Inspect's own reducers on the task's scorer, such as `mean`, `max` and `pass_at_k`:
+
+```python
+from inspect_ai import Epochs, Task, task
+from inspect_ai.agent import react
+from inspect_ai.scorer import match
+from questions import QUESTIONS
+
+from inspect_swarm import swarm
+
+
+@task
+def single_agent() -> Task:
+    return Task(
+        dataset=QUESTIONS,
+        solver=swarm(members=react(), channels=[]),
+        scorer=match(),
+        epochs=Epochs(4, ["mean", "pass_at_4"]),
+        token_limit=50_000,
+    )
+```
+
+`pass_at_k` and `max` choose with knowledge of the target, and the swarm's first submission does not, so they are upper references, not like-for-like comparisons.
+
+Compare arms on the cost the log records, not on the caps ([Analysis](analysis.qmd#samples-dataframe)). team@k, the mean member and best@k on graded scores need each member's own score, which Inspect Swarm does not record yet; best@k can be computed from per-epoch values in `samples_df()`.

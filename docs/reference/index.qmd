@@ -1,0 +1,48 @@
+---
+title: Reference
+description: Python API reference for the inspect_swarm package.
+reference: inspect_swarm
+---
+
+## Swarm
+
+### swarm
+### member
+### Member
+### Budget
+
+## Controllers
+
+### leaderless
+### swarm_controller
+### Controller
+### SwarmControl
+### MemberHandle
+### MemberEnded
+### SwarmEvent
+### MemberInfo
+### MemberState
+### StopReason
+
+## Channels
+
+### filesystem
+### shared_memory
+### swarm_tools
+### swarm_on_continue
+### swarm_channel
+### Channel
+### ChannelRun
+### ChannelState
+### WaitingState
+### WaitSpec
+### WaitNews
+### NoticeLine
+### Record
+
+## Budget view
+
+### swarm_resources
+### swarm_budget
+### SwarmBudget
+### BudgetUsage

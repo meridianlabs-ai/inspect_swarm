@@ -1,0 +1,105 @@
+---
+title: Inspect Swarm
+---
+
+## Welcome
+
+Inspect Swarm runs a swarm of agents on one sample of an [Inspect](https://inspect.aisi.org.uk) task. A swarm is an Inspect agent, so it replaces the task's solver, and the task's scorer scores the swarm's answer.
+
+::: {.callout-warning}
+Inspect Swarm is experimental and under active development. It has no stable API and no releases yet, and it may change or be withdrawn without notice.
+:::
+
+## Getting Started
+
+Inspect Swarm has no releases yet. Install it from GitHub:
+
+```bash
+pip install git+https://github.com/meridianlabs-ai/inspect_swarm
+```
+
+or, in a uv project:
+
+```bash
+uv add "inspect_swarm @ git+https://github.com/meridianlabs-ai/inspect_swarm"
+```
+
+For now it depends on inspect_ai's `main` branch, which has features no inspect_ai release has yet. Installing Inspect Swarm therefore installs inspect_ai from GitHub `main`, replacing a released inspect_ai in that environment. It needs Python 3.11 or later.
+
+## Run a swarm on an existing task
+
+Pass `swarm()` as the solver. From Python:
+
+```python
+from inspect_ai import eval
+from inspect_ai.agent import react
+
+from inspect_swarm import member, swarm
+
+from my_tasks import my_task
+
+eval(
+    my_task(),
+    solver=swarm(members=member(react, count=4)),
+    model="anthropic/claude-sonnet-4-5",
+)
+```
+
+From the command line:
+
+```bash
+inspect eval my_tasks.py --solver inspect_swarm/swarm -S 'members={factory: react, count: 4}'
+```
+
+Each sample runs four `react()` members, `react-1` to `react-4`, at the same time. Each starts with the sample's input and a short preamble: its name, the number of members, and how to share files. The swarm stops at the first submission and uses it as its answer. The other members finish the calls they have in flight and stop. The task's scorer scores the answer as it would score a single agent.
+
+`--solver` and `eval(solver=...)` replace the task's whole solver, including any system message or tools it set up, so give the members their tools and prompt. Members use the eval's model unless they are given one. The task's `setup` solver still runs first.
+
+## A task with a swarm
+
+A task can build the swarm itself. This one, from [`examples/getting_started.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/getting_started.py), makes the number of members a task parameter:
+
+```python
+from inspect_ai import Task, task
+from inspect_ai.agent import react
+from inspect_ai.scorer import match
+from questions import QUESTIONS
+
+from inspect_swarm import member, swarm
+
+
+@task
+def getting_started(k: int = 3) -> Task:
+    return Task(
+        dataset=QUESTIONS,
+        solver=swarm(members=member(react, count=k), channels=[]),
+        scorer=match(),
+        token_limit=200_000,
+    )
+```
+
+```bash
+inspect eval examples/getting_started.py --model openai/gpt-5-mini -T k=4
+```
+
+- `channels=[]` gives the members no channel. The default, `filesystem`, tells members to share files in the sample's sandbox, and these questions have none. See [Channels](channels.qmd).
+- The swarm takes its budget from the sample's limits: here it stops its members at 95% of the token limit. See [Budgets](budget.qmd).
+- `-T k=1` is a swarm of one, the single-agent arm to compare with. See [Scoring](scoring.qmd#comparisons).
+
+## What the log shows
+
+Each member's events are in a timeline named after it, so the log viewer can show one member's trajectory. The sample's messages are its input followed by the answer's message. The swarm also writes three entries to the sample store:
+
+- `inspect_swarm:result`: each member's state and status, and which member's output is the answer. See [Scoring](scoring.qmd#the-result-record).
+- `inspect_swarm:ledger`: the swarm's caps and the usage and cost of each member. See [Analysis](analysis.qmd#the-ledger).
+- `inspect_swarm:metrics`: tokens, cost and time for the swarm and each member, and counts of how members acted and communicated. See [Analysis](analysis.qmd#metrics).
+
+## Learning more
+
+- [Members](members.qmd): member records, names, limits, member builders, and how a member ends.
+- [Controllers](controllers.qmd): when the swarm stops, and writing a controller of your own.
+- [Channels](channels.qmd) and [Shared Memory](shared-memory.qmd): how members share information, and waiting for each other.
+- [Budgets](budget.qmd) and [Sandboxes](sandboxes.qmd): the swarm's caps and splits, and shared or per-member sandboxes.
+- [Scoring](scoring.qmd), [Analysis](analysis.qmd) and [Restrictions](restrictions.qmd): the answer and the result record, metrics, the ledger, and what the swarm does not support or record.
+
+The [examples](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/examples) are runnable tasks for each of these. The designs behind the swarm are in [design/](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/design).

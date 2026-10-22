@@ -1,0 +1,145 @@
+---
+title: Members
+---
+
+## Overview
+
+A member is an agent registered with `@agent`, such as `react()` or `deepagent()`. Give it in one of two forms:
+
+- The factory form: the factory and its arguments, `member(react, args={...})`. The swarm calls the factory once for each member in each sample, so every member gets its own agent. `count` makes several members from one record.
+- The built form: an agent you have built, `member(react(...))`, or the agent alone. It is one member. The same agent object cannot be in two members.
+
+```python
+from inspect_ai.agent import deepagent, react
+from inspect_ai.tool import bash, python
+from inspect_ai.util import token_limit
+
+from inspect_swarm import member, swarm
+
+solver = swarm(
+    members=[
+        member(
+            react,
+            args={"tools": [bash(), python()]},
+            name="solver",
+            role="solve the task",
+            count=3,
+        ),
+        member(
+            deepagent(tools=[bash()]),
+            name="reviewer",
+            role="check the solvers' work in /shared",
+            limits=[token_limit(200_000)],
+        ),
+    ],
+)
+```
+
+This swarm has four members: `solver-1` to `solver-3` and `reviewer`. The role is added to the member's preamble and given to the controller.
+
+## Names
+
+A member is named after its agent (`react`, `deepagent`) unless you give `name`. With `count` above 1 the members are `name-1` to `name-k`. Names must be unique in the swarm. They cannot be `init`, `solvers` or `scorers`, and cannot contain `/` or `#`. The [shared-memory channel](shared-memory.qmd) also needs names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`.
+
+Members left on their default name are numbered across the whole roster, not per record. So one member with a different prompt and model takes two records:
+
+```python
+from inspect_ai.agent import react
+
+from inspect_swarm import member, swarm
+
+solver = swarm(
+    members=[
+        member(react, args={"prompt": "Solve the task."}, count=6),
+        member(
+            react,
+            args={
+                "prompt": "Check the others' work in /shared.",
+                "model": "openai/gpt-5",
+            },
+        ),
+    ],
+)
+```
+
+The first record makes `react-1` to `react-6` and the second `react-7`.
+
+When every copy differs, give each its own record. A list comprehension builds them:
+
+```python
+prompts = ["Try algebra.", "Try brute force.", "Try a proof by cases."]
+solver = swarm(members=[member(react, args={"prompt": p}) for p in prompts])
+```
+
+These are `react-1` to `react-3`. Names you give with `name` are not numbered across records, so give each record its own.
+
+## Limits
+
+`limits` takes token, cost, turn, message and time limits for that member alone. Working limits are refused. A member that reaches one ends with status `member_limit:<type>`, and the others continue. The swarm's own caps are set with `budget=` ([Budgets](budget.qmd)).
+
+## Member builders
+
+A member builder is a function registered with `@agent` that builds the member's agent. Pass it to `member()` without calling it, with its arguments in `args`:
+
+```python
+from inspect_ai.agent import Agent, agent, react
+from inspect_ai.tool import bash
+
+from inspect_swarm import member, shared_memory, swarm, swarm_on_continue, swarm_tools
+
+
+@agent
+def worker() -> Agent:
+    return react(tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
+
+
+solver = swarm(members=member(worker, name="w", count=3), channels=[shared_memory()])
+```
+
+Use a builder for anything the swarm gives a member at run time: `swarm_tools()` and `swarm_on_continue()` ([Shared Memory](shared-memory.qmd)). The log records a builder by its name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild `swarm_tools()` or `swarm_on_continue()` passed in `args` or inside an agent you built.
+
+A builder is also the place for anything each member must have its own of. Every member built from one record gets the same objects from `args`, and two built agents given the same tool object share it, across members and samples. Inspect's built-in tools keep their state in the sample store or the sandbox, so this matters only for a custom tool or helper that keeps state in its Python object (a counter, a cache, a client). The swarm calls a builder once for each member in each sample, so what the builder creates belongs to one member. [`examples/stop_on_proof.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/stop_on_proof.py) keeps a per-member flag this way.
+
+## Tool state
+
+Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member.
+
+An explicit `instance` is used as given: members that name the same instance share its state. A board shared on purpose was `memory(instance="board")` before the shared-memory channel; see [Shared Memory](shared-memory.qmd#migrating-from-memoryinstance) for moving to the channel.
+
+- The sample store itself is shared. State that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with `tool_state_instance()`.
+- Tool state that a setup solver prepared at the default instance before the swarm runs is not visible to the members. They start with fresh state.
+
+## Background work
+
+Native members support `deepagent(background=True)` and integer background limits. Work started with `background()` belongs to its member and uses its limits, share and sandbox. A member limit or swarm cap ends the background task that reached it. A swarm cap also starts the swarm's soft stop; other work gets the effective grace period to finish calls already in flight.
+
+When the member's agent ends, its background work gets the swarm's grace period to finish work in flight. The swarm then cancels the rest and waits for its cleanup before the member ends. `Budget.grace=0` skips the grace wait. A controller therefore sees a member's end only after this drain.
+
+Start background work from the running agent, not its factory. A factory that starts it makes the member `errored`. Work started outside `background()` (an `asyncio` task, a process left running in the sandbox) is not stopped.
+
+## How a member ends
+
+A member's status says how it ended:
+
+| Status | Meaning |
+|---|---|
+| `submitted` | Its agent returned normally. Its output is its answer. |
+| `unsubmitted` | Its agent returned with a `content_filter` or `model_length` stop reason, as `react()` does after repeated refusals or a context overflow. |
+| `stopped` | The swarm stopped it, for example when another member submitted or the swarm's time cap was reached. |
+| `share` | It used up its share of a split budget. |
+| `member_limit:<type>` | It reached one of its own `limits`. |
+| `member_limit:custom` | Its agent stopped itself by raising `LimitExceededError("custom", ...)` with no `source`, for example from `react(on_continue=...)`. The other members continue. |
+| `swarm_cap` | Its call reached one of the swarm's caps. |
+| `cancelled` | It was cancelled, after the grace period of a stop or from outside the swarm. |
+| `errored` | It raised any other error. The error ends the sample. |
+
+A normal return counts as a submission for any agent other than `react()`'s two cases above. An agent that gives up in some other way and returns is treated as having answered. To make a normal return mean something stronger, such as a passed check, have the member's builder raise a custom limit when it is not so ([Controllers](controllers.qmd#stopping-on-the-first-proof)).
+
+## A swarm of one
+
+`swarm(members=react(), channels=[])` is a single agent run under the swarm's rules, with the same records. Use it as the single-agent arm when you compare a swarm with one agent ([Scoring](scoring.qmd#comparisons)). Unlike a plain agent, it returns an empty output when its member does not submit.
+
+## Agents the swarm refuses
+
+- ACP agents wait for their caller to drive them, so they are refused.
+- Bridged members, which run a CLI agent in the sandbox through Inspect's agent bridge, cannot have background work and cannot use channels with tools yet. See [Restrictions](restrictions.qmd).

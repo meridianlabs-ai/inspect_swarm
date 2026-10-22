@@ -1,0 +1,22 @@
+# A container for each member of proof_swarm.py, and the comparator they share.
+services:
+  agent-1:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    working_dir: /workspace
+    network_mode: none
+    x-default: true
+  agent-2:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    working_dir: /workspace
+    network_mode: none
+  agent-3:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    working_dir: /workspace
+    network_mode: none
+  comparator:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    network_mode: none

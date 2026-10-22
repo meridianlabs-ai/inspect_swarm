@@ -1,0 +1,179 @@
+---
+title: Analysis
+---
+
+## Overview
+
+When the swarm ends it writes two entries to the sample store, each also logged as an `InfoEvent` with source `inspect_swarm`:
+
+- `inspect_swarm:metrics`: tokens, cost and time for the swarm and each member, and counts of how each member acted, checked its work, communicated and waited ([Metrics](#metrics)).
+- `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, model calls that errored or reported no usage, unpriced models, and what stopped the swarm ([The ledger](#the-ledger)).
+
+The result record, `inspect_swarm:result`, is described in [Scoring](scoring.qmd#the-result-record).
+
+## Metrics
+
+For the swarm:
+
+- `tokens`, `cost`: everything in the swarm: members, controller and final step.
+- `wall_clock`: seconds from the swarm's start to its end.
+- `never_acted`: members with no completed model call.
+- `steps_to_answer`: completed model calls of the member whose output is the answer, `null` with no answer.
+- `longest_member_steps`: the largest number of completed model calls of any member.
+
+Step counts include cache replays and exclude failed or cancelled attempts. A member's subagents' calls count as the member's.
+
+For each member, in roster order:
+
+- `tokens`, `cost`: its usage, its subagents' and background work's included.
+- `running_time`: seconds from its start to its end, `null` for a member never started.
+- `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member, whose tool calls leave no tool events.
+- `gate_checks`, `gate_passes`, `first_pass_time`: its in-loop checks ([Scoring](scoring.qmd#checks-during-the-run)).
+- `delivery_effective`: `notify` or `poll`, the mode it ran in ([Shared Memory](shared-memory.qmd#notices)).
+- `comm`, `waits`, `waits_by_outcome`, `wait_time`, `idle_time`: below.
+
+### Communication
+
+Each member's `comm` has an entry, by channel name, for each channel with records, such as `shared_memory`:
+
+- `records` and `record_bytes`: its writes delivered to the channel, and their size.
+- `rejections`: its writes the swarm refused, by the control that refused them, such as `rate`.
+- `reads` and `listings`: its views of files and of directories.
+- `notices`: the notices it got with a line for the channel.
+
+A member's subagents count as the member. Every member has an entry for every such channel the swarm opened, zeros included. A swarm with none (`filesystem` only, or `channels=[]`) has `comm` `{}` for every member: communication through files is observed, not recorded, so it is not reported as zero ([Channels](channels.qmd#shared-files-are-observed-not-recorded)).
+
+### Waits
+
+Each member's metrics count its `swarm_wait` calls, its subagents' included:
+
+- `waits`: the number of waits.
+- `waits_by_outcome`: that number by what ended each wait: `news` (a changed file or an ended member), `all_waiting`, `stopping`, `member_ending`, `timeout` or `cancelled`. An outcome that ended no wait is left out.
+- `wait_time`: the waits' total seconds. Waits of a member's subagents that overlap each count.
+- `idle_time`: the seconds the member did nothing but wait: its own agent in `swarm_wait`, not yet released, and none of its background work running. A subagent's wait adds to `wait_time` but not to `idle_time`.
+
+In a swarm with no `swarm_wait` (`filesystem` only, or `channels=[]`) the four are `null`, so 0 means the wait was offered and unused. Waiting is wall-clock time, so a member's `running_time` includes it.
+
+### Wiring checks
+
+The metrics also check that members are wired to the channels:
+
+- `notify_unwired`: members in `notify` mode whose own loop, not a subagent's, completed two or more model calls, to whose own loop a change was news, and whose own loop never ran `swarm_on_continue()`. It is a heuristic: two own calls usually mean the member reached a turn boundary. Any extra completed model call in the member's own span before its first turn boundary can list a correctly wired member.
+- `tools_unwired`: in a swarm with a channel that has tools, members with a completed model call whose loops never resolved `swarm_tools()`.
+
+A member listed in either did not get what the channel offers, so it ran a different experiment from the one configured.
+
+## Samples dataframe
+
+`inspect_swarm.analysis.SwarmColumns` adds each sample's realized cost and ledger data to Inspect's `samples_df()`. `samples_df()` needs pandas and pyarrow, which Inspect Swarm does not install:
+
+```bash
+pip install "pandas>=2.1.0" "pyarrow>=10.0.1"
+```
+
+This example uses a task with a scorer named `match`. Replace `score_match` with your task's score column (`score_<scorer name>`):
+
+```python
+from inspect_ai.analysis import SampleSummary, samples_df
+from inspect_ai.scorer import value_to_float
+
+from inspect_swarm.analysis import SwarmColumns
+
+df = samples_df("logs", columns=SampleSummary + SwarmColumns)
+df = df[~df["swarm_resumed"]]
+df["score"] = df["score_match"].map(value_to_float(), na_action="ignore")
+df.groupby("log")[["score", "swarm_cost"]].mean()
+```
+
+The columns:
+
+- `swarm_cost`: the sample's priced cost in dollars, from its `model_usage`, including scorer calls. Tokens are in `SampleSummary`'s `total_tokens`.
+- `swarm_complete`: no call is known to be missing from `swarm_cost`. The ledger marks the swarm's interval complete, and every model in the sample's `model_usage` is priced. Calls outside the swarm, including scorer calls, are not checked. `False` for a sample with no ledger.
+- `swarm_members`: members in the roster.
+- `swarm_resumed`: the sample resumed from a checkpoint, so the swarm restarted its caps from zero. `False` for a sample with no ledger.
+- `swarm_cost_cap`, `swarm_token_cap`, `swarm_time_cap`: the swarm's caps. The time cap is in seconds.
+- `swarm_errored`, `swarm_no_usage`, `swarm_unpriced`: model calls in the swarm that errored or were cancelled (retries included), that completed with no usage, and whose usage has no cost. Each makes the cost a lower bound.
+- `swarm_unpriced_models`: models with tokens and no cost, from the ledger and the sample's `model_usage`, as a JSON list.
+
+The columns read from the ledger are null for a sample with no ledger. A sample that runs two swarms keeps only the last one's ledger, while its `model_usage` covers both. The columns read the sample's `store` and `model_usage`, so do not exclude either with `samples_df(exclude_fields=...)`.
+
+The columns hold no per-member data. `swarm_ledger()` reads a sample's whole ledger as a `SwarmLedger`, whose `members` are `MemberLedger`s with a `Meter` and `Calls` each. All are in `inspect_swarm.analysis`, and `SwarmLedger.model_json_schema()` describes every field. For example, each member's cost:
+
+```python
+from inspect_ai.log import read_eval_log
+
+from inspect_swarm.analysis import swarm_ledger
+
+log = read_eval_log("logs/my-eval.eval")
+for sample in log.samples or []:
+    ledger = swarm_ledger(sample)
+    if ledger is not None:
+        for m in ledger.members:
+            print(sample.id, sample.epoch, m.name, m.meter.cost)
+```
+
+The metrics have no reader of their own; read them from `sample.store["inspect_swarm:metrics"]`.
+
+## The ledger
+
+The ledger of a two-member swarm with a cost cap of $1 and a time cap of 600 seconds:
+
+```json
+{
+  "version": 1,
+  "budget": {"cost": 1.0, "tokens": null, "time": 600.0, "reserve": 0.05, "split": "pool", "grace": 120.0},
+  "caps": {"cost": 1.0, "tokens": null, "time": 600.0},
+  "sample_limits": {"token": null, "cost": null, "message": null, "turn": null, "working": null, "time": null},
+  "members": [
+    {
+      "name": "react-1",
+      "status": "submitted",
+      "bridged": false,
+      "meter": {"usage": {"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.0081}, "cost": 0.0081, "suspended_cost": 0.0},
+      "calls": {"calls": 1, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
+      "cancelled": false,
+      "background_started": 0,
+      "background_cancelled": 0
+    },
+    {
+      "name": "react-2",
+      "status": "submitted",
+      "bridged": false,
+      "meter": {"usage": {"input_tokens": 1150, "output_tokens": 280, "total_tokens": 1430, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.00765}, "cost": 0.00765, "suspended_cost": 0.0},
+      "calls": {"calls": 1, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
+      "cancelled": false,
+      "background_started": 0,
+      "background_cancelled": 0
+    }
+  ],
+  "runtime": {"usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": null}, "cost": 0.0, "suspended_cost": 0.0},
+  "final": {"usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": null}, "cost": 0.0, "suspended_cost": 0.0},
+  "swarm": {"usage": {"input_tokens": 2350, "output_tokens": 580, "total_tokens": 2930, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.01575}, "cost": 0.01575, "suspended_cost": 0.0},
+  "calls": {"calls": 2, "cache_replays": 0, "errored": 0, "no_usage": 0, "unpriced": 0},
+  "unpriced_calls_recorded": 0,
+  "sample_delta": {"input_tokens": 2350, "output_tokens": 580, "total_tokens": 2930, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.01575},
+  "unattributed": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_cache_write": null, "input_tokens_cache_read": null, "reasoning_tokens": null, "total_cost": 0.0},
+  "unpriced_models": [],
+  "native_compaction_classes": [],
+  "overshoot": {},
+  "stop_reason": "submitted",
+  "ended_by": null,
+  "interrupted": false,
+  "final_cancelled": false,
+  "resumed": false,
+  "total_complete": true,
+  "attribution_complete": true
+}
+```
+
+- `budget` is the `Budget` as given. `caps` are the caps the swarm applied, derived from the sample's limits or given: `cost` in dollars, `tokens`, and `time` in seconds, `null` for no cap. `sample_limits` are the sample's limits when the swarm started.
+- `members` has one entry per member, in roster order. `status` is as in [How a member ends](members.qmd#how-a-member-ends), `null` for a member never started. `cancelled` means the swarm or the sample cancelled the member, so calls it had in flight are unknown. A hard stop during a background drain also sets `cancelled`; the agent's returned status is kept. `background_started` counts the tasks the member started with `background()`, and `background_cancelled` those cancelled before they finished, whose calls in flight are unknown too.
+- `meter` is the usage and cost of what a member did. `suspended_cost` is the part spent while token counting was suspended, such as approval calls.
+- `calls` counts model calls: `calls` completed ones other than cache replays, `cache_replays` replayed from cache at no charge, `errored` attempts that errored or were cancelled (retries included), `no_usage` completed with no usage, and `unpriced` completed with usage but no cost.
+- `runtime` meters the controller's own calls, `final` the final step's (the default first-submission answer makes none), and `swarm` everything in the swarm: members, runtime and final step. The top-level `calls` counts every call in the swarm. `unpriced_calls_recorded` counts the unpriced calls the swarm's meter recorded.
+- `sample_delta` is the sample's usage while the swarm ran. `unattributed` is `sample_delta` minus `swarm`: usage no meter holds, such as the tokens of approval calls.
+- `unpriced_models` are models with tokens but no cost. `native_compaction_classes` are loaded model classes that can compact a conversation natively, which logs nothing, so their usage may be missing.
+- `overshoot` is how far usage went past each cap, for caps it passed. Calls in flight at a stop can carry usage past a cap.
+- `stop_reason` is why the swarm stopped itself: a controller's `submitted` or `all_done` (as `leaderless` returns), `verified` or `quiescence`, `controller:<reason>` for any other reason a controller returns, `swarm_cap` or `swarm_time`. `ended_by` is what ended it from outside: `sample_limit:<type>`, `operator` for an interrupt, or `unknown`. Each is `null` when it did not happen. Both are set when a sample limit ends the swarm during its own stop.
+- `interrupted` means an error (a member's, the controller's or the final step's) or a cancellation ended the swarm before it finished, `final_cancelled` that the final step was cancelled, and `resumed` that the sample resumed from a checkpoint.
+- `total_complete` means no call is known to be missing from the totals: nothing was cancelled or interrupted, every call reported priced usage, and no model class can compact natively. Otherwise the totals are lower bounds. `attribution_complete` adds that `unattributed` is zero.
