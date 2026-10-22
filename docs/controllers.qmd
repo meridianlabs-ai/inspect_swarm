@@ -4,7 +4,7 @@ title: Controllers
 
 ## Overview
 
-`controller=` decides which members start, when and with what input, and when the swarm is done. The swarm's answer is the first submission whatever the controller ([Scoring](scoring.qmd#the-answer)), so a controller decides who runs and when to stop, not which answer wins.
+`controller=` decides which members start, when and with what input, and when the swarm is done. It also decides which submission is the swarm's answer: by a rule, `first` (the default) or `last`, or by choosing a member itself ([Scoring](scoring.qmd#the-answer)).
 
 ## leaderless
 
@@ -28,6 +28,16 @@ Use it when:
 - The scorer reads what members leave in the sandbox, where members still working change what is scored ([Scoring](scoring.qmd#scoring-what-members-leave)).
 - You measure each member's result, as for team@k.
 - Your agent returns normally when it gives up, which would count as a submission and stop the swarm.
+
+The answer is still the first submission. When the members work as a team and the latest submission should be the answer, add `final="last"`:
+
+```python
+from inspect_swarm import leaderless
+
+controller = leaderless(stop_on_submission=False, final="last")
+```
+
+`final="last"` needs `stop_on_submission=False`, and `leaderless` refuses it otherwise.
 
 `leaderless` returns the stop reason `submitted` when a submission stopped the swarm and `all_done` when every member ended. The ledger records it as `stop_reason` ([Analysis](analysis.qmd#the-ledger)).
 
@@ -78,9 +88,44 @@ def escalate(first: str = "fast") -> Controller:
 - `swarm.start(member, input=None)` starts a member and returns at once. `input` replaces the swarm's input for that member; `None` gives it the swarm's input. The member's preamble follows either. A member runs once, and starting one after the stop has begun raises.
 - `swarm.events()` yields each event once, in order from the swarm's start. Its only kind is `MemberEnded`, with the member's name, status and whether it submitted. The iterator ends when no member is running and no event is waiting, so a member started later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
 - `check`, if given, is called with the roster when `swarm()` is called. Raise `ValueError` for a roster the controller cannot run.
+- `final`, if given, is the rule that chooses the answer: `first` (the default, as here) or `last`.
 - The stop reasons `all_done`, `submitted`, `verified` and `quiescence` are recorded as they are. Any other is recorded as `controller:<reason>`.
 
 A `Controller` holds configuration only: one object serves every sample, so keep per-sample state in `run`'s local variables. The factory's arguments are logged with the controller, so it can be rebuilt from the log. Pass the controller to the swarm, `swarm(..., controller=escalate("fast"))`, or by its registered name with its default arguments, `controller="escalate"`.
+
+### Choosing the answer
+
+A controller can choose the answer itself. `swarm.choose_answer(member, reason=None)` names a member that has ended with a submission, and its submission is then the answer, whatever the `final` rule says. A controller chooses once. The record gives the mode `controller` and the reason ([Scoring](scoring.qmd#the-result-record)).
+
+This controller answers with the first submission from a member with a given role, and falls back to the `final` rule, `first`, when none of them submits:
+
+```python
+from contextlib import aclosing
+
+from inspect_swarm import Controller, StopReason, SwarmControl, swarm_controller
+
+
+@swarm_controller
+def prefer(role: str) -> Controller:
+    """Answer with the first submission from a member with this role, if any."""
+
+    async def run(swarm: SwarmControl) -> StopReason:
+        for m in swarm.members:
+            swarm.start(m)
+        chosen = False
+        async with aclosing(swarm.events()) as events:
+            async for event in events:
+                if (
+                    not chosen
+                    and event.submitted
+                    and swarm.member(event.member).role == role
+                ):
+                    swarm.choose_answer(event.member, reason=f"first {role} to submit")
+                    chosen = True
+        return "all_done"
+
+    return Controller(run)
+```
 
 ## Stopping on the first proof
 

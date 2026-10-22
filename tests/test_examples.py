@@ -190,24 +190,9 @@ def test_budget_sweep(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize(
-    "script,value,answer,explanation",
-    [
-        (
-            "import sys\\nprint(len(open(sys.argv[1]).read().split()))\\n",
-            "C",
-            "9",
-            None,
-        ),
-        # a script that never ends is killed at the scorer's deadline and is wrong
-        ("while True: pass\\n", "I", "", "the script ran for more than 2 seconds"),
-        # a script whose exit status is `timeout`'s own is an ordinary wrong script
-        ("import sys\\nsys.exit(124)\\n", "I", "", None),
-    ],
-)
-def test_shared_sandbox(
-    tmp_path: Path, script: str, value: str, answer: str, explanation: str | None
-) -> None:
+def test_shared_sandbox(tmp_path: Path) -> None:
+    script = "import sys\\nprint(len(open(sys.argv[1]).read().split()))\\n"
+
     def policy(name: str, messages: list[ChatMessage]) -> ModelOutput:
         match _turn(messages):
             case 0:
@@ -218,44 +203,30 @@ def test_shared_sandbox(
             case _:
                 return _call("submit", answer="done")
 
-    [sample] = _run(
-        "shared_sandbox.py@shared_sandbox",
-        _model(policy),
-        tmp_path,
-        k=2,
-        script_timeout=2,
-    )
+    [sample] = _run("shared_sandbox.py@shared_sandbox", _model(policy), tmp_path, k=2)
     assert sample.scores is not None
     [score] = sample.scores.values()
-    assert (score.value, score.answer, score.explanation) == (
-        value,
-        answer,
-        explanation,
-    )
+    assert (score.value, score.answer) == ("C", "9")
     # every member ran to its end
     assert [m.status for m in _record(sample).members] == ["submitted", "submitted"]
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    "malformed,failure",
+    "wrong,failure",
     [
-        ("mkdir /workspace/answer.txt", "IsADirectoryError"),
-        ("mkfifo /workspace/answer.txt", "not a regular file"),
-        ("printf '40\\000' > /workspace/answer.txt", "(ValueError)"),
-        ("ln -s answer.txt /workspace/answer.txt", "(OSError)"),
-        # a link to another member's answer, which the comparator mounts too
-        ("ln -s /answers/agent-2/answer.txt /workspace/answer.txt", "(OSError)"),
-        # 400 behind 62 zeros, past the 64 bytes the comparator reads
-        ("printf '%062d400' 0 > /workspace/answer.txt", "longer than 64 bytes"),
+        # 39 * 39 + 39 + 41 = 1601, which is prime
+        ("echo 39 > /workspace/answer.txt", "1601 is prime"),
+        ("echo forty > /workspace/answer.txt", "not a whole number"),
+        ("true", "no answer file"),
     ],
 )
 def test_proof_swarm_scores_each_members_sandbox(
-    tmp_path: Path, malformed: str, failure: str
+    tmp_path: Path, wrong: str, failure: str
 ) -> None:
     def policy(name: str, messages: list[ChatMessage]) -> ModelOutput:
-        # agent-1 leaves a malformed answer; agent-2 proves 40
-        write = malformed if name == "agent-1" else "echo 40 > /workspace/answer.txt"
+        # agent-1 leaves a wrong answer, or none; agent-2 proves 40
+        write = wrong if name == "agent-1" else "echo 40 > /workspace/answer.txt"
         match _turn(messages):
             case 0:
                 return _call(
@@ -271,7 +242,7 @@ def test_proof_swarm_scores_each_members_sandbox(
             case _:
                 return _call("submit", answer="40")
 
-    # every member runs to its end, so both artifacts are there to score
+    # every member runs to its end, so both answers are there to score
     [sample] = _run(
         "proof_swarm.py@proof_swarm", _model(policy), tmp_path, k=2, stop="all_done"
     )

@@ -104,7 +104,7 @@ From the merged designs; each line links to its section.
 - `swarm()` is an `Agent`; members are built agents or `member()` records, and copies (`count`) name a registered `@agent` factory and its arguments, from which the runtime builds each member's agent in each sample; a `@swarm_controller` decides who starts and when the swarm is done; `@swarm_channel` objects say how members share information ([swarm-api.md](swarm-api.md#the-api-at-a-glance)).
 - M1: a leaderless swarm with the filesystem of a shared sandbox as its channel; members' work must stay inside their invocation, so background deepagents are rejected; each member's built-in tool state is private through a tool-state scope ([swarm.md M1](swarm.md#implementation-plan), [Members](swarm.md#members), [Sandbox topology](swarm.md#sandbox-topology)).
 - Budget: caps derived from the sample's limits minus a 5% reserve, a pool by default with optional splits, a soft stop with grace, and a ledger of realized cost per member with stated coverage ([swarm-limits.md](swarm-limits.md#the-budget-parameter)).
-- Final answer `first` in M1; a per-member result record in the store; the task's scorers unchanged; per-member scores, `verify`, `vote` and `baseline()` after M2 ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)).
+- Final answer `first` in M1, with `last` and a controller's choice from M2 ([swarm-scoring.md](swarm-scoring.md#last-and-the-controllers-choice-m2)); a per-member result record in the store; the task's scorers unchanged; per-member scores, `verify`, `vote` and `baseline()` after M2 ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)).
 - M2: the bus with a shared-memory channel, fenced tool-output delivery and metadata-only notices ([swarm-communication.md](swarm-communication.md)), and most of the recommendations below ([swarm-implementation-plan.md](swarm-implementation-plan.md)); direct messages, notes, task list and board later.
 
 ## Comparison
@@ -176,7 +176,7 @@ Gains after M2, if they choose them:
 Losses and costs:
 
 - **Background deepagents** until M2-5 lands, in M2: the one change they cannot work around.
-- **inspect_ai version coupling.** inspect_swarm tracks inspect_ai `main` and needs its registry types and the tool-state scope; their configs pin 0.3.273 "in sync with epoch-research/benchmarks@main" (`configs/erdos3-swarm32-sol61-1600usd.yaml:57-60`). Python is not a problem: they require 3.13 (`pyproject.toml:7`), inside our 3.11+.
+- **inspect_ai version coupling.** inspect_swarm needs inspect_ai 0.3.283 or later, for its registry types, the tool-state scope, the store-event switch and the background seam (it tracked inspect_ai `main` until 2026-10-22); their configs pin 0.3.273 "in sync with epoch-research/benchmarks@main" (`configs/erdos3-swarm32-sol61-1600usd.yaml:57-60`). Python is not a problem: they require 3.13 (`pyproject.toml:7`), inside our 3.11+.
 - **A young dependency** with M1's API still settling.
 - **Their own conveniences.** `_only_sandboxes` uses a private inspect_ai name; a port keeps it, as inspect_swarm may ([Goals](swarm.md#goals)). Their per-sample check lock needs a new home: their builder is called once per member, so a lock it created would be per member, while the lock must be shared by the members of one sample ([swarm-api.md](swarm-api.md#the-member-contract)).
 

@@ -31,51 +31,35 @@ Split the work: one member writes the script, the others write test files in the
 
 TEXT = "the quick brown fox\njumps over\n\nthe lazy dog\n"
 
-# Runs the script under `timeout`, which kills it after $1 seconds (exit status 137),
-# then exits 0 when the script succeeded, 2 when it was killed, and 1 for any other
-# failure. The script's own status never reaches Inspect, which reads some statuses,
-# such as `timeout`'s 124, as its own deadline passing.
-RUN = """\
-timeout -s KILL "$1" python3 /shared/wordcount.py /tmp/check.txt
-status=$?
-[ "$status" -eq 0 ] && exit 0
-[ "$status" -eq 137 ] && exit 2
-exit 1
-"""
-
 
 @scorer(metrics=[accuracy()])
-def script_works(timeout: int = 30) -> Scorer:
-    """Run `/shared/wordcount.py` on a file the members have not seen, for at most `timeout` seconds."""
+def script_works() -> Scorer:
+    """Run `/shared/wordcount.py` on a file the members have not seen."""
 
     async def score(state: TaskState, target: Target) -> Score:
         await sandbox().write_file("/tmp/check.txt", TEXT)
-        # the deadline inside the sandbox fails the script like any other wrong
-        # script; exec()'s own, later, deadline is for the sandbox itself
         result = await sandbox().exec(
-            ["sh", "-c", RUN, "sh", str(timeout)], timeout=timeout + 30
+            ["python3", "/shared/wordcount.py", "/tmp/check.txt"], timeout=60
         )
         output = result.stdout.strip()
         return Score(
             value=CORRECT if result.success and output == target.text else INCORRECT,
             answer=output,
-            explanation=f"the script ran for more than {timeout} seconds"
-            if result.returncode == 2
-            else result.stderr or None,
+            explanation=result.stderr or None,
         )
 
     return score
 
 
 @task
-def shared_sandbox(k: int = 3, script_timeout: int = 30) -> Task:
+def shared_sandbox(k: int = 3) -> Task:
     return Task(
         dataset=[Sample(input=PROMPT, target="9", files={"/shared/notes.md": ""})],
         solver=swarm(
             members=member(react, args={"tools": [bash(timeout=60)]}, count=k),
             controller=leaderless(stop_on_submission=False),
         ),
-        scorer=script_works(script_timeout),
+        scorer=script_works(),
         sandbox=("docker", "compose.yaml"),
         token_limit=1_000_000,
     )

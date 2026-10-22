@@ -21,7 +21,7 @@ or, in a uv project:
 uv add "inspect_swarm @ git+https://github.com/meridianlabs-ai/inspect_swarm"
 ```
 
-For now it depends on inspect_ai's `main` branch, which has features no inspect_ai release has yet. Installing Inspect Swarm therefore installs inspect_ai from GitHub `main`, replacing a released inspect_ai in that environment. It needs Python 3.11 or later.
+It needs inspect_ai 0.3.283 or later and Python 3.11 or later.
 
 ## Run a swarm on an existing task
 
@@ -89,7 +89,7 @@ The swarm logs every write, view, notice and wait. See [Shared Memory](https://m
 
 ## Results
 
-The swarm's answer is the first submission, and its output is that member's `ModelOutput`, unchanged. The swarm keeps three records in the sample store:
+By default the swarm's answer is the first submission. `leaderless(stop_on_submission=False, final="last")` makes it the latest, and a controller of your own can choose it. The swarm's output is the chosen member's `ModelOutput`, unchanged. The swarm keeps three records in the sample store:
 
 - `inspect_swarm:result`: each member's state and status, and which member's output is the answer. Only the swarm writes it.
 - `inspect_swarm:ledger`: the swarm's caps and each member's usage and cost.

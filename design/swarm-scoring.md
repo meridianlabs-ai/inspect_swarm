@@ -39,7 +39,7 @@ It respects the decisions recorded in swarm.md (Ransom, 2026-10-07): Python 3.11
 
 It builds on two designs and uses their shapes:
 
-- [swarm-api.md](swarm-api.md), the `swarm()` API. The swarm's fixed **runtime**, not the controller, keeps the member record, the provisional answer and finalisation; after M2 it also verifies submissions. After M2 the final-answer chain is the controller's `final=` parameter.
+- [swarm-api.md](swarm-api.md), the `swarm()` API. The swarm's fixed **runtime**, not the controller, keeps the member record, the provisional answer and finalisation; after M2 it also verifies submissions. The controller's `final=` parameter is the answer rule: `first` or `last` in M2, and after M2 the final-answer chain.
 - [swarm-communication.md](swarm-communication.md). Its evidence payloads are the shape this design's events follow, and after M2 `synthesize` follows its fencing rules.
 
 Where this document says "the runtime", it means swarm-api.md's runtime.
@@ -109,10 +109,10 @@ In inspect_ai unless noted.
 M1's runtime always selects the final answer with `first` (decision: Ransom, 2026-10-08).
 
 - **`first`** is the submission with the earliest swarm time, then roster order. Only submissions qualify. A member that ended with any other status is never selected, and neither is a member that never started.
-- **No configuration in M1.** In M1, `leaderless()` takes only `stop_on_submission` and `Controller` has no `final`: with one mode there is nothing to choose.
+- **No configuration in M1.** In M1, `leaderless()` takes only `stop_on_submission` and `Controller` has no `final`: with one mode there is nothing to choose. M2 adds `final="last"` and a controller's choice of the answer ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)).
   - With `first`, nothing a member does after the first submission can change the answer, so `leaderless()` stops the swarm at the first submission by default (`stop_on_submission=True`; decision: Ransom, 2026-10-21) and records the stop reason `submitted`.
-  - swarm-api.md's `final=` and `stop_on_verified=` come with Part 2's chain and verifier.
-  - With them, `final=None` means the default chain for the task's result contract. For a swarm without a contract, which every M1 swarm is, that chain is `["first"]`, so the same configuration selects the same answer before and after ([What M1 leaves out of the merged API](#what-m1-leaves-out-of-the-merged-api)).
+  - Part 2 adds `stop_on_verified=` and lets `final=` take a chain; M2 already accepts `first` or `last`.
+  - With the chain, `final=None` means the default chain for the task's result contract. For a swarm without a contract, which every M1 swarm is, that chain is `["first"]`, so the same configuration selects the same answer before and after ([What M1 leaves out of the merged API](#what-m1-leaves-out-of-the-merged-api)).
 - **Provisional answer.** When a submission is recorded, the runtime applies `first` to the submissions so far and sets the result on the `AgentState` it was passed. Swarm.md's [exhaustion policy](swarm.md#observer-evidence-accounting-and-metrics) requires this. Because `as_solver()` copies that object's output to the task state even when an exception ends the agent ([Agent output](#agent-output-and-member-state)), an outer limit that ends the sample early leaves the first submission as the sample's output, and the record says `provisional: true`. When nothing has been submitted, the output stays empty and the record's `reason` says why. Nothing is invented.
 - **No submissions.** When no member submitted, the final answer is empty with `reason="no_submissions"`, even though members have outputs. An output from a member stopped mid-work is usually a working message, not an answer.
 - **Finalisation.** After the stop procedure (swarm-api.md's [Stopping](swarm-api.md#controllers): scheduling closed, soft stop, grace, hard stop; the limits deep dive owns its ordering), the runtime does the following:
@@ -123,6 +123,21 @@ M1's runtime always selects the final answer with `first` (decision: Ransom, 202
   M1's finalisation makes no model call.
 - **The returned `AgentState`** has the sample's input messages followed by one assistant message: the final answer's `output.message`, with `metadata={"inspect_swarm": {"final": {"mode": "first", "member": ...}}}`. Its `output` is the chosen member's `ModelOutput`, unchanged, so the task's scorer sees exactly the object it would have seen had that member run alone. Members' own conversations stay in their spans and timelines.
 - **Shared-artifact tasks.** The task's scorer reads the drained environment. The output still carries the first submission, because some scorers read the output text and fall back to the environment (Frontier-CS, [below](#shared-artifact-scorers-in-inspect_evals)). M1 claims nothing about which member produced the environment, so it needs no declaration of what kind of result the task has. Members still working change what is scored, so these tasks pass `leaderless(stop_on_submission=False)` to let every member run to its end.
+
+### `last` and the controller's choice (M2)
+
+M2 adds two ways to choose the answer beside `first` (#67; decision: Ransom, 2026-10-22). They are for a team whose members all keep working, `leaderless(stop_on_submission=False)`, where the first submission need not be the team's answer. Before them, what the other members did after the first submission cost budget and could never reach an answer scorer.
+
+- **`final=` in M2.** `leaderless(stop_on_submission=True, *, final=None)` and `Controller(run, *, final=None, check=None)` take `final: FinalName | None`, where M2's `FinalName` is `Literal["first", "last"]`. `None` means the default chain, which is `["first"]` for every M2 swarm, since none has a result contract. Any other value raises `ValueError` when the controller is built. Part 2 widens `FinalName` and accepts a chain ([The final-answer chain](#the-final-answer-chain)). Both are additive, so a swarm configured in M2 selects the same answer after Part 2.
+- **`last`** is the submission with the latest swarm time, then roster order: a tie goes to the member listed first, as for `first`. Only submissions qualify.
+- **`last` needs the members to run on.** With `stop_on_submission=True` the swarm stops at the first submission, so `last` would choose it, or a submission a member happened to make during the grace period. Neither is a team's last word, so `leaderless(final="last")` raises `ValueError` unless `stop_on_submission=False`. This is the refusal [What the merged designs fix](#what-the-merged-designs-fix-for-part-2) expects for `verify` and `vote`.
+- **The controller's choice.** `SwarmControl.choose_answer(member, reason=None)` makes that member's submission the answer, in place of the controller's `final` rule.
+  - Controllers see no member text, so a controller chooses from what its handles show: names, roles, statuses, the order of events, and after Part 2 verdicts.
+  - The member must have ended with a submission: `RuntimeError` otherwise, and `KeyError` for an unknown name. A controller chooses once; a second call raises `RuntimeError`. Both can be relaxed later without breaking a controller that works today.
+  - The choice is the provisional answer from the call on, and the final answer after the stop. Until the call, the controller's `final` rule gives the provisional answer.
+- **The record and the evidence.** `FinalRecord.mode` is `"first"`, `"last"` or `"controller"`. Under `"controller"`, `reason` holds the reason the controller gave, or `null`; otherwise `reason` keeps its M1 meaning. The `final` event carries the same mode, member and reason, and the answer message's metadata the mode and member. `version` stays 1: `mode` and `reason` gain values, and no value an M1 record holds changes meaning.
+- **Provisional answer.** The rule in force, applied to the submissions so far. Under `last` that is the latest submission so far, so an outer limit leaves it as the sample's output, with `provisional: true`.
+- **With the chain (Part 2).** `"last"` is one more `FinalName`. Like `first` it produces nothing only when there are no submissions, so it can close a chain where `first` would (`["verify", "last"]`). The controller's choice goes before the chain: when a controller has chosen, its choice is the answer, and the chain selects only when it has not. A strict chain such as `final="verify"` does not limit the choice; a controller that wants a verified answer reads the handle's verdict before it chooses. The chain therefore needs no mode for the choice, and adding the chain changes nothing for a controller that chooses.
 
 ### What the swarm records
 
@@ -142,9 +157,9 @@ class MemberResult(BaseModel):
     first_pass_time: float | None = None  # M2: swarm time of its first passing check
 
 class FinalRecord(BaseModel):
-    mode: str | None                  # the mode that produced the answer: "first" in M1
+    mode: str | None                  # the mode that produced the answer: "first" in M1; M2 adds "last" and "controller"
     member: str | None                # the member whose output was chosen
-    reason: str | None                # why there is no answer: "no_submissions" in M1
+    reason: str | None                # why there is no answer: "no_submissions" in M1; M2: the controller's reason under "controller"
     provisional: bool                 # True until finalisation completes
 
 class SwarmResultRecord(BaseModel):
@@ -185,7 +200,7 @@ class SwarmResultRecord(BaseModel):
 swarm-api.md's surface includes parts that exist only for Part 2. M1 does not build them:
 
 - `swarm(result=)` and the `ResultSpec` it takes;
-- `leaderless(final=, stop_on_verified=)` and `Controller(final=)`;
+- `leaderless(final=, stop_on_verified=)` and `Controller(final=)`; M2 builds `final=` for `first` and `last` only ([`last` and the controller's choice](#last-and-the-controllers-choice-m2));
 - `VerdictSummary`, `MemberHandle.verdict` and `MemberEnded.verdict`;
 - the `member_scores` case of swarm-api.md's `tests/test_scoring_loop.py`.
 
@@ -317,7 +332,7 @@ In inspect_ai unless noted, in addition to [what M1 relies on](#current-behaviou
 #### What the merged designs fix for Part 2
 
 - **Where the chain is passed.** `final=` is a controller parameter: `leaderless(final=..., stop_on_verified=..., stop_on_submission=...)`. `Controller(run, final=...)` holds it, and `final=None` means this design's default chain for the task's `result` ([Controllers](swarm-api.md#controllers)). `swarm(result=)` stays on `swarm()`.
-  - M1's `stop_on_submission` (on by default) is meaningful only with the `first` chain: with `verify` or `vote` a later member can still change the answer. How it combines with them, and its default once the default chain is not `first` alone, is for Part 2 to settle; refusing the combination is the likely answer.
+  - M1's `stop_on_submission` (on by default) is meaningful only with the `first` chain: with `verify` or `vote` a later member can still change the answer. How it combines with them, and its default once the default chain is not `first` alone, is for Part 2 to settle; refusing the combination is the likely answer. M2 refuses it with `last` ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)).
   - swarm-api.md types the chain as `FinalSpec = str | FinalMode | Sequence[str | FinalMode]`; this design narrows `str` to the mode names.
   - Every `FinalMode` must be a pydantic model with a discriminator, so a mixed chain is logged faithfully and validates back from JSON ([Logging and replay](swarm-api.md#logging-and-replay)).
 - **What controllers see of a verdict.** `VerdictSummary(passed, value)`, on `MemberHandle.verdict` and `MemberEnded.verdict`. A member counts as running until the runtime has taken its submission's verdict and queued its `MemberEnded`. The explanation stays in the result record.
@@ -467,11 +482,11 @@ class SwarmResultRecord(BaseModel):   # adds
 
 ### The final-answer chain
 
-The controller's `final=` parameter (`leaderless(final=...)`) takes one mode or a sequence of modes. A sequence is a chain: each mode is tried in order on the submissions, and the first that produces an answer wins. The runtime applies the controller's chain; the controller never sees member text ([What the merged designs fix](#what-the-merged-designs-fix-for-part-2)).
+The controller's `final=` parameter (`leaderless(final=...)`) takes one mode or a sequence of modes. A sequence is a chain: each mode is tried in order on the submissions, and the first that produces an answer wins. The runtime applies the controller's chain; the controller never sees member text ([What the merged designs fix](#what-the-merged-designs-fix-for-part-2)). A controller's choice with `SwarmControl.choose_answer()` (M2) goes before the chain ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)).
 
 ```python
 # src/inspect_swarm/_final.py
-FinalName = Literal["verify", "vote", "first", "synthesize"]   # "synthesize" is synthesize() with its defaults
+FinalName = Literal["verify", "vote", "first", "last", "synthesize"]   # M2 has "first" and "last"; "synthesize" is synthesize() with its defaults
 
 class Synthesize(BaseModel):          # frozen; arbitrary types allowed for Model
     mode: Literal["synthesize"] = "synthesize"
@@ -501,6 +516,7 @@ def final_chain(final: FinalSpec | None, result: ResultSpec | None) -> list[Fina
 | `verify` | `result.verifier` | The passed submission with the highest `Verdict.value` (`None` ranks below any number), earliest swarm time on ties, then roster order | no submission passed |
 | `vote` | `result.answer_key` | The earliest submission in the plurality group of answer keys; one vote per member; `None` keys do not vote. A tied plurality goes to the group whose first submission is earliest, and `tie` is recorded | no submission has a key |
 | `first` | nothing | As in M1 ([The final answer](#the-final-answer-first)) | there are no submissions |
+| `last` | nothing | As in M2 ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)) | there are no submissions |
 | `synthesize` | `kind="answer"` | One extra model call over the submissions ([below](#synthesize)) | there are no submissions, or the call fails recoverably |
 | `reporter` | a coordinator topology | Reserved; no built-in controller accepts it yet | |
 
@@ -889,9 +905,9 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
    - The runtime verifies submissions, writes `verdict` events, and puts each verdict's `VerdictSummary` on the handle and `MemberEnded` before queuing the event (`_swarm.py`, `_controller/_control.py`, `_evidence.py`).
    - Exports in `src/inspect_swarm/__init__.py`. Tests in `tests/test_result.py`.
 2. **Final-answer chain.**
-   - `src/inspect_swarm/_final.py` gains `FinalName`, `Synthesize`, `Reporter`, `FinalMode`, `FinalSpec` and `final_chain()`.
+   - `src/inspect_swarm/_final.py` widens M2's `FinalName` and gains `Synthesize`, `Reporter`, `FinalMode`, `FinalSpec` and `final_chain()`.
    - Validation against the result, called from `swarm()`'s construction checks.
-   - `leaderless(final=, stop_on_verified=)` and `Controller(final=)` (`_controller/_controller.py`, `_controller/leaderless.py`); `leaderless()` validates its `final` with the `TypeAdapter`, and settles how M1's `stop_on_submission` combines with a chain other than `first`.
+   - `leaderless(stop_on_verified=)`, and `final=` on `leaderless()` and `Controller` widened from M2's single `first` or `last` to `FinalSpec` (`_controller/_controller.py`, `_controller/leaderless.py`); `leaderless()` validates its `final` with the `TypeAdapter`, and settles how M1's `stop_on_submission` combines with a chain other than `first` (M2 already refuses it with `last`). The controller's choice keeps its M2 meaning, ahead of the chain.
    - The chain in the provisional answer and finalisation, including the artifact `final_verdict`.
    - Tests extend `tests/test_final.py` and `tests/test_controller.py`.
 3. **`synthesize`.**
@@ -910,7 +926,7 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
 
 **Keep the chain, the result contract and per-member scoring in M1.** Existing scorers already work with the swarm as the agent, and nothing M1 keeps needs a verifier, an answer key or per-member scores. After M2 instead (decision: Ransom, 2026-10-08).
 
-**Keep `final=` in M1, accepting only `"first"`.** This would match swarm-api.md's signature from the start. But with one valid value, the parameter configures nothing. Adding it later with a default that reproduces `first` changes no M1 swarm's answer. Not chosen.
+**Keep `final=` in M1, accepting only `"first"`.** This would match swarm-api.md's signature from the start. But with one valid value, the parameter configures nothing. Adding it later with a default that reproduces `first` changes no M1 swarm's answer. Not chosen; M2 added it once it had a second value, `last`.
 
 **Pass `ResultSpec` to a registered `member_scores` scorer.** The obvious shape. But Inspect logs a plain dataclass argument as its type name, so default `inspect score` rebuilds the scorer with a string in place of the spec. Making the spec a registered object would need a new registry type in inspect_ai. A task-owned no-argument factory uses existing machinery and keeps the spec's callables in the task's code. Chosen.
 
@@ -958,13 +974,13 @@ best@k is a closed form on values alone, so it would be a reducer (an inspect_ai
 
 - **inspect_swarm** has no released API; everything here is new. Python 3.11+ as decided.
 - **Eval logs.** Only existing structures are used: a store key, `InfoEvent`s, a message metadata key, and from Part 2 scores with dict values and metadata. Old readers and the viewer show them generically. The store record and the `InfoEvent` payloads carry `version: 1`. Part 2's record fields are optional additions under the same version.
-- **Logged parameters across versions.** When Part 2 adds `result=` to `swarm()` and `final`/`stop_on_verified` to `leaderless()`, logged plan params gain those keys. A run's `task_identifier()` can then differ between inspect_swarm versions for the same task, as it can for any solver that gains a parameter. Arms in one eval set run one installed inspect_swarm, so they are unaffected.
+- **Logged parameters across versions.** When Part 2 adds `result=` to `swarm()` and `stop_on_verified` to `leaderless()`, logged plan params gain those keys, as they gained `final` in M2. A run's `task_identifier()` can then differ between inspect_swarm versions for the same task, as it can for any solver that gains a parameter. Arms in one eval set run one installed inspect_swarm, so they are unaffected.
 - **Names** (`member_scores`, `MEMBER_METRICS`, `best_member`, `mean_member`, `baseline`) become an interface the analysis and users' notebooks depend on once released; changing them later is a breaking change. The member scorer's own name is the task's.
 - **inspect_ai.** No change beyond swarm-api.md's two registry types.
   - M1 uses the store, `transcript().info` and the member wrapper's reference to its `AgentState`.
   - Part 2 adds public scorer and reducer APIs and `registry_value()` for the `Synthesize` model field. If the cost boundary is built, it also uses `sample_model_usage()` and `sample_role_usage()`, which are private and which inspect_swarm may use.
-- **Tasks.** In M1, tasks need no change: their scorers score the swarm's output. From Part 2, tasks opt in. A task that does not pass `result=` behaves as in M1, with `first` and no per-member claims. A task whose scorer can read the answer from the environment must declare `kind="artifact"` or supply an answer-only adapter.
-- **swarm-api.md.** Its parts that exist only for Part 2 are marked after M2: `result=`, `leaderless()`'s `final` and `stop_on_verified`, `Controller(final=)` and the verdict fields; their validation rules; the verifier-based examples and tests; and the `member_scores` case of `tests/test_scoring_loop.py`. This design defines what swarm-api.md leaves to it: the pydantic `FinalMode` types with their discriminator and model serialiser, and how scoring treats members a controller never started.
+- **Tasks.** In M1, tasks need no change: their scorers score the swarm's output. From Part 2, tasks opt in. A task without `result=` makes no per-member claims. With `final=None` and no controller choice, it uses `first`; explicit `first` and `last` rules and a controller's choice keep their M2 meaning. A task whose scorer can read the answer from the environment must declare `kind="artifact"` or supply an answer-only adapter.
+- **swarm-api.md.** Its parts that exist only for Part 2 are marked after M2: `result=`, `leaderless()`'s `stop_on_verified` and the chain form of `final=` on `leaderless()` and `Controller`, and the verdict fields; their validation rules; the verifier-based examples and tests; and the `member_scores` case of `tests/test_scoring_loop.py`. This design defines what swarm-api.md leaves to it: the pydantic `FinalMode` types with their discriminator and model serialiser, and how scoring treats members a controller never started.
 
 ## Security
 

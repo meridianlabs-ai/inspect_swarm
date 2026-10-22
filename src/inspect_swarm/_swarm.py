@@ -122,6 +122,7 @@ def swarm(
             budget=resolved_budget,
             shares=shares,
             channels=resolved_channels,
+            final=resolved_controller.final,
         ).run(resolved_controller.run)
         return state
 

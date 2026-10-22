@@ -10,9 +10,14 @@ A swarm is scored by the task's own scorers. The swarm is the task's solver, so 
 
 ### The answer
 
-The swarm's answer is the first submission: the member that submitted earliest, by the swarm's clock, with ties broken by roster order. A member that ended any other way is never chosen ([Members](members.qmd#how-a-member-ends)). When no member submitted, the answer is empty.
+The controller's `final` rule chooses the swarm's answer from the members' submissions:
 
-The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the chosen member. Each member's own conversation is in its timeline.
+- `first`, the default: the member that submitted earliest, by the swarm's clock, with ties broken by roster order.
+- `last`: the latest submission, again with ties broken by roster order. `leaderless(stop_on_submission=False, final="last")` gives it, for a team whose members build on each other's work ([Controllers](controllers.qmd#leaderless)).
+
+A controller of your own can also choose the answer itself, with `choose_answer()`, in place of the rule ([Controllers](controllers.qmd#choosing-the-answer)). A member that ended any other way than submitting is never chosen ([Members](members.qmd#how-a-member-ends)). When no member submitted, the answer is empty.
+
+The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the mode and the chosen member. Each member's own conversation is in its timeline.
 
 ### The result record
 
@@ -33,9 +38,9 @@ The swarm keeps a record of what it did in the sample store under `inspect_swarm
 - `time` is seconds from the swarm's start to the member's end.
 - `sandbox` is the member's own sandbox, or `null` when it shares the sample's.
 - `gate_checks`, `gate_passes` and `first_pass_time` count the member's in-loop checks ([Checks during the run](#checks-during-the-run)).
-- `final.mode` is `first` when a member submitted, and `final.member` names that member. With no submission, both are `null` and `final.reason` is `"no_submissions"`.
+- `final.mode` is `first`, `last` or `controller`, and `final.member` names the chosen member. Under `controller`, `final.reason` is the reason the controller gave. With no submission, `mode` and `member` are `null` and `final.reason` is `"no_submissions"`.
 
-The record is updated as members start and end. If a limit or error ends the sample before the swarm finishes, the record keeps the first submission so far with `provisional: true`, and that submission is the sample's output.
+The record is updated as members start and end. If a limit or error ends the sample before the swarm finishes, the record keeps the answer so far with `provisional: true`, and that submission is the sample's output: the first submission so far, the latest under `last`, or the controller's choice once it has made one.
 
 ### The record belongs to the swarm
 
@@ -47,7 +52,7 @@ Any code can read it. A scorer that reads it after the swarm is how a task finds
 
 A scorer that reads the sandbox, rather than the answer, scores what every member left there. With the default `leaderless`, the swarm stops the other members at the first submission, so what they were doing is left half done. When the scorer reads a shared artifact, let every member run to its end with `leaderless(stop_on_submission=False)` ([Controllers](controllers.qmd#leaderless)). The swarm returns after every member and its background work have ended, so the scorer sees the sandbox as the members left it.
 
-[`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) scores a script that the members build together in a shared container. It runs the script under `timeout` in the sandbox, so a script that never ends fails the check instead of reaching the command's own deadline, which raises and ends the sample. A small shell wrapper turns the script's exit status into 0, 1 or 2, because Inspect reads some statuses, such as `timeout`'s 124, as its own deadline passing, and a script can exit with any status.
+[`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) scores a script that the members build together in a shared container.
 
 ## Per-member sandboxes
 
@@ -71,9 +76,7 @@ def tests_pass() -> Scorer:
     return score
 ```
 
-Check what members leave with a fixed command whose exit status is the verdict, rather than by reading their files into the scorer. A member can leave anything at a path: a directory, a FIFO, a link that points at itself, text that is not what the scorer expects. A command fails on all of these, and a failed command is a failed check; reading the file can raise instead, and end the sample before the other members are graded. Give the command a deadline inside the sandbox too (`timeout`), since a command that outlives `exec()`'s own timeout raises, and do not pass a member program's exit status straight back to `exec()`, which may read it as that timeout.
-
-A command run in a member's own sandbox uses programs the member could have changed. When that matters, run the check in a service the members cannot write to. [`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py) mounts each member's `/workspace` read-only in a `comparator` service, at `/answers/<member>`, and checks an answer there with one command:
+A check can also run in a shared service rather than in each member's sandbox. [`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py) mounts each member's `/workspace` read-only in a `comparator` service, at `/answers/<member>`, and checks an answer there with one command:
 
 ```python
 async def run_check(member_sandbox: str) -> tuple[bool, str]:
@@ -85,7 +88,7 @@ async def run_check(member_sandbox: str) -> tuple[bool, str]:
     return result.success, result.stdout.strip() or result.stderr.strip()
 ```
 
-`VERIFY` exits 0 only for a proof. It opens the answer without following a link, since the comparator mounts every member's work and a link could point at another member's answer, and it rejects an answer longer than the bytes it reads. Its scorer, `any_member_proved()`, calls `run_check()` for every member in the result record. A member that wrote a valid answer but was stopped before it submitted still passes, which is why the scorer grades every member's work rather than only the chosen member's.
+`VERIFY` exits 0 only for a proof. Its scorer, `any_member_proved()`, calls `run_check()` for every member in the result record. A member that wrote a valid answer but was stopped before it submitted still passes, which is why the scorer grades every member's work rather than only the chosen member's.
 
 ## Checks during the run
 
@@ -124,6 +127,6 @@ def single_agent() -> Task:
     )
 ```
 
-`pass_at_k` and `max` choose with knowledge of the target, and the swarm's first submission does not, so they are upper references, not like-for-like comparisons.
+`pass_at_k` and `max` choose with knowledge of the target, and the swarm's answer rule does not, so they are upper references, not like-for-like comparisons.
 
 Compare arms on the cost the log records, not on the caps ([Analysis](analysis.qmd#samples-dataframe)). team@k, the mean member and best@k on graded scores need each member's own score, which Inspect Swarm does not record yet; best@k can be computed from per-epoch values in `samples_df()`.

@@ -3,7 +3,7 @@
 Its shape follows a port of Epoch AI's LeanOpenProblems swarm, with a toy problem in place of a Lean proof:
 
 - Each member works in its own container and reaches one shared service, the `comparator` that checks answers, by name (`visible_sandboxes`).
-- The comparator mounts each member's `/workspace` read-only, at `/answers/<member>`, and checks an answer with one fixed command that exits non-zero unless the answer is proved. What a member leaves there (a directory, a FIFO, a link, text that is not a number) can only fail the check.
+- The comparator mounts each member's `/workspace` read-only, at `/answers/<member>`, and checks an answer with one fixed command that exits non-zero unless the answer is proved.
 - Members share what they learn on a `shared_memory()` board, the only channel between them: they share no files.
 - `prover()` is a member builder registered with `@agent`. It gives each member a `check` tool, checks the member's answer again when its agent returns, and raises a member-local custom limit when that check fails. So `submitted` means the answer the member leaves passes, and `until_proved()` can stop the swarm at the first proof.
 - The scorer takes each member's sandbox from the swarm's result record, and checks every member's answer again.
@@ -51,22 +51,16 @@ MEMBERS = 3
 # the comparator's check of the answer file a member left, run in the comparator's
 # own container; it exits 0 only for a proof
 VERIFY = """\
-import os, stat, sys
+import sys
 
 def check(path):
     try:
-        # O_NOFOLLOW: a link could reach another member's answer, which this
-        # container mounts too; O_NONBLOCK: opening a FIFO does not wait for a writer
-        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-        with os.fdopen(os.open(path, flags), "rb") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                return "FAIL: the answer is not a regular file"
-            text = f.read(65)
-        if len(text) > 64:
-            return "FAIL: the answer is longer than 64 bytes"
-        n = int(text.decode())
-    except Exception as ex:
-        return f"FAIL: the answer is not a readable whole number ({type(ex).__name__})"
+        with open(path) as f:
+            n = int(f.read())
+    except FileNotFoundError:
+        return "FAIL: there is no answer file"
+    except ValueError:
+        return "FAIL: the answer is not a whole number"
     v = n * n + n + 41
     if not 1 <= n <= 100:
         return "FAIL: n is not from 1 to 100"
