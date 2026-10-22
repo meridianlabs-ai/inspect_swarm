@@ -207,18 +207,29 @@ You can write your own with `@swarm_controller` and `@swarm_channel`. See their 
 
 `shared_memory()` gives the swarm one board of files that every member reads and writes with a `shared_memory` tool. The tool has the commands of Inspect's `memory()` tool, over files under `/shared_memory`. A view shows what other members wrote, marked as information from a peer, and each result names the files others have changed since the member last viewed them. Each sample has its own board, which is gone when the swarm ends.
 
-Members get the tool from `swarm_tools()`, which gives a member the tools of the swarm's channels. Put it in the member's tools, in the factory or the built form:
+Members get the tool from `swarm_tools()`, which gives a member the tools of the swarm's channels. Call it inside a member builder registered with `@agent`, and pass the builder to `member()` without calling it. The log records a builder by name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild `swarm_tools()` passed in `args` or in an agent you built.
 
 ```python
-from inspect_ai.agent import deepagent, react
+from inspect_ai.agent import Agent, agent, deepagent, react
 from inspect_ai.tool import bash
 
 from inspect_swarm import filesystem, member, shared_memory, swarm, swarm_tools
 
+
+@agent
+def solver_member() -> Agent:
+    return react(tools=[bash(), swarm_tools()])
+
+
+@agent
+def reviewer_member() -> Agent:
+    return deepagent(tools=[bash(), swarm_tools()])
+
+
 solver = swarm(
     members=[
-        member(react, args={"tools": [bash(), swarm_tools()]}, name="solver", count=3),
-        member(deepagent(tools=[bash(), swarm_tools()]), name="reviewer"),
+        member(solver_member, name="solver", count=3),
+        member(reviewer_member, name="reviewer"),
     ],
     channels=[filesystem(), shared_memory()],
 )
