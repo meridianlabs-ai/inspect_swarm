@@ -39,7 +39,7 @@ It respects the decisions recorded in swarm.md (Ransom, 2026-10-07): Python 3.11
 
 It builds on two designs and uses their shapes:
 
-- [swarm-api.md](swarm-api.md), the `swarm()` API. The swarm's fixed **runtime**, not the controller, keeps the member record, the provisional answer and finalisation; after M2 it also verifies submissions. After M2 the final-answer chain is the controller's `final=` parameter.
+- [swarm-api.md](swarm-api.md), the `swarm()` API. The swarm's fixed **runtime**, not the controller, keeps the member record, the provisional answer and finalisation; after M2 it also verifies submissions. The controller's `final=` parameter is the answer rule: `first` or `last` in M2, and after M2 the final-answer chain.
 - [swarm-communication.md](swarm-communication.md). Its evidence payloads are the shape this design's events follow, and after M2 `synthesize` follows its fencing rules.
 
 Where this document says "the runtime", it means swarm-api.md's runtime.
@@ -926,7 +926,7 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
 
 **Keep the chain, the result contract and per-member scoring in M1.** Existing scorers already work with the swarm as the agent, and nothing M1 keeps needs a verifier, an answer key or per-member scores. After M2 instead (decision: Ransom, 2026-10-08).
 
-**Keep `final=` in M1, accepting only `"first"`.** This would match swarm-api.md's signature from the start. But with one valid value, the parameter configures nothing. Adding it later with a default that reproduces `first` changes no M1 swarm's answer. Not chosen.
+**Keep `final=` in M1, accepting only `"first"`.** This would match swarm-api.md's signature from the start. But with one valid value, the parameter configures nothing. Adding it later with a default that reproduces `first` changes no M1 swarm's answer. Not chosen; M2 added it once it had a second value, `last`.
 
 **Pass `ResultSpec` to a registered `member_scores` scorer.** The obvious shape. But Inspect logs a plain dataclass argument as its type name, so default `inspect score` rebuilds the scorer with a string in place of the spec. Making the spec a registered object would need a new registry type in inspect_ai. A task-owned no-argument factory uses existing machinery and keeps the spec's callables in the task's code. Chosen.
 
@@ -980,7 +980,7 @@ best@k is a closed form on values alone, so it would be a reducer (an inspect_ai
   - M1 uses the store, `transcript().info` and the member wrapper's reference to its `AgentState`.
   - Part 2 adds public scorer and reducer APIs and `registry_value()` for the `Synthesize` model field. If the cost boundary is built, it also uses `sample_model_usage()` and `sample_role_usage()`, which are private and which inspect_swarm may use.
 - **Tasks.** In M1, tasks need no change: their scorers score the swarm's output. From Part 2, tasks opt in. A task that does not pass `result=` behaves as in M1, with `first` and no per-member claims. A task whose scorer can read the answer from the environment must declare `kind="artifact"` or supply an answer-only adapter.
-- **swarm-api.md.** Its parts that exist only for Part 2 are marked after M2: `result=`, `leaderless()`'s `final` and `stop_on_verified`, `Controller(final=)` and the verdict fields; their validation rules; the verifier-based examples and tests; and the `member_scores` case of `tests/test_scoring_loop.py`. This design defines what swarm-api.md leaves to it: the pydantic `FinalMode` types with their discriminator and model serialiser, and how scoring treats members a controller never started.
+- **swarm-api.md.** Its parts that exist only for Part 2 are marked after M2: `result=`, `leaderless()`'s `stop_on_verified` and the chain form of `final=` on `leaderless()` and `Controller`, and the verdict fields; their validation rules; the verifier-based examples and tests; and the `member_scores` case of `tests/test_scoring_loop.py`. This design defines what swarm-api.md leaves to it: the pydantic `FinalMode` types with their discriminator and model serialiser, and how scoring treats members a controller never started.
 
 ## Security
 

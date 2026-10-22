@@ -300,7 +300,7 @@ swarm-api.md fixes the steps around the soft stop, so that nothing starts once a
 1. **Soft stop.** For every member still running, set its lever to its current usage and close its stop gate. A native member raises at its next pre-dispatch check (or after its in-flight call completes), including calls made by an approval or review callback, so calls already in flight finish and are recorded, and no new call starts except at most one native compaction per agent loop, which has no pre-dispatch check. A bridged member is cancelled at its next check instead (see [Swarm nodes](#swarm-nodes)).
 2. **Grace.** Wait until every member has returned, or the effective grace has passed. Effective grace is `Budget.grace`. When the sample has a time limit, it is clipped to half the sample's remaining time at the moment of the stop, so the final step always keeps the other half.
 3. **Hard stop.** Cancel the cancel scope of every member still running. Calls they have in flight are cancelled, and the ledger then reports the totals as incomplete ([The ledger](#the-ledger)).
-4. **Finalise**, outside the caps ([The final step](#the-final-step-and-the-reserve)): with `first` in M1, and after M2 with the controller's final-answer chain.
+4. **Finalise**, outside the caps ([The final step](#the-final-step-and-the-reserve)): with `first` in M1; in M2 with the controller's choice if it made one, else its `final` rule (`first` or `last`); after M2 with its choice or its final-answer chain.
 
 Members that end during grace still get their statuses, evidence and `MemberEnded` events, but no controller acts on them. Members never started stay `pending`.
 
