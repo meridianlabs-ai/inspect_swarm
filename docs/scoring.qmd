@@ -51,36 +51,41 @@ A scorer that reads the sandbox, rather than the answer, scores what every membe
 
 ## Per-member sandboxes
 
-With per-member sandboxes, the scorer still runs outside every member, where `sandbox()` is the sample's `default`. A scorer that grades the members' work names each member's sandbox. The result record says which member used which, so the scorer can read it rather than repeat the roster. From [`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py):
+With per-member sandboxes, the scorer still runs outside every member, where `sandbox()` is the sample's `default`. A scorer that grades the members' work names each member's sandbox. The result record says which member used which, so the scorer can read it rather than repeat the roster:
 
 ```python
 @scorer(metrics=[accuracy()])
-def any_member_proved() -> Scorer:
-    """Check every member's answer file again, in its own sandbox."""
+def tests_pass() -> Scorer:
+    """Run the task's tests in each member's sandbox."""
 
     async def score(state: TaskState, target: Target) -> Score:
         # the swarm's result record; task code reads it but never writes it
         record: dict[str, Any] = state.store.get("inspect_swarm:result")
-        checks: dict[str, dict[str, str | None]] = {}
-        for m in record["members"]:
-            answer, result = await run_check(m["sandbox"])
-            checks[m["name"]] = {"answer": answer, "check": result}
-        proved = [
-            name for name, c in checks.items() if (c["check"] or "").startswith("PASS")
+        passed = [
+            m["name"]
+            for m in record["members"]
+            if (await sandbox(m["sandbox"]).exec(["sh", "/tests/run.sh"])).success
         ]
-        return Score(
-            value=CORRECT if proved else INCORRECT,
-            answer=state.output.completion,
-            explanation=f"proved by {', '.join(proved)}"
-            if proved
-            else "no member proved it",
-            metadata=checks,
-        )
+        return Score(value=CORRECT if passed else INCORRECT, metadata={"passed": passed})
 
     return score
 ```
 
-`run_check()` reads the answer file from the named sandbox and checks it in the shared `comparator` service. A file that is missing, a directory, not a regular file, not text, or not a whole number fails the check, so one member's broken artifact does not stop the scorer from grading the others. A member that wrote a valid answer but was stopped before it submitted still passes this check, which is why the scorer grades every member's sandbox rather than only the chosen member's.
+Check what members leave with a fixed command whose exit status is the verdict, rather than by reading their files into the scorer. A member can leave anything at a path: a directory, a FIFO, a link that points at itself, text that is not what the scorer expects. A command fails on all of these, and a failed command is a failed check; reading the file can raise instead, and end the sample before the other members are graded.
+
+A command run in a member's own sandbox uses programs the member could have changed. When that matters, run the check in a service the members cannot write to. [`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py) mounts each member's `/workspace` read-only in a `comparator` service, at `/answers/<member>`, and checks an answer there with one command:
+
+```python
+async def run_check(member_sandbox: str) -> tuple[bool, str]:
+    """Check the answer a member left in its sandbox, with the comparator: whether it is a proof, and why."""
+    result = await sandbox("comparator").exec(
+        ["python3", "-c", VERIFY, f"/answers/{member_sandbox}/answer.txt"],
+        timeout=60,
+    )
+    return result.success, result.stdout.strip() or result.stderr.strip()
+```
+
+`VERIFY` exits 0 only for a proof. Its scorer, `any_member_proved()`, calls `run_check()` for every member in the result record. A member that wrote a valid answer but was stopped before it submitted still passes, which is why the scorer grades every member's work rather than only the chosen member's.
 
 ## Checks during the run
 

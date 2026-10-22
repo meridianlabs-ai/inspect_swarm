@@ -9,7 +9,7 @@ Runnable swarms. Each file defines one task at the bottom. Read them in this ord
 | `stop_on_proof.py` | Writing a controller: `until_proved()` stops the swarm at the first checked answer, and a member builder that makes a normal return mean a passed check | |
 | `budget_sweep.py` | Agent count, budget and split as task parameters; the `swarm_resources()` tool | Cost data for the model |
 | `shared_sandbox.py` | Members with `bash()` in one shared container, the `filesystem` channel, and a scorer that reads what they left | Docker |
-| `proof_swarm.py` | A verifier-gated swarm shaped like Epoch AI's LeanOpenProblems port: a container per member, a shared checking service, a shared-memory board, `until_proved()`, and a scorer that checks each member's container | Docker |
+| `proof_swarm.py` | A verifier-gated swarm shaped like Epoch AI's LeanOpenProblems port: a container per member, a shared checking service that reads each member's workspace, a shared-memory board, `until_proved()`, and a scorer that checks each member's answer | Docker |
 
 `questions.py` holds the questions that `getting_started.py`, `stop_on_proof.py` and `budget_sweep.py` share. `compose.yaml` and `proof_swarm.yaml` are the Docker configurations of the last two.
 

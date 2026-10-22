@@ -216,8 +216,9 @@ def test_shared_sandbox(tmp_path: Path) -> None:
     "malformed,failure",
     [
         ("mkdir /workspace/answer.txt", "IsADirectoryError"),
-        ("mkfifo /workspace/answer.txt", "is not a readable file"),
-        ("printf '40\\000' > /workspace/answer.txt", "not a whole number"),
+        ("mkfifo /workspace/answer.txt", "not a regular file"),
+        ("printf '40\\000' > /workspace/answer.txt", "(ValueError)"),
+        ("ln -s answer.txt /workspace/answer.txt", "(OSError)"),
     ],
 )
 def test_proof_swarm_scores_each_members_sandbox(
@@ -249,9 +250,9 @@ def test_proof_swarm_scores_each_members_sandbox(
     [score] = sample.scores.values()
     assert score.value == "C"
     assert score.metadata is not None
-    assert score.metadata["agent-2"]["check"].startswith("PASS")
-    assert score.metadata["agent-1"]["check"].startswith("FAIL")
-    assert failure in score.metadata["agent-1"]["check"]
+    assert score.metadata["agent-2"].startswith("PASS")
+    assert score.metadata["agent-1"].startswith("FAIL")
+    assert failure in score.metadata["agent-1"]
     record = _record(sample)
     assert record.final.member == "agent-2"
     assert [(m.sandbox, m.status) for m in record.members] == [

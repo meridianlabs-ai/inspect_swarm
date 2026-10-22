@@ -76,7 +76,8 @@ A member cannot see the sample's other environments, except those in its `visibl
 
 ```python
 member(
-    prover,
+    react,
+    args={"tools": [bash()]},
     name="agent",
     count=3,
     sandbox="{member}",
@@ -84,7 +85,7 @@ member(
 )
 ```
 
-Any member that lists a service can use it, so list only services every member may use. `visible_sandboxes` cannot name another member's sandbox, or `default`, which inside the member is its own sandbox. [`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py) gives every member a `comparator` that checks answers.
+Any member that lists a service can use it, so list only services every member may use. `visible_sandboxes` cannot name another member's sandbox, or `default`, which inside the member is its own sandbox. [`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py) gives every member a `comparator` that checks answers. The comparator also mounts each member's workspace volume read-only, so it can check what a member left without any member reaching another's files.
 
 ### A shared volume
 

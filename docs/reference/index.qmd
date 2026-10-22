@@ -6,6 +6,7 @@ title: Reference
 
 | | |
 |---|---|
+| [Configuration](configuration.qmd) | The member record and the swarm's budget. |
 | [inspect_swarm.analysis](inspect_swarm.analysis.qmd) | Columns for samples_df() and the models of the swarm ledger. |
 | [inspect_swarm](inspect_swarm.qmd) | Swarms, members, controllers, channels and the budget view. |
 : {.borderless tbl-colwidths=[35,65]}

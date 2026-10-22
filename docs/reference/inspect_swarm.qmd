@@ -3,12 +3,10 @@ reference: inspect_swarm
 description: Swarms, members, controllers, channels and the budget view.
 ---
 
-## Swarm
+## Swarms and members
 
 ### swarm
 ### member
-### Member
-### Budget
 
 ## Controllers
 
