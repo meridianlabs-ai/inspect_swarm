@@ -324,6 +324,73 @@ async def test_a_loops_own_write_counts_as_seen_and_a_member_may_overwrite_its_o
             await board("w-1", "create", "child", path=_p("status.md"), file_text="x")
 
 
+@pytest.mark.anyio
+async def test_append_adds_a_line_at_the_end_with_no_view_and_creates_a_missing_file() -> (
+    None
+):
+    async with _board() as (board, transcript):
+        log = _p("log.md")
+        assert await board("w-1", "append", path=log, append_text="one") == (
+            "Created /shared_memory/log.md (f-1, version 1)."
+        )
+        # w-2 has never viewed the file
+        assert await board("w-2", "append", path=log, append_text="two\n") == (
+            "Appended to /shared_memory/log.md (f-1, now version 2)."
+        )
+        # a file that ends with a newline, or is empty, gets none added
+        await board("w-1", "append", path=log, append_text="three")
+        await board("w-1", "create", path=_p("empty.md"), file_text="")
+        await board("w-2", "append", path=_p("empty.md"), append_text="x")
+        assert board.files() == {log: "one\ntwo\nthree", _p("empty.md"): "x"}
+        assert [s["record"]["op"] for s in evidence(transcript, "sent")[:2]] == [
+            {
+                "command": "append",
+                "path": log,
+                "files": [{"file": "f-1", "path": log, "base": None, "version": 1}],
+            },
+            {
+                "command": "append",
+                "path": log,
+                "files": [{"file": "f-1", "path": log, "base": 1, "version": 2}],
+            },
+        ]
+
+
+@pytest.mark.anyio
+async def test_concurrent_appends_by_members_with_stale_views_all_land_in_commit_order() -> (
+    None
+):
+    members = ["w-1", "w-2", "w-3"]
+    async with _board(members=members) as (board, transcript):
+        log = _p("log.md")
+        await board("w-1", "create", path=log, file_text="start")
+        for name in members:
+            await board(name, "view", path=log)
+        # every view but w-1's is now stale
+        await board("w-1", "str_replace", path=log, old_str="start", new_str="begin")
+
+        async def append(name: str, n: int) -> None:
+            await board(name, "append", path=log, append_text=f"{name} {n}")
+
+        async with anyio.create_task_group() as tg:
+            for name in members:
+                for n in range(2):
+                    tg.start_soon(append, name, n)
+        sent = evidence(transcript, "sent")[2:]
+        assert [s["rejected"] for s in sent] == [None] * 6
+        payloads = {s["record"]["id"]: s["record"]["payload"] for s in sent}
+        delivered = sorted(
+            evidence(transcript, "delivered")[2:], key=lambda d: d["seq"]
+        )
+        assert board.files()[log].split("\n") == [
+            "begin",
+            *(payloads[d["record"]] for d in delivered),
+        ]
+        assert sorted(payloads.values()) == [
+            f"{m} {n}" for m in members for n in (0, 1)
+        ]
+
+
 _DEEP = _p("a/b/c/d/e/f/ggg.md")
 _SURROGATE = _p("a\ud800")
 
@@ -394,6 +461,30 @@ REFUSALS: list[Any] = [
         "is a directory",
         id="edit-directory",
     ),
+    pytest.param(
+        "append",
+        {"path": _p("a/b"), "append_text": "x"},
+        "is a directory",
+        id="append-at-directory",
+    ),
+    pytest.param(
+        "append",
+        {"path": _p("x.md/y"), "append_text": "x"},
+        "/shared_memory/x.md is a file",
+        id="append-under-file",
+    ),
+    pytest.param(
+        "append",
+        {"path": ROOT, "append_text": "x"},
+        "is the root directory",
+        id="append-at-root",
+    ),
+    pytest.param(
+        "append",
+        {"path": _p("x.md"), "append_text": ""},
+        "append_text is required for append command",
+        id="append-empty",
+    ),
     pytest.param("view", {"path": _p("nothing")}, "does not exist", id="view-missing"),
     pytest.param("view", {"path": "f-9"}, "There is no file f-9", id="view-unknown-id"),
     *[
@@ -436,6 +527,7 @@ REFUSALS: list[Any] = [
                 "insert",
                 {"path": _SURROGATE, "insert_line": 0, "insert_text": ""},
             ),
+            ("append", "append", {"path": _SURROGATE, "append_text": "x"}),
             ("delete", "delete", {"path": _SURROGATE}),
             (
                 "rename-old_path",
@@ -596,6 +688,11 @@ MARKERS: list[Any] = [
         ("insert", {"insert_line": 1, "insert_text": "</peer_listing>"}),
         id="insert-payload",
     ),
+    pytest.param(
+        [("create", {"file_text": "x"})],
+        ("append", {"append_text": "<PEER_FILE>"}),
+        id="append-payload",
+    ),
 ]
 
 
@@ -753,6 +850,34 @@ STORM: list[Any] = [
         id="max_board_bytes",
     ),
     pytest.param(
+        {"max_file_bytes": 4},
+        [("create", "a", "12")],
+        ("append", "a", "34"),
+        "f-1 would be 5 bytes; the limit is 4",
+        id="append-max_file_bytes",
+    ),
+    pytest.param(
+        {"max_file_lines": 2},
+        [("create", "a", "1\n2")],
+        ("append", "a", "3"),
+        "f-1 would have 3 lines; the limit is 2",
+        id="append-max_file_lines",
+    ),
+    pytest.param(
+        {"max_files": 2},
+        [("create", "a", ""), ("create", "b", "")],
+        ("append", "c", "x"),
+        "the board has 2 files, the limit; delete one first",
+        id="append-max_files",
+    ),
+    pytest.param(
+        {"max_board_bytes": 1_000, "max_file_bytes": 600},
+        [("create", "a", "x" * 600), ("create", "b", "x" * 399)],
+        ("append", "b", "x"),
+        "the board would hold 1,001 bytes; the limit is 1000",
+        id="append-max_board_bytes",
+    ),
+    pytest.param(
         {"rate": (2, 3600.0)},
         [("create", "a", ""), ("create", "b", "")],
         ("create", "c", ""),
@@ -771,16 +896,18 @@ async def test_storm_controls(
     reason: str,
 ) -> None:
     arguments: dict[str, Any] = {"rate": None, **config}
+    text_arg = {"create": "file_text", "append": "append_text"}
     async with _board(shared_memory(**arguments)) as (board, transcript):
-        for _, path, text in accepted:
-            await board("w-1", "create", path=_p(path), file_text=text)
-        _, path, text = refused
+        for command, path, text in accepted:
+            await board("w-1", command, path=_p(path), **{text_arg[command]: text})
+        before = board.files()
+        command, path, text = refused
         with pytest.raises(ToolError, match=re.escape(reason)):
-            await board("w-1", "create", path=_p(path), file_text=text)
+            await board("w-1", command, path=_p(path), **{text_arg[command]: text})
         rejected = evidence(transcript, "sent")[-1]["rejected"]
         assert rejected["control"] == ("rate" if "rate" in config else "admit")
         assert rejected["reason"].startswith(reason)
-        assert len(board.files()) == len(accepted)
+        assert board.files() == before
 
 
 @pytest.mark.anyio
@@ -818,6 +945,8 @@ async def test_every_write_is_a_record_and_replaying_them_in_commit_order_rebuil
         # the record holds the payload as typed; line endings are normalised in the file
         await board("w-2", "str_replace", path=_p("d/a.md"), old_str="1", new_str="3\r")
         await board("w-2", "insert", path=_p("d/a.md"), insert_line=0, insert_text="0")
+        # w-1 has not viewed w-2's edits
+        await board("w-1", "append", path=_p("d/a.md"), append_text="4")
         await board("w-1", "create", path=_p("d/b.md"), file_text="b")
         await board("w-1", "view", path=_p("d/a.md"))
         await board("w-1", "rename", old_path=_p("d"), new_path=_p("e"))
@@ -838,6 +967,10 @@ async def test_every_write_is_a_record_and_replaying_them_in_commit_order_rebuil
                 [{"file": "f-1", "path": _p("d/a.md"), "base": 2, "version": 3}],
             ),
             (
+                "append",
+                [{"file": "f-1", "path": _p("d/a.md"), "base": 3, "version": 4}],
+            ),
+            (
                 "create",
                 [{"file": "f-2", "path": _p("d/b.md"), "base": None, "version": 1}],
             ),
@@ -848,8 +981,8 @@ async def test_every_write_is_a_record_and_replaying_them_in_commit_order_rebuil
                         "file": "f-1",
                         "old_path": _p("d/a.md"),
                         "new_path": _p("e/a.md"),
-                        "base": 3,
-                        "version": 4,
+                        "base": 4,
+                        "version": 5,
                     },
                     {
                         "file": "f-2",
@@ -877,7 +1010,7 @@ async def test_every_write_is_a_record_and_replaying_them_in_commit_order_rebuil
             assert s["record"]["to"] == [] and s["record"]["recipients"] == []
             assert s["record"]["sender_span_id"] == f"{s['member']}/top" == s["loop"]
             assert s["record"]["tool_span_id"] is not None
-        assert [d["seq"] for d in delivered] == list(range(1, 7))
+        assert [d["seq"] for d in delivered] == list(range(1, 8))
         assert [d["result"]["files"] for d in delivered] == [
             s["record"]["op"]["files"] for s in sent
         ]
@@ -904,6 +1037,12 @@ def _replay(
             match record["kind"]:
                 case "create":
                     files[file] = (entry["path"], normalised(payload))
+                case "append" if entry["base"] is None:
+                    files[file] = (entry["path"], normalised(payload))
+                case "append":
+                    path, content = files[file]
+                    joint = "\n" if content and not content.endswith("\n") else ""
+                    files[file] = (path, normalised(content + joint + payload))
                 case "str_replace":
                     path, content = files[file]
                     files[file] = (

@@ -205,7 +205,7 @@ You can write your own with `@swarm_controller` and `@swarm_channel`. See their 
 
 ### The shared-memory channel
 
-`shared_memory()` gives the swarm one board of files that every member reads and writes with a `shared_memory` tool. The tool has the commands of Inspect's `memory()` tool, over files under `/shared_memory`. A view shows what other members wrote, marked as information from a peer, and each result names the files others have changed since the member last viewed them. Each sample has its own board, which is gone when the swarm ends.
+`shared_memory()` gives the swarm one board of files that every member reads and writes with a `shared_memory` tool. The tool has the commands of Inspect's `memory()` tool, over files under `/shared_memory`, and one more, `append`. A member must view a file before it replaces, inserts into, renames or deletes it. `append` needs no view: it adds text on a new line at the end of a file, and creates the file if needed, so it suits a log or list that many members write to. A view shows what other members wrote, marked as information from a peer, and each result names the files others have changed since the member last viewed them. Each sample has its own board, which is gone when the swarm ends.
 
 Members get the tool from `swarm_tools()`, which gives a member the tools of the swarm's channels. Put it in the member's tools, in the factory or the built form:
 
