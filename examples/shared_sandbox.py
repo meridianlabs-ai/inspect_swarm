@@ -31,6 +31,18 @@ Split the work: one member writes the script, the others write test files in the
 
 TEXT = "the quick brown fox\njumps over\n\nthe lazy dog\n"
 
+# Runs the script under `timeout`, which kills it after $1 seconds (exit status 137),
+# then exits 0 when the script succeeded, 2 when it was killed, and 1 for any other
+# failure. The script's own status never reaches Inspect, which reads some statuses,
+# such as `timeout`'s 124, as its own deadline passing.
+RUN = """\
+timeout -s KILL "$1" python3 /shared/wordcount.py /tmp/check.txt
+status=$?
+[ "$status" -eq 0 ] && exit 0
+[ "$status" -eq 137 ] && exit 2
+exit 1
+"""
+
 
 @scorer(metrics=[accuracy()])
 def script_works(timeout: int = 30) -> Scorer:
@@ -38,26 +50,17 @@ def script_works(timeout: int = 30) -> Scorer:
 
     async def score(state: TaskState, target: Target) -> Score:
         await sandbox().write_file("/tmp/check.txt", TEXT)
-        # `timeout` in the sandbox kills a script that runs too long, which then
-        # fails like any other wrong script
+        # the deadline inside the sandbox fails the script like any other wrong
+        # script; exec()'s own, later, deadline is for the sandbox itself
         result = await sandbox().exec(
-            [
-                "timeout",
-                "-s",
-                "KILL",
-                str(timeout),
-                "python3",
-                "/shared/wordcount.py",
-                "/tmp/check.txt",
-            ],
-            timeout=timeout + 30,
+            ["sh", "-c", RUN, "sh", str(timeout)], timeout=timeout + 30
         )
         output = result.stdout.strip()
         return Score(
             value=CORRECT if result.success and output == target.text else INCORRECT,
             answer=output,
             explanation=f"the script ran for more than {timeout} seconds"
-            if result.returncode == 137
+            if result.returncode == 2
             else result.stderr or None,
         )
 

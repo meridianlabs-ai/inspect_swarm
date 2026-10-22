@@ -201,6 +201,8 @@ def test_budget_sweep(tmp_path: Path) -> None:
         ),
         # a script that never ends is killed at the scorer's deadline and is wrong
         ("while True: pass\\n", "I", "", "the script ran for more than 2 seconds"),
+        # a script whose exit status is `timeout`'s own is an ordinary wrong script
+        ("import sys\\nsys.exit(124)\\n", "I", "", None),
     ],
 )
 def test_shared_sandbox(

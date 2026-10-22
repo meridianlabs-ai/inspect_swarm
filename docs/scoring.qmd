@@ -47,7 +47,7 @@ Any code can read it. A scorer that reads it after the swarm is how a task finds
 
 A scorer that reads the sandbox, rather than the answer, scores what every member left there. With the default `leaderless`, the swarm stops the other members at the first submission, so what they were doing is left half done. When the scorer reads a shared artifact, let every member run to its end with `leaderless(stop_on_submission=False)` ([Controllers](controllers.qmd#leaderless)). The swarm returns after every member and its background work have ended, so the scorer sees the sandbox as the members left it.
 
-[`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) scores a script that the members build together in a shared container. It runs the script under `timeout` in the sandbox, so a script that never ends fails the check instead of reaching the command's own deadline, which raises and ends the sample.
+[`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) scores a script that the members build together in a shared container. It runs the script under `timeout` in the sandbox, so a script that never ends fails the check instead of reaching the command's own deadline, which raises and ends the sample. A small shell wrapper turns the script's exit status into 0, 1 or 2, because Inspect reads some statuses, such as `timeout`'s 124, as its own deadline passing, and a script can exit with any status.
 
 ## Per-member sandboxes
 
@@ -71,7 +71,7 @@ def tests_pass() -> Scorer:
     return score
 ```
 
-Check what members leave with a fixed command whose exit status is the verdict, rather than by reading their files into the scorer. A member can leave anything at a path: a directory, a FIFO, a link that points at itself, text that is not what the scorer expects. A command fails on all of these, and a failed command is a failed check; reading the file can raise instead, and end the sample before the other members are graded. Give the command a deadline inside the sandbox too (`timeout`), since a command that outlives `exec()`'s own timeout raises.
+Check what members leave with a fixed command whose exit status is the verdict, rather than by reading their files into the scorer. A member can leave anything at a path: a directory, a FIFO, a link that points at itself, text that is not what the scorer expects. A command fails on all of these, and a failed command is a failed check; reading the file can raise instead, and end the sample before the other members are graded. Give the command a deadline inside the sandbox too (`timeout`), since a command that outlives `exec()`'s own timeout raises, and do not pass a member program's exit status straight back to `exec()`, which may read it as that timeout.
 
 A command run in a member's own sandbox uses programs the member could have changed. When that matters, run the check in a service the members cannot write to. [`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py) mounts each member's `/workspace` read-only in a `comparator` service, at `/answers/<member>`, and checks an answer there with one command:
 
