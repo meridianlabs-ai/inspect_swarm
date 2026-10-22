@@ -773,7 +773,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 **Build `swarm()` inside inspect_ai.**
 
 - It would make channel items and persistent members easy, but couple an experimental, opinionated runtime to inspect_ai's release and compatibility bar.
-- The co-development setup (inspect_swarm tracks inspect_ai `main`) lets us move only the extension points into inspect_ai, as they prove necessary.
+- The co-development setup (inspect_swarm may depend on inspect_ai `main` between releases) lets us move only the extension points into inspect_ai, as they prove necessary.
 - Rejected for now. Revisit if the runtime stabilises and most users want it built in.
 
 **Extend `deepagent()` with peer messaging** (add `send_message` among background children).
