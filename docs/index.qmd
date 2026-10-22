@@ -15,19 +15,25 @@ Everything in Inspect Swarm is experimental and may change in any release withou
 Install it from PyPI:
 
 ```bash
-pip install inspect_swarm
+pip install "inspect_swarm>=0.1.0"
 ```
 
 or, in a uv project:
 
 ```bash
-uv add inspect_swarm
+uv add "inspect_swarm>=0.1.0"
 ```
 
-To install the latest development version from GitHub:
+Version 0.0.1 on PyPI is a placeholder that cannot run a swarm. Until 0.1.0 is published, or for the latest development version, install from GitHub:
 
 ```bash
 pip install git+https://github.com/meridianlabs-ai/inspect_swarm
+```
+
+or, in a uv project:
+
+```bash
+uv add "inspect_swarm @ git+https://github.com/meridianlabs-ai/inspect_swarm"
 ```
 
 It needs inspect_ai 0.3.283 or later and Python 3.11 or later.
