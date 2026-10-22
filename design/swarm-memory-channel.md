@@ -381,7 +381,7 @@ And one on `Channel`: the `reach` class attribute of [Descendants](#descendants)
 - **Eval logs:** only existing types. Evidence is versioned `InfoEvent`s; notices are `ChatMessageUser` with metadata, as swarm-communication.md specifies. No schema or generated-type change.
 - **inspect_swarm API (unreleased):** the `shared_memory()` factory and its registry name, the `shared_memory` tool's name, parameters and texts, the `reach` attribute on `Channel`, `admit()` on `ChannelState`, and unaddressed records. The tool and its texts are part of the evaluated surface: changing them changes model behaviour, so a change bumps the evidence `version`, as for messages.
 - **Tasks using `memory(instance=...)`:** unaffected; migration is opt-in ([Relation to `memory(instance="...")`](#relation-to-memoryinstance)).
-- **The first release** lists `shared_memory` among the built-in channel names it supports; the `Channel`/`ChannelState` operations, including `reach` and `admit()`, stay experimental ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6).
+- **The first release** includes `shared_memory` among its built-in channels. Like everything in inspect_swarm, its name and the `Channel`/`ChannelState` operations, including `reach` and `admit()`, are experimental ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6).
 
 ## Security
 

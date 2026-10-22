@@ -7,21 +7,27 @@ title: Inspect Swarm
 Inspect Swarm runs a swarm of agents on one sample of an [Inspect](https://inspect.aisi.org.uk) task. A swarm is an Inspect agent, so it replaces the task's solver, and the task's scorer scores the swarm's answer.
 
 ::: {.callout-warning}
-Inspect Swarm is experimental and under active development. It has no stable API and no releases yet, and it may change or be withdrawn without notice.
+Everything in Inspect Swarm is experimental and may change in any release without notice, including `swarm()`, `member()`, `Budget`, the built-in controller and channel names, and the record and evidence formats. No support is guaranteed.
 :::
 
 ## Getting Started
 
-Inspect Swarm has no releases yet. Install it from GitHub:
+Install it from PyPI:
 
 ```bash
-pip install git+https://github.com/meridianlabs-ai/inspect_swarm
+pip install inspect_swarm
 ```
 
 or, in a uv project:
 
 ```bash
-uv add "inspect_swarm @ git+https://github.com/meridianlabs-ai/inspect_swarm"
+uv add inspect_swarm
+```
+
+To install the latest development version from GitHub:
+
+```bash
+pip install git+https://github.com/meridianlabs-ai/inspect_swarm
 ```
 
 It needs inspect_ai 0.3.283 or later and Python 3.11 or later.
