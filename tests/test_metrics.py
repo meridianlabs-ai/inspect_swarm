@@ -35,7 +35,15 @@ from inspect_ai.tool import Tool, tool
 from inspect_ai.util import store
 from inspect_ai.util._span import AGENT_SPAN_TYPE
 
-from inspect_swarm import SwarmControl, leaderless, member, shared_memory, swarm
+from inspect_swarm import (
+    Controller,
+    SwarmControl,
+    leaderless,
+    member,
+    shared_memory,
+    swarm,
+    swarm_controller,
+)
 from inspect_swarm._evidence import METRICS_KEY
 from inspect_swarm._ledger import EventLog, ScoreRecord
 from inspect_swarm._metrics import GateChecks, SwarmMetrics, gate_checks
@@ -392,6 +400,56 @@ async def test_an_interrupted_swarm_counts_its_provisional_answer(ending: str) -
         assert (record.final.member, record.final.provisional) == ("a", True)
         metrics = _metrics(t)
         assert (metrics.steps_to_answer, metrics.longest_member_steps) == (2, 2)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("interrupted", [False, True])
+@pytest.mark.parametrize("rule", ["last", "controller"])
+async def test_steps_to_answer_follow_an_answer_other_than_the_first(
+    rule: str, interrupted: bool
+) -> None:
+    # a submits first after two steps, b later after three; `last` and the controller's
+    # choice both answer with b. Interrupted, the controller raises while c still waits,
+    # so the answer stays provisional.
+    async def run(control: SwarmControl) -> str:
+        for m in control.members:
+            control.start(m)
+        ended: set[str] = set()
+        async for event in control.events():
+            ended.add(event.member)
+            if ended >= {"a", "b"}:
+                break
+        if rule == "controller":
+            control.choose_answer("b")
+        if interrupted:
+            raise RuntimeError("controller-failure")
+        return "enough"
+
+    @swarm_controller(name=f"steps-{rule}-{uuid4().hex}")
+    def factory() -> Controller:
+        return Controller(run, final="last" if rule == "last" else None)
+
+    members = [
+        member(_stepper(2, 0.0, True), name="a"),
+        member(_stepper(3, 0.05, True), name="b"),
+    ]
+    if interrupted:
+        members.append(member(sleeper(), name="c"))
+    async with sample() as t:
+        agent = swarm(members, controller=factory(), channels=[])
+        if interrupted:
+            with pytest.raises(RuntimeError, match="controller-failure"):
+                await agent(AgentState(messages=[]))
+        else:
+            await agent(AgentState(messages=[]))
+        record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+        assert (record.final.mode, record.final.member, record.final.provisional) == (
+            rule,
+            "b",
+            interrupted,
+        )
+        metrics = _metrics(t)
+        assert (metrics.steps_to_answer, metrics.longest_member_steps) == (3, 3)
 
 
 # ---------------------------------------------------------------------------
