@@ -195,7 +195,7 @@ def checked_solver(attempts: int = 5) -> Agent:
     return execute
 ```
 
-- The check here is the task's own scorer, which `react(attempts=...)` runs on each submission but the last. A last submission is never checked, so it is not a proof.
+- The check here is the task's own scorer, which `react(attempts=...)` runs on each submission but the last. A last submission is never checked, so it is not a proof, and `attempts` must be at least 2 for any submission to be checked.
 - The builder is called once for each member in each sample, so `passed` belongs to one member.
 - With this builder, the default `leaderless` would stop at the first proof too, recording `submitted` rather than `controller:proved`.
 - With background work, a controller sees a member's end only after the member's background work has drained ([Members](members.qmd#background-work)), so the other members stop up to one grace period later.

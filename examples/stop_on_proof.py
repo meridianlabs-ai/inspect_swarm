@@ -2,7 +2,7 @@
 
 `until_proved()` starts every member and stops the swarm at the first member that ends `submitted`, recording the stop reason `controller:proved`. That is right only when a member's normal return means its answer passed a check. `react()` also returns normally when it runs out of attempts, after repeated refusals, or after a context overflow, so `checked_solver()` raises a member-local custom limit when its agent returns without a passing check. The member then ends `member_limit:custom`, and the other members continue.
 
-The check is the task's own scorer, which `react(attempts=...)` runs on each submission but the last. Run it with `-T stop=all_done` to let every member run to its end instead.
+The check is the task's own scorer, which `react(attempts=...)` runs on each submission but the last, so `attempts` must be at least 2. Run it with `-T stop=all_done` to let every member run to its end instead.
 """
 
 from contextlib import aclosing
@@ -81,6 +81,9 @@ def stop_on_proof(
     attempts: int = 5,
     stop: Literal["first_proof", "all_done"] = "first_proof",
 ) -> Task:
+    # react() does not check its last submission, so one attempt is never checked
+    if attempts < 2:
+        raise ValueError(f"stop_on_proof: attempts must be at least 2, got {attempts}.")
     return Task(
         dataset=QUESTIONS,
         solver=swarm(

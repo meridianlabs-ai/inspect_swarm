@@ -167,6 +167,12 @@ def test_stop_on_proof(tmp_path: Path) -> None:
         )
 
 
+def test_stop_on_proof_needs_two_attempts(tmp_path: Path) -> None:
+    # with one attempt react() checks no submission, so no member could prove anything
+    with pytest.raises(ValueError, match="attempts must be at least 2"):
+        _run("stop_on_proof.py@stop_on_proof", _model(_answers), tmp_path, attempts=1)
+
+
 def test_budget_sweep(tmp_path: Path) -> None:
     def policy(name: str, messages: list[ChatMessage]) -> ModelOutput:
         if _turn(messages) == 0:
