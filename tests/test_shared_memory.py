@@ -361,16 +361,25 @@ async def test_append_adds_a_line_at_the_end_with_no_view_and_creates_a_missing_
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("stale", [False, True], ids=["unviewed", "stale_view"])
 @pytest.mark.parametrize("command,args,refusal", SEEN)
 async def test_a_blind_append_does_not_count_as_a_view(
-    command: str, args: dict[str, Any], refusal: str
+    command: str, args: dict[str, Any], refusal: str, stale: bool
 ) -> None:
     async with _board() as (board, _):
         await board("w-1", "create", path=_p("a/x.md"), file_text="v1")
-        await board("w-2", "append", path=_p("a/x.md"), append_text="v2")
+        if stale:
+            await board("w-2", "view", path="f-1")
+            await board(
+                "w-1", "str_replace", path=_p("a/x.md"), old_str="v1", new_str="v2"
+            )
+        await board("w-2", "append", path=_p("a/x.md"), append_text="v3")
+        spec = WaitSpec("x-1", "w-2", "w-2/top", True, None)
+        assert board.state.news(spec) is not None
         with pytest.raises(ToolError, match=re.escape(refusal.split("; ")[-1])):
             await board("w-2", command, **args)
         await board("w-2", "view", path="f-1")
+        assert board.state.news(spec) is None
         await board("w-2", command, **args)
 
 
@@ -388,7 +397,7 @@ async def test_a_blind_append_leaves_the_peer_content_it_followed_news_to_the_ap
             "1 shared memory file changed where you waited (f-1 new; by w-1)."
         )
         [line] = board.state.notice_lines("w-2")
-        assert "(f-1 new; by w-1)" in line
+        assert "(f-1 new; by w-1)" in line.text
         # its own later appends do not make the covered content news again
         status = await board("w-2", "append", path=log, append_text="c")
         assert "Shared memory:" not in status
@@ -423,7 +432,7 @@ async def test_a_peers_deletion_of_a_file_the_loop_blindly_appended_to_is_news(
             "\nShared memory: 1 file changed since you last viewed it (f-1 deleted)."
         )
         [line] = board.state.notice_lines("w-2")
-        assert "(f-1 deleted; by w-1)" in line
+        assert "(f-1 deleted; by w-1)" in line.text
 
 
 @pytest.mark.anyio
@@ -438,7 +447,7 @@ async def test_an_append_is_news_to_peers(existing: bool) -> None:
         assert evidence(transcript, "delivered")[-1]["notify"] == ["w-2"]
         [line] = board.state.notice_lines("w-2")
         label = "f-1" if existing else "f-1 new"
-        assert f"({label}; by w-1)" in line
+        assert f"({label}; by w-1)" in line.text
 
 
 @pytest.mark.anyio
