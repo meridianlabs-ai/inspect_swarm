@@ -136,13 +136,15 @@ def comm_waited(
     timeout: dict[str, JsonValue],
     started: float,
     duration: float,
+    idle: float,
     outcome: str,
     woken_by: list[int],
     files: list[JsonValue],
     ended: list[JsonValue],
 ) -> None:
     # one swarm_wait, when it returns or is cancelled: what ended it, the commits that
-    # released it for news (`delivered.seq`), and the files and ends its result named
+    # released it for news (`delivered.seq`), and the files and ends its result named;
+    # `idle` is the seconds of it during which its member counted as waiting
     evidence(
         "comm",
         "waited",
@@ -156,6 +158,7 @@ def comm_waited(
         timeout=timeout,
         started=started,
         duration=duration,
+        idle=idle,
         outcome=outcome,
         woken_by=list(woken_by),
         files=files,
