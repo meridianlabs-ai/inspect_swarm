@@ -402,6 +402,31 @@ async def test_a_blind_append_leaves_the_peer_content_it_followed_news_to_the_ap
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("notified", [False, True], ids=["unnotified", "notified"])
+@pytest.mark.parametrize("deleted", ["a/log.md", "a"], ids=["file", "directory"])
+async def test_a_peers_deletion_of_a_file_the_loop_blindly_appended_to_is_news(
+    deleted: str, notified: bool
+) -> None:
+    async with _board() as (board, transcript):
+        await board("w-1", "create", path=_p("a/log.md"), file_text="a")
+        await board("w-2", "append", path=_p("a/log.md"), append_text="b")
+        if notified:
+            assert board.state.notice_lines("w-2") != []
+        await board("w-1", "view", path="f-1")
+        await board("w-1", "delete", path=_p(deleted))
+        assert evidence(transcript, "delivered")[-1]["notify"] == ["w-2"]
+        news = board.state.news(WaitSpec("x-1", "w-2", "w-2/top", True, None))
+        assert news is not None and news.lines[0].startswith(
+            "1 shared memory file changed where you waited (f-1 deleted; by w-1)."
+        )
+        assert (await board("w-2", "view", path=ROOT)).endswith(
+            "\nShared memory: 1 file changed since you last viewed it (f-1 deleted)."
+        )
+        [line] = board.state.notice_lines("w-2")
+        assert "(f-1 deleted; by w-1)" in line
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
 async def test_an_append_is_news_to_peers(existing: bool) -> None:
     async with _board() as (board, transcript):

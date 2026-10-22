@@ -291,7 +291,8 @@ class _SharedMemoryState:
         self._paths: dict[str, str] = {}
         self._bytes = 0
         self._last_file = 0
-        # loop agent span -> file id -> the version that loop has seen
+        # loop agent span -> file id -> the version that loop has seen; 0 when it knows
+        # the file only from its own blind append, which shows it none of the content
         self._seen: dict[str | None, dict[str, int]] = {}
         # member -> file id -> the version its last notice covered
         self._covered: dict[str, dict[str, int]] = {}
@@ -389,13 +390,16 @@ class _SharedMemoryState:
                 self._paths[path] = change.file
                 self._bytes += utf8_bytes(change.content)
             # a blind append acknowledges nothing it was not shown: the loop has seen
-            # the new version only if it had seen the one the append extended
+            # the new version only if it had seen the one the append extended, and
+            # otherwise only knows the file, so its deletion is news to the loop
             if (
                 record.kind != "append"
                 or change.base is None
                 or seen.get(change.file) == change.base
             ):
                 seen[change.file] = change.version
+            else:
+                seen.setdefault(change.file, 0)
         self._applied[record.id] = changes
         written = [self._files[change.file] for change in changes]
         notify = [
@@ -451,7 +455,7 @@ class _SharedMemoryState:
             f"{f.id} deleted"
             if f.deleted
             else f"{f.id} new"
-            if f.id not in seen
+            if not seen.get(f.id)
             else f.id
             for f in files
         ]
@@ -984,7 +988,7 @@ class _SharedMemoryState:
             f"{f.id} deleted"
             if f.deleted
             else f"{f.id} new"
-            if f.id not in seen and f.id not in covered
+            if not seen.get(f.id) and f.id not in covered
             else f.id
             for f in files
         ]
