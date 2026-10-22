@@ -212,14 +212,20 @@ def test_shared_sandbox(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_proof_swarm_scores_each_members_sandbox(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "malformed,failure",
+    [
+        ("mkdir /workspace/answer.txt", "IsADirectoryError"),
+        ("mkfifo /workspace/answer.txt", "is not a readable file"),
+        ("printf '40\\000' > /workspace/answer.txt", "not a whole number"),
+    ],
+)
+def test_proof_swarm_scores_each_members_sandbox(
+    tmp_path: Path, malformed: str, failure: str
+) -> None:
     def policy(name: str, messages: list[ChatMessage]) -> ModelOutput:
-        # agent-1 leaves a directory where its answer should be; agent-2 proves 40
-        write = (
-            "mkdir /workspace/answer.txt"
-            if name == "agent-1"
-            else "echo 40 > /workspace/answer.txt"
-        )
+        # agent-1 leaves a malformed answer; agent-2 proves 40
+        write = malformed if name == "agent-1" else "echo 40 > /workspace/answer.txt"
         match _turn(messages):
             case 0:
                 return _call(
@@ -245,7 +251,7 @@ def test_proof_swarm_scores_each_members_sandbox(tmp_path: Path) -> None:
     assert score.metadata is not None
     assert score.metadata["agent-2"]["check"].startswith("PASS")
     assert score.metadata["agent-1"]["check"].startswith("FAIL")
-    assert "IsADirectoryError" in score.metadata["agent-1"]["check"]
+    assert failure in score.metadata["agent-1"]["check"]
     record = _record(sample)
     assert record.final.member == "agent-2"
     assert [(m.sandbox, m.status) for m in record.members] == [

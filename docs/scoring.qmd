@@ -33,7 +33,7 @@ The swarm keeps a record of what it did in the sample store under `inspect_swarm
 - `time` is seconds from the swarm's start to the member's end.
 - `sandbox` is the member's own sandbox, or `null` when it shares the sample's.
 - `gate_checks`, `gate_passes` and `first_pass_time` count the member's in-loop checks ([Checks during the run](#checks-during-the-run)).
-- `final.mode` is `first`, and `final.member` the member whose output is the answer. With no answer, `final.member` is `null` and `final.reason` is `"no_submissions"`.
+- `final.mode` is `first` when a member submitted, and `final.member` names that member. With no submission, both are `null` and `final.reason` is `"no_submissions"`.
 
 The record is updated as members start and end. If a limit or error ends the sample before the swarm finishes, the record keeps the first submission so far with `provisional: true`, and that submission is the sample's output.
 
@@ -80,7 +80,7 @@ def any_member_proved() -> Scorer:
     return score
 ```
 
-`run_check()` reads the answer file from the named sandbox and checks it in the shared `comparator` service. A file that is missing, a directory or not text fails the check, so one member's broken artifact does not stop the scorer from grading the others. A member that wrote a valid answer but was stopped before it submitted still passes this check, which is why the scorer grades every member's sandbox rather than only the chosen member's.
+`run_check()` reads the answer file from the named sandbox and checks it in the shared `comparator` service. A file that is missing, a directory, not a regular file, not text, or not a whole number fails the check, so one member's broken artifact does not stop the scorer from grading the others. A member that wrote a valid answer but was stopped before it submitted still passes this check, which is why the scorer grades every member's sandbox rather than only the chosen member's.
 
 ## Checks during the run
 

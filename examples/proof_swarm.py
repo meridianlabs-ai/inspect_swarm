@@ -10,6 +10,8 @@ Its shape follows a port of Epoch AI's LeanOpenProblems swarm, with a toy proble
 Needs Docker. `proof_swarm.yaml` has a container for each of `agent-1` to `agent-3`, so `k` is from 1 to 3.
 """
 
+import errno
+import re
 from typing import Any, Literal
 
 from inspect_ai import Task, task
@@ -73,15 +75,19 @@ async def run_check(answer_sandbox: str | None) -> tuple[str | None, str]:
         answer = (await sandbox(answer_sandbox).read_file(ANSWER)).strip()
     except FileNotFoundError:
         return None, f"FAIL: {ANSWER} does not exist"
-    # what a member left there is not a readable text file
-    except (
-        IsADirectoryError,
-        PermissionError,
-        UnicodeDecodeError,
-        OutputLimitExceededError,
-    ) as ex:
+    except (UnicodeDecodeError, OutputLimitExceededError) as ex:
         return None, f"FAIL: {ANSWER} cannot be read as text ({type(ex).__name__})"
-    if len(answer) > 20:
+    except OSError as ex:
+        # what a member left there is a directory, unreadable, or not a regular file
+        # (a FIFO, for example, which the sandbox refuses with EINVAL); any other
+        # error is the sandbox's own, and propagates
+        if not isinstance(ex, IsADirectoryError | PermissionError) and (
+            ex.errno != errno.EINVAL
+        ):
+            raise
+        return None, f"FAIL: {ANSWER} is not a readable file ({type(ex).__name__})"
+    # only digits reach the comparator's command line
+    if not re.fullmatch(r"[0-9]{1,3}", answer):
         return None, "FAIL: the answer is not a whole number from 1 to 100"
     result = await sandbox("comparator").exec(
         ["python3", "-c", VERIFY, answer], timeout=60
