@@ -573,7 +573,10 @@ async def test_a_members_own_loop_waits_once_at_a_time() -> None:
             await start(tg, r, "w-1", "child-1")
             await start(tg, r, "w-1", "child-2")
             await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
-        assert [(d["wait"], d["loop"], d["outcome"]) for d in waited(transcript)] == [
+        # sorted: the released waits resume in any order
+        assert sorted(
+            (d["wait"], d["loop"], d["outcome"]) for d in waited(transcript)
+        ) == [
             ("x-1", "w-1/top", "news"),
             ("x-2", "w-1/child-1", "news"),
             ("x-3", "w-1/child-2", "news"),
