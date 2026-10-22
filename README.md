@@ -46,7 +46,7 @@ From the command line:
 inspect eval my_tasks.py --solver inspect_swarm/swarm -S 'members={factory: react, count: 4}'
 ```
 
-Each sample runs four `react()` members, `react-1` to `react-4`, at the same time. Each starts with the sample's input and a short preamble: its name, the number of members, and how to share files. The swarm ends when all members have ended, and its answer is the first submission. The task's scorer scores it as it would score a single agent.
+Each sample runs four `react()` members, `react-1` to `react-4`, at the same time. Each starts with the sample's input and a short preamble: its name, the number of members, and how to share files. By default the swarm stops at the first submission and uses it as its answer. It stops the remaining members. To let every member run to its end, use `leaderless(stop_on_submission=False)` (see [Controllers and channels](#controllers-and-channels)). The task's scorer scores it as it would score a single agent.
 
 `--solver` and `eval(solver=...)` replace the task's whole solver, including any system message or tools it set up, so give the members their tools and prompt. Members use the eval's model unless they are given one. The task's `setup` solver still runs first.
 
