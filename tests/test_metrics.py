@@ -32,7 +32,7 @@ from inspect_ai.scorer import (
 )
 from inspect_ai.solver import TaskState
 from inspect_ai.tool import Tool, tool
-from inspect_ai.util import background, store
+from inspect_ai.util import store
 from inspect_ai.util._span import AGENT_SPAN_TYPE
 
 from inspect_swarm import SwarmControl, member, shared_memory, swarm
@@ -794,6 +794,7 @@ async def test_waits_wait_time_and_idle_time() -> None:
     assert p.wait_time is not None and p.idle_time is not None
     # p's own loop waited through q's work, with nothing else of p running
     assert 0.15 <= p.idle_time <= p.wait_time
+    assert p.running_time is not None and p.idle_time <= p.running_time
     # q's subagent waited while q's own loop worked: wait time, but no idle time
     assert (q.waits, q.waits_by_outcome, q.idle_time) == (1, {"news": 1}, 0)
     assert q.wait_time is not None and q.wait_time >= 0.15
@@ -815,59 +816,3 @@ async def test_a_swarm_that_offers_no_wait_has_no_wait_metrics(
         None,
         None,
     )
-
-
-@agent
-def waiting_beside_work(ready: anyio.Event) -> Agent:
-    """Wait for a peer's file while another task starts background work."""
-
-    async def execute(state: AgentState) -> AgentState:
-        wait = (await resolve())["swarm_wait"]
-
-        async def work() -> None:
-            await anyio.sleep(0.1)
-
-        async def start_work() -> None:
-            await anyio.sleep(0.05)
-            background(work)
-
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(start_work)
-            ready.set()
-            await wait(path=_p("r"))
-        return state
-
-    return execute
-
-
-@agent
-def writing(ready: anyio.Event) -> Agent:
-    """Write the file a peer waits for, a while after it starts waiting."""
-
-    async def execute(state: AgentState) -> AgentState:
-        memory = (await resolve())["shared_memory"]
-        await ready.wait()
-        await anyio.sleep(0.25)
-        await memory(command="create", path=_p("r/a.md"), file_text="x")
-        return state
-
-    return execute
-
-
-@pytest.mark.anyio
-async def test_background_work_started_during_a_wait_is_not_idle_time() -> None:
-    ready = anyio.Event()
-    outcome = await run_swarm(
-        swarm(
-            [
-                member(waiting_beside_work(ready), name="p"),
-                member(writing(ready), name="q"),
-            ],
-            channels=[shared_memory()],
-        )
-    )
-    p, _ = _metrics(outcome.transcript).members
-    assert p.wait_time is not None and p.idle_time is not None
-    # idle before the background work starts and after it ends, not while it runs
-    assert p.idle_time >= 0.1
-    assert p.wait_time - p.idle_time >= 0.07

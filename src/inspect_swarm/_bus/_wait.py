@@ -128,7 +128,8 @@ class Waits:
     def recheck(self) -> None:
         # the all-waiting check, run whenever a member can have become waiting or its
         # background work started
-        self._clock_idle()
+        for waiter in self._waiters.values():
+            self._clock(waiter)
         unreleased = self._unreleased()
         if not unreleased:
             return
@@ -152,6 +153,13 @@ class Waits:
         if not self._bus.running(name):
             raise ToolError(f"{name} has ended.")
         own = not self._bus.nested(context)
+        if own and any(
+            w.spec.own and w.spec.member == name for w in self._waiters.values()
+        ):
+            # the idle clock counts one wait of the own loop at a time
+            raise ToolError(
+                f"{name} is already waiting: its own loop has a swarm_wait in progress."
+            )
         channels = self._reachable(own)
         effective = (
             self.max_wait if timeout is None else min(max(timeout, 1), self.max_wait)
@@ -297,7 +305,7 @@ class Waits:
 
     def _unregister(self, waiter: _Waiter) -> None:
         self._waiters.pop(waiter.spec.id, None)
-        self._stop_idle(waiter)
+        self._clock(waiter)
 
     def _unreleased(self) -> list[_Waiter]:
         return [w for w in self._waiters.values() if w.reason is None]
@@ -306,7 +314,7 @@ class Waits:
         # a released waiter no longer makes its member waiting
         waiter.reason = reason
         waiter.event.set()
-        self._stop_idle(waiter)
+        self._clock(waiter)
 
     def _waiting(self, name: str) -> bool:
         # the member's own loop has an unreleased waiter, and none of the member's
@@ -316,30 +324,29 @@ class Waits:
         )
 
     def _idle(self, waiter: _Waiter) -> bool:
-        # whether this waiter makes its member waiting
+        # whether this waiter makes its member waiting: registered in the member's own
+        # loop, not released, and none of the member's background work running
         return (
             waiter.spec.own
+            and self._waiters.get(waiter.spec.id) is waiter
             and waiter.reason is None
             and self._contexts[waiter.spec.member].background_running == 0
         )
 
-    # the idle clock. A waiter's clock runs while it makes its member waiting: it starts
-    # or stops where the all-waiting check runs (a registration, a member's background
-    # work starting or dropping to none), and stops when the waiter is released or
-    # unregistered.
+    # the idle clock. A waiter's clock runs exactly while `_idle()` holds for it. Every
+    # change `_idle()` reads ends in `_clock()` for the waiters it can change: a
+    # registration or return to sleep and the member's background work rising from or
+    # dropping to none (through `recheck()`), a release and an unregistration. Nothing
+    # else touches `idle_since`. The own loop's one wait at a time (`wait()` refuses a
+    # second) keeps a member's clocks from overlapping.
 
-    def _clock_idle(self) -> None:
+    def _clock(self, waiter: _Waiter) -> None:
         now = anyio.current_time()
-        for waiter in self._waiters.values():
-            if self._idle(waiter):
-                if waiter.idle_since is None:
-                    waiter.idle_since = now
-            else:
-                self._stop_idle(waiter)
-
-    def _stop_idle(self, waiter: _Waiter) -> None:
-        if waiter.idle_since is not None:
-            waiter.idle += anyio.current_time() - waiter.idle_since
+        if self._idle(waiter):
+            if waiter.idle_since is None:
+                waiter.idle_since = now
+        elif waiter.idle_since is not None:
+            waiter.idle += now - waiter.idle_since
             waiter.idle_since = None
 
 

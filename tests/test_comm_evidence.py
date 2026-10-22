@@ -1,9 +1,13 @@
 import time
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import anyio
 import pytest
+from anyio.abc import TaskGroup
 from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, react
 from inspect_ai.dataset import Sample
@@ -12,11 +16,14 @@ from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import ModelOutput
 
 from inspect_swarm import member, shared_memory, swarm, swarm_tools
+from inspect_swarm._background import MemberBackground
+from inspect_swarm._bus._bus import current_bus
 from inspect_swarm._metrics import CommMetrics, MemberMetrics, SwarmMetrics
 
 from .swarm_runtime import Script, evidence, scripted_model
 from .test_wait import (  # pyright: ignore[reportPrivateUsage]
     _p,
+    _Run,
     changed,
     run,
     start,
@@ -140,6 +147,7 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
         [span] = _tool_spans(transcript, "swarm_wait")
         assert event.span_id == span
         data = cast(dict[str, Any], event.data)
+        # the idle clock's rows below check `idle`
         timing = {k: data.pop(k) for k in ("started", "duration", "idle")}
         assert data == {
             "version": 1,
@@ -160,8 +168,6 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
         }
         assert timing["started"] >= 0
         assert timing["duration"] >= 0.04
-        # the member's own loop waited with nothing else of it running
-        assert 0.04 <= timing["idle"] <= timing["duration"]
 
 
 @pytest.mark.anyio
@@ -174,63 +180,135 @@ async def test_a_nested_waits_evidence_names_its_loop() -> None:
         [data] = waited(transcript)
         assert (data["loop"], data["nested"]) == ("w-1/child", True)
         assert data["duration"] >= 0.04
-        # a subagent's wait does not make its member waiting
-        assert data["idle"] == 0
+
+
+# The idle clock, a row per clause of its contract in design/swarm-wait.md (Metrics): w-1
+# waits while w-2 runs, so only the row's own steps end the wait. Each row bounds the
+# wait's idle and non-idle time from below, so time counted on the wrong side fails it.
+
+
+@dataclass(frozen=True)
+class _Clock:
+    # what happens once the run starts: w-1's wait and what ends it
+    steps: Callable[[_Run, TaskGroup, MemberBackground], Awaitable[None]]
+    outcome: str
+    # seconds of the wait that are idle, and that are not, at least
+    idle: float
+    not_idle: float = 0.0
+    woken_by: tuple[int, ...] = (1,)
+
+
+async def _write(r: _Run, path: str = "r/a.md") -> None:
+    await r.sm("w-2", "create", path=_p(path), file_text="x")
+
+
+async def _work(seconds: float) -> None:
+    await anyio.sleep(seconds)
+
+
+async def _nested(r: _Run, tg: TaskGroup, _: MemberBackground) -> None:
+    await start(tg, r, "w-1", "child", path=_p("r"))
+    await anyio.sleep(0.05)
+    await _write(r)
+
+
+async def _released(r: _Run, tg: TaskGroup, _: MemberBackground) -> None:
+    await start(tg, r, "w-1", path=_p("r"))
+    await anyio.sleep(0.05)
+    await _write(r)
+    # released, and held this long before its task resumes
+    time.sleep(0.05)
+
+
+async def _background_ends(r: _Run, tg: TaskGroup, owner: MemberBackground) -> None:
+    owner.start_soon(_work, 0.05)
+    await start(tg, r, "w-1", path=_p("r"))
+    await anyio.sleep(0.1)
+    await _write(r)
+
+
+async def _background_starts(r: _Run, tg: TaskGroup, owner: MemberBackground) -> None:
+    await start(tg, r, "w-1", path=_p("r"))
+    await anyio.sleep(0.05)
+    owner.start_soon(_work, 0.05)
+    await anyio.sleep(0.1)
+    await _write(r)
+
+
+async def _timeout(r: _Run, tg: TaskGroup, _: MemberBackground) -> None:
+    await start(tg, r, "w-1", timeout=1)
+
+
+async def _cancelled(r: _Run, tg: TaskGroup, _: MemberBackground) -> None:
+    await start(tg, r, "w-1")
+    await anyio.sleep(0.05)
+    tg.cancel_scope.cancel()
+
+
+async def _sleeps_again(r: _Run, tg: TaskGroup, owner: MemberBackground) -> None:
+    await _released(r, tg, owner)
+    # gone by the time the task resumes, so it sleeps again
+    await r.sm("w-2", "delete", path=_p("r/a.md"))
+    await anyio.sleep(0.05)
+    await _write(r, "r/b.md")
+
+
+@asynccontextmanager
+async def _owner(r: _Run) -> AsyncGenerator[MemberBackground]:
+    # w-1's background owner, made with the run's bus as the runtime makes it
+    token = current_bus.set(r.bus)
+    try:
+        owner = MemberBackground(r.members["w-1"].context, [])
+    finally:
+        current_bus.reset(token)
+    async with owner:
+        yield owner
 
 
 @pytest.mark.anyio
-async def test_a_wait_is_idle_only_while_none_of_its_members_background_work_runs() -> (
-    None
-):
-    async with run() as (r, transcript):
-        context = r.members["w-1"].context
-        context.background_running = 1
+@pytest.mark.parametrize(
+    "row",
+    [
+        # 1. a nested loop's wait has no clock
+        pytest.param(_Clock(_nested, "news", idle=0, not_idle=0.04), id="nested"),
+        # 2, 3. starts at registration; stops at a release, not when the task resumes
+        pytest.param(
+            _Clock(_released, "news", idle=0.04, not_idle=0.04), id="released"
+        ),
+        # 2. starts when the member's background work drops to none
+        pytest.param(
+            _Clock(_background_ends, "news", idle=0.04, not_idle=0.04),
+            id="background-ends",
+        ),
+        # 3, 2. stops when background work rises from none, and starts again after it
+        pytest.param(
+            _Clock(_background_starts, "news", idle=0.09, not_idle=0.04),
+            id="background-starts",
+        ),
+        # 3. stops at the wait's own timeout or cancellation
+        pytest.param(_Clock(_timeout, "timeout", idle=0.9, woken_by=()), id="timeout"),
+        pytest.param(
+            _Clock(_cancelled, "cancelled", idle=0.04, woken_by=()), id="cancelled"
+        ),
+        # 4. starts again when a released wait sleeps again, not in between
+        pytest.param(
+            _Clock(_sleeps_again, "news", idle=0.09, not_idle=0.04, woken_by=(1, 3)),
+            id="sleeps-again",
+        ),
+    ],
+)
+async def test_the_idle_clock(row: _Clock) -> None:
+    async with run() as (r, transcript), _owner(r) as owner:
         async with anyio.create_task_group() as tg:
-            await start(tg, r, "w-1")
-            await anyio.sleep(0.05)
-            # as the owner does when the member's last background work ends
-            context.background_running = 0
-            r.bus.recheck()
-            await anyio.sleep(0.05)
-            await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
+            await row.steps(r, tg, owner)
         [data] = waited(transcript)
-        assert data["idle"] >= 0.04
-        assert data["duration"] - data["idle"] >= 0.04
-
-
-@pytest.mark.anyio
-async def test_a_released_wait_is_not_idle_until_it_sleeps_again() -> None:
-    async with run() as (r, transcript):
-        async with anyio.create_task_group() as tg:
-            await start(tg, r, "w-1", path=_p("r"))
-            await anyio.sleep(0.05)
-            await r.sm("w-2", "create", path=_p("r/a.md"), file_text="x")
-            # released, and held this long before its task resumes, by which time the
-            # news is gone and it sleeps again
-            time.sleep(0.05)
-            await r.sm("w-2", "delete", path=_p("r/a.md"))
-            await anyio.sleep(0.05)
-            await r.sm("w-2", "create", path=_p("r/b.md"), file_text="x")
-        [data] = waited(transcript)
-        assert (data["outcome"], data["woken_by"]) == ("news", [1, 3])
-        # idle before the first release and after the return to sleep, not between
-        assert data["idle"] >= 0.09
-        assert data["duration"] - data["idle"] >= 0.04
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("ending", ["timeout", "cancelled"])
-async def test_a_wait_never_released_is_idle_until_it_ends(ending: str) -> None:
-    async with run() as (r, transcript):
-        async with anyio.create_task_group() as tg:
-            # w-2 is running and not waiting, so nothing releases w-1's wait
-            await start(tg, r, "w-1", timeout=1)
-            if ending == "cancelled":
-                await anyio.sleep(0.05)
-                tg.cancel_scope.cancel()
-        [data] = waited(transcript)
-        assert data["outcome"] == ending
-        assert 0.04 <= data["idle"] <= data["duration"]
+        assert (data["outcome"], data["woken_by"]) == (row.outcome, list(row.woken_by))
+        if row.idle == 0:
+            assert data["idle"] == 0
+        else:
+            assert data["idle"] >= row.idle
+        # 5. a wait's idle is part of its duration
+        assert data["duration"] - data["idle"] >= row.not_idle
 
 
 @pytest.mark.anyio
