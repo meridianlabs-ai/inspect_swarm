@@ -190,9 +190,22 @@ def test_budget_sweep(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_shared_sandbox(tmp_path: Path) -> None:
-    script = "import sys\\nprint(len(open(sys.argv[1]).read().split()))\\n"
-
+@pytest.mark.parametrize(
+    "script,value,answer,explanation",
+    [
+        (
+            "import sys\\nprint(len(open(sys.argv[1]).read().split()))\\n",
+            "C",
+            "9",
+            None,
+        ),
+        # a script that never ends is killed at the scorer's deadline and is wrong
+        ("while True: pass\\n", "I", "", "the script ran for more than 2 seconds"),
+    ],
+)
+def test_shared_sandbox(
+    tmp_path: Path, script: str, value: str, answer: str, explanation: str | None
+) -> None:
     def policy(name: str, messages: list[ChatMessage]) -> ModelOutput:
         match _turn(messages):
             case 0:
@@ -203,10 +216,20 @@ def test_shared_sandbox(tmp_path: Path) -> None:
             case _:
                 return _call("submit", answer="done")
 
-    [sample] = _run("shared_sandbox.py@shared_sandbox", _model(policy), tmp_path, k=2)
+    [sample] = _run(
+        "shared_sandbox.py@shared_sandbox",
+        _model(policy),
+        tmp_path,
+        k=2,
+        script_timeout=2,
+    )
     assert sample.scores is not None
     [score] = sample.scores.values()
-    assert (score.value, score.answer) == ("C", "9")
+    assert (score.value, score.answer, score.explanation) == (
+        value,
+        answer,
+        explanation,
+    )
     # every member ran to its end
     assert [m.status for m in _record(sample).members] == ["submitted", "submitted"]
 
@@ -219,6 +242,10 @@ def test_shared_sandbox(tmp_path: Path) -> None:
         ("mkfifo /workspace/answer.txt", "not a regular file"),
         ("printf '40\\000' > /workspace/answer.txt", "(ValueError)"),
         ("ln -s answer.txt /workspace/answer.txt", "(OSError)"),
+        # a link to another member's answer, which the comparator mounts too
+        ("ln -s /answers/agent-2/answer.txt /workspace/answer.txt", "(OSError)"),
+        # 400 behind 62 zeros, past the 64 bytes the comparator reads
+        ("printf '%062d400' 0 > /workspace/answer.txt", "longer than 64 bytes"),
     ],
 )
 def test_proof_swarm_scores_each_members_sandbox(

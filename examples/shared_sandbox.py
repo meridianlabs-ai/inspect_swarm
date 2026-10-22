@@ -33,33 +33,46 @@ TEXT = "the quick brown fox\njumps over\n\nthe lazy dog\n"
 
 
 @scorer(metrics=[accuracy()])
-def script_works() -> Scorer:
-    """Run `/shared/wordcount.py` on a file the members have not seen."""
+def script_works(timeout: int = 30) -> Scorer:
+    """Run `/shared/wordcount.py` on a file the members have not seen, for at most `timeout` seconds."""
 
     async def score(state: TaskState, target: Target) -> Score:
         await sandbox().write_file("/tmp/check.txt", TEXT)
+        # `timeout` in the sandbox kills a script that runs too long, which then
+        # fails like any other wrong script
         result = await sandbox().exec(
-            ["python3", "/shared/wordcount.py", "/tmp/check.txt"], timeout=60
+            [
+                "timeout",
+                "-s",
+                "KILL",
+                str(timeout),
+                "python3",
+                "/shared/wordcount.py",
+                "/tmp/check.txt",
+            ],
+            timeout=timeout + 30,
         )
         output = result.stdout.strip()
         return Score(
             value=CORRECT if result.success and output == target.text else INCORRECT,
             answer=output,
-            explanation=result.stderr or None,
+            explanation=f"the script ran for more than {timeout} seconds"
+            if result.returncode == 137
+            else result.stderr or None,
         )
 
     return score
 
 
 @task
-def shared_sandbox(k: int = 3) -> Task:
+def shared_sandbox(k: int = 3, script_timeout: int = 30) -> Task:
     return Task(
         dataset=[Sample(input=PROMPT, target="9", files={"/shared/notes.md": ""})],
         solver=swarm(
             members=member(react, args={"tools": [bash(timeout=60)]}, count=k),
             controller=leaderless(stop_on_submission=False),
         ),
-        scorer=script_works(),
+        scorer=script_works(script_timeout),
         sandbox=("docker", "compose.yaml"),
         token_limit=1_000_000,
     )
