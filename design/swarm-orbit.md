@@ -621,7 +621,7 @@ These are the changes for the `common/v1` configurations that can move, in the o
   - Safety-prompt filters become part of the member's system prompt.
   - Input and output filters stay as ORBIT's wrapper until sentinel's generate stages can rewrite and resample.
 - **Output.** `output_agent` and `history_projection` move into ORBIT's solver wrapper around the swarm, whose synchronous `finally` reads the result record and the member-wrapper keys ([P1](#orbits-solver-wrapper)).
-- **Dependencies.** ORBIT depends on inspect_swarm, which tracks inspect_ai `main` until its first release.
+- **Dependencies.** ORBIT depends on inspect_swarm, which needs inspect_ai 0.3.283 or later (it tracked inspect_ai `main` until 2026-10-22).
 
 ### What stays ORBIT-specific
 

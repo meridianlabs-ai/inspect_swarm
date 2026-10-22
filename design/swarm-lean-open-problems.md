@@ -176,7 +176,7 @@ Gains after M2, if they choose them:
 Losses and costs:
 
 - **Background deepagents** until M2-5 lands, in M2: the one change they cannot work around.
-- **inspect_ai version coupling.** inspect_swarm tracks inspect_ai `main` and needs its registry types and the tool-state scope; their configs pin 0.3.273 "in sync with epoch-research/benchmarks@main" (`configs/erdos3-swarm32-sol61-1600usd.yaml:57-60`). Python is not a problem: they require 3.13 (`pyproject.toml:7`), inside our 3.11+.
+- **inspect_ai version coupling.** inspect_swarm needs inspect_ai 0.3.283 or later, for its registry types, the tool-state scope, the store-event switch and the background seam (it tracked inspect_ai `main` until 2026-10-22); their configs pin 0.3.273 "in sync with epoch-research/benchmarks@main" (`configs/erdos3-swarm32-sol61-1600usd.yaml:57-60`). Python is not a problem: they require 3.13 (`pyproject.toml:7`), inside our 3.11+.
 - **A young dependency** with M1's API still settling.
 - **Their own conveniences.** `_only_sandboxes` uses a private inspect_ai name; a port keeps it, as inspect_swarm may ([Goals](swarm.md#goals)). Their per-sample check lock needs a new home: their builder is called once per member, so a lock it created would be per member, while the lock must be shared by the members of one sample ([swarm-api.md](swarm-api.md#the-member-contract)).
 

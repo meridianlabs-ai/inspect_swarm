@@ -14,16 +14,7 @@ classifiers = [
     "Operating System :: OS Independent",
     "Development Status :: 1 - Planning",
 ]
-dependencies = [
-    # Temporarily a git reference, to unblock work: the runtime needs
-    # tool_state_scope() (UKGovernmentBEIS/inspect_ai#5861),
-    # suspend_store_events() (UKGovernmentBEIS/inspect_ai#5960) and
-    # background_target (UKGovernmentBEIS/inspect_ai#5965), which no release
-    # has yet, so this tracks inspect_ai's `main`. PyPI rejects git
-    # dependencies, so go back to a released `inspect-ai>=X` floor before
-    # inspect_swarm is published (decision: Ransom, 2026-10-20, 2026-10-21).
-    "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",
-]
+dependencies = ["inspect-ai>=0.3.283"]
 
 [project.urls]
 "Source Code" = "https://github.com/meridianlabs-ai/inspect_swarm"
@@ -68,11 +59,6 @@ version-file = "src/inspect_swarm/_version.py"
 
 [tool.hatch.version.raw-options]
 local_scheme = "no-local-version" # Important for PyPI compatibility
-
-# hatchling rejects PEP 508 direct references (the inspect-ai git ref above)
-# without this
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.uv]
 managed = true
