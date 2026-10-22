@@ -31,7 +31,7 @@ def swarm(
 
 # Controllers: how the swarm runs. A @swarm_controller factory returns a Controller.
 @swarm_controller
-def leaderless(final: FinalSpec | None = None, stop_on_verified: bool = False, stop_on_submission: bool = True) -> Controller: ...   # M1: stop_on_submission only
+def leaderless(stop_on_submission: bool = True, *, final: FinalSpec | None = None, stop_on_verified: bool = False) -> Controller: ...   # M1: stop_on_submission only
 
 class Controller:
     def __init__(
@@ -620,9 +620,10 @@ import contextlib
 
 @swarm_controller
 def leaderless(
+    stop_on_submission: bool = True,
+    *,
     final: FinalSpec | None = None,
     stop_on_verified: bool = False,
-    stop_on_submission: bool = True,
 ) -> Controller:
     """Start every member with the swarm's input; stop at the first submission, or when all have ended."""
     if final is not None and has_reporter(final):   # any `reporter` mode in the chain
