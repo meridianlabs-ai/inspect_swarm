@@ -24,7 +24,7 @@ from .._budget import (
     is_bridged,
 )
 from .._evidence import MemberTimelines, evidence, write_ledger, write_metrics
-from .._final import finalise, first, settle
+from .._final import FinalName, Pick, answer, finalise, settle
 from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
     Member,
@@ -142,6 +142,23 @@ class SwarmControl(Protocol):
         """
         ...
 
+    def choose_answer(
+        self, member: str | MemberHandle, reason: str | None = None
+    ) -> None:
+        """Make this member's submission the swarm's answer, in place of the controller's `final` rule.
+
+        The choice is the provisional answer from now on and the final answer when the swarm ends. The result record and the `final` event give the mode `controller`, the member and `reason`. Choose once, from a member that has ended with a submission.
+
+        Args:
+            member: The member, or its name.
+            reason: Why the controller chose it, for the record.
+
+        Raises:
+            KeyError: If no member has this name.
+            RuntimeError: If the member has not ended with a submission, or the controller has already chosen.
+        """
+        ...
+
 
 # Reasons a controller may return as they are; any other is recorded as controller:<reason>.
 _TOPOLOGY_REASONS = frozenset({"all_done", "submitted", "verified", "quiescence"})
@@ -234,6 +251,7 @@ class SwarmRun:
         budget: Budget,
         shares: Mapping[str, Sequence[Limit]] | None = None,
         channels: Sequence["Channel"] = (),
+        final: FinalName | None = None,
     ) -> None:
         # deferred: the bus imports the channels, which import this module's package
         from .._bus._bus import Bus
@@ -255,6 +273,9 @@ class SwarmRun:
         self._by_name = {m.name: m for m in self._members}
         self._state = state
         self._input = list(input)
+        self._final: FinalName | None = final
+        # the controller's choice of the answer, once it has made one
+        self._pick: Pick | None = None
         self._preambles = preambles
         self._caps = caps
         self._time = time
@@ -339,6 +360,21 @@ class SwarmRun:
         finally:
             self._iterating = False
 
+    def choose_answer(
+        self, member: str | MemberHandle, reason: str | None = None
+    ) -> None:
+        m = self._lookup(member if isinstance(member, str) else member.name)
+        if self._pick is not None:
+            raise RuntimeError(
+                f"choose_answer({m.name!r}): the controller has already chosen {self._pick.member!r}, and it chooses once."
+            )
+        if not m.submitted:
+            raise RuntimeError(
+                f"choose_answer({m.name!r}): the member has not ended with a submission (its state is {m.state}, its status {m.status}); only a submission can be the answer."
+            )
+        self._pick = Pick(m.name, reason)
+        self._settle()
+
     # the runtime
 
     async def run(self, controller: Callable[["SwarmControl"], Awaitable[str]]) -> None:
@@ -404,6 +440,8 @@ class SwarmRun:
                             self._input,
                             self._results(),
                             self._outputs(),
+                            self._final,
+                            self._pick,
                             span_id=self._span_id,
                             stop_reason=self.stop_reason,
                         )
@@ -450,7 +488,9 @@ class SwarmRun:
             }
             places = interval.places(spans)
             # the record's answer, final or provisional
-            chosen = first(self._results())
+            chosen = answer(
+                self._results(), self._final, self._pick, provisional=False
+            ).member
             write_metrics(
                 swarm_metrics(
                     ledger,
@@ -473,7 +513,7 @@ class SwarmRun:
                     list(self.bus.states),
                     self.bus.waits.max_wait is not None,
                     wall_clock,
-                    chosen.name if chosen is not None else None,
+                    chosen,
                 )
             )
             timelines.fill(places)
@@ -581,7 +621,14 @@ class SwarmRun:
 
     # the record and the provisional answer, after each change
     def _settle(self) -> None:
-        settle(self._state, self._results(), self._outputs(), provisional=True)
+        settle(
+            self._state,
+            self._results(),
+            self._outputs(),
+            self._final,
+            self._pick,
+            provisional=True,
+        )
 
     def _results(self) -> list[MemberResult]:
         return [m.result() for m in self._members]

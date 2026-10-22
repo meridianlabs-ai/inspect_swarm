@@ -47,13 +47,13 @@ class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
 
     mode: str | None
-    """The mode that chose the answer: `first`. `None` when there is no answer."""
+    """The mode that chose the answer: `first` or `last` (the controller's `final` rule), or `controller` (the controller's `SwarmControl.choose_answer()`). `None` when there is no answer."""
 
     member: str | None
     """The member whose output is the answer. `None` when there is no answer."""
 
     reason: str | None
-    """Why there is no answer: `no_submissions`. `None` when there is one."""
+    """Why there is no answer: `no_submissions`. Under the mode `controller`, the reason the controller gave for its choice. Otherwise `None`."""
 
     provisional: bool
     """`True` until the swarm has finalised its answer."""

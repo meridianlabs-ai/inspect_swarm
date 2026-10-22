@@ -177,7 +177,15 @@ A member's status says how it ended:
 
 `controller=` decides which members start and when the swarm is done. The only built-in controller is `leaderless`, the default. It starts every member with the sample's input and stops the swarm when the first member submits, since that submission is the answer. The other members finish the calls they have in flight and stop. Those still running after the grace period are cancelled. If no member submits, the swarm ends when all have ended.
 
-Pass `leaderless(stop_on_submission=False)` to let every member run to its end. Use it when the scorer reads what members leave in the sandbox, when you measure each member's result (team@k), or when your agent returns normally when it gives up, which would count as a submission.
+Pass `leaderless(stop_on_submission=False)` to let every member run to its end. Use it when the scorer reads what members leave in the sandbox, when you measure each member's result (team@k), or when your agent returns normally when it gives up, which would count as a submission. When the members work as a team and the latest submission should be the answer, add `final="last"` ([The answer and the result record](#the-answer-and-the-result-record)):
+
+```python
+from inspect_swarm import leaderless
+
+controller = leaderless(stop_on_submission=False, final="last")
+```
+
+`final="last"` needs `stop_on_submission=False`, and `leaderless` refuses it otherwise.
 
 `channels=` decides how members share information. There are two built-in channels: `filesystem`, the default, and `shared_memory` ([The shared-memory channel](#the-shared-memory-channel)). `filesystem` adds no tools. It tells each member, in its preamble, to share files in `/shared`, to read and append to `/shared/notes.md`, and to keep its own work in `/scratch/<member>`. It does not create these directories. Change the paths with `filesystem(...)`:
 
@@ -307,9 +315,34 @@ See [docs/budget.qmd](docs/budget.qmd) for splits and for sweeping agent count a
 
 ## The answer and the result record
 
-The swarm's answer is the **first** submission: the member that submitted earliest, by the swarm's clock, with ties broken by roster order. A member that ended any other way is never chosen. When no member submitted, the answer is empty.
+By default the swarm's answer is the **first** submission: the member that submitted earliest, by the swarm's clock, with ties broken by roster order. With `leaderless(final="last")` it is the **last** submission, the latest, again with ties broken by roster order. A member that ended any other way is never chosen. When no member submitted, the answer is empty.
 
-The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the chosen member. Each member's own conversation is in its timeline.
+A controller of your own can choose the answer itself. Pass `final=` to `Controller` for the rule, and call `choose_answer()` from `run` to name a member that ended with a submission. Its submission is then the answer, whatever the rule says. A controller chooses once. This one answers with the first submission from a member with a given role, and falls back to the first submission when none of them submits:
+
+```python
+from inspect_swarm import Controller, StopReason, SwarmControl, swarm_controller
+
+
+@swarm_controller
+def prefer(role: str) -> Controller:
+    async def run(swarm: SwarmControl) -> StopReason:
+        for m in swarm.members:
+            swarm.start(m)
+        chosen = False
+        async for event in swarm.events():
+            if (
+                not chosen
+                and event.submitted
+                and swarm.member(event.member).role == role
+            ):
+                swarm.choose_answer(event.member, reason=f"first {role} to submit")
+                chosen = True
+        return "all_done"
+
+    return Controller(run)
+```
+
+The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the mode and the chosen member. Each member's own conversation is in its timeline.
 
 The swarm keeps a record of what it did in the sample store under `inspect_swarm:result`:
 
@@ -324,7 +357,7 @@ The swarm keeps a record of what it did in the sample store under `inspect_swarm
 }
 ```
 
-A member's `state` is `pending` (never started), `running` or `ended`. `time` is seconds from the swarm's start to the member's end, and `sandbox` is the member's own sandbox, or `null` when it shares the sample's. With no answer, `final.member` is `null` and `final.reason` is `"no_submissions"`. The record is updated as members start and end. If a limit or error ends the sample before the swarm finishes, the record keeps the first submission so far with `provisional: true`, and that submission is the sample's output.
+A member's `state` is `pending` (never started), `running` or `ended`. `time` is seconds from the swarm's start to the member's end, and `sandbox` is the member's own sandbox, or `null` when it shares the sample's. `final.mode` is `first`, `last` or `controller`. With no answer, `final.member` is `null` and `final.reason` is `"no_submissions"`. Under `controller`, `final.reason` is the reason the controller gave. The record is updated as members start and end. If a limit or error ends the sample before the swarm finishes, the record keeps the answer so far with `provisional: true`, and that submission is the sample's output: the first submission so far, the latest under `last`, or the controller's choice once it has made one.
 
 ## Metrics and analysis
 

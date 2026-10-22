@@ -79,7 +79,7 @@ M2's test is Epoch's LeanOpenProblems swarm: an external team could port that ex
 Not in M2 (decisions: Ransom, 2026-10-14; [Decisions](#decisions)):
 
 - The `messages` channel (direct messages) and bus channel tools for bridged members. Epoch's swarm uses neither, and the port gains nothing from them that the shared-memory channel does not give it.
-- Scoring beyond `first`: swarm-scoring.md Part 2's result contract and record additions, `member_scores`, `baseline()` and the analysis helper, and per-member sandboxes in the scoring contract (Recommendation 8). The port runs with its own scorer, and the Lean analysis lists these as optional gains after M2 ([What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)). Under per-member sandboxes in M2, the task's scorers run after the swarm, where `sandbox()` is `default`; a scorer that grades members' artifacts names each member's sandbox itself, as Epoch's end-of-sample check does today, and the record's `sandbox` field says which member used which (M2-1).
+- Scoring beyond `first`, `last` and a controller's choice (M2-14): swarm-scoring.md Part 2's result contract and record additions, `member_scores`, `baseline()` and the analysis helper, and per-member sandboxes in the scoring contract (Recommendation 8). The port runs with its own scorer, and the Lean analysis lists these as optional gains after M2 ([What they would gain and lose](swarm-lean-open-problems.md#what-they-would-gain-and-lose)). Under per-member sandboxes in M2, the task's scorers run after the swarm, where `sandbox()` is `default`; a scorer that grades members' artifacts names each member's sandbox itself, as Epoch's end-of-sample check does today, and the record's `sandbox` field says which member used which (M2-1).
 
 Done means: Epoch's port as sketched in [A port, sketch](swarm-lean-open-problems.md#a-port-sketch) runs on inspect_swarm with background deepagent members, per-member sandboxes and a bus-routed board, from a PyPI release, with docs that describe it.
 
@@ -305,13 +305,14 @@ flowchart LR
   M2_8 --> M2_10[M2-10 comm metrics]
   D3[D-3 wait design] --> M2_13
   M2_8 --> M2_13[M2-13 waiting for members]
-  M2_1 & M2_2 & M2_3 & M2_4 & M2_5 & M2_9 & M2_10 & M2_13 --> M2_11[M2-11 docs and examples]
+  M1 --> M2_14[M2-14 last and the controller's choice]
+  M2_1 & M2_2 & M2_3 & M2_4 & M2_5 & M2_9 & M2_10 & M2_13 & M2_14 --> M2_11[M2-11 docs and examples]
   M2_11 --> M2_12[M2-12 API statement, packaging, first release]
 ```
 
 "M1" in the graph means the M1 pull requests the item names under "Depends on"; most M2 work needs only part of M1. Four strands are independent of each other and can be built in parallel:
 
-- **Isolation and limits:** M2-1, M2-2, M2-3 and M2-4, each alone.
+- **Isolation and limits:** M2-1, M2-2, M2-3 and M2-4, each alone. M2-14, the answer rule, is alone too.
 - **Background members:** D-2 → AI-5 → M2-5. D-2 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-background-members.md](swarm-background-members.md), #28).
 - **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10, M2-13}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8, and D-3 before M2-13. D-1 started during M1 (decision: Ransom, 2026-10-14) and is merged ([swarm-memory-channel.md](swarm-memory-channel.md), #22). D-3 started on 2026-10-21 ([swarm-wait.md](swarm-wait.md)).
 - **Release:** M2-11 and M2-12, after the three strands above.
@@ -421,10 +422,16 @@ None in M2, and none in M1.
 - Depends on: M2-8, M2-5, D-3.
 - Implements: [swarm-wait.md](swarm-wait.md).
 
+**M2-14. The answer: `first`, `last` or the controller's choice.** As [swarm-scoring.md `last` and the controller's choice](swarm-scoring.md#last-and-the-controllers-choice-m2) specifies (#67; decision: Ransom, 2026-10-22): `final: FinalName | None` on `leaderless()` and `Controller`, with M2's `FinalName = Literal["first", "last"]`; `leaderless(final="last")` refused unless `stop_on_submission=False`; `SwarmControl.choose_answer(member, reason=None)`, once, from a member that submitted, ahead of the `final` rule; the record's `mode` (`first`, `last`, `controller`) and the controller's `reason` in the record, the `final` event and the answer's metadata, in the provisional answer and at finalisation. Part 2's chain widens `FinalName` and keeps the choice ahead of the chain.
+- Files: `src/inspect_swarm/_final.py`, `src/inspect_swarm/_record.py`, `src/inspect_swarm/_controller/_control.py`, `_controller/_controller.py`, `_controller/leaderless.py`, `src/inspect_swarm/_swarm.py`, `src/inspect_swarm/__init__.py`, `README.md`.
+- Tests: `tests/test_final.py`: `last` over member results, a team swarm (`stop_on_submission=False`) answered with its last submission, the provisional answer under `last` after an outer limit, a controller that chooses a member, and the refusals.
+- Depends on: M1 (#65's `stop_on_submission`).
+- Implements: [swarm-scoring.md `last` and the controller's choice](swarm-scoring.md#last-and-the-controllers-choice-m2).
+
 **M2-11. User docs and examples.** A Quarto site in `docs/`, as inspect_sentinel and inspect_flow keep, and runnable `examples/`: getting started; members, controllers and channels; budgets, splits and the ledger; sandbox topologies (shared, per member) with sizing guidance; the shared-memory channel and waiting for other members with `swarm_wait` (what wakes it, that waiting counts as time, the idle-time metric, and that filesystem-only swarms have no wait), monitoring it with sentinel, and the filesystem observation limit (swarm-communication.md step 7's content for what M2 builds), and that bridged members cannot use it yet; scoring: the task's own scorers, the result record, and with per-member sandboxes a scorer that names each member's sandbox; the result record's store key `inspect_swarm:result` is owned by the runtime, task code must not write it, and a tool reading it gives members a view of each other's results, a channel outside the bus (decision: Ransom, 2026-10-14); comparisons with epochs through Inspect's own reducers ([swarm-scoring.md Comparisons in M1](swarm-scoring.md#comparisons-in-m1)); writing a controller, including `until_proved` with its precondition ([Lean Rec. 6](swarm-lean-open-problems.md#6-m1-tighten-submitted-m2-document-stopping-on-the-first-proof), second part); and an example shaped like Epoch's port, which uses the shared-memory channel ([Lean, A port, sketch](swarm-lean-open-problems.md#a-port-sketch)). The shared-memory pages cover migration from `memory(instance=...)`, the seen rule and descendants ([swarm-memory-channel.md Relation to `memory(instance="...")`](swarm-memory-channel.md#relation-to-memoryinstance)).
 - Files: `docs/` (new), `examples/` (new), `README.md`.
 - Tests: examples run on mockllm in CI where they need no sandbox; the rest are marked slow.
-- Depends on: the functional M2 pull requests it documents (M2-1 to M2-10, and M2-13).
+- Depends on: the functional M2 pull requests it documents (M2-1 to M2-10, M2-13 and M2-14).
 - Implements: the documentation parts of every M2 item; swarm-communication.md step 7 for the memory channel.
 
 **M2-12. API statement, packaging and the first release.** The README and the package docstring state which API is supported and which is experimental, as decided ([Decisions](#decisions), item 6); classifiers move from "Development Status :: 1 - Planning"; `requires-python` stays at M1-0's 3.11; the `push` trigger is restored in `release.yaml`, so Release Please opens the 0.1.0 release pull request.
@@ -447,7 +454,7 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 - No best-of-k reducer: it is generic statistics, so a reducer for graded scores would be an inspect_ai addition beside `pass_at(k)`, if wanted (decision: Ransom, 2026-10-20; [swarm-scoring.md](swarm-scoring.md#bestk-on-graded-scores)).
 - The analysis helper: `attempt_rows` and `select_at_k` (step 5).
 - Per-member sandboxes in the scoring contract (Lean Recommendation 8), after a design that assigns how the headline scorer grades the selected member's sandbox (Inspect scores in the parent sample's context, where `sandbox()` is `default`: `src/inspect_ai/agent/_as_solver.py:71-82`, `src/inspect_ai/_eval/task/run.py:3093-3095`, at `81c1668d3`), the headline value when no member submitted while a sandbox holds a passing artifact, the verifier's sandbox for each submission, and the drained `final_verdict`.
-- The final-answer chain (`verify`, `vote`, `first`) with `stop_on_verified`, after deciding swarm-scoring.md's open question 1.
+- The final-answer chain (`verify`, `vote`, `first`, with M2-14's `last` and the controller's choice ahead of it) with `stop_on_verified`, after deciding swarm-scoring.md's open question 1.
 - `synthesize` as a final-answer mode.
 - Per-member artifacts in a shared sandbox through `materialize()`.
 - The solve/scoring cost boundary.

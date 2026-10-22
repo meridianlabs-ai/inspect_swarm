@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Awaitable, Callable, ParamSpec, Sequence, overload
 
+from .._final import FinalName, check_final
 from .._registry import register_factory
 from ._control import SwarmControl
 
@@ -31,15 +32,22 @@ class Controller:
         self,
         run: Callable[[SwarmControl], Awaitable[StopReason]],
         *,
+        final: FinalName | None = None,
         check: Callable[[Sequence[MemberInfo]], None] | None = None,
     ) -> None:
         """Create a controller.
 
         Args:
             run: Called once per sample. Starts members and waits for their events through the `SwarmControl`, and returns the stop reason. Returning requests the stop.
+            final: How the swarm chooses its answer from the submissions, for the provisional answer and when the swarm ends: `first`, the earliest submission, or `last`, the latest. `None` is the default, `first`. When `run` names the answer with `SwarmControl.choose_answer()`, that choice is the answer instead.
             check: Called with the roster when the swarm is built. Raise `ValueError` for a roster the controller cannot run.
+
+        Raises:
+            ValueError: If `final` is not `first`, `last` or `None`.
         """
+        check_final(final)
         self.run = run
+        self.final: FinalName | None = final
         self.check = check
 
 

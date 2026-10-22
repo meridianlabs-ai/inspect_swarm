@@ -131,6 +131,20 @@ def sleeper(seconds: float = 3600.0) -> Agent:
     return execute
 
 
+@agent
+def after(names: list[str], inner: Agent) -> Agent:
+    """Wait, making no model call, until the named members have ended in the result record, then run `inner`."""
+
+    async def execute(state: AgentState) -> AgentState:
+        while True:
+            record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+            if all(m.state == "ended" for m in record.members if m.name in names):
+                return await inner(state)
+            await anyio.sleep(0.01)
+
+    return execute
+
+
 def controller(run: Any, name: str) -> Controller:
     """A controller registered under `name` whose run is `run`."""
 

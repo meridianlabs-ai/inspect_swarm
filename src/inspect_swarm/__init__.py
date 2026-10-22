@@ -33,6 +33,7 @@ from ._controller._controller import (
     swarm_controller,
 )
 from ._controller.leaderless import leaderless
+from ._final import FinalName
 from ._member import Member, member
 from ._swarm import swarm
 from ._tools import swarm_resources
@@ -50,6 +51,7 @@ __all__ = [
     "ChannelRun",
     "ChannelState",
     "Controller",
+    "FinalName",
     "Member",
     "MemberEnded",
     "MemberHandle",
