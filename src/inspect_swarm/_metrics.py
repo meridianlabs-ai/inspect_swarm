@@ -53,8 +53,9 @@ class MemberMetrics(BaseModel):
     gate_checks: int = 0
     gate_passes: int = 0
     first_pass_time: float | None = None
-    # the member's effective delivery mode: notify (notices and the status line) or
-    # poll (the status line only). None in metrics written before it.
+    # the member's effective delivery mode: notify (notices) or poll (no notices; the
+    # member still has shared memory's status line and swarm_wait's results). None in
+    # metrics written before it.
     delivery_effective: Literal["notify", "poll"] | None = None
     # communication (`CommMetrics`), by channel name: an entry for each channel the
     # swarm opened with records, in the order given, zeros included, and none for a
