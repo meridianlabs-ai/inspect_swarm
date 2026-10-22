@@ -58,11 +58,14 @@ class _Board:
     async def __call__(
         self, member: str, command: str, loop: str = "top", **args: Any
     ) -> str:
+        return await self.call(member, loop, command=command, **args)
+
+    async def call(self, member: str, loop: str, *args: Any, **kwargs: Any) -> str:
         token = current_member.set(self.members[member].context)
         try:
             async with span("agent", type="agent", id=f"{member}/{loop}"):
                 async with span("shared_memory", type="tool"):
-                    return str(await self.tool(command=command, **args))
+                    return str(await self.tool(*args, **kwargs))
         finally:
             current_member.reset(token)
 
@@ -333,9 +336,10 @@ async def test_append_adds_a_line_at_the_end_with_no_view_and_creates_a_missing_
         assert await board("w-1", "append", path=log, append_text="one") == (
             "Created /shared_memory/log.md (f-1, version 1)."
         )
-        # w-2 has never viewed the file
+        # w-2 has never viewed the file, so w-1's line is still news to it
         assert await board("w-2", "append", path=log, append_text="two\n") == (
-            "Appended to /shared_memory/log.md (f-1, now version 2)."
+            "Appended to /shared_memory/log.md (f-1, now version 2).\n"
+            "Shared memory: 1 file changed since you last viewed it (f-1 new)."
         )
         # a file that ends with a newline, or is empty, gets none added
         await board("w-1", "append", path=log, append_text="three")
@@ -354,6 +358,76 @@ async def test_append_adds_a_line_at_the_end_with_no_view_and_creates_a_missing_
                 "files": [{"file": "f-1", "path": log, "base": 1, "version": 2}],
             },
         ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("command,args,refusal", SEEN)
+async def test_a_blind_append_does_not_count_as_a_view(
+    command: str, args: dict[str, Any], refusal: str
+) -> None:
+    async with _board() as (board, _):
+        await board("w-1", "create", path=_p("a/x.md"), file_text="v1")
+        await board("w-2", "append", path=_p("a/x.md"), append_text="v2")
+        with pytest.raises(ToolError, match=re.escape(refusal.split("; ")[-1])):
+            await board("w-2", command, **args)
+        await board("w-2", "view", path="f-1")
+        await board("w-2", command, **args)
+
+
+@pytest.mark.anyio
+async def test_a_blind_append_leaves_the_peer_content_it_followed_news_to_the_appender() -> (
+    None
+):
+    async with _board() as (board, _):
+        log = _p("log.md")
+        await board("w-1", "create", path=log, file_text="a")
+        await board("w-2", "append", path=log, append_text="b")
+        spec = WaitSpec("x-1", "w-2", "w-2/top", True, None)
+        news = board.state.news(spec)
+        assert news is not None and news.lines[0].startswith(
+            "1 shared memory file changed where you waited (f-1 new; by w-1)."
+        )
+        [line] = board.state.notice_lines("w-2")
+        assert "(f-1 new; by w-1)" in line
+        # its own later appends do not make the covered content news again
+        status = await board("w-2", "append", path=log, append_text="c")
+        assert "Shared memory:" not in status
+        assert board.state.notice_lines("w-2") == []
+        # an append after a view keeps the appender up to date
+        await board("w-2", "view", path=log)
+        assert board.state.news(spec) is None
+        await board("w-2", "append", path=log, append_text="d")
+        await board("w-2", "insert", path=log, insert_line=0, insert_text="top")
+        assert board.state.news(spec) is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
+async def test_an_append_is_news_to_peers(existing: bool) -> None:
+    async with _board() as (board, transcript):
+        log = _p("log.md")
+        if existing:
+            await board("w-1", "create", path=log, file_text="a")
+            await board("w-2", "view", path=log)
+        await board("w-1", "append", path=log, append_text="b")
+        assert evidence(transcript, "delivered")[-1]["notify"] == ["w-2"]
+        [line] = board.state.notice_lines("w-2")
+        label = "f-1" if existing else "f-1 new"
+        assert f"({label}; by w-1)" in line
+
+
+@pytest.mark.anyio
+async def test_positional_arguments_keep_their_places() -> None:
+    # `append_text` comes after every parameter the tool had before it
+    async with _board() as (board, _):
+        await board("w-1", "create", path=_p("a.md"), file_text="1\n2\n3")
+        no_text: list[None] = [None] * 5
+        view = await board.call("w-1", "top", "view", _p("a.md"), *no_text, [2, 2])
+        assert _fenced(view) == "     2\t2"
+        await board.call(
+            "w-1", "top", "rename", None, *no_text, None, _p("a.md"), _p("b.md")
+        )
+        assert board.files() == {_p("b.md"): "1\n2\n3"}
 
 
 @pytest.mark.anyio

@@ -198,6 +198,10 @@ class _BoardFile:
     record: str
     # the agent span of the loop that wrote this version
     loop: str | None
+    # the latest version written by another loop than `loop`, and its writer: what
+    # `loop` may not have seen when its own last write was a blind append
+    peer_version: int = 0
+    peer_writer: str | None = None
 
     @property
     def deleted(self) -> bool:
@@ -366,6 +370,10 @@ class _SharedMemoryState:
         for change in changes:
             path = change.path if change.path is not None else change.old_path
             assert path is not None
+            old = self._files.get(change.file)
+            peer_version, peer_writer = (
+                (0, None) if old is None else _by_others(old, loop)
+            )
             self._files[change.file] = _BoardFile(
                 id=change.file,
                 path=path,
@@ -374,18 +382,31 @@ class _SharedMemoryState:
                 writer=record.sender,
                 record=record.id,
                 loop=loop,
+                peer_version=peer_version,
+                peer_writer=peer_writer,
             )
             if change.content is not None:
                 self._paths[path] = change.file
                 self._bytes += utf8_bytes(change.content)
-            seen[change.file] = change.version
+            # a blind append acknowledges nothing it was not shown: the loop has seen
+            # the new version only if it had seen the one the append extended
+            if (
+                record.kind != "append"
+                or change.base is None
+                or seen.get(change.file) == change.base
+            ):
+                seen[change.file] = change.version
         self._applied[record.id] = changes
         written = [self._files[change.file] for change in changes]
         notify = [
             name
             for name in self._roster
             if self._bus.running(name)
-            and any(self._is_news(name, self._top_loop(name), f) for f in written)
+            and any(
+                f.loop != self._top_loop(name)
+                and self._is_news(name, self._top_loop(name), f)
+                for f in written
+            )
         ]
         return notify, {
             "files": [change.entry(record.kind) for change in changes],
@@ -401,7 +422,7 @@ class _SharedMemoryState:
         covered = self._covered.setdefault(member, {})
         for f in files:
             covered[f.id] = f.version
-        writers = ", ".join(sorted({f.writer for f in files}))
+        writers = _writers(files, self._top_loop(member))
         return [
             f"[Swarm notice] {_files_changed(len(files), 'shared memory ')} ({labels}; by {writers}). "
             f'View one with shared_memory(command="view", path="{files[0].id}"), or list them with path="{ROOT}".'
@@ -418,10 +439,8 @@ class _SharedMemoryState:
         # only the files the record changed, so the cost is per write, not per board
         assert record.op is not None
         files = cast(tuple[Mapping[str, FrozenJson], ...], record.op["files"])
-        return any(
-            self._reportable(spec, self._files[cast(str, entry["file"])])
-            for entry in files
-        )
+        written = [self._files[cast(str, entry["file"])] for entry in files]
+        return any(f.loop != spec.loop and self._reportable(spec, f) for f in written)
 
     def news(self, spec: WaitSpec) -> WaitNews | None:
         files = [f for f in self._files.values() if self._reportable(spec, f)]
@@ -436,7 +455,7 @@ class _SharedMemoryState:
             else f.id
             for f in files
         ]
-        writers = ", ".join(sorted({f.writer for f in files}))
+        writers = _writers(files, spec.loop)
         line = _changed_where_you_waited(
             len(files), _id_list(labels, len(files)), writers, files[0].id
         )
@@ -451,10 +470,10 @@ class _SharedMemoryState:
     def _reportable(self, spec: WaitSpec, f: _BoardFile) -> bool:
         # a version under the filter written by another loop and above what the waiting
         # loop has seen; a tombstone only when the loop saw an earlier version
-        if not _watched(spec.path, f) or f.loop == spec.loop:
+        if not _watched(spec.path, f):
             return False
         seen = self._seen.get(spec.loop, {})
-        if f.version <= seen.get(f.id, 0):
+        if _by_others(f, spec.loop)[0] <= seen.get(f.id, 0):
             return False
         return not f.deleted or f.id in seen
 
@@ -469,10 +488,10 @@ class _SharedMemoryState:
             new_str: str | None = None,
             insert_line: int | None = None,
             insert_text: str | None = None,
-            append_text: str | None = None,
             view_range: list[int] | None = None,
             old_path: str | None = None,
             new_path: str | None = None,
+            append_text: str | None = None,
         ) -> str:
             """Shared memory.
 
@@ -484,10 +503,10 @@ class _SharedMemoryState:
                 new_str: Optional for `str_replace`: the new text (if not given, `old_str` is deleted).
                 insert_line: Required for `insert`: `insert_text` is inserted AFTER line `insert_line` of `path`; 0 inserts at the start.
                 insert_text: Required for `insert`: the text to insert.
-                append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
                 view_range: Optional for `view` of a file: the lines to show, e.g. [11, 12] shows lines 11 and 12. Indexing starts at 1. `[start_line, -1]` shows from `start_line` to the end of the file.
                 old_path: Required for `rename`: the current path of a file or directory.
                 new_path: Required for `rename`: the new path, which must not exist.
+                append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
             """
             return await self._call(
                 command,
@@ -938,10 +957,8 @@ class _SharedMemoryState:
         # a version written by another loop, newer than any this loop has seen; a
         # tombstone only when the loop saw, or its member was notified of, the file
         # before
-        if f.loop == loop:
-            return False
         seen = self._seen.get(loop, {})
-        if f.version <= seen.get(f.id, 0):
+        if _by_others(f, loop)[0] <= seen.get(f.id, 0):
             return False
         heard = f.id in seen or (
             loop == self._top_loop(member) and f.id in self._covered.get(member, {})
@@ -954,7 +971,8 @@ class _SharedMemoryState:
         return [
             f
             for f in self._files.values()
-            if self._is_news(member, loop, f) and covered.get(f.id) != f.version
+            if self._is_news(member, loop, f)
+            and covered.get(f.id, 0) < _by_others(f, loop)[0]
         ]
 
     def _labels(
@@ -977,6 +995,17 @@ class _SharedMemoryState:
         if not files:
             return None
         return _status(len(files), self._labels(member, loop, files, own))
+
+
+def _by_others(f: _BoardFile, loop: str | None) -> tuple[int, str | None]:
+    # the latest version of a file written by another loop than `loop`, and its writer
+    if f.loop != loop:
+        return f.version, f.writer
+    return f.peer_version, f.peer_writer
+
+
+def _writers(files: Sequence[_BoardFile], loop: str | None) -> str:
+    return ", ".join(sorted({cast(str, _by_others(f, loop)[1]) for f in files}))
 
 
 def _required(value: str | None, name: str, command: str, empty: bool = False) -> str:

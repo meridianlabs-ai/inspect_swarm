@@ -183,6 +183,24 @@ async def test_a_peer_write_under_path_ends_the_wait() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
+@pytest.mark.parametrize("watched", ["results/log.md", "results"])
+async def test_a_peers_append_ends_a_wait_on_its_file_or_directory(
+    existing: bool, watched: str
+) -> None:
+    async with run() as (r, _):
+        log = _p("results/log.md")
+        if existing:
+            await r.sm("w-2", "create", path=log, file_text="a")
+            await r.sm("w-1", "view", path=log)
+        async with anyio.create_task_group() as tg:
+            pending = await start(tg, r, "w-1", path=_p(watched))
+            await r.sm("w-2", "append", path=log, append_text="b")
+            label = "f-1" if existing else "f-1 new"
+            assert await pending.value() == changed(label, "w-2", "f-1")
+
+
+@pytest.mark.anyio
 async def test_a_subagents_write_wakes_its_members_wait() -> None:
     async with run() as (r, _):
         async with anyio.create_task_group() as tg:
