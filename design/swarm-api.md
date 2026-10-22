@@ -606,7 +606,7 @@ def research_math(k: int = 4, cost: float = 40.0, controller: str = "leaderless"
 ```python
 swarm(
     members=member(deepagent, args={"tools": [bash(), python()]}, name="solver", count=4),
-    controller=leaderless(final="verify", stop_on_verified=True),
+    controller=leaderless(final="verify", stop_on_verified=True, stop_on_submission=False),
     channels=[filesystem(notes="notes.md")],
     budget=Budget(cost=40.0),
     result=answer_result(answer_key=boxed_number, verifier=check_answer),   # verify needs a verifier
