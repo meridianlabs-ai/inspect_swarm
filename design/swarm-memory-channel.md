@@ -364,7 +364,7 @@ And one on `Channel`: the `reach` class attribute of [Descendants](#descendants)
 
 **A `reach` setting on the channel**, so an arm can restrict the board to top loops. Rejected for now: no user has asked for it, and it is a one-parameter addition if an experiment needs it.
 
-**Remove fence markers instead of refusing them**, as the communication design does for messages. Rejected (decision: Ransom, 2026-10-21): removing one tag can assemble another, so removal has to repeat until none remains and needs care to stay linear in the text; it changes what the writer wrote without telling it; and the record no longer holds what the model typed. A refusal is one search and says why.
+**Remove fence markers instead of refusing them** (ADK's practice). Rejected (decision: Ransom, 2026-10-21): removing one tag can assemble another, so removal has to repeat until none remains and needs care to stay linear in the text; it changes what the writer wrote without telling it; and the record no longer holds what the model typed. A refusal is one search and says why.
 
 ## Compatibility and migration
 

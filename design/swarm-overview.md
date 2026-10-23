@@ -69,7 +69,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 
 **Monitoring aligns with inspect_sentinel.** There is no separate swarm monitor type.
 - A send is a tool call, so sentinel's tool stages see it with the sender's identity, and sentinel's per-sample state gives monitors a joint view of the swarm.
-- Sentinel's dispatcher is part of inspect_ai, but its tool stages still skip bridged agents, so M2 also builds a minimal hook in sentinel's action vocabulary on the bus ([decisions](swarm-implementation-plan.md#decisions), item 5).
+- Sentinel's dispatcher is part of inspect_ai, and every M2 record is a native member's tool call that its tool stages see, so M2 monitors through sentinel only. Its tool stages still skip bridged agents, so a minimal bus hook in sentinel's action vocabulary is future work, for bridged members' bus tools and internal records ([decisions](swarm-implementation-plan.md#decisions), item 5).
 ([The bus](swarm.md#the-bus-one-interception-point))
 
 **Peer messages are model output, delivered as tool output with distinct provenance.** By default a peer's text reaches a member only as the result of a swarm tool (`read_messages()` and the like), never as a user-role message. That is the default, not an absolute (decision: Ransom, 2026-10-09): after M2 an arm may opt into injection, below.

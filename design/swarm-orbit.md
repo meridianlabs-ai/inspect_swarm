@@ -262,7 +262,7 @@ Each is an `InfoEvent` with source `orbit.communication` (`runtime.py:190-227`).
   - A member time limit is an Inspect `time_limit` around the member.
   - Approval calls are kept out of token and turn nodes, but they count against cost nodes ([Interactions](swarm-limits.md#interactions)).
 - **Answers** ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)).
-  - Only submissions are answers ("nothing is invented"). M1's answer is `first`, and `reporter(member)` comes later with the final-answer chain.
+  - Only submissions are answers ("nothing is invented"). M1's answer is `first`. M2 adds `last` and a controller's choice, `SwarmControl.choose_answer(member)`, which also takes only a submission ([swarm-scoring.md](swarm-scoring.md#last-and-the-controllers-choice-m2)). `reporter(member)` comes later with the final-answer chain.
   - The record `inspect_swarm:result` keeps every member's status, and from Part 2 its output.
   - The returned state carries the sample's input and the answer, not the members' conversations.
 - **Sandboxes.** Members share the sample's sandbox by default. Per-member sandboxes are an M2 opt-in (`member(sandbox=, visible_sandboxes=)`). Users isolation in one sandbox is later work ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md)).
@@ -309,7 +309,7 @@ So ORBIT's `model_step` scheduling, and its repeatable conversational `completio
 | `sent`, `read`, `model_exposure` | `sent`, `read`, and ORBIT's own `model_exposure` written through `record_exposure()` ([P3](#p3-exposure)) | |
 | ORBIT `notified` (a notice reached a successful input) | `model_exposure` with `notice` set, through `record_exposure()` ([P3](#p3-exposure)) | The swarm's own `notified` means a notice was added to the conversation. |
 | ORBIT `delivered` (content inserted into a conversation) | None on the swarm runtime | Only `auto` and dialogue projections produce it. The swarm's `delivered` means a record reached channel state. |
-| `output_agent` (latest output, submitted or not) | ORBIT's solver wrapper around the swarm, reading the result record in a synchronous `finally`; later, `reporter(member)` | `reporter` selects only a submission ([P1](#p1-members-input-and-output-no-new-api)). |
+| `output_agent` (latest output, submitted or not) | ORBIT's solver wrapper around the swarm, reading the result record in a synchronous `finally`; a controller's `choose_answer(member)`, or later `reporter(member)` | Both select only a submission ([P1](#p1-members-input-and-output-no-new-api)). |
 | `history_projection` | ORBIT's member wrapper saves each final conversation, and ORBIT's solver wrapper projects them in its `finally` | The swarm returns no member conversations ([P1](#p1-members-input-and-output-no-new-api)). |
 | Tool gates (`on_tool_call`) | Per-member `react(approval=...)` policies, or sentinel `BeforeToolCall` protocols | Judge usage moves out of member token and turn limits ([Behaviour a port changes](#behaviour-a-port-changes)). |
 | Input filters with redaction, output checks, resampling | None yet. Sentinel's generate stages only observe or terminate | ORBIT keeps its filter wrapper and reports exposure after its filters ([P3](#p3-exposure)). |
@@ -325,9 +325,9 @@ Four items, P2 to P5, all future work. The plan already lists the scheduled mode
 
 - **Roles.** `role` is a field of M1's `Member` record ([swarm-api.md](swarm-api.md#members)). Like ORBIT's, it is informational: it appears in the preamble, the record and the evidence.
 - **Per-member input.** ORBIT's group goals are input that ORBIT's controller passes to `start(member, input=...)`, or to `activate(..., input=...)` for a member's first activation. ORBIT does not need swarm-api.md's `member(input=)` field, the default for `start()`, because it always runs its own controller.
-- **The answer.** swarm-scoring.md makes only a submission an answer: `first` in M1, and `reporter(member)` once the final-answer chain is built. ORBIT's `output_agent` takes the output member's latest output whether or not it submitted. ORBIT keeps that rule on its own side, in an ORBIT solver that wraps the swarm, as its `mas_orchestrator` wraps its executor today ([below](#orbits-solver-wrapper)).
+- **The answer.** swarm-scoring.md makes only a submission an answer: `first` in M1, `last` or a controller's `choose_answer()` in M2, and `reporter(member)` once the final-answer chain is built. ORBIT's `output_agent` takes the output member's latest output whether or not it submitted. ORBIT keeps that rule on its own side, in an ORBIT solver that wraps the swarm, as its `mas_orchestrator` wraps its executor today ([below](#orbits-solver-wrapper)).
 
-  The swarm's own answer, and the record's `final`, are unaffected. A conversational member released at the stop after a tool-free reply ends `submitted` ([P4](#stopping-a-scheduled-swarm)), so under `reporter` such a member's last reply is an answer too.
+  The swarm's own answer, and the record's `final`, are unaffected. A conversational member released at the stop after a tool-free reply ends `submitted` ([P4](#stopping-a-scheduled-swarm)), so under `last`, `choose_answer()` or `reporter` such a member's last reply can be the answer too.
 - **Member conversations.** The swarm returns the sample's input and its answer, not the members' conversations ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)). For `history_projection`, ORBIT's member builder, a registered `@agent` of its own, builds each member's agent and wraps it. In a synchronous `finally` block, the wrapper writes the final `AgentState.messages` to an ORBIT store key under the member's name. Because `react()` updates the state it was given in place, the wrapper sees the final conversation after a submission, a limit, a stop release, a hard stop or a cancellation.
 
 ##### ORBIT's solver wrapper
@@ -732,7 +732,7 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
 
 ## Compatibility and migration
 
-- **inspect_swarm** has no released API, and everything here comes after its first release. The additions are:
+- **inspect_swarm** is experimental throughout ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6), and everything here comes after M2. The additions are:
   - on the bus: `Channel.recipients`, `Delivery.seq`, `Bus.sequence()`, `record_read()`, `notice_text()`, `record_exposure()` and `record_exposure_coverage()`;
   - in evidence: ORBIT's `model_exposure` events written through `record_exposure()`, per-member coverage declarations, and the `schedule` type with its kinds `activation_started`, `activation_ended` and `intervened`, all inside the versioned `InfoEvent` payloads;
   - in scheduled mode: the scheduled path of `swarm_on_continue()`, the handle methods, `SwarmControl.sequence()`, `activation_read_cutoff()`, `ActivationResult`, `MemberSnapshot` and `round_robin`;

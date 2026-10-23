@@ -276,7 +276,7 @@ class SandboxIdentityError(RuntimeError): ...
 - **What it does not touch.** `SandboxEnvironment.exec()`, `read_file()` and `write_file()` themselves are unchanged. Inspect's own commands (tool injection, root probes, checkpoint snapshots) pass explicit users or none and keep working, and so do scorers that call `exec()`, including a member's in-loop scoring: a scorer is trusted task code and keeps the sandbox's default user. Outside a scope nothing changes, so no existing eval is affected.
 - **Custom tools** that call `sandbox().exec()` directly run as the sandbox's default user, as they do today, unless they resolve their user through `sandbox_identity_user(..., strict=True)`. This is the same contract as custom store keys and `tool_state_instance()`. The swarm cannot see them, so `member()`'s documentation states it, and the runtime reports what it can see: after a member ends, it counts the member's `SandboxEvent` execs (their options record the user, `events.py:85-91`) that ran with no user or another user, excluding the injected tools' own launcher, which runs as the tools user and switches per call. That count, `foreign_execs`, is a harness-validity diagnostic in the member's record, not a guarantee: `read_file()` and `write_file()` record no user at all.
 
-The runtime enters, for each member, its tool-state scope and `sandbox_identity(f"swarm-{name}", cwd=home, sandbox=isolation.sandbox)`, around the member's `run()`.
+The runtime enters, for each member, its tool-state scope and `sandbox_identity(f"swarm-{name}", cwd=home, sandbox=isolation.sandbox)`, around the member's agent. The member wrapper enters them itself and does not call `run()` ([swarm-limits.md Stopping](swarm-limits.md#stopping)).
 
 #### Bridged members
 

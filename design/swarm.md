@@ -281,7 +281,7 @@ What the log keeps:
 
 - Tool approval already offers `approve`, `modify`, `reject`, `terminate` and `escalate` per tool call (`src/inspect_ai/approval/_approval.py:7-15`).
 - [inspect_sentinel](https://github.com/meridianlabs-ai/inspect_sentinel) generalises this into monitors (which score) and protocols (which decide), at the `BeforeToolCall` and `AfterToolCall` stages. Generate stages are designed but not built (`inspect_sentinel: design/sentinel-overview.md`).
-  - Its dispatcher is part of inspect_ai (`src/inspect_ai/_sentinel/_dispatch.py` at `215cf087`).
+  - Its dispatcher is part of inspect_ai (`src/inspect_ai/_sentinel/_dispatch.py` at `2c002827fa`).
   - Every step carries a `conversation` id meant to tell agents in one sample apart. Monitor state (`Context.store_as`) is per sample, so it is shared across a swarm's members.
   - Sentinels do not yet run for bridged agents' tool calls (`inspect_sentinel: design/workstreams.md`).
 
@@ -439,7 +439,7 @@ In M2 the notice is the one swarm-authored text that enters a member's context o
 So the notice does not let peer text into the user role; only an opt-in `inject` arm after M2 does. [swarm-communication.md](swarm-communication.md) settles the rest: the notice is appended at the member's turn boundary by a swarm `on_continue` hook, bridged members get `poll` only, and wake means ending a member's wait in the bus's `swarm_wait` ([swarm-wait.md](swarm-wait.md)), which the shared memory's writes end in M2 and `wake=True` messages later.
 
 Tool output is a better place than the user role, but it is not a trust boundary by itself. ADK's own fencing module calls peers' turns and tool results "attacker-reachable" ([`_fencing.py`](https://github.com/google/adk-python/blob/main/src/google/adk/flows/llm_flows/context/_fencing.py)). So the read tools also follow three rules taken from the frameworks surveyed:
-- **Fence each message as data.** Each message sits between begin and end markers under a sender line the bus stamps. Copies of the markers inside the payload are removed, so a payload cannot close its own block. A fixed note says the content is another agent's message to read, not instructions to follow.
+- **Fence each message as data.** Each message sits between begin and end markers under a sender line the bus stamps. A payload holding a copy of any fence marker is refused, so a payload cannot close its own block ([swarm-communication.md Fencing](swarm-communication.md#fencing)). A fixed note says the content is another agent's message to read, not instructions to follow.
 - **Relay text, not mechanics.** A message is what the sender wrote, never the sender's tool calls, tool results or transcript. Microsoft Agent Framework and the OpenAI Agents SDK's `remove_all_tools` filter make the same choice.
 - **Bind sender identity at the bus.** Members never assert who they are. METR's investigation of the Hugging Face incident found agents impersonating one another. Terrarium's attacks inject system messages through its communication proxy.
 
@@ -489,7 +489,7 @@ Cases that might need them, none committed:
 
 [swarm-communication.md](swarm-communication.md) details the bus, its tools, addressing and evidence. All sanctioned communication goes through one function, `deliver(record)`, which runs these steps in order:
 
-1. **Policy and monitor.** Attached protocols decide `continue`, `modify` (rewrite the payload, e.g. paraphrase), `reject` (the sender gets a tool error it can react to) or `terminate`.
+1. **Policy and monitor.** A bus hook's protocols decide `proceed`, `modify` (rewrite the payload, e.g. paraphrase), `reject` (the sender gets a tool error it can react to) or `terminate`. The hook is future work: in M2 every record is a native member's tool call, which sentinel's tool stages see before it reaches the bus ([swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 5).
 2. **Storm controls.** Per-sender rate, deduplication, inbox cap and size cap. Claude Code ships these for cross-session messaging so that a message loop "stops on its own".
    - A full inbox is returned to the sender as a tool error, which is back-pressure it can react to, as AG2's arbiter does with `InboxFull` ([AG2 Network](https://github.com/ag2ai/ag2)).
    - Loop detection beyond rate limits is a later option, from two candidates:
@@ -515,7 +515,7 @@ Monitoring aligns with inspect_sentinel; there is no separate `SwarmMonitor` typ
 
 What sentinel does not cover is the delivery side: what each recipient was shown, after rewriting, notification and coalescing. The bus records that itself. If monitors turn out to need to act on deliveries rather than sends, it can become a sentinel stage later.
 
-The bus uses sentinel's action vocabulary from the start. Sentinel's dispatcher is part of inspect_ai, so a native member's call to a channel tool is a step its protocols see with no swarm code. Its tool stages still skip bridged agents, though, and records that do not come from a tool call are no tool step at all. So M2 also carries the smallest protocol-shaped hook with sentinel's action names, to be replaced by sentinel once it covers those cases, and nothing more ([swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 5).
+The bus uses sentinel's action vocabulary from the start. Sentinel's dispatcher is part of inspect_ai, so a native member's call to a channel tool is a step its protocols see with no swarm code. Its tool stages still skip bridged agents, though, and records that do not come from a tool call are no tool step at all. M2 has neither: a swarm with a bus channel refuses bridged members, and every M2 record is a native tool call, so M2 monitors through sentinel only. The smallest protocol-shaped hook with sentinel's action names comes with bridged members' bus tools or internal records, to be replaced by sentinel once it covers those cases ([swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 5).
 
 ### Observer: evidence, accounting and metrics
 
@@ -844,7 +844,7 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 
 ## Compatibility and migration
 
-- **inspect_swarm** has no released API, so nothing it adds is a compatibility concern yet.
+- **inspect_swarm** is experimental throughout, so any release may change what it adds ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6).
   - It supports Python 3.11 and later, above inspect_ai's 3.10 floor (decision: Ransom, 2026-10-07). So the design can use 3.11 features, notably native `ExceptionGroup` and `except*` for recovering the swarm's own cap ([Accounting](#observer-evidence-accounting-and-metrics)).
   - It must run on both anyio backends, which rules out raw `asyncio` primitives in the runtime.
 - **Eval logs.** M1 writes only existing event types (spans, tool and model events, `InfoEvent`s) plus store and metadata entries. Old viewers and readers see a swarm log as an ordinary log with concurrent agent spans. The `InfoEvent` payload carries a `version` field so later readers can tell formats apart.
@@ -881,7 +881,7 @@ Untrusted input reaches this code from several directions.
   - The tool-state scope removes the accidental case for the built-in tools: each member's state is its own unless the eval author names a shared instance ([Members](#members)).
   - **A deliberately shared instance is a channel**, treated like the filesystem: observed, not monitored. Members' uses of it are tool calls, recorded as `ToolEvent`s and seen by sentinel's tool stages for native members, but the bus does not see them, so storm controls, the policy hook and evidence records do not apply. An explicit instance is visible in the member's logged parameters when the tool is given to a built agent (`react(tools=[...])`) or passed in a factory's `args`, not when a builder creates it inside its invocation. Spans inside a swarm log no `StoreEvent`s, and the swarm's span logs only the net change, which says what changed and not who changed it ([Store events](#observer-evidence-accounting-and-metrics)); the `ToolEvent`s are the record of who used the instance.
   - **The same observation limit applies.** Tool calls are evidence of possible communication, not an audit: a command one member starts in a shared `bash_session()` keeps writing output that another member reads later.
-  - M2 routes a shared memory through the bus, as a channel whose writes are records, with evidence and the policy hook ([Channels](#channels)). A shared instance outside that channel stays observed only, so an arm meant to have bus channels as its only channel uses no shared instance.
+  - M2 routes a shared memory through the bus, as a channel whose writes are records, with evidence and storm controls ([Channels](#channels)). A shared instance outside that channel stays observed only, so an arm meant to have bus channels as its only channel uses no shared instance.
   - What the scope does not cover stays shared: environment state a task keeps in the store, which members can use to signal each other as they can through the sandbox, and custom tools that keep private state with the default instance.
 - **Red-team features** (forged senders, injected records, secret channels) are optional and may never be built. If they are, they create adversarial content deliberately, so they must be configured only by the eval author, recorded in the evidence events with their true origin, and never reachable from member tools.
 - **Log contents.** Evidence payloads are model text. They are written as JSON data in `InfoEvent`s, not as Markdown, so the viewer does not render them as formatted content.
@@ -901,10 +901,10 @@ Untrusted input reaches this code from several directions.
   - `first` selects the earliest submission (after M2, each further final-answer mode selects as specified);
   - each member's submission status and time are recorded (recording member outputs is tested with Part 2);
   - evidence events are written with the right ids, including causation ids;
-  - storm controls and monitor verdicts (`continue`, `modify`, `reject`) behave as specified, and a full inbox reaches the sender as a tool error;
+  - storm controls behave as specified, and so, once the bus hook exists, do its verdicts (`proceed`, `modify`, `reject`); a full inbox reaches the sender as a tool error;
   - peer content reaches a recipient only in a read tool's result:
     - fenced, with the bus-stamped sender;
-    - with markers inside the payload removed;
+    - with a payload holding a fence marker refused at send;
     - with no tool calls or results relayed;
     - notices contain no peer-chosen strings (bodies, subjects, thread titles, member-created channel names);
   - every run records its stop reason;

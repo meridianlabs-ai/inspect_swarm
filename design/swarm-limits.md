@@ -576,7 +576,6 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
 
 ## Compatibility and migration
 
-- **inspect_swarm** has no released API.
 - **inspect_ai internals used:**
   - `_TokenLimit`, `_CostLimit`, `_TurnLimit`, `_MessageLimit` and `_TokenLimit._usage`;
   - `token_limit_tree.is_suspended()`;
@@ -672,7 +671,7 @@ All in inspect_swarm, as part of M1 ([Implementation plan](swarm.md#implementati
 2. **Members and stopping.** The member wrapper with lever, shares, re-created member limits and leaf-by-leaf error classification; the runtime lever; `stop()` with step 0, soft stop, grace and hard stop; the time-cap timer; member statuses and stop reasons. With swarm-api.md's step 4 (the controller surface in the runtime), which starts members through this wrapper and passes the controller's reason to `stop()`. swarm-scoring.md's M1 PR follows it. Files: `src/inspect_swarm/_member.py`, `_swarm.py`, `tests/test_swarm_limits.py`.
 3. **Exhaustion and the final step.** Recovery of own caps and propagation with own errors removed (both in step 2's wrapper), the synchronous `finally`, and the final meter around swarm-scoring.md's finalisation and provisional answer. Files: `_controller/_control.py`, `_ledger.py`, `_member.py`, tests.
 4. **The ledger.** `MemberLedger`, `SwarmLedger`, event counting, reconciliation and claims, written as an `InfoEvent` and a store entry. Files: `_budget.py` (or `_ledger.py` if it grows), `_evidence.py`, tests.
-5. **Splits and the sweep example.** Share nodes and validation, and a task example in the docs showing the three sweeps. Files: `_budget.py`, tests, `README.md`.
+5. **Splits and the sweep example.** Share nodes and validation, and a task example showing the three sweeps, `examples/budget_sweep.py`, which the docs' Budgets page links. Files: `_budget.py`, tests, `examples/budget_sweep.py`, `docs/budget.qmd`.
 
 The order and plan ids of these steps are in [swarm-implementation-plan.md](swarm-implementation-plan.md#m1-pull-requests).
 
