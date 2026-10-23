@@ -1,5 +1,6 @@
 ---
 title: Shared Memory
+llms-description: "The `shared_memory` channel: wiring its tools into members, the tool's commands, notices, `swarm_wait`, subagents, limits, the record of the board, monitoring with Inspect Sentinel, and migrating from `memory(instance=...)`; read it when members need a shared board of files that the log records."
 ---
 
 ## Overview

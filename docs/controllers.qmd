@@ -1,5 +1,6 @@
 ---
 title: Controllers
+llms-description: "The `leaderless` controller, when the swarm stops, which submission is its answer, and how to write a controller of your own; read it to change how members start and stop or how the answer is chosen."
 ---
 
 ## Overview

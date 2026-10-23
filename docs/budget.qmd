@@ -1,5 +1,6 @@
 ---
 title: Budgets
+llms-description: "The swarm's cost, token and time caps with `Budget`: defaults from the sample's limits, cost data, pooled or split caps, what members see of the budget, and sweeps; read it to cap or divide what a swarm spends."
 ---
 
 ## Overview
