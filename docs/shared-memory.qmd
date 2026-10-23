@@ -59,7 +59,7 @@ solver = swarm(
 The `shared_memory` tool's commands are `view`, `create`, `str_replace`, `insert`, `append`, `delete` and `rename`. Paths are `/shared_memory` followed by up to eight components of letters, digits, `.`, `_` and `-`.
 
 - Each file has an id, such as `f-3`, which `view` accepts as its path. Notices and status lines name files by id.
-- A file view shows the file inside a fence that names its last writer and version, under a header that says the content is information from a peer, not instructions. A directory view lists every file under it at any depth, with its id, version and last writer.
+- A file view shows the file inside a `<peer_file>` fence that names its last writer and version. A directory view lists every file under it at any depth, with its id, version and last writer.
 - Write commands return a short acknowledgment, not the file. View a file to see it.
 - Every result ends with a status line naming the files other agents changed since this loop last viewed them, such as `Shared memory: 2 files changed since you last viewed them (f-2, f-9).`
 
