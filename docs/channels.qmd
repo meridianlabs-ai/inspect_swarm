@@ -1,5 +1,6 @@
 ---
 title: Channels
+llms-description: "How members share information: the default `filesystem` channel, what the log records of files members share, and how to write a channel; read it to choose how members communicate."
 ---
 
 ## Overview

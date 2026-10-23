@@ -1,5 +1,6 @@
 ---
 title: Inspect Swarm
+llms-description: "Install Inspect Swarm, run a swarm as the solver of an existing task or in a task of your own, and see what the log records; read this first."
 ---
 
 ## Welcome
@@ -103,3 +104,11 @@ Each member's events are in a timeline named after it, so the log viewer can sho
 - [Scoring](scoring.qmd), [Analysis](analysis.qmd) and [Restrictions](restrictions.qmd): the answer and the result record, metrics, the ledger, and what the swarm does not support or record.
 
 The [examples](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/examples) are runnable tasks for each of these. The designs behind the swarm are in [design/](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/design).
+
+## For agents
+
+The documentation is also published as Markdown for agents:
+
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms.txt>: an index of the pages, with a line on what each covers.
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms-guide.txt>: the user guide as one Markdown file.
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms-full.txt>: the user guide and the API reference as one Markdown file.

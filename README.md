@@ -97,6 +97,14 @@ By default the swarm's answer is the first submission. `leaderless(stop_on_submi
 
 `inspect_swarm.analysis` adds the swarm's cost and ledger data to Inspect's `samples_df()`. See [Scoring](https://meridianlabs-ai.github.io/inspect_swarm/scoring.html), [Analysis](https://meridianlabs-ai.github.io/inspect_swarm/analysis.html) and [Restrictions](https://meridianlabs-ai.github.io/inspect_swarm/restrictions.html).
 
+## For agents
+
+The documentation is also published as Markdown for agents:
+
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms.txt>: an index of the pages, with a line on what each covers.
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms-guide.txt>: the user guide as one Markdown file.
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms-full.txt>: the user guide and the API reference as one Markdown file.
+
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The documentation's source is in [docs/](docs/); `make docs` builds it. The designs behind the swarm are in [design/](design/).
