@@ -744,13 +744,13 @@ async def test_parallel_calls_from_one_loop_see_each_others_results() -> None:
 
 
 @pytest.mark.anyio
-async def test_a_view_is_fenced_with_the_last_writer_version_and_record() -> None:
+async def test_a_view_is_fenced_with_its_id_path_version_and_last_writer() -> None:
     async with _board() as (board, _):
         await board("w-1", "create", path=_p("a.md"), file_text="1\n2\n3")
         await board("w-2", "str_replace", path=_p("a.md"), old_str="2", new_str="two")
         result = await board("w-1", "view", path=_p("a.md"), view_range=[2, -1])
         assert result == (
-            '<peer_file id="f-1" path="/shared_memory/a.md" version="2" writer="w-2" record="w-2" lines="2-3">\n'
+            '<peer_file id="f-1" path="/shared_memory/a.md" version="2" writer="w-2">\n'
             "     2\ttwo\n"
             "     3\t3\n"
             "</peer_file>"
@@ -762,7 +762,7 @@ async def test_a_listing_is_the_fence_alone() -> None:
     async with _board() as (board, _):
         await board("w-1", "create", path=_p("a/b.md"), file_text="x")
         assert await board("w-1", "view", path=_p("a")) == (
-            '<peer_listing path="/shared_memory/a">\n'
+            "<peer_listing>\n"
             "f-1  version 1  w-1  /shared_memory/a/b.md\n"
             "</peer_listing>"
         )

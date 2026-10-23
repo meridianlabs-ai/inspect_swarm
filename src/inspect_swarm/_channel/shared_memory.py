@@ -46,8 +46,8 @@ _FILE_ID = re.compile(r"f-[1-9][0-9]{0,13}")
 # the addressing grammar of member names, which appear in fence attributes and notices
 _MEMBER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,47}")
 
-# file and record ids, versions and counts are given at most this many bytes when the
-# read budget is computed
+# file ids, versions and counts are given at most this many bytes when the read budget
+# is computed
 _ID_BYTES = 16
 
 # at most this many file ids in a status line or notice
@@ -908,11 +908,8 @@ class _SharedMemoryState:
             ("path", f.path),
             ("version", str(f.version)),
             ("writer", f.writer),
-            ("record", f.record),
         ]
         line_range = f"{start}-{end}" if view_range else None
-        if line_range is not None:
-            attributes.append(("lines", line_range))
         self._seen.setdefault(loop, {})[f.id] = f.version
         self._read(member, span_id, loop, own, [_shown(f, line_range)], listing=False)
         return fence("peer_file", attributes, _numbered(shown, start))
@@ -935,7 +932,7 @@ class _SharedMemoryState:
         body = "\n".join(
             _listing_line(f.id, str(f.version), f.writer, f.path) for f in files
         )
-        return fence("peer_listing", [("path", path)], body)
+        return fence("peer_listing", [], body)
 
     def _read(
         self,
@@ -1189,7 +1186,6 @@ def _read_budget(limits: _Limits, roster: Sequence[str]) -> int:
             _id_list([f"{'x' * _ID_BYTES} deleted"] * (_LISTED_IDS + 1), int(count)),
         )
     )
-    line_range = len(str(limits.max_file_lines)) * 2 + 1
     file_view = (
         fence_bytes(
             "peer_file",
@@ -1198,8 +1194,6 @@ def _read_budget(limits: _Limits, roster: Sequence[str]) -> int:
                 ("path", _MAX_PATH_BYTES),
                 ("version", _ID_BYTES),
                 ("writer", writer),
-                ("record", _ID_BYTES),
-                ("lines", line_range),
             ],
         )
         # each line numbered in six columns and a tab
@@ -1209,8 +1203,6 @@ def _read_budget(limits: _Limits, roster: Sequence[str]) -> int:
     listing_line = utf8_bytes(
         _listing_line("x" * _ID_BYTES, count, "x" * writer, "x" * _MAX_PATH_BYTES)
     )
-    listing = fence_bytes(
-        "peer_listing", [("path", _MAX_PATH_BYTES)]
-    ) + limits.max_files * (listing_line + 1)
+    listing = fence_bytes("peer_listing", []) + limits.max_files * (listing_line + 1)
     tombstone = utf8_bytes(f"{'x' * _ID_BYTES} was deleted by {'x' * writer}.")
     return max(file_view, listing, tombstone) + status
