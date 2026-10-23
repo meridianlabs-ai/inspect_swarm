@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.1.0...0.1.1) (2026-10-23)
+
+
+### Features
+
+* shared memory drops the repeated not-instructions headers ([#83](https://github.com/meridianlabs-ai/inspect_swarm/issues/83)) ([ce481c6](https://github.com/meridianlabs-ai/inspect_swarm/commit/ce481c6a781e7db4cf003eb4fbe76394f443fdbd))
+* shared memory fences drop the record and line-range attributes ([#86](https://github.com/meridianlabs-ai/inspect_swarm/issues/86)) ([2d341af](https://github.com/meridianlabs-ai/inspect_swarm/commit/2d341afb55c6c5326301f305fc00c2a66250e190))
+
 ## 0.1.0 (2026-10-23)
 
 
