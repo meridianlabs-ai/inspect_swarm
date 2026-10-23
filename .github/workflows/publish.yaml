@@ -59,3 +59,18 @@ jobs:
       - name: Publish to PyPI
         if: ${{ github.event_name == 'release' || inputs.confirm == 'yes' }}
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  # Release announcement to the inspect_swarm Slack channel. Needs publish so a
+  # rejected or failed PyPI publish is never announced; the manual break-glass
+  # path has no release to announce.
+  announce:
+    needs: publish
+    if: ${{ github.event_name == 'release' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: meridianlabs-ai/actions/slack-release-announce@v1
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          title: ":rocket: inspect-swarm ${{ github.event.release.tag_name }} released"
+          release-url: ${{ github.event.release.html_url }}
+          release-body: ${{ github.event.release.body }}
