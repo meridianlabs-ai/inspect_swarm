@@ -1,5 +1,6 @@
 ---
 title: Scoring
+llms-description: "How the task's scorers score a swarm: which submission is the answer, the `inspect_swarm:result` record, scoring what members leave in sandboxes, checks during the run, and comparing a swarm with a single agent; read it to set up scoring or read the answer."
 ---
 
 ## Overview

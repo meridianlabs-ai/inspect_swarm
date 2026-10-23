@@ -12,13 +12,20 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
-    "Development Status :: 1 - Planning",
+    "Development Status :: 3 - Alpha",
 ]
-dependencies = ["inspect-ai>=0.3.283"]
+dependencies = [
+    "inspect-ai>=0.3.283",
+    # imported directly; inspect-ai depends on them too, but a transitive
+    # dependency is not a promise
+    "anyio>=4.0",
+    "pydantic>=2.0",
+]
 
 [project.urls]
 "Source Code" = "https://github.com/meridianlabs-ai/inspect_swarm"
 "Issue Tracker" = "https://github.com/meridianlabs-ai/inspect_swarm/issues"
+Documentation = "https://meridianlabs-ai.github.io/inspect_swarm/"
 
 # lets inspect_ai resolve `inspect_swarm/<name>` without importing the package first
 [project.entry-points.inspect_ai]

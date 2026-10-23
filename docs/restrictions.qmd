@@ -1,5 +1,6 @@
 ---
 title: Restrictions
+llms-description: "What the swarm does not support, the limits of bridged members, what the log does not record, and the store keys task code must not write; read it to check whether a setup is supported and what the log holds as evidence."
 ---
 
 ## What the swarm does not support

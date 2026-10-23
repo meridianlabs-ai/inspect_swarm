@@ -64,7 +64,7 @@ See [`AGENTS.md`](AGENTS.md) for the full conventions used in this repo.
 
 We use [Conventional Commits](https://www.conventionalcommits.org/). Because we squash-merge, **the PR title becomes the commit message**, so the title is what matters. Format it as `<type>: <description>`; `pr-title-lint` enforces it.
 
-Releases are paused for now: `release.yaml` has no `push` trigger, so nothing is released until a maintainer turns it on. Once on, releases are automated with [Release Please](https://github.com/googleapis/release-please): **don't edit `CHANGELOG.md` or bump the version by hand.** Release Please reads the merged commit types, opens a release PR that updates the changelog and version, and merging that PR tags the release; the publish then runs once a maintainer approves the deployment.
+Releases are automated with [Release Please](https://github.com/googleapis/release-please): **don't edit `CHANGELOG.md` or bump the version by hand.** Release Please reads the merged commit types, opens a release PR that updates the changelog and version, and merging that PR tags the release; the publish then runs once a maintainer approves the deployment.
 
 Choose the type deliberately. `feat:` and `fix:` drive the version bump and headline the release notes:
 

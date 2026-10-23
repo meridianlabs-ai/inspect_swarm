@@ -1,5 +1,6 @@
 ---
 title: Members
+llms-description: "Define the swarm's members with `member()`: factory or built agents, names, roles, counts, limits, member builders, tool state, background work, how a member ends, and the agents the swarm refuses; read it to set up who runs in a swarm."
 ---
 
 ## Overview

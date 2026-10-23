@@ -1,15 +1,26 @@
 # Inspect Swarm
 
-> [!WARNING]
-> **Experimental.** Inspect Swarm is under active development. It has no stable API, no releases, and may change or be withdrawn without notice.
+> **Experimental.** Everything in Inspect Swarm is experimental and may change in any release without notice, including `swarm()`, `member()`, `Budget`, the built-in controller and channel names, and the record and evidence formats. No support is guaranteed.
 
 Inspect Swarm runs a swarm of agents on one sample of an [Inspect](https://inspect.aisi.org.uk) task. A swarm is an Inspect agent, so it replaces the task's solver and the task's scorer scores the swarm's answer.
 
-Documentation: <https://meridianlabs-ai.github.io/inspect_swarm>. Runnable examples are in [`examples/`](examples/).
+Documentation: <https://meridianlabs-ai.github.io/inspect_swarm>. Runnable examples are in [`examples/`](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/examples).
 
 ## Installation
 
-Inspect Swarm has no releases yet. Install it from GitHub:
+Install it from PyPI:
+
+```bash
+pip install inspect_swarm
+```
+
+or, in a uv project:
+
+```bash
+uv add inspect_swarm
+```
+
+To install the latest development version from GitHub:
 
 ```bash
 pip install git+https://github.com/meridianlabs-ai/inspect_swarm
@@ -97,6 +108,14 @@ By default the swarm's answer is the first submission. `leaderless(stop_on_submi
 
 `inspect_swarm.analysis` adds the swarm's cost and ledger data to Inspect's `samples_df()`. See [Scoring](https://meridianlabs-ai.github.io/inspect_swarm/scoring.html), [Analysis](https://meridianlabs-ai.github.io/inspect_swarm/analysis.html) and [Restrictions](https://meridianlabs-ai.github.io/inspect_swarm/restrictions.html).
 
+## For agents
+
+The documentation is also published as Markdown for agents:
+
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms.txt>: an index of the pages, with a line on what each covers.
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms-guide.txt>: the user guide as one Markdown file.
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms-full.txt>: the user guide and the API reference as one Markdown file.
+
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The documentation's source is in [docs/](docs/); `make docs` builds it. The designs behind the swarm are in [design/](design/).
+See [CONTRIBUTING.md](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/CONTRIBUTING.md). The documentation's source is in [docs/](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/docs); `make docs` builds it. The designs behind the swarm are in [design/](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/design).

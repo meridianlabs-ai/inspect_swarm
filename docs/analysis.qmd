@@ -1,5 +1,6 @@
 ---
 title: Analysis
+llms-description: "The `inspect_swarm:metrics` and `inspect_swarm:ledger` store entries and the swarm columns for Inspect's `samples_df()`; read it to analyse a swarm's usage, cost, communication and waits after a run."
 ---
 
 ## Overview

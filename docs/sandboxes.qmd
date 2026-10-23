@@ -1,5 +1,6 @@
 ---
 title: Sandboxes
+llms-description: "Shared or per-member sandboxes: members in the sample's sandbox, a sandbox for each member with shared services or a shared volume, sizing, and scoring; read it when members run code or edit files."
 ---
 
 ## Overview

@@ -1,5 +1,6 @@
 ---
 title: Inspect Swarm
+llms-description: "Install Inspect Swarm, run a swarm as the solver of an existing task or in a task of your own, and see what the log records; read this first."
 ---
 
 ## Welcome
@@ -7,12 +8,24 @@ title: Inspect Swarm
 Inspect Swarm runs a swarm of agents on one sample of an [Inspect](https://inspect.aisi.org.uk) task. A swarm is an Inspect agent, so it replaces the task's solver, and the task's scorer scores the swarm's answer.
 
 ::: {.callout-warning}
-Inspect Swarm is experimental and under active development. It has no stable API and no releases yet, and it may change or be withdrawn without notice.
+Everything in Inspect Swarm is experimental and may change in any release without notice, including `swarm()`, `member()`, `Budget`, the built-in controller and channel names, and the record and evidence formats. No support is guaranteed.
 :::
 
 ## Getting Started
 
-Inspect Swarm has no releases yet. Install it from GitHub:
+Install it from PyPI:
+
+```bash
+pip install inspect_swarm
+```
+
+or, in a uv project:
+
+```bash
+uv add inspect_swarm
+```
+
+To install the latest development version from GitHub:
 
 ```bash
 pip install git+https://github.com/meridianlabs-ai/inspect_swarm
@@ -103,3 +116,11 @@ Each member's events are in a timeline named after it, so the log viewer can sho
 - [Scoring](scoring.qmd), [Analysis](analysis.qmd) and [Restrictions](restrictions.qmd): the answer and the result record, metrics, the ledger, and what the swarm does not support or record.
 
 The [examples](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/examples) are runnable tasks for each of these. The designs behind the swarm are in [design/](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/design).
+
+## For agents
+
+The documentation is also published as Markdown for agents:
+
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms.txt>: an index of the pages, with a line on what each covers.
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms-guide.txt>: the user guide as one Markdown file.
+- <https://meridianlabs-ai.github.io/inspect_swarm/llms-full.txt>: the user guide and the API reference as one Markdown file.
