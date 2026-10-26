@@ -56,12 +56,13 @@ solver = swarm(
 
 ## The tool
 
-The `shared_memory` tool's commands are `view`, `create`, `str_replace`, `insert`, `append`, `delete` and `rename`. Paths are `/shared_memory` followed by up to eight components of letters, digits, `.`, `_` and `-`.
+The `shared_memory` tool's commands are `view`, `create`, `str_replace`, `insert`, `append`, `delete`, `rename` and `changes`. Paths are `/shared_memory` followed by up to eight components of letters, digits, `.`, `_` and `-`.
 
 - Each file has an id, such as `f-3`, which it keeps through renames. Notices and status lines name files by id. `view` takes an id as `file_id`, in place of `path`. A view shows the file's path, which the write commands take.
 - A file view shows the file inside a `<peer_file>` fence that names its id, path, version and last writer. A directory view lists every file under it at any depth, with its id, version and last writer.
 - Write commands return a short acknowledgment, not the file. View a file to see it.
 - Every result ends with a status line naming the files other agents changed since this loop last viewed them, such as `Shared memory: 2 files changed since you last viewed them (f-2, f-9).`
+- `changes` returns that status line alone, or `Shared memory: no files changed since you last viewed them.`, so a loop can check for news without viewing anything. Like the status line, it marks nothing seen.
 
 ### The seen rule
 
@@ -83,7 +84,7 @@ At each turn boundary where other agents have changed files since its last notic
 - A notice holds counts, file ids, member names and fixed instructions, never a member-chosen file path or file contents. Its metadata, under `inspect_swarm`, gives the notice's id and, for each channel's line, the ids it names.
 - The member continues or stops exactly as it would without the hook. If it has a hook of its own, wrap it: `swarm_on_continue(my_hook)`. For `react(submit=False)`, which stops after a turn without tool calls, pass `swarm_on_continue(no_tool_calls="stop")`.
 - A member that is stopping gets no notice. Neither do a member's subagents: only its own loop does.
-- `member(..., delivery="poll")` turns notices off for that member. It still learns of changes from the status line that ends each `shared_memory` result.
+- `member(..., delivery="poll")` turns notices off for that member. It still learns of changes from the status line that ends each `shared_memory` result, and can ask for that line alone with `shared_memory(command="changes")`.
 - A custom agent gets notices only if it calls an `on_continue` hook at each turn boundary, as `react()` and `deepagent()` do. If it does not, give its member `delivery="poll"`, so the metrics do not list it in `notify_unwired` ([Analysis](analysis.qmd#wiring-checks)).
 
 ## Waiting for other members
