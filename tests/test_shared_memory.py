@@ -750,7 +750,7 @@ async def test_a_view_is_fenced_with_its_id_path_version_and_last_writer() -> No
         await board("w-2", "str_replace", path=_p("a.md"), old_str="2", new_str="two")
         result = await board("w-1", "view", path=_p("a.md"), view_range=[2, -1])
         assert result == (
-            '<peer_file id="f-1" path="/shared_memory/a.md" version="2" writer="w-2">\n'
+            '<peer_file id="f-1" path="/shared_memory/a.md" version="2" last_writer="w-2">\n'
             "     2\ttwo\n"
             "     3\t3\n"
             "</peer_file>"
@@ -770,7 +770,7 @@ async def test_a_listing_is_the_fence_alone() -> None:
 
 @pytest.mark.anyio
 async def test_the_preamble_and_description_say_once_how_files_are_fenced() -> None:
-    sentence = "Files are shown between <peer_file> tags whose writer attribute names the agent that last wrote them."
+    sentence = "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them."
     async with _board() as (board, _):
         description = ToolDef(board.tool).description
     instructions = shared_memory().instructions(MemberInfo(name="w-1", role=None))

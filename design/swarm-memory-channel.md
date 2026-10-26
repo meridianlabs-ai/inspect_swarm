@@ -93,7 +93,7 @@ The bus needs inspect_ai's swarm registry types ([AI-1](swarm-implementation-pla
  │ top loop      general() child  bg child│            │ top loop               │
  │   │ shared_memory(...)  │          │   │            │   ▲ notice: f-3 changed │
  └───┼──────────────────────┼──────────┼───┘            └───┼────────────────────┘
-     │ write: sender=worker-1, loop=<agent span>             │ view f-3 → <peer_file ... writer="worker-1">
+     │ write: sender=worker-1, loop=<agent span>             │ view f-3 → <peer_file ... last_writer="worker-1">
      ▼                                                       │
  ┌──────────── Bus.deliver(record) ──────────────────────────┴──────────┐
  │ 0 bind member, compute op against the board   1 bus hook (later)     │
@@ -122,7 +122,7 @@ def shared_memory(
 - **Logging.** Every parameter is a plain value, so the plan step logs `{"type": "swarm_channel", "name": "inspect_swarm/shared_memory", "params": {...}}` and replay rebuilds it; `rate` also accepts its list form, which is how a tuple comes back from a log ([swarm-communication.md Configuration](swarm-communication.md#configuration)). Two arms that differ in any parameter, or in whether the channel is listed, get different eval-set identifiers.
 - **Validation** when `shared_memory()` is called raises `ValueError` outside: `max_files` 1 to 10,000; `max_file_bytes` 1 to 262,144; `max_file_lines` 1 to 100,000; `max_board_bytes` from `max_file_bytes` to 16,777,216; `rate` a positive count and a positive window; `max_wait` 1 to 3,600.
 - **`check(roster)`** at `swarm()` construction raises `ValueError` for a member name outside `^[a-z][a-z0-9_-]{0,47}$`, the grammar of [swarm-communication.md Addressing](swarm-communication.md#addressing), because writer names appear in fence attributes and notices. A name defaulted from a factory is reported with the fix, `member(..., name=...)`.
-- **`instructions(member)`** is a fixed template: the board is shared by every member of the swarm and their subagents, it is reached with the `shared_memory` tool under `/shared_memory`, files are shown between `<peer_file>` tags whose `writer` attribute names the agent that last wrote them, notices name changed files by ids such as `f-3`, which `view` accepts as a path, and a file must be viewed in its current version before it is overwritten, edited by line, renamed or deleted, and that a member waiting for another member's work calls `swarm_wait` rather than polling. It names no member other than the reader and nothing a member wrote ([swarm-api.md Security](swarm-api.md#security)).
+- **`instructions(member)`** is a fixed template: the board is shared by every member of the swarm and their subagents, it is reached with the `shared_memory` tool under `/shared_memory`, files are shown between `<peer_file>` tags whose `last_writer` attribute names the agent that last wrote them, notices name changed files by ids such as `f-3`, which `view` accepts as a path, and a file must be viewed in its current version before it is overwritten, edited by line, renamed or deleted, and that a member waiting for another member's work calls `swarm_wait` rather than polling. It names no member other than the reader and nothing a member wrote ([swarm-api.md Security](swarm-api.md#security)).
 - **Bridged members** are refused at construction by M2-6's rule, since this channel has a non-`None` `name`.
 
 **Why the tool is not called `memory`.** It keeps memory()'s commands and parameter names, which models know, but a tool named `memory` with exactly those parameters is sent to Claude 4+ models as Anthropic's native memory tool, so our description, which says the board is shared and fenced, would never reach the model; compaction's memory integration would treat board writes as the member's private notes; and a deepagent member would also get its own private `memory()` under the same name, since deepagent cannot see a tool behind a tool source ([Current behaviour](#the-name-memory-is-special-in-inspect_ai)). A distinct name and root keep the private memory and the board apart, which also lets a member keep private notes in deepagent's `memory()`.
@@ -233,7 +233,7 @@ The tool then returns its content-free acknowledgment ([The tool](#the-tool)) an
 A file view:
 
 ```
-<peer_file id="f-3" path="/shared_memory/notes/lemma.md" version="5" writer="worker-2">
+<peer_file id="f-3" path="/shared_memory/notes/lemma.md" version="5" last_writer="worker-2">
      1	...
 </peer_file>
 Shared memory: 2 files changed since you last viewed them (f-2, f-9).

@@ -59,7 +59,7 @@ _NO_LOOP = "\0"
 
 _INSTRUCTIONS = (
     f"Every member of the swarm, and their subagents, share one board of files, which you reach with the shared_memory tool under {ROOT}. "
-    "Files are shown between <peer_file> tags whose writer attribute names the agent that last wrote them. "
+    "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them. "
     "Notices name changed files by ids such as f-3, which the view command accepts as its path. "
     "View a file in its current version before you overwrite it with create, insert into it, rename it or delete it. "
     "To wait for another member's work, call swarm_wait rather than polling."
@@ -67,7 +67,7 @@ _INSTRUCTIONS = (
 
 _DESCRIPTION = (
     f"A board of files under {ROOT}, shared by every agent in the swarm and their subagents. "
-    "Files are shown between <peer_file> tags whose writer attribute names the agent that last wrote them. "
+    "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them. "
     "View a file in its current version before you overwrite it with create, insert into it, rename it or delete it; "
     "str_replace needs no view, since it fails unless old_str occurs exactly once in the file as it is now. "
     "To add an entry to a shared log or list, use append, which needs no view: it adds append_text on a new line at the end of the file as it is when the write lands, and creates the file if it does not exist. "
@@ -907,7 +907,7 @@ class _SharedMemoryState:
             ("id", f.id),
             ("path", f.path),
             ("version", str(f.version)),
-            ("writer", f.writer),
+            ("last_writer", f.writer),
         ]
         line_range = f"{start}-{end}" if view_range else None
         self._seen.setdefault(loop, {})[f.id] = f.version
@@ -1193,7 +1193,7 @@ def _read_budget(limits: _Limits, roster: Sequence[str]) -> int:
                 ("id", _ID_BYTES),
                 ("path", _MAX_PATH_BYTES),
                 ("version", _ID_BYTES),
-                ("writer", writer),
+                ("last_writer", writer),
             ],
         )
         # each line numbered in six columns and a tab
