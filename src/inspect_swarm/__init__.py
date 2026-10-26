@@ -1,6 +1,6 @@
 """Evals with multi-agent swarms.
 
-Experimental and under development; the API may change.
+Everything in this package is experimental and may change in any release without notice, including `swarm()`, `member()`, `Budget`, the built-in controller and channel names, and the record and evidence formats. No support is guaranteed.
 """
 
 from ._budget import Budget, BudgetUsage, SwarmBudget, swarm_budget

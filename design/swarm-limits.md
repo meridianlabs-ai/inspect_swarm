@@ -1,7 +1,5 @@
 # Inspect Swarm: limits and budgets
 
-Status: proposed, 2026-10-08. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
-
 ## Overview
 
 A swarm takes its budget the way a single agent does: from the sample's own limits. By default `swarm(budget=Budget())` reads the sample's cost, token and time limits when it starts and sets its own caps 5% below them. The 5% reserve absorbs calls already in flight when the swarm stops. Optionally, the budget can also be split into fixed shares per member, which makes the split an experimental condition to sweep. Each member may also have its own limits, as any agent run under `run()` does.
@@ -21,14 +19,14 @@ It respects the decisions Ransom took on swarm.md (2026-10-07). Those that bear 
 - M1, then M2, then the rest in any order;
 - members share the sample's sandbox by default.
 
-It builds on the merged sibling designs and uses their terms:
+It builds on the sibling designs and uses their terms:
 - [swarm-api.md](swarm-api.md), the `swarm()` API: `Budget` is a field of `swarm()`, member limits and `bridged` are fields of the `Member` record, and every argument must log faithfully. A **controller** (a `@swarm_controller` object) decides who starts and when the swarm is done. The **runtime**, inspect_swarm's fixed code, owns member tasks, limits, stopping, finalisation and the ledger. Where swarm.md says "the controller" for these, it means the runtime.
 - [swarm-scoring.md](swarm-scoring.md): M1's final answer is `first`, which makes no model call. Verification, voting and `synthesize` come after M2 (decision: Ransom, 2026-10-08), and the sample's usage includes the task's scorer calls.
 - [swarm-communication.md](swarm-communication.md): the bus and its storm controls are not Inspect limits, and a stop closes the bus first.
 
-The ORBIT deep dive (PR #4) is still open; nothing here depends on it.
+Nothing here depends on the ORBIT port ([swarm-orbit.md](swarm-orbit.md)).
 
-Code references are to inspect_ai `main` at `aa20052a` (2026-10-06), the commit swarm.md cites, and to inspect_swe at `a54461e7`. The spikes below ran against inspect_ai `fccfb298` (2026-10-07), installed in this repository's environment; its only source change from `aa20052a` is in `log/_convert.py`, so the line numbers hold for both. Paths are relative to the inspect_ai root unless noted.
+Code references are to inspect_ai at `aa20052a`, the commit swarm.md cites, and to inspect_swe at `a54461e7`. The spikes below ran against inspect_ai `fccfb298`, whose only source change from `aa20052a` is in `log/_convert.py`, so the line numbers hold for both. Paths are relative to the inspect_ai root unless noted.
 
 ## Why
 
@@ -75,7 +73,7 @@ This section covers only what the design depends on. Claims marked *spike* were 
 - Each limit kind is a tree of nodes held in a ContextVar; a `with` block pushes a child of the current leaf (`src/inspect_ai/util/_limit.py:957-1003`). A task spawned inside the block copies the context, so it sees the same leaf. That is how a node opened around a group of members meters all of them, as swarm.md's spike showed.
 - Token, cost and turn usage is recorded on the leaf and every ancestor, and checked root to leaf, so when several nodes are exceeded the outermost raises (`_limit.py:1076-1091`, `:1163-1178`, `:1247-1262`).
 - `apply_limits()` (used by `run()`) catches a `LimitExceededError` only when its `source` is one of the limits it applied (`_limit.py:150-186`, `src/inspect_ai/agent/_run.py:96-111`). Everything else propagates.
-- `apply_limits()` matches only a bare error: an owned limit error wrapped in an `ExceptionGroup` (by a task group inside the agent) escapes `run()` as if it were foreign (`_limit.py:179-186`; reproduced by the round-1 review on both backends).
+- `apply_limits()` matches only a bare error: an owned limit error wrapped in an `ExceptionGroup` (by a task group inside the agent) escapes `run()` as if it were foreign (`_limit.py:179-186`; reproduced on both backends).
 - Every `Limit` object is single-use: entering it twice raises `RuntimeError` (`_limit.py:141-147`). deepagent copies its subagents' limits per dispatch for this reason (`src/inspect_ai/agent/_deepagent/agent_tool.py:559-560`).
 - A node's limit can be changed while it is open through its `limit` setter, without a check (`_limit.py:1066-1074`, `:1237-1245`). The next check uses the new value.
 
@@ -113,7 +111,7 @@ Two more facts about working time:
 - `sandbox_agent_bridge()` starts the model service task inside its own task group, which is created inside the bridged agent, so bridged generations run in the member's context and see its limit nodes (`src/inspect_ai/agent/_bridge/sandbox/bridge.py:196-264`; inferred from the code, not run, since it needs a sandbox).
 - `_forward_provider_errors()` re-raises a `LimitExceededError` from a bridged generation (`src/inspect_ai/agent/_bridge/sandbox/service.py:42-67`), and the sandbox service dispatcher answers any bare `LimitExceededError` with `ActiveSample.limit_exceeded()`, which cancels the whole sample (`src/inspect_ai/util/_sandbox/service.py:540-560`). It does not look at the error's `source`. inspect_ai's own tests pin both halves (`tests/agent/test_bridge_provider_errors.py:178-190`, `tests/util/sandbox/test_sandbox_service.py:579-655`).
 - So today `run(claude_code(), limits=[token_limit(N)])` ends the sample when the agent's own limit is reached, and a swarm cap reached by a bridged member ends the sample, not the member.
-- `bridge_generate()` marks its `model.generate()` call with a ContextVar, read by `in_bridge_model_generate()` (`src/inspect_ai/agent/_bridge/util.py:349-387`, `:715-728`). Bridge compaction and a bridge filter run *before* that mark, on every request including the first (`util.py:660-708`). So the mark cannot tell whether a check is running for a bridged agent: the round-1 review reproduced a limit error from initial native compaction with the mark false. Nothing else in the bridge or the sandbox service sets a context marker.
+- `bridge_generate()` marks its `model.generate()` call with a ContextVar, read by `in_bridge_model_generate()` (`src/inspect_ai/agent/_bridge/util.py:349-387`, `:715-728`). Bridge compaction and a bridge filter run *before* that mark, on every request including the first (`util.py:660-708`). So the mark cannot tell whether a check is running for a bridged agent: a limit error from initial native compaction was reproduced with the mark false. Nothing else in the bridge or the sandbox service sets a context marker.
 
 ### What the nodes record
 
@@ -122,7 +120,7 @@ Two more facts about working time:
 - Response-cache hits return before any usage is recorded (`_model.py:1537-1564`), so nodes count only newly incurred usage.
 - Approval and review model calls run under `suspend_token_limit()` and `suspend_turn_limit()` (`src/inspect_ai/approval/_apply.py:50`, `src/inspect_ai/review/_apply.py:59`). They are missing from token and turn nodes, but still recorded into cost nodes and the sample's `model_usage`.
 - Native compaction records usage through the same path with no model event (`_model.py:1356-1359`). Summary compaction is an ordinary `model.generate()` (`src/inspect_ai/model/_compaction/summary.py:124`), so it has a model event, counts as a turn, and checks the message limit against the summarisation input. `CompactionAuto` (deepagent's default) falls back to summary compaction when native compaction raises any exception, a limit error included (`_compaction/auto.py:102-112`).
-- A call cancelled in flight records nothing and leaves an error event with no usage (`_model.py:1658-1674`). A native compaction cancelled in flight leaves neither an event nor usage (round-1 review probe). A successful response whose provider reported no usage records nothing either (`_model.py:1733-1736`).
+- A call cancelled in flight records nothing and leaves an error event with no usage (`_model.py:1658-1674`). A native compaction cancelled in flight leaves neither an event nor usage (checked by a probe). A successful response whose provider reported no usage records nothing either (`_model.py:1733-1736`).
 - `record_model_cost()` is called only for priced calls (`_model.py:3092`), so cost nodes never see unpriced ones. Token nodes see every recorded call, priced or not, one `ModelUsage` at a time, before it is summed.
 - *Spike (soft stop):* three members of 0.1-second calls ran under a common `token_limit(None)` node. After 0.35 s the node's limit was set to its current usage (300 tokens, 9 calls started). Each member raised the node's error at its next call. The 3 calls in flight completed and were recorded (450 tokens, equal to the sample's usage), and nothing was cancelled.
 
@@ -320,7 +318,7 @@ Triggers:
 - **The time cap** is a timer task in the runtime's task group, not an Inspect `time_limit`. It calls `stop("swarm_time")`, so the time cap gets the same soft stop. The sample's own time limit stays a hard stop around everything.
 - **Controller stops.** A controller requests a stop by returning from its `run` with a reason: `submitted` or `all_done` (the built-in `leaderless` in M1: `submitted` at the first submission unless `stop_on_submission=False`, else `all_done` when every member has ended), after M2 `verified`, later `quiescence`, or its own `controller:<reason>` ([swarm-api.md](swarm-api.md#controllers)).
 
-**Member wrapper and statuses.** The wrapper does not call `run()`. `run()` builds the member's `AgentState` from its input before it enters its limits (`src/inspect_ai/agent/_run.py:94`), so the input and preamble would be checked against the sample's message limit, not the member's; and it copies the input into a state of its own, so when an error escapes it the caller loses the agent's output (swarm-scoring.md's [Terms](swarm-scoring.md#terms)). So the wrapper enters the member's nodes itself, then builds the member's conversation on the `AgentState` the runtime keeps for the member, as `as_solver()` keeps one, opens the member's agent span and calls the agent on that state. Entered first, a member message limit replaces the sample's for that conversation from its first message, above or below it. Nothing catches the member's limit errors before the wrapper, and `run()` would in any case return a bare owned limit error but let a grouped one escape ([Limit trees](#limit-trees)), so the wrapper classifies every leaf itself. This is the wrapper as M1-4 and M1-5 built it (`src/inspect_swarm/_member.py`, `run_member()`), simplified:
+**Member wrapper and statuses.** The wrapper does not call `run()`. `run()` builds the member's `AgentState` from its input before it enters its limits (`src/inspect_ai/agent/_run.py:94`), so the input and preamble would be checked against the sample's message limit, not the member's; and it copies the input into a state of its own, so when an error escapes it the caller loses the agent's output (swarm-scoring.md's [Terms](swarm-scoring.md#terms)). So the wrapper enters the member's nodes itself, then builds the member's conversation on the `AgentState` the runtime keeps for the member, as `as_solver()` keeps one, opens the member's agent span and calls the agent on that state. Entered first, a member message limit replaces the sample's for that conversation from its first message, above or below it. Nothing catches the member's limit errors before the wrapper, and `run()` would in any case return a bare owned limit error but let a grouped one escape ([Limit trees](#limit-trees)), so the wrapper classifies every leaf itself. The wrapper (`src/inspect_swarm/_member.py`, `run_member()`), simplified:
 
 ```python
 async def run_member(m: MemberRun, input: list[ChatMessage]) -> str:
@@ -334,7 +332,7 @@ async def run_member(m: MemberRun, input: list[ChatMessage]) -> str:
         with tool_state_scope(m.name), m.context.scope:
             agent = build_member(m.record)  # the built agent, or the factory's agent built in this scope (swarm-api.md, the member contract)
             with ExitStack() as entered:
-                for node in m.nodes:  # lever, re-created member limits (shares from M1-8): fresh per run
+                for node in m.nodes:  # lever, shares, re-created member limits: fresh per run
                     entered.enter_context(node)
                 # the member's own copy of its input, as run() makes one, inside its limits
                 state.messages = [msg.model_copy(update={"source": "input"}) for msg in input]
@@ -356,7 +354,7 @@ async def run_member(m: MemberRun, input: list[ChatMessage]) -> str:
         return m.context.stop_cause  # a node stopped a bridged member whose cancellation had not arrived
     if m.context.scope.cancelled_caught:
         return "cancelled"  # the hard stop
-    return "submitted"  # unsubmitted from M1-9
+    return "submitted"  # or "unsubmitted", see the statuses below
 ```
 
 The runtime's task for the member records the returned status, or `errored` when the wrapper raises, and queues the member's `MemberEnded`; the member's output is `m.agent_state.output` either way. (The code hands the returned state back through the callback that ends the member, which stores it on the record; it has the same effect.)
@@ -496,23 +494,7 @@ Claims. Completeness is judged over the whole interval the ledger covers (member
 
 ### Budget splits as a sweep axis
 
-Agent count, budget and split are task parameters. The task sets the sample limit once, and the swarm derives its cap from it:
-
-```python
-@task
-def research_math(
-    k: int = 4, budget: float = 40.0, split: Literal["pool", "equal"] = "pool"
-) -> Task:
-    return Task(
-        dataset=...,
-        solver=swarm(
-            members=member(deepagent, args={...}, name="solver", count=k),
-            budget=Budget(split=split),
-        ),
-        scorer=...,
-        cost_limit=budget,
-    )
-```
+Agent count, budget and split are task parameters. The task sets the sample limit once, and the swarm derives its cap from it; [Budgets: Sweeps](https://meridianlabs-ai.github.io/inspect_swarm/budget.html#sweeps) has the example task.
 
 swarm-api.md's version of this task passes the cap explicitly, `Budget(cost=cost)`, with no sample limit; both work. Deriving it from `cost_limit` is what lets a single-agent arm and an epochs arm read the same number. Because `Budget` is a pydantic model, arms that differ only in `split` are distinct in an eval set ([The budget parameter](#the-budget-parameter)).
 
@@ -540,7 +522,7 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
 **Bus channels (M2) and messages (later).** swarm-communication.md leaves to this design how limits treat its channels.
 - Its storm controls (payload size, rate, inbox cap) are bus rules, not Inspect limits. They never raise `LimitExceededError` and never touch a swarm node.
 - The swarm's communication tools make no model calls, so no swarm node is checked inside them, and a message costs its sender and its reader only the generations around the tool calls.
-- **Waiting in `swarm_wait`** (M2; `read_messages` until D-3 replaced its wait, [swarm-wait.md](swarm-wait.md#time)) is wall-clock time inside a tool call. It counts towards the member's time limit, the swarm's time cap and the sample's time limit, as any tool call does. Inspect reports waiting time only for connection slots, model retries and pauses (`src/inspect_ai/_util/working.py:41-48`, its callers in `util/_concurrency.py:300` and `model/_model.py`), not for a tool blocked on an event, so the wait also counts as working time at a sample `working_limit`. This design keeps it so: a wait reported as sample waiting time would collapse with the other members' waits, as connection waits do ([Each limit kind](#each-limit-kind)), and member working limits are rejected anyway. The idle-time metric measures these waits separately ([swarm-wait.md Metrics](swarm-wait.md#metrics)).
+- **Waiting in `swarm_wait`** (M2, [swarm-wait.md](swarm-wait.md#time)) is wall-clock time inside a tool call. It counts towards the member's time limit, the swarm's time cap and the sample's time limit, as any tool call does. Inspect reports waiting time only for connection slots, model retries and pauses (`src/inspect_ai/_util/working.py:41-48`, its callers in `util/_concurrency.py:300` and `model/_model.py`), not for a tool blocked on an event, so the wait also counts as working time at a sample `working_limit`. This design keeps it so: a wait reported as sample waiting time would collapse with the other members' waits, as connection waits do ([Each limit kind](#each-limit-kind)), and member working limits are rejected anyway. The idle-time metric measures these waits separately ([swarm-wait.md Metrics](swarm-wait.md#metrics)).
 - A stop releases every wait at once (step 0 of [Stopping](#stopping)), so a waiting member neither blocks the grace period nor needs the hard stop.
 
 **Compaction.**
@@ -594,7 +576,6 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
 
 ## Compatibility and migration
 
-- **inspect_swarm** has no released API.
 - **inspect_ai internals used:**
   - `_TokenLimit`, `_CostLimit`, `_TurnLimit`, `_MessageLimit` and `_TokenLimit._usage`;
   - `token_limit_tree.is_suspended()`;
@@ -605,7 +586,7 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
   - `_resume_checkpoint` on `sample_active().checkpointer`, which sets the ledger's `resumed`.
 
   This is allowed (decision: Ransom, 2026-10-07). They are pinned by tests in this repository ([Testing](#testing)), so an inspect_ai change that breaks them fails CI here.
-- **No inspect_ai changes for limits.** M1's two inspect_ai PRs, the registry types and the tool-state scope, come from swarm-api.md and swarm.md, not from this design. The bridge fix in [Alternatives](#alternatives-considered) and the two observability changes in [open question 3](#open-questions) are optional; the ledger's completeness rules relax as they land.
+- **No inspect_ai changes for limits.** M1's two inspect_ai prerequisites, the registry types (AI-1) and the tool-state scope (AI-2), come from swarm-api.md and swarm.md, not from this design ([swarm-implementation-plan.md](swarm-implementation-plan.md#inspect_ai)). The bridge fix in [Alternatives](#alternatives-considered) and the two observability changes in [open question 3](#open-questions) (AI-3 and AI-4) are optional; the ledger's completeness rules relax as they land.
 - **`swarm()` arguments in the log.** `Budget` and a member's limits are logged as their fields, by swarm-api.md's rule, so they are part of the task identifier and are rebuilt on replay ([The budget parameter](#the-budget-parameter)).
 - **Eval logs.** The ledger is an `InfoEvent` with a `version` field and a store entry; no new event types. Swarm nodes write no `SampleLimitEvent`, so the log's sample-limit record and `SampleLimitEvent`s keep meaning a sample limit.
 - **Checkpoint and resume.** inspect_ai restores only the sample's root nodes on resume (`src/inspect_ai/util/_checkpoint/sample_runtime.py:147-225`). Swarm nodes restart from zero, so a resumed swarm would overspend its cap. Resume is out of scope for swarms (swarm.md's [Not this design](swarm.md#not-this-design)); until it is designed, the ledger records `resumed: true` when the sample was resumed, and analysis excludes such samples from matched-cost comparisons.
@@ -688,11 +669,11 @@ All in inspect_swarm, as part of M1 ([Implementation plan](swarm.md#implementati
 
 1. **Swarm nodes and the budget parameter.** `Budget` as a frozen pydantic model with validation, cap derivation, the swarm node classes and cost pairs (ownership, messages, per-call pricing, the bridged branch), bridged detection, and the pinned-behaviour tests. Before swarm-api.md's step 3, whose `swarm()` signature takes a `Budget`. Files: `src/inspect_swarm/_budget.py`, `tests/test_budget.py`.
 2. **Members and stopping.** The member wrapper with lever, shares, re-created member limits and leaf-by-leaf error classification; the runtime lever; `stop()` with step 0, soft stop, grace and hard stop; the time-cap timer; member statuses and stop reasons. With swarm-api.md's step 4 (the controller surface in the runtime), which starts members through this wrapper and passes the controller's reason to `stop()`. swarm-scoring.md's M1 PR follows it. Files: `src/inspect_swarm/_member.py`, `_swarm.py`, `tests/test_swarm_limits.py`.
-3. **Exhaustion and the final step.** Recovery of own caps and propagation with own errors removed (both already supplied by step 2 as M1-4 built it), the synchronous `finally`, and the final meter around swarm-scoring.md's finalisation and provisional answer. Files: `_controller/_control.py`, `_ledger.py`, `_member.py`, tests.
+3. **Exhaustion and the final step.** Recovery of own caps and propagation with own errors removed (both in step 2's wrapper), the synchronous `finally`, and the final meter around swarm-scoring.md's finalisation and provisional answer. Files: `_controller/_control.py`, `_ledger.py`, `_member.py`, tests.
 4. **The ledger.** `MemberLedger`, `SwarmLedger`, event counting, reconciliation and claims, written as an `InfoEvent` and a store entry. Files: `_budget.py` (or `_ledger.py` if it grows), `_evidence.py`, tests.
-5. **Splits and the sweep example.** Share nodes and validation, and a task example in the docs showing the three sweeps. Files: `_budget.py`, tests, `README.md`.
+5. **Splits and the sweep example.** Share nodes and validation, and a task example showing the three sweeps, `examples/budget_sweep.py`, which the docs' Budgets page links. Files: `_budget.py`, tests, `examples/budget_sweep.py`, `docs/budget.qmd`.
 
-[swarm-implementation-plan.md](swarm-implementation-plan.md#m1-pull-requests) builds step 4 before step 3 (M1-6, then M1-7), so that step 3's test of the ledger surviving a sample limit lands with it.
+The order and plan ids of these steps are in [swarm-implementation-plan.md](swarm-implementation-plan.md#m1-pull-requests).
 
 In M2 the communication deep dive's bus is closed from step 0 of `stop()` (M2-6), and after M2 verifier calls run under the runtime lever and the final meter; both are small additions to steps 2 and 3, made with that work.
 

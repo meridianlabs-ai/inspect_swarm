@@ -799,16 +799,23 @@ def _limit_from_dict(data: Mapping[str, Any]) -> Limit:
     value = data["value"]
     match kind:
         case "token":
-            return token_limit(value, type=data.get("type", "all"))
+            limit = token_limit(value, type=data.get("type", "all"))
         case "cost":
-            return cost_limit(value)
+            limit = cost_limit(value)
         case "turn":
-            return turn_limit(value)
+            limit = turn_limit(value)
         case "message":
-            return message_limit(value)
+            limit = message_limit(value)
         case "time":
-            return time_limit(value)
+            limit = time_limit(value)
         case _:
             raise ValueError(
                 f"{kind!r} is not a member limit kind; expected one of {', '.join(_LIMIT_KINDS)}."
             )
+    keys = _limit_dict(limit)
+    unknown = [key for key in data if key not in keys]
+    if unknown:
+        raise ValueError(
+            f"A {kind} limit dict takes only the keys {', '.join(map(repr, keys))}, got unknown {', '.join(map(repr, unknown))} in {dict(data)!r}."
+        )
+    return limit

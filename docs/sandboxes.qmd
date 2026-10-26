@@ -1,0 +1,132 @@
+---
+title: Sandboxes
+llms-description: "Shared or per-member sandboxes: members in the sample's sandbox, a sandbox for each member with shared services or a shared volume, sizing, and scoring; read it when members run code or edit files."
+---
+
+## Overview
+
+A swarm has one of two sandbox topologies:
+
+- Shared, the default: every member works in the sample's sandbox, at the same time. Members can share files, and can change files under each other.
+- Per member: each member works in a sandbox environment of its own, and members cannot reach each other's. What they share goes through a channel, such as the [shared-memory board](shared-memory.qmd), or a volume every member's sandbox mounts.
+
+## Shared
+
+With no `sandbox=` on any member, members share the sample's sandbox. The default `filesystem` channel gives them a convention for it: `/shared` for shared files, `/shared/notes.md` for notes, and `/scratch/<member>` for each member's own work ([Channels](channels.qmd#the-filesystem-channel)). The channel does not create these directories, so create them in the sandbox image or with the sample's `files`.
+
+[`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) runs `bash()` members in one container:
+
+```python
+@task
+def shared_sandbox(k: int = 3) -> Task:
+    return Task(
+        dataset=[Sample(input=PROMPT, target="9", files={"/shared/notes.md": ""})],
+        solver=swarm(
+            members=member(react, args={"tools": [bash(timeout=60)]}, count=k),
+            controller=leaderless(stop_on_submission=False),
+        ),
+        scorer=script_works(),
+        sandbox=("docker", "compose.yaml"),
+        token_limit=1_000_000,
+    )
+```
+
+Members' processes run side by side in one container, and nothing stops one member from killing another's process or filling the disk. Keep the task's checks and secrets out of a shared sandbox the members could read.
+
+## Per member
+
+With `sandbox`, a member works in a sandbox environment of its own, which becomes its default, so `sandbox()` in its tools returns it. `{member}` stands for the member's name, so `sandbox="{member}"` gives each copy of a counted member its own:
+
+```python
+from inspect_ai.agent import react
+from inspect_ai.tool import bash
+
+from inspect_swarm import member, swarm
+
+solver = swarm(
+    members=member(
+        react, args={"tools": [bash()]}, name="agent", count=2, sandbox="{member}"
+    ),
+    channels=[],
+)
+```
+
+`agent-1` and `agent-2` run in the environments of those names. With `count=1` the member's name has no number, so `{member}` is `agent`; a task whose member count is a parameter can give each member its own record, `[member(..., name=f"agent-{i}", sandbox=f"agent-{i}") for i in range(1, k + 1)]`, so the names match the environments for every count. The sample's sandbox configuration provides them (for Docker, a compose service for each), and the swarm checks that they exist when it starts:
+
+```yaml
+services:
+  agent-1:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    network_mode: none
+    x-default: true
+  agent-2:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    network_mode: none
+```
+
+- When one member has its own sandbox, every member must have one, and no two can have the same one.
+- Tools that choose a sandbox without a name, such as `bash()`, `text_editor()`, `bash_session()` and the agent bridge, use the member's own.
+- The `filesystem` channel describes a shared sandbox, so it is refused: pass `channels=[]`, `channels=[shared_memory()]` for a board the members share, or `filesystem(shared_volume=True)` for [a shared volume](#a-shared-volume).
+- The preamble tells each member that it works in its own sandbox, which no other member can reach.
+
+### Shared services
+
+A member cannot see the sample's other environments, except those in its `visible_sandboxes`, such as a service every member uses. It reaches those only by name, as `sandbox("comparator")`:
+
+```python
+member(
+    react,
+    args={"tools": [bash()]},
+    name="agent",
+    count=3,
+    sandbox="{member}",
+    visible_sandboxes=["comparator"],
+)
+```
+
+Any member that lists a service can use it, so list only services every member may use. `visible_sandboxes` cannot name another member's sandbox, or `default`, which inside the member is its own sandbox. [`examples/proof_swarm.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py) gives every member a `comparator` that checks answers. The comparator also mounts each member's workspace volume read-only, so it can check what a member left without any member reaching another's files.
+
+### A shared volume
+
+When the members' sandboxes each mount one shared volume, the `filesystem` channel can describe it. Mount the volume at the same path in every member's service, and pass that path as `shared`:
+
+```yaml
+services:
+  agent-1:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    volumes:
+      - shared:/shared
+    x-default: true
+  agent-2:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    volumes:
+      - shared:/shared
+volumes:
+  shared:
+```
+
+```python
+solver = swarm(
+    members=member(react, name="agent", count=2, sandbox="{member}"),
+    channels=[filesystem(shared="/shared", shared_volume=True)],
+)
+```
+
+The preamble then says that `/shared` and the notes file in it are the same in every member's sandbox. The swarm cannot check that the volume is mounted.
+
+## Sizing
+
+The two topologies cost different resources:
+
+- Shared: one sandbox runs every member's tool calls at once. Size it for `k` agents working at the same time, not one: CPU, memory, disk, and process limits. A compose service's `cpus` and `mem_limit` set them for Docker.
+- Per member: each sample starts `k` sandboxes, plus any shared services. A sample of 32 members, each with a 32 GiB container, needs 32 such containers at once.
+
+Inspect's `max_sandboxes` (for Docker, twice the number of CPUs by default) limits how many samples have their sandboxes running at once, not how many containers they hold. With per-member sandboxes, the containers running at once can reach `max_sandboxes × (k + services)`. Lower `max_sandboxes` or `max_samples` to fit the machine or cluster, and keep each member's container no larger than one agent needs.
+
+## Scoring
+
+The task's scorer runs after the swarm, outside every member, where `sandbox()` is the sample's `default`. A scorer that grades the members' work names each member's sandbox, as in `sandbox("agent-1")`. The result record's `sandbox` field says which member used which. See [Scoring](scoring.qmd#per-member-sandboxes).

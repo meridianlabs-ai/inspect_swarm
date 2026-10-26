@@ -1,0 +1,46 @@
+---
+reference: inspect_swarm
+description: Swarms, members, controllers, channels and the budget view.
+---
+
+## Swarms and members
+
+### swarm
+### member
+
+## Controllers
+
+### leaderless
+### swarm_controller
+### Controller
+### SwarmControl
+### MemberHandle
+### MemberEnded
+### SwarmEvent
+### MemberInfo
+### MemberState
+### StopReason
+### FinalName
+
+## Channels
+
+### filesystem
+### shared_memory
+### swarm_tools
+### swarm_on_continue
+### swarm_channel
+### Channel
+### ChannelRun
+### ChannelState
+### WaitingState
+### WaitSpec
+### WaitNews
+### NoticeLine
+### Record
+
+## Budget view
+
+### swarm_resources
+### swarm_budget
+### SwarmBudget
+### BudgetUsage

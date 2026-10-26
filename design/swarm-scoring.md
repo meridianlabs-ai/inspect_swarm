@@ -1,7 +1,5 @@
 # Inspect Swarm: scoring
 
-Status: proposed, 2026-10-08. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
-
 ## Overview
 
 A swarm is scored the way any agent is. It is the task's solver, so the task's own scorers grade what it leaves behind: its answer, or the shared environment its members worked in. This design says what the swarm must leave behind for that to work in M1, and sketches what could be added after M2 for richer comparisons.
@@ -44,7 +42,7 @@ It builds on two designs and uses their shapes:
 
 Where this document says "the runtime", it means swarm-api.md's runtime.
 
-Code references are to inspect_ai `main` at `215cf087` (2026-10-08) and inspect_evals `main` at `a73e6d99` (2026-10-08). Paths are relative to each repository's root. Spikes ran against the inspect_ai this repository's lockfile installs (`0.3.278.dev1+gfccfb298e`), whose registry and scoring code is unchanged from `215cf087`.
+Code references are to inspect_ai `main` at `215cf087` and inspect_evals `main` at `a73e6d99`. Paths are relative to each repository's root. Spikes ran against inspect_ai at `fccfb298e`, whose registry and scoring code is unchanged from `215cf087`.
 
 ## Part 1: M1
 
@@ -80,7 +78,7 @@ In inspect_ai unless noted.
 - `as_solver()` keeps a reference to the agent's state so that it can copy the output to the task state even when an exception ends the agent (`src/inspect_ai/agent/_as_solver.py:65-80`). A plain single agent that hits its limit is therefore scored on its last output.
 - A `LimitExceededError` raised inside the solver is recorded as `EvalSample.limit` only when it reaches the runner (`run.py:2992-3001`).
 
-#### What the merged designs fix for M1
+#### What the other designs fix for M1
 
 - **Runtime and controller.** The runtime owns the following:
   - member tasks;
@@ -94,7 +92,7 @@ In inspect_ai unless noted.
 
 ### Terms
 
-- **Member output.** The member's `AgentState.output` when it stops, however it stops: what Inspect would have scored had that member been the only solver. The runtime's member wrapper keeps a reference to the member's `AgentState`, as `as_solver()` does, so the output survives the member's own limit and the stop procedure. For agents that do not update their state in place, a cancelled member's output is empty. The wrapper does this since M1-5 (#31): it builds the member's `AgentState` itself and calls the agent on it, rather than through `run()`, which would discard the state when the agent raises (`src/inspect_swarm/_member.py`, `_run_member()`). A member with background work keeps the output its agent ended with through its drain ([swarm-background-members.md](swarm-background-members.md#entering-the-owner)).
+- **Member output.** The member's `AgentState.output` when it stops, however it stops: what Inspect would have scored had that member been the only solver. The runtime's member wrapper keeps a reference to the member's `AgentState`, as `as_solver()` does, so the output survives the member's own limit and the stop procedure. For agents that do not update their state in place, a cancelled member's output is empty. The wrapper does this: it builds the member's `AgentState` itself and calls the agent on it, rather than through `run()`, which would discard the state when the agent raises (`src/inspect_swarm/_member.py`, `_run_member()`). A member with background work keeps the output its agent ended with through its drain ([swarm-background-members.md](swarm-background-members.md#entering-the-owner)).
 - **Submission.** A member output from a member that ended with status `submitted`: it finished normally.
   - For `react()` that is a submit; for a bridged agent it is the agent returning.
   - A member that ended with any other status (stopped, its own or the swarm's limit, cancelled, errored) has an output but no submission.
@@ -122,15 +120,15 @@ M1's runtime always selects the final answer with `first` (decision: Ransom, 202
 
   M1's finalisation makes no model call.
 - **The returned `AgentState`** has the sample's input messages followed by one assistant message: the final answer's `output.message`, with `metadata={"inspect_swarm": {"final": {"mode": "first", "member": ...}}}`. Its `output` is the chosen member's `ModelOutput`, unchanged, so the task's scorer sees exactly the object it would have seen had that member run alone. Members' own conversations stay in their spans and timelines.
-- **Shared-artifact tasks.** The task's scorer reads the drained environment. The output still carries the first submission, because some scorers read the output text and fall back to the environment (Frontier-CS, [below](#shared-artifact-scorers-in-inspect_evals)). M1 claims nothing about which member produced the environment, so it needs no declaration of what kind of result the task has. Members still working change what is scored, so these tasks pass `leaderless(stop_on_submission=False)` to let every member run to its end.
+- **Shared-artifact tasks.** The task's scorer reads the drained environment. The output still carries the first submission, because some scorers read the output text and fall back to the environment (Frontier-CS, [below](#shared-artifact-scorers-in-inspect_evals)). M1 claims nothing about which member produced the environment, so it needs no declaration of what kind of result the task has. Members still working change what is scored, so these tasks pass `leaderless(stop_on_submission=False)` to let every member run to its end ([Scoring what members leave](https://meridianlabs-ai.github.io/inspect_swarm/scoring.html#scoring-what-members-leave)).
 
 ### `last` and the controller's choice (M2)
 
-M2 adds two ways to choose the answer beside `first` (#67; decision: Ransom, 2026-10-22). They are for a team whose members all keep working, `leaderless(stop_on_submission=False)`, where the first submission need not be the team's answer. Before them, what the other members did after the first submission cost budget and could never reach an answer scorer.
+M2 adds two ways to choose the answer beside `first` (decision: Ransom, 2026-10-22). They are for a team whose members all keep working, `leaderless(stop_on_submission=False)`, where the first submission need not be the team's answer. Without them, what the other members do after the first submission costs budget and can never reach an answer scorer.
 
 - **`final=` in M2.** `leaderless(stop_on_submission=True, *, final=None)` and `Controller(run, *, final=None, check=None)` take `final: FinalName | None`, where M2's `FinalName` is `Literal["first", "last"]`. `None` means the default chain, which is `["first"]` for every M2 swarm, since none has a result contract. Any other value raises `ValueError` when the controller is built. Part 2 widens `FinalName` and accepts a chain ([The final-answer chain](#the-final-answer-chain)). Both are additive, so a swarm configured in M2 selects the same answer after Part 2.
 - **`last`** is the submission with the latest swarm time, then roster order: a tie goes to the member listed first, as for `first`. Only submissions qualify.
-- **`last` needs the members to run on.** With `stop_on_submission=True` the swarm stops at the first submission, so `last` would choose it, or a submission a member happened to make during the grace period. Neither is a team's last word, so `leaderless(final="last")` raises `ValueError` unless `stop_on_submission=False`. This is the refusal [What the merged designs fix](#what-the-merged-designs-fix-for-part-2) expects for `verify` and `vote`.
+- **`last` needs the members to run on.** With `stop_on_submission=True` the swarm stops at the first submission, so `last` would choose it, or a submission a member happened to make during the grace period. Neither is a team's last word, so `leaderless(final="last")` raises `ValueError` unless `stop_on_submission=False`. This is the refusal [What the other designs fix](#what-the-other-designs-fix-for-part-2) expects for `verify` and `vote`.
 - **The controller's choice.** `SwarmControl.choose_answer(member, reason=None)` makes that member's submission the answer, in place of the controller's `final` rule.
   - Controllers see no member text, so a controller chooses from what its handles show: names, roles, statuses, the order of events, and after Part 2 verdicts.
   - The member must have ended with a submission: `RuntimeError` otherwise, and `KeyError` for an unknown name. A controller chooses once; a second call raises `RuntimeError`. Both can be relaxed later without breaking a controller that works today.
@@ -152,6 +150,7 @@ class MemberResult(BaseModel):
     status: str | None                # the limits deep dive's status once ended, else None
     submitted: bool                   # status == "submitted"
     time: float | None                # swarm time when the member ended, after any background drain (M2-5)
+    sandbox: str | None = None        # M2: the member's own sandbox by name; None when it shares the sample's
     gate_checks: int = 0              # M2: its own submissions checked in its loop by the task's first scorer
     gate_passes: int = 0              # M2: those checks that passed under the default value_to_float()
     first_pass_time: float | None = None  # M2: swarm time of its first passing check
@@ -173,13 +172,13 @@ class SwarmResultRecord(BaseModel):
   - Members the controller never started stay `pending` in the final record, which is how the evidence records them as not started.
   - The gate fields are filled in when the member ends, so a member that has not ended has 0, 0 and `None`. Records written before M2 load with those defaults. A pass assumes `react()`'s default `score_value` converter, `value_to_float()`, so a member with its own converter can record passes that differ from its own gate (decision: Ransom, 2026-10-20).
 - **Why the store.** It is in the store, not only in events, because re-scoring rebuilds `TaskState.store` and nothing else from the run (`src/inspect_ai/_eval/score.py:461-475`). Part 2's scorers read it from there.
-- **Owned by the runtime, readable by member code.** Only the runtime writes `inspect_swarm:result`; task code (tools, member builders, controllers, scorers, Sentinel protocols) must not write it. Every member's Python code shares the sample's one store, so it can read the record while the swarm runs. Models cannot reach the store themselves, and built-in tools read only their own namespaces, but a tool written to read this key gives the members that call it a view of each other's results: a channel between members outside the bus, with none of its fencing or evidence. In M1 that view is each peer's state, status and time, not its output; Part 2's record adds outputs ([What the record adds](#what-the-record-adds)). The user docs say so (decision: Ransom, 2026-10-14).
+- **Owned by the runtime, readable by member code.** Only the runtime writes `inspect_swarm:result`; task code (tools, member builders, controllers, scorers, Sentinel protocols) must not write it. Every member's Python code shares the sample's one store, so it can read the record while the swarm runs. Models cannot reach the store themselves, and built-in tools read only their own namespaces, but a tool written to read this key gives the members that call it a view of each other's results: a channel between members outside the bus, with none of its fencing or evidence. In M1 that view is each peer's state, status and time, not its output; Part 2's record adds outputs ([What the record adds](#what-the-record-adds)). The [user docs](https://meridianlabs-ai.github.io/inspect_swarm/scoring.html#the-record-belongs-to-the-swarm) say so (decision: Ransom, 2026-10-14).
 - **Evidence events.** Each member's end and the final selection also produce an evidence `InfoEvent` with `source="inspect_swarm"` and the payload shape swarm-communication.md uses for its own evidence:
   - `version: 1`, `type: "result"`, and `kind` one of `member_result` or `final`;
   - the common fields `member` and `span_id` (the swarm's span for `final`).
 
   Each event is written inside the member's span or the swarm's span. The events put the result in the transcript at the time it happened; the store record is what scorers read. The payload format is the Observer's ([Observer](swarm.md#observer-evidence-accounting-and-metrics)). This design adds the `result` type, as the communication design adds `comm`.
-- **No outputs in M1.** Nothing in M1 reads a member's output from the record. `first` uses `submitted` and `time`, and the chosen member's output reaches the returned `AgentState`, `TaskState.output` and the sample's logged output on its own; the runtime holds the members' outputs in memory. The decision was also for log size: Inspect copies each store change into every span open at the time, so writing whole outputs as members end would grow the log roughly with the square of the member count (meridianlabs-ai/inspect_ai#589). The store-event switch removes that reason: spans inside the swarm log no `StoreEvent`s, so an output written there is logged in the swarm's span's net change and the enclosing spans', a fixed number of copies however many members run (decision: Ransom, 2026-10-19; [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)). M1 still writes no outputs, because nothing reads them; Part 2 can add them ([What the record adds](#what-the-record-adds)) (decision: Ransom, 2026-10-19). Evidence events carry the member name and status, not the text.
+- **No outputs in M1.** Nothing in M1 reads a member's output from the record. `first` uses `submitted` and `time`, and the chosen member's output reaches the returned `AgentState`, `TaskState.output` and the sample's logged output on its own; the runtime holds the members' outputs in memory. M1 writes no outputs, because nothing reads them; Part 2 can add them ([What the record adds](#what-the-record-adds)) (decision: Ransom, 2026-10-19). Log size is no reason against them: spans inside the swarm log no `StoreEvent`s, so an output written there is logged in the swarm's span's net change and the enclosing spans', a fixed number of copies however many members run ([swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)). Evidence events carry the member name and status, not the text.
 - **Additive later.** Part 2 adds optional fields to these models ([What the record adds](#what-the-record-adds)). `version` stays 1, because no existing field changes meaning, and an M1 record reads as the record of a swarm without a result contract.
 
 ### Comparisons in M1
@@ -204,7 +203,7 @@ swarm-api.md's surface includes parts that exist only for Part 2. M1 does not bu
 - `VerdictSummary`, `MemberHandle.verdict` and `MemberEnded.verdict`;
 - the `member_scores` case of swarm-api.md's `tests/test_scoring_loop.py`.
 
-Each comes back later in an additive form: a keyword parameter whose default keeps M1's behaviour, or a field that defaults to `None`. A user controller written for M1 keeps working. swarm-api.md marks the affected parts as after M2: the signatures, validation rules, examples, tests and plan step ([Compatibility](#compatibility-and-migration)).
+Each comes back later in an additive form: a keyword parameter whose default keeps M1's behaviour, or a field that defaults to `None`. A user controller written for M1 keeps working.
 
 ### Testing in M1
 
@@ -229,7 +228,7 @@ All tests use mockllm with scripted outputs, need no network or Docker, and run 
 
 ### Implementation plan for M1
 
-One PR, after swarm-api.md's steps 2 to 4 (registry plumbing, `Member` and the `swarm()` signature, the controller surface in the runtime) and the limits deep dive's member wrapper and stop procedure:
+After swarm-api.md's steps 2 to 4 (registry plumbing, `Member` and the `swarm()` signature, the controller surface in the runtime) and the limits deep dive's member wrapper and stop procedure:
 
 1. **The record and `first`.**
    - `src/inspect_swarm/_record.py`: `MemberResult`, `FinalRecord`, `SwarmResultRecord`.
@@ -329,7 +328,7 @@ In inspect_ai unless noted, in addition to [what M1 relies on](#current-behaviou
   - Extraction returns the last fenced block's contents (`scorer.py:38-69`), so a non-empty completion holding an empty fenced block also triggers the recovery.
   - The unchanged scorer therefore reads the answer from the environment in some cases: it is not answer-scored in this design's sense.
 
-#### What the merged designs fix for Part 2
+#### What the other designs fix for Part 2
 
 - **Where the chain is passed.** `final=` is a controller parameter: `leaderless(final=..., stop_on_verified=..., stop_on_submission=...)`. `Controller(run, final=...)` holds it, and `final=None` means this design's default chain for the task's `result` ([Controllers](swarm-api.md#controllers)). `swarm(result=)` stays on `swarm()`.
   - M1's `stop_on_submission` (on by default) is meaningful only with the `first` chain: with `verify` or `vote` a later member can still change the answer. How it combines with them, and its default once the default chain is not `first` alone, is for Part 2 to settle; refusing the combination is the likely answer. M2 refuses it with `last` ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)).
@@ -338,7 +337,7 @@ In inspect_ai unless noted, in addition to [what M1 relies on](#current-behaviou
 - **What controllers see of a verdict.** `VerdictSummary(passed, value)`, on `MemberHandle.verdict` and `MemberEnded.verdict`. A member counts as running until the runtime has taken its submission's verdict and queued its `MemberEnded`. The explanation stays in the result record.
 - **Logging.** `swarm(result=)` is logged as the type name `"ResultSpec"`. A raw-solver replay (`--solver inspect_swarm/swarm -S ...`) passes that string back, and `swarm()` raises `TypeError` for it. The supported routes are the task, or a registered swarm builder ([Logging and replay](swarm-api.md#logging-and-replay)).
 - **Task identity.** Scorers are not hashed into `task_identifier()`, and a member's in-loop scoring makes the task's scorer part of the trajectory. A scorer ablation is therefore an arm of its own, chosen by a task argument ([Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
-- **Fencing (M2).** Peer text is fenced in tagged envelopes whose tag markers are removed from payloads, repeating until none remain ([Fencing](swarm-communication.md#fencing)).
+- **Fencing (M2).** Peer text is fenced in tagged envelopes, and a payload holding a fence marker is refused, not cleaned ([Fencing](swarm-communication.md#fencing)).
 
 ### The result contract
 
@@ -401,7 +400,7 @@ A swarm without `result=`, which includes every M1 swarm, still runs:
 
 Omitting the contract never produces a per-member claim.
 
-`ResultSpec` stays a frozen dataclass. It holds the task's callables, so no serialisable form would rebuild it, and swarm-api.md already routes it through the task or a registered swarm builder ([What the merged designs fix](#what-the-merged-designs-fix-for-part-2)).
+`ResultSpec` stays a frozen dataclass. It holds the task's callables, so no serialisable form would rebuild it, and swarm-api.md already routes it through the task or a registered swarm builder ([What the other designs fix](#what-the-other-designs-fix-for-part-2)).
 
 ### Opting in
 
@@ -482,7 +481,7 @@ class SwarmResultRecord(BaseModel):   # adds
 
 ### The final-answer chain
 
-The controller's `final=` parameter (`leaderless(final=...)`) takes one mode or a sequence of modes. A sequence is a chain: each mode is tried in order on the submissions, and the first that produces an answer wins. The runtime applies the controller's chain; the controller never sees member text ([What the merged designs fix](#what-the-merged-designs-fix-for-part-2)). A controller's choice with `SwarmControl.choose_answer()` (M2) goes before the chain ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)).
+The controller's `final=` parameter (`leaderless(final=...)`) takes one mode or a sequence of modes. A sequence is a chain: each mode is tried in order on the submissions, and the first that produces an answer wins. The runtime applies the controller's chain; the controller never sees member text ([What the other designs fix](#what-the-other-designs-fix-for-part-2)). A controller's choice with `SwarmControl.choose_answer()` (M2) goes before the chain ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)).
 
 ```python
 # src/inspect_swarm/_final.py
@@ -517,7 +516,7 @@ def final_chain(final: FinalSpec | None, result: ResultSpec | None) -> list[Fina
 | `vote` | `result.answer_key` | The earliest submission in the plurality group of answer keys; one vote per member; `None` keys do not vote. A tied plurality goes to the group whose first submission is earliest, and `tie` is recorded | no submission has a key |
 | `first` | nothing | As in M1 ([The final answer](#the-final-answer-first)) | there are no submissions |
 | `last` | nothing | As in M2 ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)) | there are no submissions |
-| `synthesize` | `kind="answer"` | One extra model call over the submissions ([below](#synthesize)) | there are no submissions, or the call fails recoverably |
+| `synthesize` | `kind="answer"` | One extra model call over the submissions ([below](#synthesize)) | there are no submissions, every submission holds a fence marker, or the call fails recoverably |
 | `reporter` | a coordinator topology | Reserved; no built-in controller accepts it yet | |
 
 **The default.** With the controller's `final=None` (the default of `leaderless()`), the chain is built from what the task supplies:
@@ -560,10 +559,10 @@ So a task with both gets `["verify", "vote", "first"]`, and one with neither get
   - an instruction to give one final answer in the format the task asks for. `prompt` replaces that instruction, not the header or the fencing.
 
   The fencing rules:
-  - **Marker removal** follows the communication design's rule. Every case-insensitive occurrence of `<member_submission` and `</member_submission` is removed from the payload, repeating until none remain, so nested fragments cannot reassemble a tag.
+  - **Marker refusal** follows the communication design's rule. `<member_submission` joins the fence tags in `src/inspect_swarm/_fence.py`, and a submission holding any case-insensitive fence marker is left out of the prompt whole; nothing is removed. The other submissions are unaffected, so a member can only leave itself out (decision: Ransom, 2026-10-23). When every submission is left out, `synthesize` makes no call and produces nothing: the chain moves to its next mode and `synthesize_error` records why, as for a recoverable failure.
   - **Attribute values** are roster names and sequence numbers. Roster names come from the eval author, but no name grammar applies unless the messages channel is enabled, so the fence escapes them as XML attribute values.
   - **Text only.** The payload is the submission's completion. Members' tool calls, transcripts and messages are never included.
-  - **One fencing implementation.** `synthesize` reuses the bus's fencing code with its own tag, so the two cannot drift. That code lands in `src/inspect_swarm/_fence.py` with M2's shared-memory channel (M2-8 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m2-pull-requests)).
+  - **One fencing implementation.** `synthesize` reuses the bus's fencing code with its own tag, so the two cannot drift. That code is `src/inspect_swarm/_fence.py`, which M2's shared-memory channel uses (M2-8 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m2-pull-requests)).
 - **Shared notes.** The filesystem notes file is not read, because its contents are unfenced and member-written in any layout. If the notes channel is built, its entries are fenced the same way.
 - **Accounting.** The call runs in the swarm's span after the drain, inside the final-answer reserve, so the ledger counts it as finalisation.
 - **Failures.** Before the call, the provisional answer (computed without `synthesize`) is already on the `AgentState`. Then:
@@ -680,7 +679,7 @@ team@k follows Test-Time Communication's usage: "a game counts as solved if any 
 
 All of them are compared at realized cost, with each arm's cap and realized spend reported (swarm.md, [Eval questions](swarm.md#eval-questions-and-the-experimental-design-they-imply)).
 
-Two things the merged designs add to what these quantities mean:
+Two things the other designs add to what these quantities mean:
 
 - **Conditional controllers.** A controller may leave members `pending`. swarm-api.md's `escalate`, for example, starts its workers only when the first answer does not verify.
   - k stays the roster size, the arm's configuration.
@@ -846,9 +845,10 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
   - Its exception fails the sample. Neither scoring nor re-scoring calls it.
   - Its verdict is on the member's `MemberEnded` and handle as a `VerdictSummary` before the controller sees the event, and no event or handle field contains the explanation.
 - **`synthesize`.**
-  - The prompt holds each submission in a `<member_submission>` envelope, with nested marker fragments removed, a roster name containing `"` and `<` escaped, and no tool calls or messages.
+  - The prompt holds each submission in a `<member_submission>` envelope; a submission holding a fence marker, in any letter case, is left out and the others are kept; a roster name containing `"` and `<` escaped, and no tool calls or messages.
   - The shared fence code gives the same results on the communication design's `<peer_message>` cases.
   - A provider error, a refusal and an empty output fall through the chain with `synthesize_error` set.
+  - When every submission holds a fence marker, no call is made and the chain falls through with `synthesize_error` set.
   - A sample-level `LimitExceededError`, `TerminateSampleError` and cancellation propagate, the sample records its limit, and the provisional answer is the output.
   - An `ExceptionGroup` holding a sample limit (from a model API that uses a task group), and a mixed group of a limit and an ordinary error, propagate whole, on both backends.
 - **Record additions.** Keys, verdicts and chain fields are written as specified. An M1 record reads with them absent.
@@ -896,7 +896,7 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
 
 ### Implementation plan after M2
 
-Optional, after M2, in any order with swarm.md's menu, subject to the dependencies at the top of this part. One PR per step:
+Optional, after M2, in any order with swarm.md's menu, subject to the dependencies at the top of this part:
 
 1. **Result contract and record additions.**
    - `src/inspect_swarm/_result.py`: `ResultSpec`, `answer_result`, `artifact_result`, `Verdict`, `Verifier`, `MemberArtifacts`.
@@ -926,7 +926,7 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
 
 **Keep the chain, the result contract and per-member scoring in M1.** Existing scorers already work with the swarm as the agent, and nothing M1 keeps needs a verifier, an answer key or per-member scores. After M2 instead (decision: Ransom, 2026-10-08).
 
-**Keep `final=` in M1, accepting only `"first"`.** This would match swarm-api.md's signature from the start. But with one valid value, the parameter configures nothing. Adding it later with a default that reproduces `first` changes no M1 swarm's answer. Not chosen; M2 added it once it had a second value, `last`.
+**Keep `final=` in M1, accepting only `"first"`.** This would match swarm-api.md's signature from the start. But with one valid value, the parameter configures nothing. Adding it later with a default that reproduces `first` changes no M1 swarm's answer. Not chosen for M1; M2 adds it with a second value, `last`.
 
 **Pass `ResultSpec` to a registered `member_scores` scorer.** The obvious shape. But Inspect logs a plain dataclass argument as its type name, so default `inspect score` rebuilds the scorer with a string in place of the spec. Making the spec a registered object would need a new registry type in inspect_ai. A task-owned no-argument factory uses existing machinery and keeps the spec's callables in the task's code. Chosen.
 
@@ -972,7 +972,7 @@ best@k is a closed form on values alone, so it would be a reducer (an inspect_ai
 
 ## Compatibility and migration
 
-- **inspect_swarm** has no released API; everything here is new. Python 3.11+ as decided.
+- **inspect_swarm** is experimental throughout ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6); everything here is new. Python 3.11+ as decided.
 - **Eval logs.** Only existing structures are used: a store key, `InfoEvent`s, a message metadata key, and from Part 2 scores with dict values and metadata. Old readers and the viewer show them generically. The store record and the `InfoEvent` payloads carry `version: 1`. Part 2's record fields are optional additions under the same version.
 - **Logged parameters across versions.** When Part 2 adds `result=` to `swarm()` and `stop_on_verified` to `leaderless()`, logged plan params gain those keys, as they gained `final` in M2. A run's `task_identifier()` can then differ between inspect_swarm versions for the same task, as it can for any solver that gains a parameter. Arms in one eval set run one installed inspect_swarm, so they are unaffected.
 - **Names** (`member_scores`, `MEMBER_METRICS`, `best_member`, `mean_member`, `baseline`) become an interface the analysis and users' notebooks depend on once released; changing them later is a breaking change. The member scorer's own name is the task's.
@@ -980,7 +980,7 @@ best@k is a closed form on values alone, so it would be a reducer (an inspect_ai
   - M1 uses the store, `transcript().info` and the member wrapper's reference to its `AgentState`.
   - Part 2 adds public scorer and reducer APIs and `registry_value()` for the `Synthesize` model field. If the cost boundary is built, it also uses `sample_model_usage()` and `sample_role_usage()`, which are private and which inspect_swarm may use.
 - **Tasks.** In M1, tasks need no change: their scorers score the swarm's output. From Part 2, tasks opt in. A task without `result=` makes no per-member claims. With `final=None` and no controller choice, it uses `first`; explicit `first` and `last` rules and a controller's choice keep their M2 meaning. A task whose scorer can read the answer from the environment must declare `kind="artifact"` or supply an answer-only adapter.
-- **swarm-api.md.** Its parts that exist only for Part 2 are marked after M2: `result=`, `leaderless()`'s `stop_on_verified` and the chain form of `final=` on `leaderless()` and `Controller`, and the verdict fields; their validation rules; the verifier-based examples and tests; and the `member_scores` case of `tests/test_scoring_loop.py`. This design defines what swarm-api.md leaves to it: the pydantic `FinalMode` types with their discriminator and model serialiser, and how scoring treats members a controller never started.
+- **swarm-api.md.** Its parts that exist only for Part 2 are the ones [What M1 leaves out of the merged API](#what-m1-leaves-out-of-the-merged-api) lists, with their validation rules, examples and tests. This design defines what swarm-api.md leaves to it: the pydantic `FinalMode` types with their discriminator and model serialiser, and how scoring treats members a controller never started.
 
 ## Security
 
@@ -993,7 +993,7 @@ Untrusted input reaching the new code:
     - `answer_key`, task code that must accept any text and return `None` rather than raise on unparseable input;
     - the verifier, which may execute the answer (code) and must do so only inside the sandbox;
     - the member scorer, as they would from a single agent, and only after the solve (`completed=True`);
-    - `synthesize`'s prompt, in the communication design's envelope with harness-written attributes and markers stripped, in a separate call outside every member's context. That is weaker than tool output, so `synthesize` is never a default.
+    - `synthesize`'s prompt, in the communication design's envelope with harness-written attributes and any submission holding a fence marker left out ([`synthesize`](#synthesize)), in a separate call outside every member's context. That is weaker than tool output, so `synthesize` is never a default.
 - **Answer attribution.** A member's output must not be credited with the team's environment. The answer-scored contract forbids scorers that read the answer from the environment, and the empty-output backstop keeps the commonest case from reaching the scorer at all.
 - **The target.** Neither the verifier, nor `answer_key`, nor any member tool is given the target. Agents that consult the task's scorer in the loop are flagged by the analysis.
 - **Controllers.** A controller sees no member text (swarm-api.md). After M2 it sees a verdict only as `VerdictSummary(passed, value)`. The verifier's explanation may quote the answer or a judge model, so it stays in the record, and a controller cannot relay member text through a verdict.
@@ -1018,7 +1018,7 @@ Untrusted input reaching the new code:
 
 ## Not this design
 
-- **A best-of-k reducer in inspect_ai.** It would generalise `pass_at(k)` to graded scores and belong beside it, if wanted. inspect_swarm does not ship one (decision: Ransom, 2026-10-20).
+- **A best-of-k reducer in inspect_ai.** It would generalise `pass_at(k)` to graded scores and belong beside it, if wanted; inspect_swarm does not ship one ([best@k on graded scores](#bestk-on-graded-scores)).
 - **Per-scorer epoch reducers** (inspect_ai). Today every reducer applies to every scorer and key, which fills logs with meaningless cells such as `pass_at` of `mean_member`.
 - **A no-recovery option for Frontier-CS's scorer** (inspect_evals), so swarm tasks need no adapter.
 - **Re-scoring with a sandbox.** Inspect cannot re-score sandbox scorers; snapshots of the final environment would be needed.

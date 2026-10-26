@@ -1,0 +1,37 @@
+# A container for each member of proof_swarm.py, and the comparator they share,
+# which mounts each member's /workspace read-only to check its answer.
+services:
+  agent-1:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    working_dir: /workspace
+    volumes:
+      - workspace-1:/workspace
+    network_mode: none
+    x-default: true
+  agent-2:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    working_dir: /workspace
+    volumes:
+      - workspace-2:/workspace
+    network_mode: none
+  agent-3:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    working_dir: /workspace
+    volumes:
+      - workspace-3:/workspace
+    network_mode: none
+  comparator:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    volumes:
+      - workspace-1:/answers/agent-1:ro
+      - workspace-2:/answers/agent-2:ro
+      - workspace-3:/answers/agent-3:ro
+    network_mode: none
+volumes:
+  workspace-1:
+  workspace-2:
+  workspace-3:
