@@ -333,7 +333,7 @@ The runtime adds a fixed paragraph to each member's preamble (swarm-api.md, `sta
 
 With `peers="read"`, the second sentence says other members can read it but not change it. Members are not told what is not isolated; the eval author decides whether a prompt mentions it, because telling them is itself a treatment.
 
-The paragraph names the member's user and home after its assigned name, so a member with `choose_name=True` must not receive it unchanged: per-member users either refuse such members or describe their user and home without the name ([swarm-chosen-names.md Compatibility and migration](swarm-chosen-names.md#compatibility-and-migration)).
+Per-member users are named after the members' assigned names: the user `swarm-<member>` and, by default, its home `/scratch/<member>`, which is also the member's `$HOME` and starting directory. A member can read them with `id` or `pwd`, whatever its preamble says, so per-member users refuse a roster in which any member has `choose_name=True`, before any user or home is set up ([swarm-chosen-names.md Compatibility and migration](swarm-chosen-names.md#compatibility-and-migration)).
 
 ### Processes a member leaves running
 
