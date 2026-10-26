@@ -219,7 +219,7 @@ async def test_a_notice_names_new_files_by_id_and_reaches_the_next_model_call(
     assert all(_notices(i) == [] for i in turns.inputs["w-1"])
     [notice] = _notices(inputs[1])
     assert notice.text == (
-        '[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
+        '[Automatic swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
     )
     assert notice.source is None
     files = [{"file": "f-1", "version": 1, "record": "w-1"}]
@@ -288,12 +288,12 @@ async def test_notices_cap_listed_ids_and_report_a_deletion_once(
 
     texts = [[n.text for n in _notices(i)] for i in turns.inputs["w-2"]]
     first = (
-        "[Swarm notice] 11 shared memory files changed since you last viewed them "
+        "[Automatic swarm notice] 11 shared memory files changed since you last viewed them "
         "(f-1 new, f-2 new, f-3 new, f-4 new, f-5 new, f-6 new, f-7 new, f-8 new, f-9 new, f-10 new, and 1 more; by w-1). "
         'View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
     )
     second = (
-        "[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 deleted; by w-1). "
+        "[Automatic swarm notice] 1 shared memory file changed since you last viewed it (f-1 deleted; by w-1). "
         'View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
     )
     # no notice after the view, which changed nothing, nor after the deletion's notice
@@ -644,7 +644,7 @@ async def test_a_subagents_deletion_is_news_to_its_parent_once(
     notices = [_notices(i) for i in turns.inputs["w"]]
     assert [len(n) for n in notices] == expected
     assert notices[-1][0].text == (
-        "[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 deleted; by w). "
+        "[Automatic swarm notice] 1 shared memory file changed since you last viewed it (f-1 deleted; by w). "
         'View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
     )
     [notified] = _comm(log, "notified")
@@ -706,7 +706,11 @@ class _ListState(_BoardState):
         if self.covered == len(self.records):
             return []
         self.covered = len(self.records)
-        return [NoticeLine("[Swarm notice] New records.", {"records": self.records})]
+        return [
+            NoticeLine(
+                "[Automatic swarm notice] New records.", {"records": self.records}
+            )
+        ]
 
 
 class _ListBoard(_Board):

@@ -427,7 +427,7 @@ class _SharedMemoryState:
         writers = _writers(files, self._top_loop(member))
         return [
             NoticeLine(
-                f"[Swarm notice] {_files_changed(len(files), 'shared memory ')} ({labels}; by {writers}). "
+                f"[Automatic swarm notice] {_files_changed(len(files), 'shared memory ')} ({labels}; by {writers}). "
                 f'View one with shared_memory(command="view", path="{files[0].id}"), or list them with path="{ROOT}".',
                 {
                     "files": [

@@ -371,7 +371,7 @@ A send to a member that is not running is rejected at step 0 (and again at the c
 In M2 the notice is the only swarm text that enters a member's context outside a tool result (after M2, an `inject` member also gets injected messages, [Content injection](#content-injection)). It is metadata-only:
 
 ```
-[Swarm notice] 3 unread messages (from worker-2, worker-4). Call read_messages() to read them.
+[Automatic swarm notice] 3 unread messages (from worker-2, worker-4). Call read_messages() to read them.
 ```
 
 - **Template.** Fixed text; its only variables are counts, channel kinds and roster names. Later channels add fixed-template lines with swarm-assigned ids (`1 task assigned to you: t-12`). It never contains a payload, subject, title, or any member-chosen name.
@@ -605,7 +605,7 @@ M2 notices each record once. With `remind=N`:
 - At each turn boundary of a `notify` member's bound loop (a call of `swarm_on_continue()` whose result is not `False`), new unread records get M2's notice as before. Otherwise, if the member has unread records an earlier notice covered and at least N boundaries have passed since its last notice, it gets a **reminder** listing everything unread:
 
   ```
-  [Swarm notice] Reminder: 3 unread messages (from worker-2, worker-4). Call read_messages() to read them.
+  [Automatic swarm notice] Reminder: 3 unread messages (from worker-2, worker-4). Call read_messages() to read them.
   ```
 
 - Fixed template, with the notice's metadata plus `"reminder": true`. Turns without an `on_continue` call (interrupted, overflow recovery) do not count as boundaries, so `remind=3` means at most one notice every three continued turns. Reminders stop when nothing is unread.
@@ -704,7 +704,7 @@ inspect_ai tests: a steer interrupts a tool and a generate and resumes with the 
 The sender's result names each recipient's outcome: `Sent m-14 to worker-2 (interrupted), worker-3 (will see it at its next turn).`
 
 **The boundary message** is built at post time from all the recipient's unread records, as the recipient's mode would build it at a boundary, with a fixed first line naming the interruption and the urgent record first:
-- `notify`: `[Swarm notice] Your turn was interrupted by an urgent message from worker-2. 3 unread messages (from worker-2, worker-4). Call read_messages() to read them.`, with the notice's metadata and `"urgent": true`.
+- `notify`: `[Automatic swarm notice] Your turn was interrupted by an urgent message from worker-2. 3 unread messages (from worker-2, worker-4). Call read_messages() to read them.`, with the notice's metadata and `"urgent": true`.
 - `inject`: the injected message, with that first line, the urgent records first and then the others oldest first, under the read budget.
 
 The records are marked covered or read at post time, so neither a concurrent boundary nor a read shows them twice. The `notified` and `read` evidence is written when the item is confirmed delivered, at the loop's next `started` after the drain (above). Both observers run synchronously in the member's task, so the event lands in the member's span. If the loop ends before then, for example while an operator's redirect is still awaited, no event claims a notice or read that never reached the model.
@@ -732,7 +732,7 @@ With `nested=True`, a member's running subagent learns that its member has unrea
 - **Delivery.** At step 4, for a recipient with nested loops registered this turn, the bus posts a `Steer`, never an interrupt, to each nested loop:
 
   ```
-  [Swarm notice] worker-1 has 2 unread messages (from worker-2). Only worker-1's main loop can read them; it sees them when you return.
+  [Automatic swarm notice] worker-1 has 2 unread messages (from worker-2). Only worker-1's main loop can read them; it sees them when you return.
   ```
 
   The message is a fixed template with metadata `type: "nested_notice"`, posted for new records to each nested loop with no undelivered notice of its own (one pending `Steer` per loop, as above); records that arrive meanwhile are counted in the next one. The nested `react()` renders it at its next `before_turn()`.
