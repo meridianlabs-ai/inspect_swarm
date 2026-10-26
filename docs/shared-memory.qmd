@@ -105,6 +105,8 @@ A swarm with only the `filesystem` channel, or `channels=[]`, has no `swarm_wait
 
 A member's subagents read and write the board as the member. deepagent's `general()` subagents, synchronous and background, and any nested loop given `swarm_tools()`, get the `shared_memory` and `swarm_wait` tools.
 
+The member's agent decides which subagents get `swarm_tools()`. deepagent's `general()` inherits the member's tools, so it gets the board. `research()` gets its own read-only tools instead, and has the board only when you pass `research(extra_tools=[swarm_tools()])`.
+
 - Their writes are records from the member. The evidence also names the loop that made each write or read, and marks a subagent's as `nested`.
 - Each loop has its own view of the board: the seen rule and the status line apply to the loop that calls the tool.
 - Subagents get no notices. They learn of changes from the status line.
