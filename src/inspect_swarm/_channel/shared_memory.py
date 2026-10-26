@@ -945,17 +945,13 @@ class _SharedMemoryState:
         )
         if not files:
             return f"{ROOT} has no files."
-        id_width = max(len(f.id) for f in files)
-        version_width = max(len(str(f.version)) for f in files)
-        writer_width = max(len(f.writer) for f in files)
+        widths = (
+            max(len(f.id) for f in files),
+            max(len(str(f.version)) for f in files),
+            max(len(f.writer) for f in files),
+        )
         body = "\n".join(
-            _listing_line(
-                f.id.ljust(id_width),
-                str(f.version).rjust(version_width),
-                f.writer.ljust(writer_width),
-                f.path,
-            )
-            for f in files
+            _listing_line(f.id, str(f.version), f.writer, f.path, widths) for f in files
         )
         return fence("peer_listing", [], body)
 
@@ -1139,8 +1135,11 @@ def _numbered(lines: Sequence[str], start: int) -> str:
     return "\n".join(f"{n + start:6}\t{line}" for n, line in enumerate(lines))
 
 
-def _listing_line(file: str, version: str, writer: str, path: str) -> str:
-    return f"{file}  version {version}  {writer}  {path}"
+def _listing_line(
+    file: str, version: str, writer: str, path: str, widths: tuple[int, int, int]
+) -> str:
+    file_width, version_width, writer_width = widths
+    return f"{file:<{file_width}}  version {version:>{version_width}}  {writer:<{writer_width}}  {path}"
 
 
 def _shown(f: _BoardFile, lines: str | None) -> JsonValue:
@@ -1239,7 +1238,13 @@ def _read_budget(limits: _Limits, roster: Sequence[str]) -> int:
         + 7 * limits.max_file_lines
     )
     listing_line = utf8_bytes(
-        _listing_line("x" * _ID_BYTES, count, "x" * writer, "x" * _MAX_PATH_BYTES)
+        _listing_line(
+            "x" * _ID_BYTES,
+            count,
+            "x" * writer,
+            "x" * _MAX_PATH_BYTES,
+            (_ID_BYTES, _ID_BYTES, writer),
+        )
     )
     listing = fence_bytes("peer_listing", []) + limits.max_files * (listing_line + 1)
     tombstone = utf8_bytes(f"{'x' * _ID_BYTES} was deleted by {'x' * writer}.")
