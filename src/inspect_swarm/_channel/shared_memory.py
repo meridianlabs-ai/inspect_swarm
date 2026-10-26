@@ -945,8 +945,17 @@ class _SharedMemoryState:
         )
         if not files:
             return f"{ROOT} has no files."
+        id_width = max(len(f.id) for f in files)
+        version_width = max(len(str(f.version)) for f in files)
+        writer_width = max(len(f.writer) for f in files)
         body = "\n".join(
-            _listing_line(f.id, str(f.version), f.writer, f.path) for f in files
+            _listing_line(
+                f.id.ljust(id_width),
+                str(f.version).rjust(version_width),
+                f.writer.ljust(writer_width),
+                f.path,
+            )
+            for f in files
         )
         return fence("peer_listing", [], body)
 

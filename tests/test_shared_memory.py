@@ -259,9 +259,27 @@ async def test_a_listing_shows_every_file_at_any_depth() -> None:
         assert status.endswith(", and 3 more).")
         listing = _fenced(await board("w-2", "view", path=ROOT), "peer_listing")
         assert [line.split()[-1] for line in listing.split("\n")] == sorted(paths)
-        assert listing.split("\n")[0] == "f-1  version 1  w-1  /shared_memory/a/b/c.md"
+        assert listing.split("\n")[0] == "f-1   version 1  w-1  /shared_memory/a/b/c.md"
         sub = _fenced(await board("w-2", "view", path=_p("a")), "peer_listing")
         assert sub == "f-1  version 1  w-1  /shared_memory/a/b/c.md"
+
+
+@pytest.mark.anyio
+async def test_a_listings_columns_line_up() -> None:
+    async with _board(members=["w-1", "worker"]) as (board, _):
+        for i in range(10):
+            await board("w-1", "create", path=_p(f"{i}.md"), file_text="x")
+        await board("worker", "view", path=_p("0.md"))
+        for _ in range(9):
+            await board(
+                "worker", "insert", path=_p("0.md"), insert_line=1, insert_text="x"
+            )
+        lines = _fenced(await board("w-1", "view", path=ROOT), "peer_listing")
+        assert lines.split("\n")[:2] + lines.split("\n")[-1:] == [
+            "f-1   version 10  worker  /shared_memory/0.md",
+            "f-2   version  1  w-1     /shared_memory/1.md",
+            "f-10  version  1  w-1     /shared_memory/9.md",
+        ]
 
 
 # Writes a loop's view must allow: each refused after a peer's write the loop has not
