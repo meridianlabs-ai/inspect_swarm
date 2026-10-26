@@ -177,7 +177,10 @@ class WaitSpec:
     """Whether that loop is the member's own, not one of its subagents'."""
 
     path: str | None
-    """The shared memory's filter as the model gave it, or `None` for the whole board. Later channels add filters of their own."""
+    """The shared memory's path filter as the model gave it, or `None`. Later channels add filters of their own."""
+
+    file_id: str | None = None
+    """The shared memory's file id filter as the model gave it, or `None`. With neither filter, the wait watches the whole board."""
 
 
 @dataclass(frozen=True)

@@ -60,7 +60,7 @@ _NO_LOOP = "\0"
 _INSTRUCTIONS = (
     f"Every member of the swarm, and their subagents, share one board of files, which you reach with the shared_memory tool under {ROOT}. "
     "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them. "
-    "Notices name changed files by ids such as f-3, which the view command accepts as its path. "
+    "Notices name changed files by ids such as f-3, which the view command takes as its file_id. "
     "View a file in its current version before you overwrite it with create, insert into it, rename it or delete it. "
     "To wait for another member's work, call swarm_wait rather than polling."
 )
@@ -73,7 +73,7 @@ _DESCRIPTION = (
     "To add an entry to a shared log or list, use append, which needs no view: it adds append_text on a new line at the end of the file as it is when the write lands, and creates the file if it does not exist. "
     "Use insert only when the position matters. "
     "Write commands return a short acknowledgment, not the file; view a file to see it. "
-    "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view accepts as its path."
+    "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view takes as its file_id."
 )
 
 
@@ -122,7 +122,7 @@ def shared_memory(
 ) -> Channel:
     """A board of files that every member of the swarm, and their subagents, read and write.
 
-    Each member gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` over files under `/shared_memory`. Every write goes through the swarm's bus as a record from the member that made it. A view shows a file inside a fence that names its last writer and version, and lists of changed files name them by ids such as `f-3`. A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `append` needs no view: it adds text on a new line at the end of a file, creating the file if it does not exist.
+    Each member gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` over files under `/shared_memory`. Every write goes through the swarm's bus as a record from the member that made it. A view shows a file inside a fence that names its last writer and version, and lists of changed files name them by ids such as `f-3`, which `view` takes as its `file_id`. A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `append` needs no view: it adds text on a new line at the end of a file, creating the file if it does not exist.
 
     The board lives for one run of the swarm. Its bounds keep every file viewable whole in one result.
 
@@ -428,7 +428,7 @@ class _SharedMemoryState:
         return [
             NoticeLine(
                 f"[Swarm notice] {_files_changed(len(files), 'shared memory ')} ({labels}; by {writers}). "
-                f'View one with shared_memory(command="view", path="{files[0].id}"), or list them with path="{ROOT}".',
+                f'View one with shared_memory(command="view", file_id="{files[0].id}"), or list them with path="{ROOT}".',
                 {
                     "files": [
                         {"file": f.id, "version": f.version, "record": f.record}
@@ -442,8 +442,12 @@ class _SharedMemoryState:
     # marks anything
 
     def wait_check(self, spec: WaitSpec) -> None:
-        if spec.path is not None and not _FILE_ID.fullmatch(spec.path):
+        if spec.path is not None and spec.file_id is not None:
+            raise ToolError("swarm_wait takes path or file_id, not both.")
+        if spec.path is not None:
             _path(spec.path)
+        if spec.file_id is not None:
+            _file_id(spec.file_id)
 
     def wakes(self, spec: WaitSpec, record: Record) -> bool:
         # only the files the record changed, so the cost is per write, not per board
@@ -480,7 +484,7 @@ class _SharedMemoryState:
     def _reportable(self, spec: WaitSpec, f: _BoardFile) -> bool:
         # a version under the filter written by another loop and above what the waiting
         # loop has seen; a tombstone only when the loop saw an earlier version
-        if not _watched(spec.path, f):
+        if not _watched(spec, f):
             return False
         seen = self._seen.get(spec.loop, {})
         if _by_others(f, spec.loop)[0] <= seen.get(f.id, 0):
@@ -502,12 +506,13 @@ class _SharedMemoryState:
             old_path: str | None = None,
             new_path: str | None = None,
             append_text: str | None = None,
+            file_id: str | None = None,
         ) -> str:
             """Shared memory.
 
             Args:
                 command: Command to execute (view, create, str_replace, insert, append, delete, rename).
-                path: Required for `view`, `create`, `str_replace`, `insert`, `append` and `delete`. Path to a file or directory under /shared_memory, e.g. `/shared_memory/notes.md` or `/shared_memory/notes`. For `view`, also a file id such as `f-3`.
+                path: Required for `create`, `str_replace`, `insert`, `append` and `delete`, and for `view` without `file_id`. Path to a file or directory under /shared_memory, e.g. `/shared_memory/notes.md` or `/shared_memory/notes`.
                 file_text: Required for `create`: the content of the file. It replaces the file if it exists.
                 old_str: Required for `str_replace`: the text in `path` to replace, which must occur there exactly once.
                 new_str: Optional for `str_replace`: the new text (if not given, `old_str` is deleted).
@@ -517,10 +522,12 @@ class _SharedMemoryState:
                 old_path: Required for `rename`: the current path of a file or directory.
                 new_path: Required for `rename`: the new path, which must not exist.
                 append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
+                file_id: Optional for `view`, in place of `path`: the id of a file, such as `f-3`, as notices and status lines name files.
             """
             return await self._call(
                 command,
                 path=path,
+                file_id=file_id,
                 file_text=file_text,
                 old_str=old_str,
                 new_str=new_str,
@@ -546,6 +553,7 @@ class _SharedMemoryState:
         command: str,
         *,
         path: str | None,
+        file_id: str | None,
         file_text: str | None,
         old_str: str | None,
         new_str: str | None,
@@ -569,7 +577,13 @@ class _SharedMemoryState:
         if own:
             self._top[member] = loop
         if command == "view":
-            result = self._view(member, context.span_id, loop, own, path, view_range)
+            result = self._view(
+                member, context.span_id, loop, own, path, file_id, view_range
+            )
+        elif command in _WRITES and file_id is not None:
+            raise ToolError(
+                f"{command} takes the file's path, not file_id; a view of the file shows its path."
+            )
         elif command in _WRITES:
             result = await self._write(
                 command,
@@ -876,15 +890,17 @@ class _SharedMemoryState:
         loop: str | None,
         own: bool,
         path: str | None,
+        file_id: str | None,
         view_range: list[int] | None,
     ) -> str:
-        path = _required(path, "path", "view")
-        if _FILE_ID.fullmatch(path):
-            f = self._files.get(path)
+        if path is not None and file_id is not None:
+            raise ToolError("view takes path or file_id, not both.")
+        if file_id is not None:
+            f = self._files.get(_file_id(file_id))
             if f is None:
-                raise ToolError(f"There is no file {path}.")
+                raise ToolError(f"There is no file {file_id}.")
         else:
-            path = _path(path)
+            path = _path(_required(path, "path or file_id", "view"))
             f = self._live(path)
             if f is None:
                 if not self._is_dir(path):
@@ -1056,11 +1072,24 @@ def _is_path(path: str) -> bool:
 
 def _path(path: str | None) -> str:
     # checked against the grammar and never normalised; the error does not repeat what
-    # was typed
+    # was typed, except a file id, whose grammar makes it safe to
     assert path is not None
+    if _FILE_ID.fullmatch(path):
+        raise ToolError(
+            f"{path} is a file id, not a path; view and swarm_wait take it as file_id, and a view of the file shows its path."
+        )
     if path != ROOT and not _is_path(path):
         raise ToolError(f"Invalid path: {_PATH_RULE}.")
     return path
+
+
+def _file_id(file_id: str) -> str:
+    # the error does not repeat what was typed
+    if not _FILE_ID.fullmatch(file_id):
+        raise ToolError(
+            "Invalid file_id: file ids are f- followed by a number, such as f-3."
+        )
+    return file_id
 
 
 def _edit(f: _BoardFile, content: str) -> _Change:
@@ -1131,19 +1160,19 @@ def _status(count: int, labels: str) -> str:
     return f"Shared memory: {_files_changed(count)} ({labels})."
 
 
-def _watched(path: str | None, f: _BoardFile) -> bool:
+def _watched(spec: WaitSpec, f: _BoardFile) -> bool:
     # whether a wait's filter covers a file: the whole board, the file's id, or its
     # current path (a tombstone's, the path it had) at or under the filter's
-    if path is None:
+    if spec.file_id is not None:
+        return f.id == spec.file_id
+    if spec.path is None:
         return True
-    if _FILE_ID.fullmatch(path):
-        return f.id == path
-    return f.path == path or f.path.startswith(path + "/")
+    return f.path == spec.path or f.path.startswith(spec.path + "/")
 
 
 def _changed_where_you_waited(count: int, labels: str, writers: str, first: str) -> str:
     files = "1 shared memory file" if count == 1 else f"{count} shared memory files"
-    return f'{files} changed where you waited ({labels}; by {writers}). View one with shared_memory(command="view", path="{first}").'
+    return f'{files} changed where you waited ({labels}; by {writers}). View one with shared_memory(command="view", file_id="{first}").'
 
 
 def _acknowledgment(command: str, args: _Args, changes: Sequence[_Change]) -> str:

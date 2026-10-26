@@ -182,6 +182,7 @@ def comm_waited(
         wait=spec.id,
         channels=list(channels),
         path=spec.path,
+        file_id=spec.file_id,
         timeout=timeout,
         started=started,
         duration=duration,

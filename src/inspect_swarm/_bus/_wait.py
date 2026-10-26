@@ -21,13 +21,15 @@ Outcome = Literal[
 
 _DESCRIPTION = (
     "Wait until there is something for you to look at in the swarm: a shared memory file where you watch has a change you have not viewed (another agent's write, including your own subagents'), or another member has ended. "
-    "Returns at once if that is already so, and keeps returning while a changed file there stays unviewed, so view what it names, or narrow `path`. "
+    "Returns at once if that is already so, and keeps returning while a changed file there stays unviewed, so view what it names, or narrow `path`, or watch one file with `file_id`. "
     "It also returns when every member is waiting, has ended or has not started, when the swarm is stopping, or after `timeout` seconds. "
     "It returns file ids and member names, never file content. "
     "Use it instead of polling with sleep."
 )
 
-_PATH = "A shared memory file or directory to watch, such as `/shared_memory/results`, or a file id such as `f-3`. Without it, any change to shared memory wakes you."
+_PATH = "A shared memory file or directory to watch, such as `/shared_memory/results`. Without it or `file_id`, any change to shared memory wakes you."
+
+_FILE_ID = "In place of `path`: the id of a shared memory file to watch, such as `f-3`, as notices name files."
 
 _ALL_WAITING = (
     "Nothing can change: every member is waiting, has ended or has not started."
@@ -145,7 +147,9 @@ class Waits:
 
     # the wait
 
-    async def wait(self, path: str | None, timeout: int | None) -> str:
+    async def wait(
+        self, path: str | None, file_id: str | None, timeout: int | None
+    ) -> str:
         assert self.max_wait is not None
         context = self._bus.member()
         if context is None:
@@ -174,6 +178,7 @@ class Waits:
             loop=current_agent_span_id(),
             own=own,
             path=path,
+            file_id=file_id,
         )
         for channel in channels:
             self._states[channel].wait_check(spec)
@@ -264,14 +269,19 @@ class Waits:
                 )
 
     def _make_tool(self) -> Tool:
-        async def execute(path: str | None = None, timeout: int | None = None) -> str:
+        async def execute(
+            path: str | None = None,
+            timeout: int | None = None,
+            file_id: str | None = None,
+        ) -> str:
             """Wait for other members.
 
             Args:
                 path: A shared memory file or directory to watch.
                 timeout: Seconds to wait at most.
+                file_id: A shared memory file id to watch.
             """
-            return await self.wait(path, timeout)
+            return await self.wait(path, file_id, timeout)
 
         return ToolDef(
             execute,
@@ -280,6 +290,7 @@ class Waits:
             parameters={
                 "path": _PATH,
                 "timeout": f"Seconds to wait at most (default and maximum: {self.max_wait}).",
+                "file_id": _FILE_ID,
             },
             # alone in its loop's turn, so a loop in a wait is doing nothing else
             parallel=False,

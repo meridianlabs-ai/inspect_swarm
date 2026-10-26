@@ -343,7 +343,7 @@ async def test_one_swarm_object_keeps_concurrent_samples_boards_apart(
         {
             "w": [
                 _sm("create", path="/shared_memory/a.md", file_text="x"),
-                _sm("view", path="f-1"),
+                _sm("view", file_id="f-1"),
             ]
         }
     )

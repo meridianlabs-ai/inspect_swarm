@@ -145,7 +145,7 @@ def waited(transcript: Transcript) -> list[dict[str, Any]]:
 
 def changed(labels: str, writers: str, first: str, count: int = 1) -> str:
     files = "1 shared memory file" if count == 1 else f"{count} shared memory files"
-    return f'{files} changed where you waited ({labels}; by {writers}). View one with shared_memory(command="view", path="{first}").'
+    return f'{files} changed where you waited ({labels}; by {writers}). View one with shared_memory(command="view", file_id="{first}").'
 
 
 STOPPING = "The swarm is stopping."
@@ -211,13 +211,20 @@ async def test_a_subagents_write_wakes_its_members_wait() -> None:
 
 @pytest.mark.anyio
 async def test_a_file_id_follows_the_file_through_a_rename() -> None:
-    async with run() as (r, _):
+    async with run() as (r, transcript):
         await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
-        await r.sm("w-1", "view", path="f-1")
+        await r.sm("w-2", "create", path=_p("b.md"), file_text="x")
+        await r.sm("w-1", "view", file_id="f-1")
         async with anyio.create_task_group() as tg:
-            pending = await start(tg, r, "w-1", path="f-1")
+            pending = await start(tg, r, "w-1", file_id="f-1")
+            # another file does not wake it
+            await r.sm("w-2", "append", path=_p("b.md"), append_text="y")
+            await anyio.wait_all_tasks_blocked()
+            assert pending.result is None
             await r.sm("w-2", "rename", old_path=_p("a.md"), new_path=_p("b/a.md"))
             assert await pending.value() == changed("f-1", "w-2", "f-1")
+        [record] = waited(transcript)
+        assert (record["path"], record["file_id"]) == (None, "f-1")
 
 
 @pytest.mark.anyio
@@ -228,7 +235,7 @@ async def test_an_unviewed_change_returns_every_wait_at_once_until_it_is_viewed(
         await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
         for _ in range(2):
             assert await r.wait("w-1") == changed("f-1 new", "w-2", "f-1")
-        await r.sm("w-1", "view", path="f-1")
+        await r.sm("w-1", "view", file_id="f-1")
         async with anyio.create_task_group() as tg:
             pending = await start(tg, r, "w-1")
             assert pending.result is None
@@ -283,12 +290,12 @@ async def test_eleven_files_are_named_ten_and_one_more_by_each_wait() -> None:
 async def test_a_deletion_ends_a_wait_only_for_a_file_the_loop_viewed() -> None:
     async with run() as (r, _):
         await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
-        await r.sm("w-1", "view", path="f-1")
+        await r.sm("w-1", "view", file_id="f-1")
         async with anyio.create_task_group() as tg:
             pending = await start(tg, r, "w-1")
             # never seen by w-1, and gone before it could be
             await r.sm("w-2", "create", path=_p("b.md"), file_text="x")
-            await r.sm("w-2", "view", path="f-2")
+            await r.sm("w-2", "view", file_id="f-2")
             await r.sm("w-2", "delete", path=_p("b.md"))
             await anyio.wait_all_tasks_blocked()
             assert pending.result is None
@@ -569,10 +576,36 @@ async def test_news_that_keeps_vanishing_does_not_outlast_the_timeout() -> None:
 
 
 @pytest.mark.anyio
-async def test_refusals() -> None:
+@pytest.mark.parametrize(
+    "args,message",
+    [
+        pytest.param(
+            {"path": "/elsewhere"},
+            "Invalid path: paths are /shared_memory followed by",
+            id="invalid-path",
+        ),
+        pytest.param(
+            {"path": "f-1"},
+            "f-1 is a file id, not a path; view and swarm_wait take it as file_id, and a view of the file shows its path.",
+            id="file-id-as-path",
+        ),
+        pytest.param(
+            {"file_id": "/elsewhere"},
+            "Invalid file_id: file ids are f- followed by a number, such as f-3.",
+            id="invalid-file_id",
+        ),
+        pytest.param(
+            {"path": _p("a"), "file_id": "f-1"},
+            "swarm_wait takes path or file_id, not both.",
+            id="both",
+        ),
+    ],
+)
+async def test_refusals(args: dict[str, Any], message: str) -> None:
     async with run() as (r, transcript):
-        with pytest.raises(ToolError, match="Invalid path"):
-            await r.wait("w-1", path="/elsewhere")
+        with pytest.raises(ToolError) as refused:
+            await r.wait("w-1", **args)
+        assert str(refused.value).startswith(message)
         r.end("w-1")
         with pytest.raises(ToolError, match="w-1 has ended"):
             await r.wait("w-1")
@@ -639,7 +672,7 @@ async def test_a_long_result_stays_within_a_fixed_bound() -> None:
         a, b, c = names
         for n in range(11):
             await r.sm(b, "create", path=_p(f"{n}.md"), file_text="x")
-            await r.sm(a, "view", path=f"f-{n + 1}")
+            await r.sm(a, "view", file_id=f"f-{n + 1}")
         await r.sm(b, "delete", path=ROOT + "/0.md")
         for n in range(1, 11):
             await r.sm(b, "delete", path=_p(f"{n}.md"))

@@ -810,7 +810,7 @@ async def test_only_a_record_with_wake_releases_a_wait() -> None:
 
     async def wait() -> None:
         with _as(members["w-2"].context):
-            results.append(await bus.wait(None, None))
+            results.append(await bus.wait(None, None, None))
 
     async def send(wake: bool) -> None:
         with _as(members["w-1"].context):
