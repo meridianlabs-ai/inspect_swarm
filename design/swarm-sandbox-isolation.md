@@ -333,6 +333,8 @@ The runtime adds a fixed paragraph to each member's preamble (swarm-api.md, `sta
 
 With `peers="read"`, the second sentence says other members can read it but not change it. Members are not told what is not isolated; the eval author decides whether a prompt mentions it, because telling them is itself a treatment.
 
+The paragraph names the member's user and home after its assigned name, so a member with `choose_name=True` must not receive it unchanged: per-member users either refuse such members or describe their user and home without the name ([swarm-chosen-names.md Compatibility and migration](swarm-chosen-names.md#compatibility-and-migration)).
+
 ### Processes a member leaves running
 
 - **When a member ends**, for any reason (submitted, stopped, its own limit, cancelled or errored), the runtime kills every process in the sandbox whose real uid is the member's. It is one `privileged_shell()` as root, with `timeout=30` and `timeout_retry=False` (the helper's default timeout is `None`, `src/inspect_ai/util/_sandbox/_privileged.py:178-190`). The script scans `/proc/[0-9]*/status`, re-reads each matching pid's `Uid` line immediately before sending it `SIGKILL`, and repeats until a scan finds none or five rounds have run; it prints the number killed, the survivors and their names. The call runs in a shielded cancel scope bounded by `move_on_after(40)`, so a hard stop's cancellation does not skip it and a stalled provider cannot hold the stop indefinitely.
