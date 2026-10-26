@@ -77,7 +77,7 @@ Two commands need no view:
 At each turn boundary where other agents have changed files since its last notice, a member with `swarm_on_continue()` gets one user message, such as:
 
 ```
-[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".
+[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with `shared_memory(command="view", path="f-1")`, or list them with `path="/shared_memory"`.
 ```
 
 - A notice holds counts, file ids, member names and fixed instructions, never a member-chosen file path or file contents. Its metadata, under `inspect_swarm`, gives the notice's id and, for each channel's line, the ids it names.

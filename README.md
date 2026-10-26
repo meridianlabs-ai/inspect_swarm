@@ -93,7 +93,7 @@ solver = swarm(members=member(worker, name="w", count=3), channels=[shared_memor
 At each turn boundary where other agents have changed files since its last notice, a member gets one notice, such as:
 
 ```
-[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".
+[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with `shared_memory(command="view", path="f-1")`, or list them with `path="/shared_memory"`.
 ```
 
 The swarm logs every write, view, notice and wait. See [Shared Memory](https://meridianlabs-ai.github.io/inspect_swarm/shared-memory.html) for the tool's commands, waiting, subagents, limits, monitoring with Inspect Sentinel, and migrating from `memory(instance=...)`.

@@ -428,7 +428,7 @@ class _SharedMemoryState:
         return [
             NoticeLine(
                 f"[Swarm notice] {_files_changed(len(files), 'shared memory ')} ({labels}; by {writers}). "
-                f'View one with shared_memory(command="view", path="{files[0].id}"), or list them with path="{ROOT}".',
+                f'View one with `shared_memory(command="view", path="{files[0].id}")`, or list them with `path="{ROOT}"`.',
                 {
                     "files": [
                         {"file": f.id, "version": f.version, "record": f.record}
