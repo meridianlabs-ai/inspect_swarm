@@ -307,7 +307,7 @@ def shared_memory(
 ) -> Channel: ...
 ```
 
-`max_wait` is logged with the channel's other parameters, so arms that differ in it get different eval-set identifiers, and `shared_memory()` raises `ValueError` outside 1 to 3,600. 600 s is long enough that a member with nothing to do costs about one model call every ten minutes, and short enough that a wait nothing will end (a peer working on something else for an hour) still lets the member reconsider. The shared memory's instructions gain one sentence: "To wait for another member's work, call swarm_wait rather than polling."
+`max_wait` is logged with the channel's other parameters, so arms that differ in it get different eval-set identifiers, and `shared_memory()` raises `ValueError` below 1. 600 s is long enough that a member with nothing to do costs about one model call every ten minutes, and short enough that a wait nothing will end (a peer working on something else for an hour) still lets the member reconsider. The shared memory's instructions gain one sentence: "To wait for another member's work, call swarm_wait rather than polling."
 
 There is no switch to turn waiting off for an arm; [Not this design](#not-this-design) lists it.
 

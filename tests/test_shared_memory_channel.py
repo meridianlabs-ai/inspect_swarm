@@ -130,15 +130,11 @@ def test_eval_set_arms_are_distinct() -> None:
     "arguments",
     [
         {"max_files": 0},
-        {"max_files": 10_001},
         {"max_files": 1.5},
         {"max_files": True},
         {"max_file_bytes": 0},
-        {"max_file_bytes": 262_145},
         {"max_file_lines": 0},
-        {"max_file_lines": 100_001},
         {"max_board_bytes": 15_999},
-        {"max_board_bytes": 16_777_217},
         {"rate": (0, 60.0)},
         {"rate": (1.5, 60.0)},
         {"rate": (1, 0)},
@@ -146,7 +142,6 @@ def test_eval_set_arms_are_distinct() -> None:
         {"rate": (1,)},
         {"rate": "60/60"},
         {"max_wait": 0},
-        {"max_wait": 3_601},
     ],
 )
 def test_each_bound_is_checked(arguments: dict[str, Any]) -> None:
@@ -154,7 +149,7 @@ def test_each_bound_is_checked(arguments: dict[str, Any]) -> None:
         shared_memory(**arguments)
 
 
-def test_bounds_at_their_limits_are_accepted() -> None:
+def test_lower_bounds_and_large_values_are_accepted() -> None:
     shared_memory(
         max_files=1,
         max_file_bytes=1,
@@ -164,12 +159,12 @@ def test_bounds_at_their_limits_are_accepted() -> None:
         max_wait=1,
     )
     shared_memory(
-        max_files=10_000,
-        max_file_bytes=262_144,
-        max_file_lines=100_000,
-        max_board_bytes=16_777_216,
+        max_files=1_000_000,
+        max_file_bytes=1_000_000_000,
+        max_file_lines=1_000_000_000,
+        max_board_bytes=1_000_000_000_000,
         rate=[1, 1],
-        max_wait=3_600,
+        max_wait=31_536_000,
     )
 
 
