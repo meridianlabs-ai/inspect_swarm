@@ -850,7 +850,7 @@ async def test_a_listing_is_the_fence_alone() -> None:
 
 @pytest.mark.anyio
 async def test_the_preamble_and_description_say_once_how_files_are_fenced() -> None:
-    sentence = "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them."
+    sentence = "Files are shown between `<peer_file>` tags whose `last_writer` attribute names the agent that last wrote them."
     async with _board() as (board, _):
         description = ToolDef(board.tool).description
     instructions = shared_memory().instructions(MemberInfo(name="w-1", role=None))
