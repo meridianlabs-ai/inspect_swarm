@@ -763,12 +763,11 @@ async def test_a_file_id_views_the_file_and_a_tombstones_id_says_who_deleted_it(
     None
 ):
     async with _board() as (board, transcript):
-        await board("w-1", "create", path=_p("a.md"), file_text="x")
+        await board("w-1", "create", path=_p("a.md"), file_text="one\ntwo\nthree")
         by_id = await board("w-2", "view", file_id="f-1")
         assert by_id == await board("w-2", "view", path=_p("a.md"))
-        assert await board("w-2", "view", file_id="f-1", view_range=[1, 1]) == (
-            await board("w-2", "view", path=_p("a.md"), view_range=[1, 1])
-        )
+        ranged = await board("w-2", "view", file_id="f-1", view_range=[2, 2])
+        assert _fenced(ranged) == "     2\ttwo"
         await board("w-2", "delete", path=_p("a.md"))
         assert await board("w-1", "view", file_id="f-1") == "f-1 was deleted by w-2."
         assert evidence(transcript, "read")[-1]["files"] == [
