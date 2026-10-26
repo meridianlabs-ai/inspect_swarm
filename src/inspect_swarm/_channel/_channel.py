@@ -39,7 +39,7 @@ class Channel:
     """The prefix of the channel's record ids (`"w"` gives `w-1`), set exactly when `name` is. No two channels of a swarm may share it."""
 
     reach: ClassVar[Literal["loop", "member"]] = "loop"
-    """Which of a member's agent loops get the channel's tools from `swarm_tools()`. `"loop"` (the default): only the member's own loop, the first in which it resolves `swarm_tools()`. `"member"`: also the member's nested loops, such as a `deepagent()` member's subagents, which then act as the member."""
+    """Which of a member's agent loops get the channel's tools from `swarm_tools()`. `"loop"` (the default): only the member's own loop, the first in which it resolves `swarm_tools()`. `"member"`: also any nested loop the member's agent gives `swarm_tools()`, such as a `deepagent()` member's `general()` subagents, which then act as the member. Which nested loops get `swarm_tools()` is the agent's choice; `reach` filters the channel tools they get and which channels can wake their `swarm_wait`. A channel whose reads consume something for the member, such as an inbox that marks messages read, keeps `"loop"` so that it has one reader."""
 
     storm: StormControls = StormControls()
     """The storm controls the bus applies to the channel's records. By default there are none."""
