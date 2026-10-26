@@ -126,7 +126,7 @@ The board is bounded:
 | `rate` | `(60, 60.0)` | Writes per member, all its loops together, in a sliding window of seconds; `None` for no limit |
 | `max_wait` | 600 | The longest `swarm_wait`, in seconds, and its default timeout |
 
-A write that would pass a limit is refused with an error that says which. A view longer than the tool output limit (the generate config's `max_tool_output`, else 16 KiB) is truncated in the middle, as Inspect truncates any tool's result: it keeps the fence's opening tag and first lines, and its last lines, closing tag and status line. A model reads the rest with `view_range`. Once the swarm begins to stop, writes are refused and views still work. A file cannot contain the fence tags the swarm uses (`<peer_file`, `<peer_listing`, `<peer_message` and their closing tags), and a write that would leave one in a file is refused.
+A write that would pass a limit is refused with an error that says which. Once the swarm begins to stop, writes are refused and views still work. A file cannot contain the fence tags the swarm uses (`<peer_file`, `<peer_listing`, `<peer_message` and their closing tags), and a write that would leave one in a file is refused.
 
 ## The record of the board
 
