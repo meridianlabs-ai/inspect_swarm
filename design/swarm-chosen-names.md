@@ -1,7 +1,5 @@
 # Inspect Swarm: members that choose their own names
 
-Status: proposed, 2026-10-22. Issue: [#61](https://github.com/meridianlabs-ai/inspect_swarm/issues/61). Author: agent (Claude), reviewed by Codex; see the PR.
-
 ## Overview
 
 A new member option, `member(..., choose_name=True)`, leaves the swarm's name for the member out of everything the swarm tells it. Its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the others what it is, instead of opening with "You are react-1". Its role, if it has one, is still stated. The swarm keeps its own name for the member for everything it tracks (timelines, spans, tool-state scopes, budget shares, the ledger and the result record), so the option changes only what the agent is told.
@@ -54,7 +52,7 @@ So with the filesystem channel alone, the preamble's first sentence and the scra
 
 ### Who uses what
 
-inspect_swarm has no users outside this repository yet: no other Inspect or Meridian repository checked out beside it imports it (searched 2026-10-22). Its channels are the built-in `filesystem` and `shared_memory`, and the user channels in its tests; one of those, `_Locks` in `tests/test_channel.py:37-39`, puts `member.name` in its instructions. Controllers are the built-in `leaderless`, which starts every member with the swarm's input and names no one to them (`src/inspect_swarm/_controller/leaderless.py:33-40`). The design therefore serves the filesystem channel (with and without `shared_volume`) and `channels=[]`, which a filesystem-only first study needs (decision: Ransom, 2026-10-22: "filesystem only is ok"), and refuses every other channel when a member chooses its name.
+inspect_swarm has no users outside this repository: no other Inspect or Meridian repository checked out beside it imports it. Its channels are the built-in `filesystem` and `shared_memory`, and the user channels in its tests; one of those, `_Locks` in `tests/test_channel.py:37-39`, puts `member.name` in its instructions. Controllers are the built-in `leaderless`, which starts every member with the swarm's input and names no one to them (`src/inspect_swarm/_controller/leaderless.py:33-40`). The design therefore serves the filesystem channel (with and without `shared_volume`) and `channels=[]`, which is all a filesystem-only first study needs, and refuses every other channel when a member chooses its name.
 
 ## Design
 
@@ -77,7 +75,7 @@ choose_name: bool = False
 """Whether the member chooses its own name. `True` leaves the member's name out of its preamble, which asks it to choose a name and tell the other members; the swarm still uses `name` for everything it records."""
 ```
 
-It is per member, beside `name` and `role`, which it qualifies (decision: Ransom, 2026-10-22: "per member is fine"). A whole swarm without assigned names is `choose_name=True` on each record (one record with `count` for identical members). A roster may mix the two, for example a lead the eval author names and workers that name themselves; the swarm tells a named member its assigned name, and tells no one else. Peers can still discover it through that member's scratch directory in the shared sandbox, or because the member announces it; members that choose never receive their own assigned names in anything the swarm generates.
+It is per member, beside `name` and `role`, which it qualifies. A whole swarm without assigned names is `choose_name=True` on each record (one record with `count` for identical members). A roster may mix the two, for example a lead the eval author names and workers that name themselves; the swarm tells a named member its assigned name, and tells no one else. Peers can still discover it through that member's scratch directory in the shared sandbox, or because the member announces it; members that choose never receive their own assigned names in anything the swarm generates.
 
 `member()`'s docstring gets a paragraph, "Chosen names": what the member is and is not told, that the swarm's records still use `name`, that only the filesystem channel or no channel can be used in a swarm where any member has it, and that the eval author's own text (the sample input, a controller's `start(input=...)`, the agent's prompt, the sandbox configuration) is not changed. The `name` argument's description adds: "With `choose_name=True` the member is not told it."
 
@@ -92,7 +90,7 @@ It is per member, beside `name` and `role`, which it qualifies (decision: Ransom
 | Several members | `You are {name}, one of {N} agents in a swarm working on this task at the same time.` | `You are one of {N} agents in a swarm working on this task at the same time. The swarm has not given you a name: choose one for yourself, and tell the other members what it is.` |
 | One member | `You are {name}, the only agent in this swarm.` | `You are the only agent in this swarm. The swarm has not given you a name: choose one for yourself.` |
 
-The rest of the preamble is as today, except the filesystem channel's scratch sentence, which changes for every member of a roster in which some member chooses ([The `filesystem` channel](#the-filesystem-channel)). **The role line stays** (decision: Ransom, 2026-10-22: "role is fine"): `Your role: {role}.` is the eval author's assignment of what the member does, not who it is, and a study of naming wants roles held fixed while names vary. An eval that wants no role leaves `role` unset.
+The rest of the preamble is as today, except the filesystem channel's scratch sentence, which changes for every member of a roster in which some member chooses ([The `filesystem` channel](#the-filesystem-channel)). **The role line stays**: `Your role: {role}.` is the eval author's assignment of what the member does, not who it is, and a study of naming wants roles held fixed while names vary. An eval that wants no role leaves `role` unset.
 
 The sentence asks the member to choose and announce a name, rather than saying nothing, because "members have to choose a name for themselves and tell their peers what it is" is the issue's condition, and because the filesystem channel's scratch convention needs a name to refer to. How the member tells the others is up to it: the notes file, a file in the shared directory, or nothing.
 
@@ -164,7 +162,7 @@ The name a member chose is **not** recorded. The swarm never learns it: the memb
 
 ## Alternatives considered
 
-**A `swarm()` argument.** `swarm(choose_names=True)` states "nobody is assigned a name" in one place, which reads well for the study. But the name and role it qualifies are per member, a mixed roster (a named lead, self-named workers) is a reasonable arm that it cannot express, and the record field is per member anyway. A swarm-wide flag is a loop over records on the per-member one; the reverse is not possible. Not chosen (decision: Ransom, 2026-10-22).
+**A `swarm()` argument.** `swarm(choose_names=True)` states "nobody is assigned a name" in one place, which reads well for the study. But the name and role it qualifies are per member, a mixed roster (a named lead, self-named workers) is a reasonable arm that it cannot express, and the record field is per member anyway. A swarm-wide flag is a loop over records on the per-member one; the reverse is not possible. Not chosen.
 
 **Registering the chosen name.** A `swarm_name(name)` tool that each self-naming member must call before it can use the channels; the swarm checks the name against the addressing grammar and against names already taken, and channels show the registered name instead of the swarm's (fences, listings, notices, wait results, message addresses), with the record storing both. This is what makes shared memory and the messages channel usable with chosen names. It costs a new tool and a gate on every channel tool, a second name per member through the bus, its evidence and every channel, a rule for what peers see before a member registers (a placeholder id, which is an assigned name again), and it breaks the rule that notices never contain a name a member chose ([swarm.md Delivery](swarm.md#delivery-peer-messages-are-model-output)), which would need its own security argument (a chosen name is model output, constrained by the grammar but still chosen to be read by peers). It also changes the condition being studied: names become a swarm-enforced, unique registry rather than something the members work out. No arm needs it with the filesystem channel; left for a later design if a study needs shared memory or messages with chosen names.
 
@@ -172,7 +170,7 @@ The name a member chose is **not** recorded. The swarm never learns it: the memb
 
 **Drop the scratch sentence for self-naming members.** Simpler than the `<your name>` form, but members would then have no convention for private work in a shared sandbox, which is a different condition from the named arm in more than the name. Not chosen.
 
-**Accept user channels whose instructions pass a check.** Round 1 of this design called each channel's `instructions()` with the member's name and with a probe name and accepted it when the two texts were equal. Equal texts do not prove the name is absent: `"/scratch/" + (m.name if m.name.isidentifier() else "worker")` gives `/scratch/worker` for a member named `worker` and for the probe. Searching the text for the name fails both ways: a default name such as `solver` can appear in a channel's prose, and a transformed name does not match. Not chosen; no user channel needs to run beside members that choose.
+**Accept user channels whose instructions pass a check.** One check calls each channel's `instructions()` with the member's name and with a probe name and accepts the channel when the two texts are equal. Equal texts do not prove the name is absent: `"/scratch/" + (m.name if m.name.isidentifier() else "worker")` gives `/scratch/worker` for a member named `worker` and for the probe. Searching the text for the name fails both ways: a default name such as `solver` can appear in a channel's prose, and a transformed name does not match. Not chosen; no user channel needs to run beside members that choose.
 
 **Let a channel declare that its instructions omit the name.** A `Channel` class attribute, say `chosen_names: ClassVar[bool] = False`, that a channel sets to `True` when its `instructions()` honours `member.choose_name`, with `swarm()` accepting only such channels. It would open the option to user channels on their author's word, as `reach` and `max_wait` do for other properties. Not needed while the filesystem channel is the only one a study uses; it is the natural extension when one is.
 
@@ -180,7 +178,7 @@ The name a member chose is **not** recorded. The swarm never learns it: the memb
 
 - **Public API.** `member(choose_name=)`, `Member.choose_name`, `MemberInfo.choose_name` and `MemberHandle.choose_name` are additive (`MemberHandle` is a protocol the runtime implements; controllers only read it) with a `False` default; existing calls, positional `MemberInfo(name, role)` included, are unchanged, and so are their preambles.
 - **Channels.** Every channel keeps working in a swarm where no member chooses its name. With a member that chooses, only the built-in filesystem channel is accepted. `Channel`'s interface is unchanged; `FilesystemChannel.member_instructions()` is new and internal to the two built-in callers.
-- **Logs and task identifiers.** The plan step's member dict gains `"choose_name": false`, written even at the default as every other member field is. As with `delivery` and `sandbox` before it, a task's `task_identifier()` changes on upgrade even with unchanged arguments, so continuing an eval set across the upgrade does not match its completed tasks and runs them again; an eval set compares arms run on one inspect_swarm version. That cost is accepted (decision: Ransom, 2026-10-22: "compatability regression is not an issue"). Replaying an older log, whose member dicts lack the field, gives `False`.
+- **Logs and task identifiers.** The plan step's member dict gains `"choose_name": false`, written even at the default as every other member field is. Because the field is new, a task's `task_identifier()` changes on upgrade even with unchanged arguments, so continuing an eval set across the upgrade does not match its completed tasks and runs them again; an eval set compares arms run on one inspect_swarm version. That cost is accepted. Replaying an older log, whose member dicts lack the field, gives `False`.
 - **Result record.** `MemberResult` gains a defaulted field in record version 1. Older records read with `False`; an older inspect_swarm reading a newer record ignores the field (`MemberResult` keeps pydantic's default `extra="ignore"`). No viewer types are generated from it.
 - **Other designs.** This design amends [swarm-api.md](swarm-api.md) (the Names bullet, `start()`'s description of the preamble in Controllers, and the preamble line in Security) to say that a member with `choose_name` is not told its name and may choose one for itself, while the swarm's names stay the eval author's. The proposed, unimplemented [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md) names each member's user `swarm-<member>` and its home after the member in the preamble; when it is implemented it must refuse `choose_name` members or describe their user without the name (see [Not this design](#not-this-design)).
 
@@ -216,7 +214,7 @@ One pull request, `feat: members that choose their own names`:
 
 ## Open questions
 
-None. Ransom settled round 1's questions on 2026-10-22: the option is per member, mixed rosters included ("per member is fine"); members that choose keep the role line ("role is fine"); the first study uses the filesystem channel only, with other channels refused and no registration design ("filesystem only is ok"); and serialising `choose_name=False` is accepted although it changes existing task identifiers ("compatability regression is not an issue").
+None.
 
 ## Not this design
 
