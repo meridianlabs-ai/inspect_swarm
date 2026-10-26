@@ -407,7 +407,7 @@ async def test_a_long_view_is_truncated_in_the_middle_and_only_a_view_records_a_
     lines = [f"{n + 1:6}\t{line}" for n, line in enumerate(content.split("\n"))]
     assert "too long to be displayed" in view
     assert (
-        '<peer_file id="f-1" path="/shared_memory/a.md" version="1" writer="w">\n'
+        '<peer_file id="f-1" path="/shared_memory/a.md" version="1" last_writer="w">\n'
         + lines[0]
     ) in view
     assert lines[-1] + "\n</peer_file>" in view
