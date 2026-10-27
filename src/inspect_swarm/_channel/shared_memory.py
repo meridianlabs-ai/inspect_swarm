@@ -27,7 +27,7 @@ CHANNEL = "shared_memory"
 ROOT = "/shared_memory"
 
 Command = Literal[
-    "view", "create", "str_replace", "insert", "append", "delete", "rename"
+    "view", "create", "str_replace", "insert", "append", "delete", "rename", "changes"
 ]
 
 _WRITES = ("create", "str_replace", "insert", "append", "delete", "rename")
@@ -73,7 +73,8 @@ _DESCRIPTION = (
     "To add an entry to a shared log or list, use append, which needs no view: it adds append_text on a new line at the end of the file as it is when the write lands, and creates the file if it does not exist. "
     "Use insert only when the position matters. "
     "Write commands return a short acknowledgment, not the file; view a file to see it. "
-    "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view takes as its file_id."
+    "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view takes as its file_id. "
+    "The changes command returns that list alone."
 )
 
 
@@ -122,7 +123,7 @@ def shared_memory(
 ) -> Channel:
     """A board of files that every member of the swarm, and their subagents, read and write.
 
-    Each member gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` over files under `/shared_memory`. Every write goes through the swarm's bus as a record from the member that made it. A view shows a file inside a fence that names its last writer and version, and lists of changed files name them by ids such as `f-3`, which `view` takes as its `file_id`. A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `append` needs no view: it adds text on a new line at the end of a file, creating the file if it does not exist.
+    Each member gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` over files under `/shared_memory`. Every write goes through the swarm's bus as a record from the member that made it. A view shows a file inside a fence that names its last writer and version, and lists of changed files name them by ids such as `f-3`, which `view` takes as its `file_id`. A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `append` needs no view: it adds text on a new line at the end of a file, creating the file if it does not exist. `changes` returns only the list of files other agents changed since the loop last viewed them, which ends every result.
 
     The board lives for one run of the swarm. Its bounds keep every file viewable whole in one result.
 
@@ -511,7 +512,7 @@ class _SharedMemoryState:
             """Shared memory.
 
             Args:
-                command: Command to execute (view, create, str_replace, insert, append, delete, rename).
+                command: Command to execute (view, create, str_replace, insert, append, delete, rename, changes).
                 path: Required for `create`, `str_replace`, `insert`, `append` and `delete`, and for `view` without `file_id`. Path to a file or directory under /shared_memory, e.g. `/shared_memory/notes.md` or `/shared_memory/notes`.
                 file_text: Required for `create`: the content of the file. It replaces the file if it exists.
                 old_str: Required for `str_replace`: the text in `path` to replace, which must occur there exactly once.
@@ -576,6 +577,11 @@ class _SharedMemoryState:
         own = not self._bus.nested(context)
         if own:
             self._top[member] = loop
+        if command == "changes":
+            return (
+                self._status_line(member, loop, own)
+                or "Shared memory: no files changed since you last viewed them."
+            )
         if command == "view":
             result = self._view(
                 member, context.span_id, loop, own, path, file_id, view_range

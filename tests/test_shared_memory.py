@@ -1407,3 +1407,23 @@ async def test_the_status_line_lists_a_deleted_file_until_the_loop_views_its_id(
             )
         assert await board("w-2", "view", file_id="f-1") == "f-1 was deleted by w-1."
         assert await board("w-2", "view", path=ROOT) == "/shared_memory has no files."
+
+
+@pytest.mark.anyio
+async def test_changes_gives_the_status_line_alone_and_marks_nothing_seen() -> None:
+    async with _board() as (board, transcript):
+        await board("w-1", "create", path=_p("a.md"), file_text="x")
+        await board("w-1", "create", path=_p("b.md"), file_text="y")
+        both = "Shared memory: 2 files changed since you last viewed them (f-1 new, f-2 new)."
+        for _ in range(2):
+            assert await board("w-2", "changes") == both
+        await board("w-2", "view", file_id="f-1")
+        assert await board("w-2", "changes") == (
+            "Shared memory: 1 file changed since you last viewed it (f-2 new)."
+        )
+        assert await board("w-2", "changes", "child") == both
+        await board("w-2", "view", path=_p("b.md"))
+        assert await board("w-2", "changes") == (
+            "Shared memory: no files changed since you last viewed them."
+        )
+        assert len(evidence(transcript, "read")) == 2
