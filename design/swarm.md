@@ -517,7 +517,7 @@ The bus uses sentinel's action vocabulary from the start. Sentinel's dispatcher 
 - the monitor verdict and the original payload when rewritten;
 - the ids that tie it to the rest of the log: the sender's span id, its tool call id and the Inspect event id.
 
-The swarm writes its evidence as two inspect_ai event types, inside the member spans (decision: Ransom, 2026-10-27; [open question 1](#open-questions)): communication as a communication event shaped for agent communication in general, so that bridged agents' traffic can use it too, and everything else (member results, the final selection, the ledger, the metrics) as a swarm event whose format inspect_swarm owns. [swarm-event-types.md](swarm-event-types.md) designs both, their fields and versioning, their viewer support and how the swarm writes and reads them.
+The swarm writes its evidence as two inspect_ai event types (decision: Ransom, 2026-10-27; [open question 1](#open-questions)): communication as a communication event shaped for agent communication in general, so that bridged agents' traffic can use it too, and everything else (member results, the final selection, the ledger, the metrics) as a swarm event whose format inspect_swarm owns. [swarm-event-types.md](swarm-event-types.md) designs both, their fields and versioning, their viewer support and how the swarm writes and reads them, including the span each event is written in.
 
 **Accounting.** Two separate things:
 
