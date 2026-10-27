@@ -114,9 +114,11 @@ class Bus:
         self._stopping = True
         self._waits.close()
 
-    async def wait(self, path: str | None, timeout: int | None) -> str:
+    async def wait(
+        self, path: str | None, file_id: str | None, timeout: int | None
+    ) -> str:
         # the swarm_wait tool's body
-        return await self._waits.wait(path, timeout)
+        return await self._waits.wait(path, file_id, timeout)
 
     def member_ended(self, name: str, status: str) -> None:
         # from the runtime, right after it marks the member ended
