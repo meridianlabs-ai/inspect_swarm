@@ -64,7 +64,7 @@ swarm(
 )
 ```
 
-runs four members, `react-1` to `react-4` in the log, each told: `You are one of 4 agents in a swarm working on this task at the same time. The swarm has not given you a name: choose one for yourself, and tell the other members what it is.` followed by the filesystem instructions with `Keep your own work in /scratch/<your name>, a directory named with the name you chose; check that no other member uses the same one.`
+runs four members, `react-1` to `react-4` in the log, each told: `You are one of 4 agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is.` followed by the filesystem instructions with `Keep your own work in /scratch/<your name>, a directory named with the name you chose; check that no other member uses the same one.`
 
 ### The option
 
@@ -87,8 +87,8 @@ It is per member, beside `name` and `role`, which it qualifies. A whole swarm wi
 
 | | `choose_name=False` (unchanged) | `choose_name=True` |
 |---|---|---|
-| Several members | `You are {name}, one of {N} agents in a swarm working on this task at the same time.` | `You are one of {N} agents in a swarm working on this task at the same time. The swarm has not given you a name: choose one for yourself, and tell the other members what it is.` |
-| One member | `You are {name}, the only agent in this swarm.` | `You are the only agent in this swarm. The swarm has not given you a name: choose one for yourself.` |
+| Several members | `You are {name}, one of {N} agents in a swarm working on this task at the same time.` | `You are one of {N} agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is.` |
+| One member | `You are {name}, the only agent in this swarm.` | `You are the only agent in this swarm. Choose a name for yourself.` |
 
 The rest of the preamble is as today, except the filesystem channel's scratch sentence, which changes for every member of a roster in which some member chooses ([The `filesystem` channel](#the-filesystem-channel)). **The role line stays**: `Your role: {role}.` is the eval author's assignment of what the member does, not who it is, and a study of naming wants roles held fixed while names vary. An eval that wants no role leaves `role` unset.
 
