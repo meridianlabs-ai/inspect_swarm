@@ -198,7 +198,7 @@ All in inspect_swarm, with mockllm and stub agents, on asyncio and trio, with no
 - `tests/test_shared_memory_channel.py`: `swarm()` refuses `shared_memory()` with a `choose_name` member, and with a mixed roster where only one member chooses, also when `filesystem` is listed too; the message names the member and the channel.
 - `tests/test_api_log.py`: the logged member dict includes `"choose_name"` (`test_logged_members`), replay rebuilds it (`test_replay_rebuilds_the_swarm`), and a `choose_name` arm in `test_eval_set_arms_are_distinct`'s parameters gives two arms differing only in it distinct identifiers.
 - `tests/test_member.py`: a member given as a dict without `choose_name` validates with `False`.
-- The result record: a swarm run with one choosing and one named member writes `choose_name` per member in `inspect_swarm:result` (in `tests/test_controller.py`, beside the existing record checks).
+- The result record: a swarm run with one choosing and one named member writes `choose_name` per member in `inspect_swarm:result` (in `tests/test_controller.py`, beside the existing record checks), and the exact set of member keys that `test_the_record_is_written_at_start_and_on_each_start_and_end` in `tests/test_final.py` expects gains `choose_name`, which the record now writes for every member.
 
 ## Implementation plan
 
