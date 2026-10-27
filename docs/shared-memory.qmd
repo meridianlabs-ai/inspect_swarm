@@ -80,7 +80,7 @@ The swarm adds no messages to a member's conversation. A member learns what othe
 - `shared_memory(command="changes")`, which returns the status line alone, to check for changes without viewing anything.
 - `swarm_wait`, which blocks until a file the member watches changes ([Waiting for other members](#waiting-for-other-members)).
 
-A changed file stays in the status line until the loop views it. A deleted file is listed only to a loop that viewed it before. These lists hold counts, file ids and member names, never a file path or file contents.
+A changed file stays in the status line until the loop views it. A deleted file is listed only to a loop that previously viewed or wrote it, including a blind append. These lists hold counts, file ids and member names, never a file path or file contents.
 
 ## Waiting for other members
 
