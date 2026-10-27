@@ -100,17 +100,18 @@ So the shapes this design serves are: native `react()` and `deepagent()` members
 ### The tool
 
 ```python
-swarm_wait(path: str | None = None, timeout: int | None = None) -> str
+swarm_wait(path: str | None = None, timeout: int | None = None, file_id: str | None = None) -> str
 ```
 
 Built per run by the bus with `parallel=False` and offered by `swarm_tools()` when at least one open channel wakes waits ([Channels that wake waits](#channels-that-wake-waits)); in M2 that is the shared-memory channel, so a swarm with `channels=["shared_memory"]` gives every member `shared_memory` and `swarm_wait`, and a swarm with `channels=["filesystem"]` or `channels=[]` gives neither. Its reach is the reach of the channels it waits on: the shared memory's is `"member"`, so a member's subagents get `swarm_wait` too, and their waits watch the board for them as their own `view`s do.
 
 Description (fixed template; the numbers come from the configuration):
 
-> Wait until there is something for you to look at in the swarm: a shared memory file where you watch has a change you have not viewed (another agent's write, including your own subagents'), or another member has ended. Returns at once if that is already so, and keeps returning while a changed file there stays unviewed, so view what it names, or narrow `path`. It also returns when every member is waiting, has ended or has not started, when the swarm is stopping, or after `timeout` seconds. It returns file ids and member names, never file content. Use it instead of polling with sleep.
+> Wait until there is something for you to look at in the swarm: a shared memory file where you watch has a change you have not viewed (another agent's write, including your own subagents'), or another member has ended. Returns at once if that is already so, and keeps returning while a changed file there stays unviewed, so view what it names, or narrow `path`, or watch one file with `file_id`. It also returns when every member is waiting, has ended or has not started, when the swarm is stopping, or after `timeout` seconds. It returns file ids and member names, never file content. Use it instead of polling with sleep.
 
-- `path`: "A shared memory file or directory to watch, such as `/shared_memory/results`, or a file id such as `f-3`. Without it, any change to shared memory wakes you." The shared-memory channel checks it with its path grammar (or the file id grammar) and refuses anything else with the grammar's `ToolError`. The path need not exist yet, so a member can wait for a file to be created. A file is under `path` when its current path (a tombstone's: the path it had) is `path` or starts with `path + "/"`, or when its id is `path`.
+- `path`: "A shared memory file or directory to watch, such as `/shared_memory/results`. Without it or `file_id`, any change to shared memory wakes you." The shared-memory channel checks it with its path grammar and refuses anything else with the grammar's `ToolError`; a file id given as `path` is refused with a message that names `file_id` ([swarm-memory-channel.md Notices](swarm-memory-channel.md#notices-and-the-status-line)). The path need not exist yet, so a member can wait for a file to be created. A file is under `path` when its current path (a tombstone's: the path it had) is `path` or starts with `path + "/"`.
 - `timeout`: "Seconds to wait at most (default and maximum: 600)." `None` means `max_wait`; any value is clamped to 1 to `max_wait` (default 600). The result states the effective value when the wait times out, so a clamp is visible to the model.
+- `file_id`: "In place of `path`: the id of a shared memory file to watch, such as `f-3`, as notices name files." The channel checks it with the file id grammar and refuses anything else without repeating it, and refuses `path` and `file_id` together. A file is under `file_id` when its id is `file_id`, so the wait follows the file through renames. It comes after `timeout`, so positional arguments keep their places. Below, "under `path`" means under whichever filter the wait was given.
 
 **Why a separate tool, not a `wait` command on `shared_memory`.** swarm-communication.md rejected a separate `wait_for_messages` tool as "one more tool the model must learn" when `read_messages(wait_seconds=...)` could carry the wait. Three things change that here:
 
@@ -146,7 +147,7 @@ The result is fixed-template lines with counts, swarm-assigned file ids, roster 
 
 | Ended by | Result |
 |---|---|
-| Unviewed change | `2 shared memory files changed where you waited (f-3, f-9 new; by worker-2, worker-4). View one with shared_memory(command="view", path="f-3").` |
+| Unviewed change | `2 shared memory files changed where you waited (f-3, f-9 new; by worker-2, worker-4). View one with shared_memory(command="view", file_id="f-3").` |
 | Unreported end | `worker-2 ended (submitted). worker-4 ended (member_limit:cost).` |
 | No member active | `Nothing can change: every member is waiting, has ended or has not started.` |
 | Stop | `The swarm is stopping.` |
@@ -203,7 +204,8 @@ One `InfoEvent` per wait, written when it ends (in the synchronous `finally`, so
 | `kind` | `"waited"` |
 | `wait` | the wait id, `x-4`, numbered per run |
 | `channels` | the channels it waited on (`["shared_memory"]`) |
-| `path` | the filter as given, or `null` (grammar-checked, so safe to log) |
+| `path` | the path filter as given, or `null` (grammar-checked, so safe to log) |
+| `file_id` | the file id filter as given, or `null` (grammar-checked, so safe to log) |
 | `timeout` | requested and effective seconds |
 | `started`, `duration` | swarm time of the call, and seconds until it returned (0 for an immediate return), returns to sleep included |
 | `idle` | seconds of the wait during which its member counted as waiting ([The idle clock](#metrics)); 0 for a nested loop's wait |
@@ -247,7 +249,8 @@ class WaitSpec:
     member: str
     loop: str | None     # the waiting loop's agent span
     own: bool            # the member's own loop
-    path: str | None     # the shared memory's filter; later channels add theirs
+    path: str | None     # the shared memory's path filter; later channels add theirs
+    file_id: str | None = None   # the shared memory's file id filter
 
 @dataclass(frozen=True)
 class WaitNews:
@@ -269,7 +272,7 @@ class WaitingState(ChannelState, Protocol):
 ```python
 # src/inspect_swarm/_bus/_wait.py (new), used by Bus
 class Bus:
-    async def wait(self, path: str | None, timeout: int | None) -> str: ...   # the tool's body
+    async def wait(self, path: str | None, file_id: str | None, timeout: int | None) -> str: ...   # the tool's body
     def member_ended(self, name: str, status: str) -> None: ...   # from SwarmRun._end()
     def member_ending(self, name: str) -> None: ...               # from the drain
     def recheck(self) -> None: ...                                # from the owner
@@ -351,7 +354,7 @@ There is no switch to turn waiting off for an arm; [Not this design](#not-this-d
 
 Untrusted input reaching this code, and how it is handled:
 
-- **`path`** (model output): checked by the shared memory's path grammar or file id grammar and refused otherwise; logged in `waited`, never echoed in a result, never in another member's text.
+- **`path`, `file_id`** (model output): checked by the shared memory's path grammar and file id grammar and refused otherwise; logged in `waited`, never echoed in a result, never in another member's text. A refusal repeats what was typed only when it is a file id given as `path`, whose grammar makes it safe.
 - **`timeout`** (model output): an integer by the tool schema, clamped to 1 to `max_wait`.
 - **What a result contains:** counts, swarm-assigned file ids, roster names validated by the channel's `check()`, and statuses from the runtime's closed set. No content, no peer-chosen path. A wait adds no channel for peer text; it adds one fact members did not have before, each peer's end and status, which `list_members` was always going to show in the messages channel.
 - **Identity** comes from the member ContextVar and the agent span, never from arguments, as for every swarm tool.
@@ -363,7 +366,7 @@ Untrusted input reaching this code, and how it is handled:
 
 All tests use mockllm with scripted tool calls, run on asyncio and trio, and need no network, Docker or model provider. Scripted members coordinate with test tools that set `anyio.Event`s, so tests do not depend on sleeps; timeout cases use `max_wait=1`.
 
-- **Waking** (`tests/test_wait.py`): a peer's write under `path` ends the wait and the result names the file by id and the writer; a write outside `path`, and the waiter's own write, do not; a write by the member's own subagent does; a file id as `path` follows the file through a rename; a `path` that does not exist yet wakes on its creation; a wait called while an unviewed change is under `path` returns at once, again on every call until the loop views the file, and then sleeps; a file named in a status line or a notice, but not viewed, still ends the next wait (the status line and notices mark nothing for it); eleven unviewed files under `path` are named ten then one more, by the first wait and again by the next while unviewed; a deletion of a file the loop had viewed ends the wait, and a file created and deleted by a peer before the loop viewed it does not; release-then-gone: a peer creates a file under `path` and, before the waiter's task resumes (a test tool holds it), renames it out of `path` or deletes it, and the waiter goes back to sleep and later returns by timeout, with `woken_by` naming the creation's `seq`; status lines and notices for the same sequences match D-1's behaviour without the wait (with M2-9 for notices); a wait result has no status line, and a peer's write outside `path` that did not wake it is named by the status line of the loop's next `shared_memory` call.
+- **Waking** (`tests/test_wait.py`): a peer's write under `path` ends the wait and the result names the file by id and the writer; a write outside `path`, and the waiter's own write, do not; a write by the member's own subagent does; a `file_id` follows the file through a rename, and a write to another file does not wake it; a malformed `path` or `file_id`, a file id as `path`, and `path` with `file_id` are refused, with no `waited` event; a `path` that does not exist yet wakes on its creation; a wait called while an unviewed change is under `path` returns at once, again on every call until the loop views the file, and then sleeps; a file named in a status line or a notice, but not viewed, still ends the next wait (the status line and notices mark nothing for it); eleven unviewed files under `path` are named ten then one more, by the first wait and again by the next while unviewed; a deletion of a file the loop had viewed ends the wait, and a file created and deleted by a peer before the loop viewed it does not; release-then-gone: a peer creates a file under `path` and, before the waiter's task resumes (a test tool holds it), renames it out of `path` or deletes it, and the waiter goes back to sleep and later returns by timeout, with `woken_by` naming the creation's `seq`; status lines and notices for the same sequences match D-1's behaviour without the wait (with M2-9 for notices); a wait result has no status line, and a peer's write outside `path` that did not wake it is named by the status line of the loop's next `shared_memory` call.
 - **Ends**: a member ending wakes every waiter of every other member with its name and status; a loop's first wait after an end no wait of that loop has named returns at once; ends are reported once per loop, and a wait cancelled before returning reports nothing and marks no end.
 - **Releases**: two members waiting with nothing else running are both released with the all-waiting result, as is a lone member; a pending member (a custom controller that never starts it) and an ended one count as not active; a member in a long scripted tool call keeps the others waiting; a subagent's wait does not make its member waiting; a turn calling a slow tool and `swarm_wait` runs them one after the other; the stop (controller return, swarm cap, time cap) releases every wait at once and a wait called after it returns at once; write-then-stop: a peer's write under `path` releases a waiter and `bus.close()` runs before its task resumes (a test tool holds it), and the result has both the changed-file line and the stop line; close-then-peer-end: after that stop, a peer ends before the waiter resumes, and the result has the changed-file, ends and stop lines; drain-then-peer-end: a background child's wait is released by its member's drain and another member ends before it resumes, and the result has the ends line and the drain line; the timeout returns the timeout result with the effective, clamped value.
 - **Cancellation**: a member time limit during a wait writes `waited` with `cancelled`, and the next all-waiting check no longer counts that member; a wait called with a cancellation already pending (on news, the stop or the drain) writes `cancelled`, names nothing and leaves the ends for the loop's next wait.

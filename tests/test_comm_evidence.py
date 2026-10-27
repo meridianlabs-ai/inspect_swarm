@@ -221,6 +221,7 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
             "wait": "x-1",
             "channels": ["shared_memory"],
             "path": _p("r"),
+            "file_id": None,
             "timeout": {"requested": None, "effective": 600},
             "outcome": "news",
             "woken_by": [1],

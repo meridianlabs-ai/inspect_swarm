@@ -199,7 +199,7 @@ async def test_a_notice_names_new_files_by_id_and_reaches_the_next_model_call(
             ],
             "w-2": [
                 (_call("noop"), "w-1:2"),
-                _call("shared_memory", command="view", path="f-1"),
+                _call("shared_memory", command="view", file_id="f-1"),
                 _call("noop"),
             ],
         }
@@ -219,7 +219,7 @@ async def test_a_notice_names_new_files_by_id_and_reaches_the_next_model_call(
     assert all(_notices(i) == [] for i in turns.inputs["w-1"])
     [notice] = _notices(inputs[1])
     assert notice.text == (
-        '[Automatic swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
+        '[Automatic swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with `shared_memory(command="view", file_id="f-1")`, or list them with `path="/shared_memory"`.'
     )
     assert notice.source is None
     files = [{"file": "f-1", "version": 1, "record": "w-1"}]
@@ -271,7 +271,7 @@ async def test_notices_cap_listed_ids_and_report_a_deletion_once(
             ],
             "w-2": [
                 (_call("noop"), "w-1:12"),
-                _call("shared_memory", command="view", path="f-1"),
+                _call("shared_memory", command="view", file_id="f-1"),
                 (_call("noop"), "w-1:13"),
                 _call("noop"),
             ],
@@ -290,11 +290,11 @@ async def test_notices_cap_listed_ids_and_report_a_deletion_once(
     first = (
         "[Automatic swarm notice] 11 shared memory files changed since you last viewed them "
         "(f-1 new, f-2 new, f-3 new, f-4 new, f-5 new, f-6 new, f-7 new, f-8 new, f-9 new, f-10 new, and 1 more; by w-1). "
-        'View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
+        'View one with `shared_memory(command="view", file_id="f-1")`, or list them with `path="/shared_memory"`.'
     )
     second = (
         "[Automatic swarm notice] 1 shared memory file changed since you last viewed it (f-1 deleted; by w-1). "
-        'View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
+        'View one with `shared_memory(command="view", file_id="f-1")`, or list them with `path="/shared_memory"`.'
     )
     # no notice after the view, which changed nothing, nor after the deletion's notice
     assert texts == [[], [first], [first], [first, second], [first, second]]
@@ -645,7 +645,7 @@ async def test_a_subagents_deletion_is_news_to_its_parent_once(
     assert [len(n) for n in notices] == expected
     assert notices[-1][0].text == (
         "[Automatic swarm notice] 1 shared memory file changed since you last viewed it (f-1 deleted; by w). "
-        'View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".'
+        'View one with `shared_memory(command="view", file_id="f-1")`, or list them with `path="/shared_memory"`.'
     )
     [notified] = _comm(log, "notified")
     assert notified["ids"] == {
