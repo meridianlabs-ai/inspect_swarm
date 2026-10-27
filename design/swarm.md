@@ -435,7 +435,7 @@ Why no notices at the turn boundary: a user running large swarms found them nois
 ORBIT's modes that add text at each model call (`notify`, and `auto`, which injects full bodies) are not offered. After M2, injecting fenced bodies, reminders and urgent messages that interrupt a recipient's turn are opt-in push options for the messages channel, each off by default and a logged ablation axis; whether ordinary messages are pushed at all is open ([swarm-communication.md](swarm-communication.md#open-questions), open question 2). So no swarm text enters the user role in M2; only an opt-in injection arm after M2 would.
 
 Tool output is a better place than the user role, but it is not a trust boundary by itself. ADK's own fencing module calls peers' turns and tool results "attacker-reachable" ([`_fencing.py`](https://github.com/google/adk-python/blob/main/src/google/adk/flows/llm_flows/context/_fencing.py)). So the read tools also follow three rules taken from the frameworks surveyed:
-- **Fence each message as data.** Each message sits between begin and end markers under a sender line the bus stamps. A payload holding a copy of any fence marker is refused, so a payload cannot close its own block ([swarm-communication.md Fencing](swarm-communication.md#fencing)).
+- **Fence each message as data.** Each message sits between begin and end markers under a sender line the bus stamps. The fence is a label for the reader, not a security boundary: a payload is delivered as typed, so a member can write text that looks like a fence, another member's text, or a status line the swarm writes (decision: Ransom, 2026-10-27; [swarm-communication.md Fencing](swarm-communication.md#fencing)).
 - **Relay text, not mechanics.** A message is what the sender wrote, never the sender's tool calls, tool results or transcript. Microsoft Agent Framework and the OpenAI Agents SDK's `remove_all_tools` filter make the same choice.
 - **Bind sender identity at the bus.** Members never assert who they are. METR's investigation of the Hugging Face incident found agents impersonating one another. Terrarium's attacks inject system messages through its communication proxy.
 
@@ -860,6 +860,7 @@ Untrusted input reaches this code from several directions.
 - **Peer messages are model output** and may be adversarial: a compromised member, or ordinary prompt injection relayed from a web page.
   - They reach a member only as tool output, never in the user role (decision: Ransom, 2026-10-07), unless an arm opts into injection after M2 (decision: Ransom, 2026-10-09), which deliberately measures that weaker boundary ([swarm-communication.md](swarm-communication.md#security)). Status lines carry counts and ids only, with no peer-chosen strings ([Delivery](#delivery-peer-messages-are-model-output)). Claude Code teams take the same stance: an agent message is never user consent.
   - Approval and sentinel decisions are never taken from message content.
+  - **No protection is given to peer text.** A fence is a label for the reader, not a security boundary: a member can write text that looks like a fence, another member's text, or text the swarm writes, such as a status line (decision: Ransom, 2026-10-27). By default, peer text reaches members only as tool output; the messages channel's opt-in `inject` mode delivers it in a user message. Evidence comes from bus events and ids, never from result text. A channel that needs stronger guarantees, for example for multi-agent security experiments, must provide them itself.
   - The `synthesize` final-answer mode is the one place peer text enters a prompt the harness composes. It quotes member submissions as delimited data in a separate model call, not in any member's context. That is a weaker boundary, so `synthesize` is never the default.
 - **Message volume.** Storm controls (rate, deduplication, inbox and size caps) bound how much one member can push into others' contexts and into the log.
 - **The shared filesystem** is an unsanctioned, unmonitored channel by construction. The design treats it as an observed channel, not a trusted one. The Hugging Face incident shows that agents will also find channels the eval designer did not intend, such as package caches, shared mounts and network services.
@@ -894,7 +895,7 @@ Untrusted input reaches this code from several directions.
   - storm controls behave as specified, and so, once the bus hook exists, do its verdicts (`proceed`, `modify`, `reject`); a full inbox reaches the sender as a tool error;
   - peer content reaches a recipient only in a read tool's result:
     - fenced, with the bus-stamped sender;
-    - with a payload holding a fence marker refused at send;
+    - with a payload that looks like a fence delivered as typed;
     - with no tool calls or results relayed;
     - status lines contain no peer-chosen strings (bodies, subjects, thread titles, member-created channel names);
   - every run records its stop reason;
