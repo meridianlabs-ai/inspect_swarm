@@ -112,7 +112,7 @@ A deepagent member also has a private `memory()` of its own by default. Pass `de
 
 ## Limits
 
-The board is bounded, so every file fits whole in one view:
+The board is bounded:
 
 | Argument | Default | Limit |
 |---|---|---|

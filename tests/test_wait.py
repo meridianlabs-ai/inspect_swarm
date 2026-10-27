@@ -814,7 +814,7 @@ def slow() -> Tool:
 
 
 @pytest.mark.anyio
-async def test_a_wait_runs_alone_in_its_turn_and_is_not_truncated(
+async def test_a_wait_runs_alone_in_its_turn(
     tmp_path: Path,
 ) -> None:
     # p and q write and end before r starts; r's one turn calls slow and swarm_wait
@@ -846,7 +846,6 @@ async def test_a_wait_runs_alone_in_its_turn_and_is_not_truncated(
             channels=["shared_memory"],
         ),
         tmp_path,
-        max_tool_output=100,
     )
     events = sample.events
     [result] = _results(events, "swarm_wait")

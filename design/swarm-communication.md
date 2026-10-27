@@ -564,7 +564,7 @@ Depends on [open question 2](#open-questions). With `remind=N`:
 - If the member has unread records and at least N turn boundaries of its bound loop have passed since its last reminder, it gets a **reminder** listing everything unread:
 
   ```
-  [Swarm] Reminder: 3 unread messages (from worker-2, worker-4). Call read_messages() to read them.
+  [Automatic swarm notice] Reminder: 3 unread messages (from worker-2, worker-4). Call read_messages() to read them.
   ```
 
 - Fixed template, with metadata naming the records. Turns that do not reach a boundary (interrupted, overflow recovery) do not count, so `remind=3` means at most one reminder every three continued turns. Reminders stop when nothing is unread.
@@ -663,7 +663,7 @@ inspect_ai tests: a steer interrupts a tool and a generate and resumes with the 
 The sender's result names each recipient's outcome: `Sent m-14 to worker-2 (interrupted), worker-3 (will see it at its next turn).`
 
 **The boundary message** is built at post time from all the recipient's unread records, with a fixed first line naming the interruption and the urgent record first:
-- by default: `[Swarm] Your turn was interrupted by an urgent message from worker-2. 3 unread messages (from worker-2, worker-4). Call read_messages() to read them.`, with metadata naming the records and `"urgent": true`.
+- by default: `[Automatic swarm notice] Your turn was interrupted by an urgent message from worker-2. 3 unread messages (from worker-2, worker-4). Call read_messages() to read them.`, with metadata naming the records and `"urgent": true`.
 - with `inject`: the injected message, with that first line, the urgent records first and then the others oldest first, under the read budget.
 
 Injected records are marked read at post time, so neither a concurrent boundary nor a read shows them twice. The evidence of what the message showed is written when the item is confirmed delivered, at the loop's next `started` after the drain (above). Both observers run synchronously in the member's task, so the event lands in the member's span. If the loop ends before then, for example while an operator's redirect is still awaited, no event claims a message or read that never reached the model.
@@ -691,7 +691,7 @@ Depends on [open question 2](#open-questions). With `nested=True`, a member's ru
 - **Delivery.** At step 4, for a recipient with nested loops registered this turn, the bus posts a `Steer`, never an interrupt, to each nested loop:
 
   ```
-  [Swarm] worker-1 has 2 unread messages (from worker-2). Only worker-1's main loop can read them; it sees them when you return.
+  [Automatic swarm notice] worker-1 has 2 unread messages (from worker-2). Only worker-1's main loop can read them; it sees them when you return.
   ```
 
   The message is a fixed template with metadata `type: "nested_notice"`, posted for new records to each nested loop with no undelivered notice of its own (one pending `Steer` per loop, as above); records that arrive meanwhile are counted in the next one. The nested `react()` renders it at its next `before_turn()`.

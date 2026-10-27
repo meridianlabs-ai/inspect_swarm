@@ -130,15 +130,11 @@ def test_eval_set_arms_are_distinct() -> None:
     "arguments",
     [
         {"max_files": 0},
-        {"max_files": 10_001},
         {"max_files": 1.5},
         {"max_files": True},
         {"max_file_bytes": 0},
-        {"max_file_bytes": 262_145},
         {"max_file_lines": 0},
-        {"max_file_lines": 100_001},
         {"max_board_bytes": 15_999},
-        {"max_board_bytes": 16_777_217},
         {"rate": (0, 60.0)},
         {"rate": (1.5, 60.0)},
         {"rate": (1, 0)},
@@ -146,7 +142,6 @@ def test_eval_set_arms_are_distinct() -> None:
         {"rate": (1,)},
         {"rate": "60/60"},
         {"max_wait": 0},
-        {"max_wait": 3_601},
     ],
 )
 def test_each_bound_is_checked(arguments: dict[str, Any]) -> None:
@@ -154,7 +149,7 @@ def test_each_bound_is_checked(arguments: dict[str, Any]) -> None:
         shared_memory(**arguments)
 
 
-def test_bounds_at_their_limits_are_accepted() -> None:
+def test_bounds_at_their_minimums_and_far_above_are_accepted() -> None:
     shared_memory(
         max_files=1,
         max_file_bytes=1,
@@ -164,12 +159,12 @@ def test_bounds_at_their_limits_are_accepted() -> None:
         max_wait=1,
     )
     shared_memory(
-        max_files=10_000,
-        max_file_bytes=262_144,
-        max_file_lines=100_000,
-        max_board_bytes=16_777_216,
+        max_files=1_000_000,
+        max_file_bytes=100_000_000,
+        max_file_lines=10_000_000,
+        max_board_bytes=1_000_000_000,
         rate=[1, 1],
-        max_wait=3_600,
+        max_wait=86_400,
     )
 
 
@@ -381,7 +376,7 @@ async def test_one_swarm_object_keeps_concurrent_samples_boards_apart(
 
 
 @pytest.mark.anyio
-async def test_a_view_is_not_truncated_and_only_a_view_records_a_read(
+async def test_a_long_view_is_truncated_in_the_middle_and_only_a_view_records_a_read(
     tmp_path: Path,
 ) -> None:
     content = "\n".join(f"line {n} " + "x" * 40 for n in range(200))
@@ -404,13 +399,17 @@ async def test_a_view_is_not_truncated_and_only_a_view_records_a_read(
             ),
         ),
         tmp_path,
-        max_tool_output=100,
+        max_tool_output=1_000,
     )
     assert log.samples is not None
     [sample] = log.samples
     view = _results(sample)[1]
-    assert view.endswith(
-        "\n".join(f"{n + 1:6}\t{line}" for n, line in enumerate(content.split("\n")))
-        + "\n</peer_file>"
-    )
+    lines = [f"{n + 1:6}\t{line}" for n, line in enumerate(content.split("\n"))]
+    assert "too long to be displayed" in view
+    assert (
+        '<peer_file id="f-1" path="/shared_memory/a.md" version="1" last_writer="w">\n'
+        + lines[0]
+    ) in view
+    assert lines[-1] + "\n</peer_file>" in view
+    assert lines[100] not in view
     assert len(_comm(sample, "read")) == 1

@@ -12,7 +12,7 @@ from .._bus._record import Draft, FrozenJson, Record, thaw_json
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
 from .._evidence import comm_read
-from .._fence import FENCE_TAGS, fence, fence_bytes, has_marker, utf8_bytes
+from .._fence import FENCE_TAGS, fence, has_marker, utf8_bytes
 from ._channel import (
     Channel,
     ChannelRun,
@@ -45,10 +45,6 @@ _FILE_ID = re.compile(r"f-[1-9][0-9]{0,13}")
 # the addressing grammar of member names, which appear in fence attributes and wait
 # results
 _MEMBER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,47}")
-
-# file ids, versions and counts are given at most this many bytes when the read budget
-# is computed
-_ID_BYTES = 16
 
 # at most this many file ids in a status line or wait result
 _LISTED_IDS = 10
@@ -126,29 +122,29 @@ def shared_memory(
 
     Each member gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` over files under `/shared_memory`. Every write goes through the swarm's bus as a record from the member that made it. A view shows a file inside a fence that names its last writer and version, and lists of changed files name them by ids such as `f-3`, which `view` takes as its `file_id`. A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `append` needs no view: it adds text on a new line at the end of a file, creating the file if it does not exist. `changes` returns only the list of files other agents changed since the loop last viewed them, which ends every result.
 
-    The board lives for one run of the swarm. Its bounds keep every file viewable whole in one result.
+    The board lives for one run of the swarm. A result longer than the tool output limit is truncated in the middle, as Inspect truncates any tool's result.
 
     Each member, and each of its subagents, also gets `swarm_wait`, which blocks until a file it watches has a change it has not viewed, another member ends, every member is waiting, the swarm stops, or a timeout passes. A wait is wall-clock time inside a tool call: it counts towards the member's time limit, the swarm's time cap, and the sample's time and working limits. It makes no model call, so it adds no tokens, cost or steps.
 
     Args:
-        max_files: The most files on the board, from 1 to 10,000.
-        max_file_bytes: The most UTF-8 bytes in one file, from 1 to 262,144.
-        max_file_lines: The most lines in one file, from 1 to 100,000.
-        max_board_bytes: The most UTF-8 bytes in all files together, from `max_file_bytes` to 16,777,216.
+        max_files: The most files on the board, at least 1.
+        max_file_bytes: The most UTF-8 bytes in one file, at least 1.
+        max_file_lines: The most lines in one file, at least 1.
+        max_board_bytes: The most UTF-8 bytes in all files together, at least `max_file_bytes`.
         rate: The most writes one member may make, all its loops together, in a sliding window of seconds, as `(count, seconds)`; `None` for no limit.
-        max_wait: The longest `swarm_wait` in seconds, from 1 to 3,600, and its default timeout.
+        max_wait: The longest `swarm_wait` in seconds, at least 1, and its default timeout.
 
     Returns:
         The channel.
 
     Raises:
-        ValueError: If a bound is out of its range, or `rate` is not a positive count and a finite, positive window.
+        ValueError: If a bound is below its minimum, or `rate` is not a positive count and a finite, positive window.
     """
-    _check_bound("max_files", max_files, 1, 10_000)
-    _check_bound("max_file_bytes", max_file_bytes, 1, 262_144)
-    _check_bound("max_file_lines", max_file_lines, 1, 100_000)
-    _check_bound("max_board_bytes", max_board_bytes, max_file_bytes, 16_777_216)
-    _check_bound("max_wait", max_wait, 1, 3_600)
+    _check_bound("max_files", max_files, 1)
+    _check_bound("max_file_bytes", max_file_bytes, 1)
+    _check_bound("max_file_lines", max_file_lines, 1)
+    _check_bound("max_board_bytes", max_board_bytes, max_file_bytes)
+    _check_bound("max_wait", max_wait, 1)
     return _SharedMemory(
         _Limits(max_files, max_file_bytes, max_file_lines, max_board_bytes),
         None if rate is None else _rate(rate),
@@ -156,14 +152,10 @@ def shared_memory(
     )
 
 
-def _check_bound(name: str, value: object, low: int, high: int) -> None:
-    if (
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or not low <= value <= high
-    ):
+def _check_bound(name: str, value: object, low: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < low:
         raise ValueError(
-            f"shared_memory(): {name} must be a whole number from {low:,} to {high:,}, got {value!r}."
+            f"shared_memory(): {name} must be a whole number of at least {low:,}, got {value!r}."
         )
 
 
@@ -301,7 +293,6 @@ class _SharedMemoryState:
         self._admitted: tuple[str, list[_Change]] | None = None
         self._applied: dict[str, list[_Change]] = {}
         self._tool: Tool | None = None
-        self.read_budget = _read_budget(limits, self._roster)
 
     def tools(self) -> list[Tool]:
         if self._tool is None:
@@ -505,8 +496,6 @@ class _SharedMemoryState:
             name="shared_memory",
             description=_DESCRIPTION,
             parallel=True,
-            # the read budget bounds every view, so nothing truncates a fence
-            max_output=0,
         ).as_tool()
 
     async def _call(
@@ -1157,44 +1146,3 @@ def _acknowledgment(command: str, args: _Args, changes: Sequence[_Change]) -> st
             return f"Renamed {args.old_path} to {args.new_path} ({first.file}, now version {first.version})."
         case _:
             return f"Renamed {args.old_path} to {args.new_path} ({len(changes)} file{'' if len(changes) == 1 else 's'})."
-
-
-def _read_budget(limits: _Limits, roster: Sequence[str]) -> int:
-    # the most UTF-8 bytes a view can return for this configuration and roster: the
-    # larger of a whole file of the largest size and a listing of the most files, with
-    # ids, versions and counts of up to 16 bytes, the longest path and member name
-    writer = max(utf8_bytes(name) for name in roster)
-    count = "9" * _ID_BYTES
-    status = utf8_bytes(
-        "\n"
-        + _status(
-            int(count),
-            _id_list([f"{'x' * _ID_BYTES} deleted"] * (_LISTED_IDS + 1), int(count)),
-        )
-    )
-    file_view = (
-        fence_bytes(
-            "peer_file",
-            [
-                ("id", _ID_BYTES),
-                ("path", _MAX_PATH_BYTES),
-                ("version", _ID_BYTES),
-                ("last_writer", writer),
-            ],
-        )
-        # each line numbered in six columns and a tab
-        + limits.max_file_bytes
-        + 7 * limits.max_file_lines
-    )
-    listing_line = utf8_bytes(
-        _listing_line(
-            "x" * _ID_BYTES,
-            count,
-            "x" * writer,
-            "x" * _MAX_PATH_BYTES,
-            (_ID_BYTES, _ID_BYTES, writer),
-        )
-    )
-    listing = fence_bytes("peer_listing", []) + limits.max_files * (listing_line + 1)
-    tombstone = utf8_bytes(f"{'x' * _ID_BYTES} was deleted by {'x' * writer}.")
-    return max(file_view, listing, tombstone) + status

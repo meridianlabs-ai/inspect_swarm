@@ -966,8 +966,7 @@ async def test_text_without_a_fence_marker_is_stored_as_typed(
         )
 
 
-# The read budget: every accepted file, and the listing of a full board, fits whole in
-# one view.
+# Views of the largest file and of a full board's listing, which the channel never cuts.
 
 
 @pytest.mark.anyio
@@ -978,7 +977,7 @@ async def test_text_without_a_fence_marker_is_stored_as_typed(
         pytest.param("\n" * 19, id="max_file_lines-empty-lines"),
     ],
 )
-async def test_a_largest_file_is_viewed_whole_within_the_budget(content: str) -> None:
+async def test_a_largest_file_is_viewed_whole(content: str) -> None:
     name = "m" * 48
     async with _board(
         shared_memory(max_file_bytes=100, max_file_lines=20, rate=None),
@@ -995,7 +994,6 @@ async def test_a_largest_file_is_viewed_whole_within_the_budget(content: str) ->
             await board("w", "delete", path=_p(f"{n}"))
         result = await board(name, "view", path=path, view_range=[1, -1])
         assert result.endswith(", and 2 more).")
-        assert utf8_bytes(result) <= board.state.read_budget
         assert _fenced(result) == "\n".join(
             f"{n + 1:6}\t{line}" for n, line in enumerate(content.split("\n"))
         )
@@ -1023,7 +1021,7 @@ async def test_a_waits_news_line_stays_within_a_fixed_bound() -> None:
 
 
 @pytest.mark.anyio
-async def test_a_full_boards_listing_is_within_the_budget() -> None:
+async def test_a_full_boards_listing_lists_every_file() -> None:
     name = "m" * 48
     async with _board(
         shared_memory(max_files=5, max_file_bytes=1, rate=None), members=[name]
@@ -1033,7 +1031,6 @@ async def test_a_full_boards_listing_is_within_the_budget() -> None:
             await board(name, "create", path=path, file_text="x")
         result = await board(name, "view", path=ROOT)
         assert len(_fenced(result, "peer_listing").split("\n")) == 5
-        assert utf8_bytes(result) <= board.state.read_budget
 
 
 # Storm controls: each at its threshold and over it, refused at admission with `sent`

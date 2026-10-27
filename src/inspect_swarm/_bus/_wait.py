@@ -294,8 +294,6 @@ class Waits:
             },
             # alone in its loop's turn, so a loop in a wait is doing nothing else
             parallel=False,
-            # results are fixed lines of ids and names, which nothing should cut
-            max_output=0,
         ).as_tool()
 
     # the registry
