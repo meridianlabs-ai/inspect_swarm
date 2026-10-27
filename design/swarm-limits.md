@@ -219,7 +219,7 @@ Swarm nodes differ from Inspect's in four more ways:
 
 - **Ownership.** Each has an owner: the swarm, or one member. The runtime recognises its own errors by `error.source` identity against the nodes it created, split into *shared* nodes (swarm meter, caps, runtime lever, final meter) and *member-owned* nodes (that member's lever, shares and re-created limits).
 - **Cap stop.** A swarm cap, when exceeded, first calls the runtime's `stop("swarm_cap")`, for a native or a bridged member and for the controller (`_budget.py`, `SwarmNode.exceeded`), and only then raises or cancels as below. So a native tool or handoff that consumes the cap's error still leaves the swarm stopping ([Stopping](#stopping), Triggers).
-- **Messages.** When exceeded for a native member they raise `LimitExceededError` as usual, with the kind's `type`, except the lever, which raises `type="custom"`. The message names the swarm and the reason ("Swarm cost cap reached", "Stopped by the swarm: verified answer"). They write no `SampleLimitEvent`, which the viewer would show as a sample limit; the runtime's ledger records the stop instead, in its store entry and `SwarmEvent` ([Ledger](#the-ledger)).
+- **Messages.** When exceeded for a native member they raise `LimitExceededError` as usual, with the kind's `type`, except the lever, which raises `type="custom"`. The message names the swarm and the reason ("Swarm cost cap reached", "Stopped by the swarm: verified answer"). They write no `SampleLimitEvent`, which the viewer would show as a sample limit; the runtime's ledger records the stop instead, in its store entry and evidence event ([Ledger](#the-ledger)).
 - **Bridged members.** A node exceeded while checking for a bridged member does not raise, because a raise in the sandbox service ends the sample ([Bridged generations](#bridged-generations)). It records why the member must stop and cancels that member's cancel scope synchronously; a swarm cap has already called the runtime's `stop("swarm_cap")` (Cap stop, above). The bridged agent's pending call is cancelled at its next await, before or just after dispatch.
 
 **Knowing a member is bridged.** A member is bridged from its first instruction, so the swarm decides before the member starts rather than inferring it from a generation (bridge compaction and filters run before the bridge's mark, [Bridged generations](#bridged-generations)):
@@ -399,7 +399,7 @@ After the members have stopped, the runtime leaves the cap nodes and runs the fi
 
 ### The ledger
 
-The ledger is what analysis compares across arms (swarm.md: "caps are stopping rules; comparisons use realized cost"). It is written once, in the runtime's `finally`, as a `SwarmEvent` of kind `ledger` whose `data` is the store entry ([swarm-event-types.md](swarm-event-types.md#swarmevent)) and as a `StoreModel` under `inspect_swarm:ledger`, so scorers and the analysis helpers read the same record.
+The ledger is what analysis compares across arms (swarm.md: "caps are stopping rules; comparisons use realized cost"). It is written once, in the runtime's `finally`, as an evidence event of kind `ledger` ([swarm-event-types.md](swarm-event-types.md#how-inspect_swarm-writes-them) defines its format) and as a `StoreModel` under `inspect_swarm:ledger`, so scorers and the analysis helpers read the same record.
 
 ```python
 class Meter(BaseModel):
@@ -588,7 +588,7 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
   This is allowed (decision: Ransom, 2026-10-07). They are pinned by tests in this repository ([Testing](#testing)), so an inspect_ai change that breaks them fails CI here.
 - **No inspect_ai changes for limits.** M1's two inspect_ai prerequisites, the registry types (AI-1) and the tool-state scope (AI-2), come from swarm-api.md and swarm.md, not from this design ([swarm-implementation-plan.md](swarm-implementation-plan.md#inspect_ai)). The bridge fix in [Alternatives](#alternatives-considered) and the two observability changes in [open question 3](#open-questions) (AI-3 and AI-4) are optional; the ledger's completeness rules relax as they land.
 - **`swarm()` arguments in the log.** `Budget` and a member's limits are logged as their fields, by swarm-api.md's rule, so they are part of the task identifier and are rebuilt on replay ([The budget parameter](#the-budget-parameter)).
-- **Eval logs.** The ledger is a `SwarmEvent` with a `version` and a store entry; the event type is [swarm-event-types.md](swarm-event-types.md)'s, and limits add none. Swarm nodes write no `SampleLimitEvent`, so the log's sample-limit record and `SampleLimitEvent`s keep meaning a sample limit.
+- **Eval logs.** The ledger is an evidence event and a store entry, both versioned; the event type is [swarm-event-types.md](swarm-event-types.md)'s, and limits add none. Swarm nodes write no `SampleLimitEvent`, so the log's sample-limit record and `SampleLimitEvent`s keep meaning a sample limit.
 - **Checkpoint and resume.** inspect_ai restores only the sample's root nodes on resume (`src/inspect_ai/util/_checkpoint/sample_runtime.py:147-225`). Swarm nodes restart from zero, so a resumed swarm would overspend its cap. Resume is out of scope for swarms (swarm.md's [Not this design](swarm.md#not-this-design)); until it is designed, the ledger records `resumed: true` when the sample was resumed, and analysis excludes such samples from matched-cost comparisons.
 
 ## Security
@@ -596,7 +596,7 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
 - **What reaches this code.** Model usage numbers and prices from providers, member names from the task's roster, and limit values from task parameters. Model output and tool arguments do not reach it; the ledger records numbers, statuses and model names, not content.
 - **A member cannot raise its own budget.** Nodes, levers and shares live in the host process. A member's tools, including bridged tools and code in the sandbox, have no handle on them, and stop causes are set only by the runtime.
 - **Spending to deny the others.** Under `split="pool"` one member can spend the whole budget; that is the condition being measured. `"equal"` or weights bound each member when that is unwanted.
-- **Log contents.** The ledger is JSON data in a `SwarmEvent`, rendered generically.
+- **Log contents.** The ledger is JSON data in an evidence event, rendered generically ([swarm-event-types.md Security](swarm-event-types.md#security)).
 
 ## Testing
 
