@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.2.0](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.1.0...0.2.0) (2026-10-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove swarm notices; members learn of shared memory changes from tools ([#106](https://github.com/meridianlabs-ai/inspect_swarm/issues/106))
+
+### Features
+
+* new `changes` command in `shared_memory` reports changed files without listing the board ([#96](https://github.com/meridianlabs-ai/inspect_swarm/issues/96)) ([f56b83e](https://github.com/meridianlabs-ai/inspect_swarm/commit/f56b83e10a7349ab923af3635ccc4d916949dc29))
+* remove swarm notices; members learn of shared memory changes from tools ([#106](https://github.com/meridianlabs-ai/inspect_swarm/issues/106)) ([aa9ec88](https://github.com/meridianlabs-ai/inspect_swarm/commit/aa9ec882cbbb3eda8ef8c7923214bbde4eecac6c))
+* shared memory accepts text that looks like a fence, and the docs say peer text has no protection ([#105](https://github.com/meridianlabs-ai/inspect_swarm/issues/105)) ([b5ae470](https://github.com/meridianlabs-ai/inspect_swarm/commit/b5ae470502e2356a5392e50deb5c052f97a56c14))
+* shared memory drops the repeated not-instructions headers ([#83](https://github.com/meridianlabs-ai/inspect_swarm/issues/83)) ([ce481c6](https://github.com/meridianlabs-ai/inspect_swarm/commit/ce481c6a781e7db4cf003eb4fbe76394f443fdbd))
+* shared memory fences drop the record and line-range attributes ([#86](https://github.com/meridianlabs-ai/inspect_swarm/issues/86)) ([2d341af](https://github.com/meridianlabs-ai/inspect_swarm/commit/2d341afb55c6c5326301f305fc00c2a66250e190))
+* shared memory fences name the last writer as last_writer ([#89](https://github.com/meridianlabs-ai/inspect_swarm/issues/89)) ([2b8c740](https://github.com/meridianlabs-ai/inspect_swarm/commit/2b8c7404a531f21eab2d040bacc37beeb81e4b42))
+* shared memory has no upper bounds, and Inspect truncates its tools' results ([#93](https://github.com/meridianlabs-ai/inspect_swarm/issues/93)) ([4f0657c](https://github.com/meridianlabs-ai/inspect_swarm/commit/4f0657c8cdab41e3d4744728c79a043770a05a58))
+* shared memory views and waits take a file id as file_id ([#90](https://github.com/meridianlabs-ai/inspect_swarm/issues/90)) ([d9092e5](https://github.com/meridianlabs-ai/inspect_swarm/commit/d9092e50a67a4810875d25a7ceb6afe2a38eacba))
+* swarm notices put tool calls in markdown backticks ([#94](https://github.com/meridianlabs-ai/inspect_swarm/issues/94)) ([0701835](https://github.com/meridianlabs-ai/inspect_swarm/commit/070183577877dae13b254f7e280b2f46b92a210f))
+* swarm notices start with [Automatic swarm notice] ([#98](https://github.com/meridianlabs-ai/inspect_swarm/issues/98)) ([cbe8b26](https://github.com/meridianlabs-ai/inspect_swarm/commit/cbe8b264b5486952cfdbc3a297fa03ee6b811c65))
+
+
+### Bug Fixes
+
+* shared memory listings line up their columns when file ids, versions or writers differ in length ([#97](https://github.com/meridianlabs-ai/inspect_swarm/issues/97)) ([6345c82](https://github.com/meridianlabs-ai/inspect_swarm/commit/6345c82ea8ca1cca956ebc4612a610fddb59e491))
+* validate member limit dicts ([#88](https://github.com/meridianlabs-ai/inspect_swarm/issues/88)) ([fff3c7e](https://github.com/meridianlabs-ai/inspect_swarm/commit/fff3c7ee88be70a05b5d72531db072c7ac8b452b))
+
 ## 0.1.0 (2026-10-23)
 
 
