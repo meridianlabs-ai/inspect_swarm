@@ -14,7 +14,7 @@ ORBIT keeps its scenarios, attacks, defenses and scorers, and the configurations
 What inspect_swarm would add is all future work in [the implementation plan](swarm-implementation-plan.md#future-work), which lists "a scheduled execution mode" and "ORBIT on inspect_swarm". None of it is in M1 or M2:
 
 - **A scheduled mode** ([P4](#p4-scheduled-mode-the-turn-seam-and-activation)).
-  - A controller runs a member for one quantum with `activate()`. The member then parks at its next turn boundary inside `swarm_on_continue()`, the hook M2 already adds for notices.
+  - A controller runs a member for one quantum with `activate()`. The member then parks at its next turn boundary inside `swarm_on_continue()`, a turn hook the port adds; M2 has no turn hook and no notices ([open question 5](#open-questions)).
   - The member stays inside one `react()` call for the whole sample, so nothing re-enters `react()`.
 - **Trusted interventions** ([P5](#p5-trusted-interventions)). Between activations, eval-author code may append scenario or attack input to a staged copy of a member's conversation, and defenses may rewrite that copy. Every change is recorded.
 - **Three small bus extensions** ([P2](#p2-bus-extensions)):
@@ -46,7 +46,7 @@ This is a deep dive on one topic of [swarm.md](swarm.md): how ORBIT, the multi-a
 It builds on the other designs:
 
 - [swarm-api.md](swarm-api.md) for controllers, member handles and stopping;
-- [swarm-communication.md](swarm-communication.md) for the bus, channels, `swarm_on_continue()`, notices, evidence and the notices' metadata ids;
+- [swarm-communication.md](swarm-communication.md) for the bus, channels and evidence, and how members learn of changes;
 - [swarm-limits.md](swarm-limits.md) for statuses, member limits and the stop procedure;
 - [swarm-scoring.md](swarm-scoring.md) for the final answer and the result record;
 - [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md) for sandbox topology;
@@ -58,8 +58,9 @@ It keeps the standing decisions recorded in swarm.md and the deep dives:
 
 - **2026-10-07.** Python 3.11+. inspect_ai internals may be used. Limits stay soft. M1, then M2, then the rest in any order. Members share the sample sandbox by default. Monitoring goes through inspect_sentinel. Red-team features are optional. Peer messages are model output, delivered as tool output with distinct provenance. The transcript representation stays open.
 - **2026-10-09.** Peer text may enter the user role only in an explicit, opt-in experimental arm.
-- **2026-10-13.** Ordinary notices stay on `swarm_on_continue()` even once inspect_ai has a `Steer` item. The milestones are defined by audience.
+- **2026-10-13.** The milestones are defined by audience.
 - **2026-10-14.** M2 is ready for external use, measured against Epoch's LeanOpenProblems swarm. Direct messages, and scoring beyond `first`, are later work.
+- **2026-10-27.** The swarm adds no message to a member's conversation: there are no notices and no `swarm_on_continue()`, and members learn of changes through tools. This supersedes the 2026-10-13 decision that ordinary notices stay on `swarm_on_continue()`, and leaves this design's turn hook and notices open ([open question 5](#open-questions)).
 
 Code references:
 
@@ -74,7 +75,7 @@ Paths are relative to each repository's root.
 swarm.md recommends that inspect_swarm "align with ORBIT and aim to be a substrate it could run on, not to absorb it". It lists what inspect_swarm should provide for that:
 
 - turn boundaries and an activation-policy interface;
-- notices without `Model` wrappers, and swarm evidence that ORBIT's own exposure observer joins model input to;
+- swarm evidence that ORBIT's own exposure observer joins model input to; the swarm adds no notices, so ORBIT's are [open question 5](#open-questions);
 - an extension point on the bus for channel kinds.
 
 That list is a claim, not a design. This document checks it against ORBIT's code and the other designs, and makes it concrete.
@@ -246,16 +247,15 @@ Each is an `InfoEvent` with source `orbit.communication` (`runtime.py:190-227`).
   - swarm-api.md expected this deep dive's scheduled mode to be a controller, with `activate()`, `snapshot()`, `append()` and `edit()` as methods on the same handles. It left to this design the case for giving such controllers member text.
 - **The bus and channels** ([swarm-communication.md](swarm-communication.md#records-and-the-bus)).
   - Every sanctioned record goes through `Bus.deliver()`. The bus binds the sender from the member ContextVar and resolves addresses at step 0, where a recipient that is not `running` makes the send fail; an unaddressed record, such as a shared-memory write, has none. Then come the policy, commit checks (the sender's and recipients' liveness, storm controls and the channel's `admit()`), `sent` evidence, and finally apply with `delivered` evidence carrying the commit sequence number ([swarm-memory-channel.md Changes to the bus](swarm-memory-channel.md#changes-to-the-bus)).
-  - A channel is a `@swarm_channel` whose per-run `ChannelState` supplies `tools()`, `validate()`, `admit()`, `apply()`, `notice_lines()` and `quiescent()`. User channels may implement it from M2, and the interface is experimental in the first release.
+  - A channel is a `@swarm_channel` whose per-run `ChannelState` supplies `tools()`, `validate()`, `admit()`, `apply()` and `quiescent()`. User channels may implement it from M2, and the interface is experimental in the first release.
   - Routes are a parameter of the later messages channel, `messages(routes=)`.
-- **The turn hook and notices** ([Notices](swarm-communication.md#notices)).
-  - `swarm_on_continue(inner=None, *, no_tool_calls="continue")` computes the continuation exactly as the member would without it.
-  - Unless that result is `False`, it appends a metadata-only notice: a `ChatMessageUser` with `metadata.inspect_swarm.type == "notice"`.
-  - It acts only in the member's bound loop.
-  - The swarm never posts to agent channels. Ordinary notices stay on this hook (decision: Ransom, 2026-10-13).
+- **No turn hook and no notices** ([How members learn of changes](swarm-communication.md#how-members-learn-of-changes)).
+  - The swarm adds no message to a member's conversation; members learn of changes from tools: a status line, the shared memory's `changes` command and `swarm_wait` (decision: Ransom, 2026-10-27).
+  - There is no `swarm_on_continue()`. The hook this design's scheduled mode parks in, and the notices it keeps for ORBIT's channels, are [open question 5](#open-questions).
+  - The swarm never posts to agent channels.
 - **Evidence** ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)).
-  - The kinds are `sent`, `delivered`, `notified` and `read`, as `InfoEvent`s with `source="inspect_swarm"`, `version: 1` and `type: "comm"`. M2 computes no exposure.
-  - Notices and injections carry the swarm's ids in their metadata. A read is identified by its `read` event and the fenced ids in its result text; its result message carries no swarm metadata in M2 ([Records in model input](swarm-communication.md#records-and-the-bus); decision: Ransom, 2026-10-16).
+  - The kinds are `sent`, `delivered`, `read` and `waited`, as `InfoEvent`s with `source="inspect_swarm"`, `version: 1` and `type: "comm"`. M2 computes no exposure.
+  - Injections, after M2, carry the swarm's ids in their metadata. A read is identified by its `read` event and the fenced ids in its result text; its result message carries no swarm metadata in M2 ([Records in model input](swarm-communication.md#records-and-the-bus); decision: Ransom, 2026-10-16).
 - **Limits and stopping** ([swarm-limits.md](swarm-limits.md#stopping)).
   - Every stop goes through `stop(reason)`: close synchronously, soft stop, grace, hard stop, finalise.
   - Member statuses are a closed set. A normal return is `submitted`, unless the output's `stop_reason` is `content_filter` or `model_length`.
@@ -307,7 +307,7 @@ So ORBIT's `model_step` scheduling, and its repeatable conversational `completio
 | `visibility="step_start"` | `activate(read_cutoff=)` checked against the bus's commit sequence (`delivered.seq`) ([P2](#p2-bus-extensions), [P4](#p4-scheduled-mode-the-turn-seam-and-activation)) | |
 | `max_turns`, halt conditions, hooks | The controller's `run`; its reasons are recorded as `controller:<reason>` | |
 | `sent`, `read`, `model_exposure` | `sent`, `read`, and ORBIT's own `model_exposure` written through `record_exposure()` ([P3](#p3-exposure)) | |
-| ORBIT `notified` (a notice reached a successful input) | `model_exposure` with `notice` set, through `record_exposure()` ([P3](#p3-exposure)) | The swarm's own `notified` means a notice was added to the conversation. |
+| ORBIT `notified` (a notice reached a successful input) | `model_exposure` with `notice` set, through `record_exposure()` ([P3](#p3-exposure)) | The swarm has no `notified` kind of its own. |
 | ORBIT `delivered` (content inserted into a conversation) | None on the swarm runtime | Only `auto` and dialogue projections produce it. The swarm's `delivered` means a record reached channel state. |
 | `output_agent` (latest output, submitted or not) | ORBIT's solver wrapper around the swarm, reading the result record in a synchronous `finally`; a controller's `choose_answer(member)`, or later `reporter(member)` | Both select only a submission ([P1](#p1-members-input-and-output-no-new-api)). |
 | `history_projection` | ORBIT's member wrapper saves each final conversation, and ORBIT's solver wrapper projects them in its `finally` | The swarm returns no member conversations ([P1](#p1-members-input-and-output-no-new-api)). |
@@ -372,7 +372,7 @@ Three extensions are needed, and one choice is left to the ORBIT work:
   - **Joining through the `read` event.** The observer finds the result by the event's tool span and the call's `ToolEvent`, whose id is the result's `tool_call_id`. No metadata, but tool call ids can repeat within a loop ([swarm-memory-channel.md Descendants](swarm-memory-channel.md#descendants)).
   - **Keeping ORBIT's current join.** ORBIT's `record_read()` captures the read's tool call id at read time (`ORBIT: orbit/execution/provenance.py:17-49`), and its observer matches a `ChatMessageTool` by tool call id, function, agent and session, then checks each rendered line verbatim (`ORBIT: orbit/communication/runtime.py:330-395`). It needs no swarm or inspect_ai change.
 
-Notices need nothing new. ORBIT's channel returns `notice_lines(member)` with its configured channel ids and unread counts. These ids are chosen by the eval author, or by trusted attack code that registers a channel, never by a member, so swarm.md's notice rule allows them.
+Notices depend on [open question 5](#open-questions): inspect_swarm has no notices or `notice_lines()`. If the port brings notices for ORBIT's channels, they name its configured channel ids and unread counts. These ids are chosen by the eval author, or by trusted attack code that registers a channel, never by a member, so swarm.md's rule for harness text allows them.
 
 #### P3. Exposure
 
@@ -386,11 +386,11 @@ Exposure in ORBIT's sense, whether a record's or a notice's original content rea
 
 #### P4. Scheduled mode: the turn seam and activation
 
-Scheduled mode is a way for a controller to run members, not a new kind of controller. A controller enters it per member, by activating that member with `activate()` instead of starting it with `start()`. The member's agent needs `swarm_on_continue()`, the hook swarm-communication.md already requires of any member that gets notices. No second hook is added.
+Scheduled mode is a way for a controller to run members, not a new kind of controller. A controller enters it per member, by activating that member with `activate()` instead of starting it with `start()`. The member's agent needs `swarm_on_continue()`, a hook the port adds; M2 has none ([open question 5](#open-questions)).
 
 ##### The seam
 
-`swarm_on_continue(inner=None, *, no_tool_calls="continue")` keeps its signature. Its scheduled behaviour applies only to a call made in the bound loop of a member whose current run began with `activate()`. In every other case (outside a swarm, in a nested loop, or for a member started with `start()`), it is exactly swarm-communication.md's hook.
+`swarm_on_continue(inner=None, *, no_tool_calls="continue")` keeps its signature. Its scheduled behaviour applies only to a call made in the bound loop of a member whose current run began with `activate()`. In every other case (outside a swarm, in a nested loop, or for a member started with `start()`), it adds nothing and returns the continuation the member would have without it.
 
 The member's bound loop is the one swarm-communication.md's tool source binds ([Members and identity](swarm-communication.md#members-and-identity)). For a member with no `swarm_tools()`, the first call of the hook binds it. For `react()` and `deepagent()` that is always the top-level loop, because `deepagent()` passes `on_continue` only to its top-level agent (`src/inspect_ai/agent/_deepagent/deepagent.py:102-103`, `:222-237`).
 
@@ -424,7 +424,7 @@ A member that never reaches a boundary is unaffected, because nothing above runs
 - a bridged member;
 - an agent without the hook.
 
-Its activation lasts until it ends. When a member activated with `model_step` makes two or more model calls and the hook never runs, the runtime records `scheduled_unwired` in the harness-validity checks, as swarm-communication.md records `notify_unwired`.
+Its activation lasts until it ends. When a member activated with `model_step` makes two or more model calls and the hook never runs, the runtime records `scheduled_unwired` in the harness-validity checks, as the runtime records `tools_unwired`.
 
 Because the member stays inside one `react()` invocation, these persist across activations, and nothing re-enters `react()`:
 
@@ -584,9 +584,9 @@ An operation cancelled before it completes changes nothing and writes nothing. I
 | [swarm-api.md](swarm-api.md#controllers) controllers and handles | **Uses.** Scheduled mode is a `@swarm_controller` driving `activate()`. It **extends** `MemberHandle` with `parked`, `snapshot()`, `activate()`, `append()` and `edit()`, and `SwarmControl` with `sequence()`, as swarm-api.md anticipated. `MemberState` is unchanged: parked members are `running`. Activation is the controller's `run`, with no `ActivationPolicy` protocol or `set_output()`; answers follow swarm-scoring.md's rule, and stop reasons are `controller:<reason>`. |
 | swarm-api.md, "No member text" | **Extends**, for controllers that activate members: `snapshot()` and `edit()` carry text ([P4](#member-handles-and-snapshots); [open question 1](#open-questions)). |
 | swarm-api.md, the sibling-parameters table | Of `member(input=, role=, exposure=)`, none remains: `role` is M1's, input goes through `start()` or `activate()`, and exposure is ORBIT's observer's, with no member parameter. The ORBIT row for `routes` is not needed, because ORBIT's channel computes its own recipients. `round_robin` is a `@swarm_controller`, as that table says. |
-| [swarm-communication.md](swarm-communication.md#notices) `swarm_on_continue()` and notices | **Uses** as the turn seam. **Extends** it with the scheduled path. Notices are unchanged (user role, metadata, kept in the conversation), except that a parked member's notice is computed when it resumes. |
+| [swarm-communication.md](swarm-communication.md#how-members-learn-of-changes): no turn hook and no notices | **Adds** `swarm_on_continue()` as the turn seam, with the scheduled path, and notices for ORBIT's channels (user role, metadata, kept in the conversation; a parked member's notice computed when it resumes), as [open question 5](#open-questions) decides. |
 | swarm-communication.md bus and channels | **Uses** for ORBIT's channel, as a user `@swarm_channel`. **Extends** with `Channel.recipients`, the commit sequence in `Delivery` and `Bus.sequence()`, and a public `record_read()`; ORBIT's capacity checks use its `admit()` ([P2](#p2-bus-extensions)). Does not use `messages(routes=)`. |
-| swarm-communication.md evidence | **Uses** the kinds and the notices' metadata ids. Adds `record_exposure()`, which writes ORBIT's `model_exposure` events from its observer, and the `schedule` evidence type ([P3](#p3-exposure)). ORBIT's `delivered` and `notified` mean something else, and the [projection](#compatibility-and-migration) maps them. |
+| swarm-communication.md evidence | **Uses** the kinds. Adds `record_exposure()`, which writes ORBIT's `model_exposure` events from its observer, and the `schedule` evidence type ([P3](#p3-exposure)). ORBIT's `delivered` and `notified` mean something else, and the [projection](#compatibility-and-migration) maps them. |
 | swarm-communication.md `inject` (later) | Not used for ORBIT's channel. ORBIT's `auto` stays ORBIT-specific. |
 | [swarm-limits.md](swarm-limits.md#stopping) stopping and statuses | **Uses** the stop procedure and the closed status set. **Extends** step 0 to release parked members, and the member wrapper to give `stopped` to a member the hook released mid-work ([Stopping a scheduled swarm](#stopping-a-scheduled-swarm)). |
 | swarm-limits.md member limits and approvals | **Uses** as decided. Parked time inside member time limits, and judges outside token and turn limits, are [behaviour changes](#behaviour-a-port-changes). |
@@ -644,7 +644,7 @@ A port does not reproduce every ORBIT behaviour exactly. Runs from the two runti
 
 - **Notices persist, in the user role.**
   - ORBIT recomputes the notice for every request as a system message, and never stores it (`delivery.py:218`, `:297-305`, `:336-343`).
-  - inspect_swarm appends a `ChatMessageUser` with notice metadata at a turn boundary, and keeps it ([Notices](swarm-communication.md#notices)).
+  - With the port's notices ([open question 5](#open-questions)), a `ChatMessageUser` with notice metadata is appended at a turn boundary and kept.
   - Prompts and cache keys differ.
 - **No continue prompt on resume.** `turn_react` adds "Please continue with your next action." on every resume after a tool result. A parked `react()` member adds nothing, because it never left its loop.
 - **Overflow recovery is not a boundary.** Under `model_step`, `turn_react` yields after a context overflow (`turn_react.py:255-258`). `react()` does not call `on_continue` after a recovered overflow, so that activation runs one more generation.
@@ -664,7 +664,7 @@ Each step names the configurations it moves. Everything else keeps running on OR
    - They gain the drain, the realized-cost ledger and per-member records.
    - User controllers are experimental in the first release, but M1 runs them.
 2. **After M2 and the bus extensions (F-1, F-2): the same runs, with channels.**
-   - ORBIT's channels become its `@swarm_channel`, with M2's notices, and ORBIT's observer reports exposure through `record_exposure()`. This works because these runs execute inside a swarm, where the member ContextVar exists.
+   - ORBIT's channels become its `@swarm_channel`, with the port's notices ([open question 5](#open-questions)), and ORBIT's observer reports exposure through `record_exposure()`. This works because these runs execute inside a swarm, where the member ContextVar exists.
    - Scheduled runs do not move in this step. Their executor calls `run()` per activation outside any swarm, so the bus could not bind a sender.
 3. **After scheduled mode (F-3, F-4): ORBIT's scheduler as a controller.**
    - Scheduled `common/v1` runs move, except the combinations in [What stays ORBIT-specific](#what-stays-orbit-specific).
@@ -683,8 +683,8 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
 **A turn gate in inspect_ai's agent channel.** Add an async gate that producers register and `before_turn` awaits (`channel.py:432-453`).
 
 - It would cover the first turn, recovered-overflow turns and every agent that uses the channel facade, without building the agent with `swarm_on_continue()`.
-- But it is an inspect_ai behaviour change. And swarm-communication.md decided that the swarm never posts to agent channels, and that ordinary notices stay on `swarm_on_continue()` even once a `Steer` item exists (decision: Ransom, 2026-10-13). A scheduled seam elsewhere would split the turn boundary in two.
-- Kept as the path if users need to schedule agents that cannot take the hook, as swarm-communication.md keeps the same question for notices.
+- But it is an inspect_ai behaviour change. And swarm-communication.md decided that the swarm never posts to agent channels in M2. A scheduled seam elsewhere would split the turn boundary in two.
+- Kept as the path if users need to schedule agents that cannot take the hook, as swarm-communication.md keeps open whether ordinary messages are pushed.
 
 **A separate scheduling hook** (`swarm_continue()`). It is equivalent, but a member would then need two composed hooks, and their order would matter. Folding the scheduled path into `swarm_on_continue()` keeps one hook and one wiring check. Rejected.
 
@@ -704,7 +704,7 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
 
 - Works today. It handles caching correctly when done with ORBIT's care, and a `ModelAPI`-level observer sees the request after any filter below it.
 - But each wrapper must preserve the model's identity and effective configuration through a private API, the wrappers' order matters, and inspect_swarm would carry this for every member.
-- Rejected for inspect_swarm's own machinery: turn-boundary notices need none, and the swarm computes no exposure. ORBIT keeps its observer, which reports through `record_exposure()` ([P3](#p3-exposure)).
+- Rejected for inspect_swarm's own machinery: the swarm adds no notices, and the swarm computes no exposure. ORBIT keeps its observer, which reports through `record_exposure()` ([P3](#p3-exposure)).
 
 **Exposure computed by the swarm**, live through a transcript subscription or after the drain by a walk over member spans. Either duplicates what ORBIT's observer already sees, and only the observer sees the request after ORBIT's filters. Rejected with M2's own exposure event ([swarm-communication.md Alternatives considered](swarm-communication.md#alternatives-considered); decision: Ransom, 2026-10-15).
 
@@ -772,7 +772,7 @@ Through all four steps, `legacy/v1` stays on ORBIT's own executors.
 - **Member text to controllers.** Only controllers that activate members get it, through `snapshot()` and `edit()`. That widens what swarm-api.md lets a controller see ([open question 1](#open-questions)). A controller cannot write to a member except through `append()` and `edit()`, both recorded.
 - **Defenses before the next generation.** At a boundary, defenses run after attack input is appended, so a sanitising defense sees an injection before the member's next generation, as in ORBIT today.
 - **Exposure is ORBIT's observer's claim.** The bus checks that reported ids belong to the run and the calling member, and records the report; it joins nothing by text, and a member without a complete observer has unknown exposure, never zero.
-- **Notices** list only channel ids configured by the task or registered by trusted code, never ids or names a member created. This keeps swarm.md's notice rule.
+- **Notices** list only channel ids configured by the task or registered by trusted code, never ids or names a member created. This keeps swarm.md's rule for harness text.
 - **Metadata ids** on swarm messages come from bus state, never from a payload, so a reproduced fence cannot pass for a read in the observer's join.
 - **Controller decisions are never read from model output.** ORBIT installs no model-facing schedule editor (`plans.py:1-6`), and a port must keep it that way.
 
@@ -830,7 +830,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
 Future work, after M1 and M2, in the plan's "Later, any order" menu. Each step is one pull request, named `F-n` here, with the M1 and M2 pull requests it needs ([swarm-implementation-plan.md](swarm-implementation-plan.md)):
 
 1. **F-1. Bus extensions.**
-   - Scope: `Channel.recipients` with the step-0 and commit-check rules; the commit sequence as `Delivery.seq` and `Bus.sequence()`; public `record_read(records) -> str`; and the way a read result is named for ORBIT's observer, as [P2](#p2-bus-extensions) leaves to the ORBIT work (for option (c), the stamping in `swarm_on_continue()`, `_bus/_notice.py`).
+   - Scope: `Channel.recipients` with the step-0 and commit-check rules; the commit sequence as `Delivery.seq` and `Bus.sequence()`; public `record_read(records) -> str`; and the way a read result is named for ORBIT's observer, as [P2](#p2-bus-extensions) leaves to the ORBIT work (for option (c), the stamping in the port's turn hook).
    - Files: `src/inspect_swarm/_bus/_record.py`, `_bus/_bus.py`, `src/inspect_swarm/_channel/_channel.py`, `src/inspect_swarm/_evidence.py`.
    - Tests: the bus-extension cases in `tests/test_bus.py`.
    - Depends on: M2-6 (bus core), and M2-8 (the first channel's read events).
@@ -838,7 +838,7 @@ Future work, after M1 and M2, in the plan's "Later, any order" menu. Each step i
    - Scope: `record_exposure()` and `record_exposure_coverage()`, writing ORBIT's `model_exposure` events with the activation id and `cached` fields after checking the ids against the run and the member; the notice message id in `notified`; each notice's original text kept in memory, `notice_text()`, and the text's SHA-256 and length in `notified`.
    - Files: `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_bus/_bus.py`, `src/inspect_swarm/_bus/_notice.py`.
    - Tests: the exposure-reporting cases in `tests/test_comm_evidence.py`.
-   - Depends on: M2-9 (notices), F-1.
+   - Depends on: [open question 5](#open-questions) (notices), F-1.
 3. **F-3. Scheduled mode.**
    - Scope:
      - the scheduled path of `swarm_on_continue()`;
@@ -850,7 +850,7 @@ Future work, after M1 and M2, in the plan's "Later, any order" menu. Each step i
      - `round_robin`.
    - Files: `src/inspect_swarm/_bus/_notice.py`, `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_controller/_schedule.py` (new), `src/inspect_swarm/_controller/round_robin.py` (new), `src/inspect_swarm/_member.py`, `src/inspect_swarm/_swarm.py`, `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_entrypoint.py`.
    - Tests: the seam and handle cases of `tests/test_scheduled.py`.
-   - Depends on: M1-4 (handles and `stop()`), M1-5 (the member's `AgentState` reference), M1-9 (the status rule it amends), M2-9 (`swarm_on_continue()`), and F-1 for the commit sequence.
+   - Depends on: M1-4 (handles and `stop()`), M1-5 (the member's `AgentState` reference), M1-9 (the status rule it amends), [open question 5](#open-questions) (the turn hook), and F-1 for the commit sequence.
 4. **F-4. Trusted interventions.**
    - Scope: staged conversations, `append` and `edit`, commit at `activate()`, and `intervened` events.
    - Files: `src/inspect_swarm/_controller/_schedule.py`, `src/inspect_swarm/_evidence.py`.
@@ -887,7 +887,9 @@ A port of ORBIT follows the [migration path](#migration-path). It is ORBIT work,
 3. **How ORBIT's observer finds a read's result message** ([P2](#p2-bus-extensions), "Naming a read in model input"). Options: (c) stamping in `swarm_on_continue()`, which covers only loops that run the hook; an inspect_ai `tool_result_metadata()` helper in inspect_ai; joining through the `read` event; keeping ORBIT's current tool-call-id join. Leading: (c) (Ransom, 2026-10-16), to be decided when the ORBIT work starts.
 4. **Notices inside combined user messages** ([P3](#p3-exposure), "Combined user messages"). Options: join a combined message to its notices through the loop's `notified` events, in order; or rely on full `combined_from` lineage, an optional standalone inspect_ai fix. To be decided when the ORBIT work starts.
 
-Questions 3 and 4 are resolved when the ORBIT work starts, and do not block the swarm's own design.
+5. **The turn hook and notices.** This design's scheduled mode (P4) parks members inside `swarm_on_continue()`, P2's option (c) stamps reads there, and P3 joins ORBIT's notices to model input. inspect_swarm has no such hook and no notices: the swarm adds no message to a member's conversation (decision: Ransom, 2026-10-27; [swarm-communication.md How members learn of changes](swarm-communication.md#how-members-learn-of-changes)). The port needs a turn seam of its own, for activated members, and must decide whether ORBIT's channels keep notices, which ORBIT's experiments measure. To be decided when the ORBIT work starts.
+
+Questions 3, 4 and 5 are resolved when the ORBIT work starts, and do not block the swarm's own design.
 
 ## Not this design
 
