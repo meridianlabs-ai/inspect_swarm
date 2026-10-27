@@ -197,7 +197,7 @@ A wait is wall-clock time inside a tool call, as swarm-limits.md decided for `re
 
 ### Evidence
 
-One `InfoEvent` per wait, written when it ends (in the synchronous `finally`, so also on cancellation), in the waiter's tool span, with comm's common fields (`version: 1`, `type: "comm"`, `member`, `span_id`, `loop`, `nested`):
+One `CommunicationEvent` per wait, written when it ends (in the synchronous `finally`, so also on cancellation), in the waiter's tool span, with comm's common fields (`member`, `span_id`, `loop`, `nested`). The fields below are named as the swarm writes them; `wait`, `channels`, `outcome` and `duration` are the event's typed `wait`, and the rest are in its `data`, whose `version` is 1 ([swarm-event-types.md](swarm-event-types.md#how-inspect_swarm-writes-them)):
 
 | Field | Meaning |
 |---|---|
@@ -346,7 +346,7 @@ There is no switch to turn waiting off for an arm; [Not this design](#not-this-d
 ## Compatibility and migration
 
 - **inspect_ai:** none. `parallel=False` and `ToolDef` are public; the bus already uses `current_agent_channel()` and `current_agent_span_id()`.
-- **Eval logs:** only existing types. `waited` is a new comm kind inside the versioned `InfoEvent` payload, `delivered` is unchanged, and shared-memory `sent` records now carry `wake: true`. No schema or generated-type change, and evidence stays `version: 1`.
+- **Eval logs:** `waited` is one of `CommunicationEvent`'s kinds ([swarm-event-types.md](swarm-event-types.md#communicationevent)), `delivered` is unchanged, and shared-memory `sent` records carry `wake: true` in their `data`. The wait adds no schema or generated-type change of its own, and evidence stays `version: 1`.
 - **inspect_swarm API:** the `swarm_wait` tool (name, parameters, texts), `shared_memory(max_wait=)`, `Channel.max_wait`, `WaitSpec`, `WaitNews` and `WaitingState`, and `Draft.wake`. Like everything in inspect_swarm, these are experimental ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6). The tool and its texts are evaluated surface: an arm with the shared memory now also has `swarm_wait`, so results from before and after this change are different conditions.
 - **Members and tasks:** nothing changes for a swarm without the shared-memory channel. A member definition with `swarm_tools()` gains `swarm_wait` in arms with the shared memory, and no new tool otherwise.
 

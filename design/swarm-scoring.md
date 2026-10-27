@@ -88,7 +88,7 @@ In inspect_ai unless noted.
 
   The controller decides who starts, when, and when the swarm is done. It may start members conditionally, so some members can stay `pending` and never run ([Controller and runtime](swarm-api.md#controller-and-runtime), [Controllers](swarm-api.md#controllers)).
 - **Member state and status.** `MemberState` is `pending`, `running` or `ended`. Once ended, a member's status is the limits deep dive's closed set as swarm-api.md cites it: `submitted`, `unsubmitted`, `stopped`, `share`, `member_limit:<type>`, `swarm_cap`, `cancelled`, `errored`. `unsubmitted` is a normal return that was not a submit, such as `react()` giving up after refusals ([swarm-limits.md](swarm-limits.md#stopping)). `submitted` is this design's submission ([Controllers](swarm-api.md#controllers), "Statuses").
-- **Evidence.** Evidence is `InfoEvent`s with `source="inspect_swarm"` and payloads carrying `version`, `type` and `kind`, with common fields `member` and `span_id` ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)). Communication changes nothing about how a member submits: a member still submits through its own agent.
+- **Evidence.** Evidence other than communication is `SwarmEvent`s, each with a `kind`, the `member` it concerns and versioned `data` that inspect_swarm owns ([swarm-event-types.md](swarm-event-types.md#swarmevent)); communication is `CommunicationEvent`s ([Evidence and provenance](swarm-communication.md#evidence-and-provenance)). Communication changes nothing about how a member submits: a member still submits through its own agent.
 
 ### Terms
 
@@ -173,11 +173,11 @@ class SwarmResultRecord(BaseModel):
   - The gate fields are filled in when the member ends, so a member that has not ended has 0, 0 and `None`. Records written before M2 load with those defaults. A pass assumes `react()`'s default `score_value` converter, `value_to_float()`, so a member with its own converter can record passes that differ from its own gate (decision: Ransom, 2026-10-20).
 - **Why the store.** It is in the store, not only in events, because re-scoring rebuilds `TaskState.store` and nothing else from the run (`src/inspect_ai/_eval/score.py:461-475`). Part 2's scorers read it from there.
 - **Owned by the runtime, readable by member code.** Only the runtime writes `inspect_swarm:result`; task code (tools, member builders, controllers, scorers, Sentinel protocols) must not write it. Every member's Python code shares the sample's one store, so it can read the record while the swarm runs. Models cannot reach the store themselves, and built-in tools read only their own namespaces, but a tool written to read this key gives the members that call it a view of each other's results: a channel between members outside the bus, with none of its fencing or evidence. In M1 that view is each peer's state, status and time, not its output; Part 2's record adds outputs ([What the record adds](#what-the-record-adds)). The [user docs](https://meridianlabs-ai.github.io/inspect_swarm/scoring.html#the-record-belongs-to-the-swarm) say so (decision: Ransom, 2026-10-14).
-- **Evidence events.** Each member's end and the final selection also produce an evidence `InfoEvent` with `source="inspect_swarm"` and the payload shape swarm-communication.md uses for its own evidence:
-  - `version: 1`, `type: "result"`, and `kind` one of `member_result` or `final`;
-  - the common fields `member` and `span_id` (the swarm's span for `final`).
+- **Evidence events.** Each member's end and the final selection also produce a `SwarmEvent` ([swarm-event-types.md](swarm-event-types.md#swarmevent)):
+  - `kind` one of `member_result` or `final`, `version: 1`, and `member` (the chosen member, or `None`, for `final`);
+  - `data` with `span_id` (the swarm's span for `final`) and the fields of each kind.
 
-  Each event is written inside the member's span or the swarm's span. The events put the result in the transcript at the time it happened; the store record is what scorers read. The payload format is the Observer's ([Observer](swarm.md#observer-evidence-accounting-and-metrics)). This design adds the `result` type, as the communication design adds `comm`.
+  Each event is written inside the member's span or the swarm's span. The events put the result in the transcript at the time it happened; the store record is what scorers read. The format is the Observer's ([Observer](swarm.md#observer-evidence-accounting-and-metrics)).
 - **No outputs in M1.** Nothing in M1 reads a member's output from the record. `first` uses `submitted` and `time`, and the chosen member's output reaches the returned `AgentState`, `TaskState.output` and the sample's logged output on its own; the runtime holds the members' outputs in memory. M1 writes no outputs, because nothing reads them; Part 2 can add them ([What the record adds](#what-the-record-adds)) (decision: Ransom, 2026-10-19). Log size is no reason against them: spans inside the swarm log no `StoreEvent`s, so an output written there is logged in the swarm's span's net change and the enclosing spans', a fixed number of copies however many members run ([swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)). Evidence events carry the member name and status, not the text.
 - **Additive later.** Part 2 adds optional fields to these models ([What the record adds](#what-the-record-adds)). `version` stays 1, because no existing field changes meaning, and an M1 record reads as the record of a swarm without a result contract.
 
@@ -777,12 +777,12 @@ class SwarmResultRecord(BaseModel):   # adds, with the cost boundary
 |---|---|
 | Sample `output` and last assistant message | The final answer, the chosen member's own `ModelOutput`; message metadata names the mode and member (M1) |
 | Sample `store["inspect_swarm:result"]` | The record: every member's state, status and time, and the final selection (M1); outputs, keys, verdicts, the chain's details and `final_verdict` (Part 2) |
-| Transcript | `InfoEvent`s of kinds `member_result` and `final` (M1) and `verdict` (Part 2), with source `inspect_swarm`, at the time they happened; `member_scores`' per-member spans under the scorer span |
+| Transcript | `SwarmEvent`s of kinds `member_result` and `final` (M1) and `verdict` (Part 2), at the time they happened; `member_scores`' per-member spans under the scorer span |
 | Sample scores | The task's scorer (final@k, or team@k for artifact tasks); the task's member scorer with `best_member` and `mean_member`, per-member detail in its metadata |
 | Eval results | One `EvalScore` per task scorer and reducer; the member scorer contributes `best_member` and `mean_member` as separate `EvalScore`s with `scored_samples` and `unscored_samples` counts |
 | Eval spec (plan) | `swarm()`'s `result` argument is logged as the type name `"ResultSpec"`, because it holds callables; the record carries the facts. The chain is logged faithfully inside the controller's params, for example `{"type": "swarm_controller", "name": "inspect_swarm/leaderless", "params": {"final": ["verify", {"mode": "synthesize", ...}], "stop_on_verified": false}}` |
 
-Nothing here needs a new event type, schema change or viewer change. The viewer shows the store, `InfoEvent`s and dict scores generically.
+Nothing here needs an event type, schema change or viewer change beyond `SwarmEvent` ([swarm-event-types.md](swarm-event-types.md)). The viewer shows the store, `SwarmEvent` data and dict scores generically.
 
 Inspect applies every epoch reducer to every scorer and key. An epochs arm with `["mean", pass_at(k)]` therefore also shows, for example, `pass_at` of `mean_member`. Those cells are well defined but not meaningful; the user's analysis selects the cells that are.
 
@@ -972,7 +972,7 @@ best@k is a closed form on values alone, so it would be a reducer (an inspect_ai
 ## Compatibility and migration
 
 - **inspect_swarm** is experimental throughout ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6); everything here is new. Python 3.11+ as decided.
-- **Eval logs.** Only existing structures are used: a store key, `InfoEvent`s, a message metadata key, and from Part 2 scores with dict values and metadata. Old readers and the viewer show them generically. The store record and the `InfoEvent` payloads carry `version: 1`. Part 2's record fields are optional additions under the same version.
+- **Eval logs.** A store key, `SwarmEvent`s ([swarm-event-types.md Compatibility](swarm-event-types.md#compatibility-and-migration)), a message metadata key, and from Part 2 scores with dict values and metadata. The viewer shows them generically. The store record and the events' `data` carry `version: 1`. Part 2's record fields are optional additions under the same version.
 - **Logged parameters across versions.** When Part 2 adds `result=` to `swarm()` and `stop_on_verified` to `leaderless()`, logged plan params gain those keys, as they gained `final` in M2. A run's `task_identifier()` can then differ between inspect_swarm versions for the same task, as it can for any solver that gains a parameter. Arms in one eval set run one installed inspect_swarm, so they are unaffected.
 - **Names** (`member_scores`, `MEMBER_METRICS`, `best_member`, `mean_member`, `baseline`) become an interface the analysis and users' notebooks depend on once released; changing them later is a breaking change. The member scorer's own name is the task's.
 - **inspect_ai.** No change beyond swarm-api.md's two registry types.

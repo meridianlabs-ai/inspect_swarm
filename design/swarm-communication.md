@@ -56,7 +56,7 @@ Non-goals:
 - The API's shape ([swarm-api.md](swarm-api.md)): this design fills in the M2 parts it left to this deep dive and changes none of its decisions.
 - Red-team features (forged senders, injected records, secret channels). The record and the hook leave room for them; nothing builds them.
 - Budget and limit semantics (the limits deep dive), ORBIT mapping and the semantics of its `routes` (the ORBIT deep dive), and scores built on communication metrics (the scoring deep dive).
-- A first-class inter-agent event type ([open question 1 of swarm.md](swarm.md#open-questions) stays open).
+- The evidence event types themselves ([swarm-event-types.md](swarm-event-types.md)).
 - Making any push option a default, or changing anything in M2's scope or plan for it.
 - Push for bridged members (Claude Code, Codex). This design says what it would take in inspect_swe and does not design it ([Push for bridged members](#push-for-bridged-members)).
 - Judging whether a member *acted on* a pushed message. The evidence here gives delivery and read, and the ids that let analysis find a read's records in later model input; what a member did with a message is the scoring and analysis work.
@@ -161,7 +161,7 @@ inspect_swe (`a54461e`) configures no Claude Code or Codex hooks: the only Claud
  ┌──────────────────────── Bus.deliver(record) ─────────────────────────────┴───┐
  │ 0 bind sender (member ContextVar), resolve addresses                          │
  │ 1 bus hook (later; not in M2)           2 checks: liveness, storm, admit()    │
- │ 3 evidence (InfoEvent "sent")           4 commit seq, apply, wake             │
+ │ 3 evidence ("sent" event)               4 commit seq, apply, wake             │
  └───────────────────────────────────────────────────────────────────────────────┘
    sentinel tool stages see send_message / read_messages as ordinary tool calls
 ```
@@ -398,7 +398,7 @@ Monitoring aligns with inspect_sentinel, with no swarm monitor type (decision: R
 
 ### Evidence and provenance
 
-**Evidence events** are `InfoEvent`s with `source="inspect_swarm"`, as M1's are (swarm.md). Every payload has `version: 1` and `type: "comm"`. Kinds follow ORBIT's vocabulary, which swarm.md adopts:
+**Evidence events** are `CommunicationEvent`s with `source="inspect_swarm"` ([swarm-event-types.md](swarm-event-types.md#communicationevent) defines the type and maps each field below to a typed field or to `data`, whose `version` is 1). Kinds follow ORBIT's vocabulary, which swarm.md adopts:
 
 | Kind | When | Where written | Fields beyond the common ones |
 |---|---|---|---|
@@ -406,7 +406,7 @@ Monitoring aligns with inspect_sentinel, with no swarm monitor type (decision: R
 | `delivered` | step 4 | same span | record id, recipients, `seq` (the commit sequence number), `notify` (the members whose own loop the record is news to) and the result `apply()` returned |
 | `read` | `read_messages` returns | reader's tool span | read id, record ids, reader, `tool_span_id`, through which the result message's tool call id is found ([Records in model input](#records-and-the-bus)) |
 
-Common fields: `kind`, `channel`, `member` (whose span it is), and the member's `span_id`. Record and file identifiers depend on the event kind.
+Common fields: `kind`, `channel`, `member` (whose span it is; the event's `agent`), and the member's `span_id` (its `agent_span_id`). Record and file identifiers depend on the event kind.
 
 **No exposure event.** Whether a model received a record is not swarm evidence. A `read` event says that a loop's tool returned the record; its `ToolEvent` lets analysis of a generation's input correlate the result with that input, within the limits in [Records in model input](#records-and-the-bus). Read but not seen is almost always a loop that never generated again, which the member's status shows, or author code that removed the result. Bridged reads have no tool span in the CLI's conversation: the CLI builds its own conversation, so only the fenced ids in the result text identify their records there ([Alternatives considered](#alternatives-considered)).
 
@@ -771,14 +771,14 @@ The rest concern push delivery after M2.
 ## Compatibility and migration
 
 - **inspect_ai:** beyond the `swarm_controller` and `swarm_channel` registry types (AI-1), communication needs nothing. M2's other inspect_ai change, AI-5, a private seam for where `background()` starts work, is for background members ([swarm-background-members.md](swarm-background-members.md)). M2 uses private names (`current_agent_channel`, `AgentChannel`, `sample_active`), which the standing decision allows.
-- **Eval logs:** only existing types. Evidence is versioned `InfoEvent`s, and the swarm adds no message to a member's conversation. No new `source` value, event type or schema change, so old readers and viewers read swarm logs.
+- **Eval logs:** evidence is `CommunicationEvent`s, whose compatibility [swarm-event-types.md](swarm-event-types.md#compatibility-and-migration) covers, and the swarm adds no message to a member's conversation. Communication adds no `source` value for messages, event type or schema change of its own.
 - **inspect_sentinel:** none required. Its dispatcher is in inspect_ai, so protocols on native members' channel tool calls work with no swarm code, and they are M2's only monitor.
 - **inspect_swe:** none; `bridged_tools` already exists on its Claude Code agent (swarm.md).
 - **inspect_swarm public API, on swarm-api.md's shapes:** the `@swarm_channel` factory `messages()` (`inspect_swarm/messages`); the member-side helpers `swarm_tools()` and `swarm_bridged_tools()`; the M2 operations on `Channel` (`check()`, `open()`, `reach`) and the `ChannelRun`, `ChannelState` (with `admit()`) and `Record` types. The plan step logs `messages()` faithfully. Tool names and parameters are part of the evaluated surface: changing them changes model behaviour, so runs before and after a change are different experimental conditions, told apart by the inspect_swarm release a run used. The evidence `version` tracks the shape of the evidence payload only, not the tools or their texts (decision: Ransom, 2026-10-23).
 
 **Push delivery after M2:**
 - **inspect_ai:** urgent messages and nested notices need one PR ([Urgent messages and steering](#urgent-messages-and-steering)): the `Steer` item and the `steer` cancel reason, `before_turn()` and `after_cancel()` rendering it, `after_cancel()` waiting until an operator's redirect actually arrives, and finalising cancelled `ToolEvent`s. The redirect-wait loop, the named repairs and the finalised `ToolEvent`s change behaviour for existing agent-channel users, all toward their documented contracts: `after_cancel()`'s docstring already says it "always blocks" for the operator's follow-up, a repair exists to make the conversation well-formed for the next generate, and a `ToolEvent` left pending is a log defect. No log schema or generated-type change. Against an inspect_ai without the `Steer` item, `messages(steer=...)` and `nested=True` refuse to construct.
-- **Eval logs:** only existing types. Injected messages are `ChatMessageUser` with metadata; the new evidence kind `steered` and the new fields (`via: "inject"`, `reminder`, `urgent`, `loop`) are inside the versioned `InfoEvent` payloads. A reader that knows only M2's kinds ignores `steered`.
+- **Eval logs:** only existing types. Injected messages are `ChatMessageUser` with metadata; the new fields (`via: "inject"`, `reminder`, `urgent`, `loop`) are in the communication events' `data`. The new evidence kind `steered` is not one of `CommunicationEvent`'s four kinds, so it is either a new kind there, an inspect_ai change that older readers refuse, or a `SwarmEvent` kind, which needs none; the push-delivery work decides ([swarm-event-types.md](swarm-event-types.md#communicationevent)).
 - **inspect_swarm API:** the new `messages()` parameters, `Member.inject` and `Member.remind`, `Record.urgent`, and the `urgent` parameter of `send_message` (present only with `steer`). All default to the behaviour without push. If the logged `messages()` dict includes defaulted parameters, a task's identifier changes when they land even with unchanged arguments, so an eval set compares arms run on one version.
 - **Tool schemas** are unchanged unless `steer` is set; the schema change it brings is part of the logged arm.
 
@@ -786,7 +786,7 @@ The rest concern push delivery after M2.
 
 Untrusted input reaching this code, and how it is handled:
 
-- **Payloads** (model output, possibly adversarial or relaying an injection): size-capped, delivered only as fenced tool output (in M2; an opt-in `inject` arm after M2 also delivers them in a marked user message, below), recorded as JSON in `InfoEvent`s, never placed in status lines or any other harness-composed text.
+- **Payloads** (model output, possibly adversarial or relaying an injection): size-capped, delivered only as fenced tool output (in M2; an opt-in `inject` arm after M2 also delivers them in a marked user message, below), recorded as JSON in evidence events and shown by the viewer as plain text, never placed in status lines or any other harness-composed text.
 - **Addresses and `reply_to`** (model output): resolved against the roster and checked against the sender's own sent and read records; `swarm_wait`'s `timeout` is clamped ([swarm-wait.md Security](swarm-wait.md#security)). Errors list valid names, which the sender may know anyway via `list_members`.
 - **Sender identity** is never taken from model output: it comes from the ContextVar the runtime set. A payload claiming to be from another member is just text inside a fence whose `from` the bus wrote. The payload can hold text that looks like another member's fence or a status line; the fence is a label for the reader, not a security boundary ([Fencing](#fencing)).
 - **Internal records** come only from channel code through `deliver_internal()`, which member tools cannot reach, under the reserved sender `swarm`.

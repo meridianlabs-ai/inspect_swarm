@@ -275,7 +275,7 @@ The swarm adds no message to a member's conversation; a loop learns of changes f
 
 ### Evidence
 
-Evidence follows [swarm-communication.md Evidence and provenance](swarm-communication.md#evidence-and-provenance): `InfoEvent`s with `source="inspect_swarm"`, `version: 1`, `type: "comm"`. What this channel writes:
+Evidence follows [swarm-communication.md Evidence and provenance](swarm-communication.md#evidence-and-provenance): `CommunicationEvent`s with `source="inspect_swarm"`. The fields below are named as the swarm writes them; [swarm-event-types.md](swarm-event-types.md#how-inspect_swarm-writes-them) maps each to a typed field (the record, `records`, `seq`) or to `data` (the files, `listing`, `notify`), whose `version` is 1. What this channel writes:
 
 | Kind | When | Where | Fields beyond the common ones |
 |---|---|---|---|
@@ -362,7 +362,7 @@ And one on `Channel`: the `reach` class attribute of [Descendants](#descendants)
 ## Compatibility and migration
 
 - **inspect_ai:** none beyond the registry types the bus needs (AI-1). The channel uses `current_agent_span_id()` and the private names the bus already uses (`current_agent_channel`, `sample_active`), which the standing decision allows.
-- **Eval logs:** only existing types. Evidence is versioned `InfoEvent`s, and the channel adds no message to a member's conversation. No schema or generated-type change.
+- **Eval logs:** evidence is `CommunicationEvent`s ([swarm-event-types.md](swarm-event-types.md#compatibility-and-migration)), and the channel adds no message to a member's conversation. The channel itself adds no schema or generated-type change.
 - **inspect_swarm API:** the `shared_memory()` factory and its registry name, the `shared_memory` tool's name, parameters and texts, the `reach` attribute on `Channel`, `admit()` on `ChannelState`, and unaddressed records. The tool and its texts are part of the evaluated surface: changing them changes model behaviour, so runs before and after a change are different experimental conditions, told apart by the inspect_swarm release a run used. The evidence `version` tracks the shape of the evidence payload only, not the tool or its texts, so a change to them keeps `"version": 1` (decision: Ransom, 2026-10-23).
 - **Tasks using `memory(instance=...)`:** unaffected; migration is opt-in ([Relation to `memory(instance="...")`](#relation-to-memoryinstance)).
 - **The first release** includes `shared_memory` among its built-in channels. Like everything in inspect_swarm, its name and the `Channel`/`ChannelState` operations, including `reach` and `admit()`, are experimental ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6).
@@ -371,7 +371,7 @@ And one on `Channel`: the `reach` class attribute of [Descendants](#descendants)
 
 Untrusted input reaching this code, and how it is handled:
 
-- **File contents** (model output, possibly relaying an injection): bounded in bytes and lines, shown only inside a `<peer_file>` fence in tool output, recorded as JSON in `InfoEvent`s, and never placed in status lines, errors, write acknowledgments or instructions, so a view is the only way content reaches a model, and every view is evidenced. Line numbers are added by the harness outside the content. The content can hold text that looks like a fence, another member's file or a status line; the fence is a label for the reader, not a security boundary ([Fencing](#fencing)).
+- **File contents** (model output, possibly relaying an injection): bounded in bytes and lines, shown only inside a `<peer_file>` fence in tool output, recorded as JSON in evidence events and shown by the viewer as plain text, and never placed in status lines, errors, write acknowledgments or instructions, so a view is the only way content reaches a model, and every view is evidenced. Line numbers are added by the harness outside the content. The content can hold text that looks like a fence, another member's file or a status line; the fence is a label for the reader, not a security boundary ([Fencing](#fencing)).
 - **Paths** (model output): a narrow ASCII grammar with no quotes, angle brackets, spaces or newlines, at most 160 bytes; anything else is refused, not normalised. They appear only in fence attributes and fenced listings, and in errors returned to the loop that typed them. Status lines use swarm-assigned file ids.
 - **`file_id`** (model output): checked against the id grammar, `f-` and a number; anything else is refused with an error that does not repeat it.
 - **`old_str`, `insert_line`, `view_range`** (model output): validated by the tool; `old_str` lives only in the record's `op` and the `ToolEvent`.
@@ -418,7 +418,7 @@ Adjacent problems noticed and left out, for Ransom to file if wanted:
 
 - **inspect_ai `memory()` quirks** (inspect_ai): str_replace and insert expand every tab in the file; the directory listing claims to exclude hidden items and does not; a file can be created at a directory's path or at `/memories` and is then never shown; `delete /memories` empties the store; rename overwrites silently. All verified above at `a11afc943`.
 - **memory()'s private framing** (inspect_ai): its description and deepagent's prompt call it the agent's own memory, which contradicts a deliberately shared instance (already listed in [swarm-lean-open-problems.md](swarm-lean-open-problems.md#not-this-design)).
-- **A final board snapshot for scorers and the viewer**: a store entry or `InfoEvent` with the board at the swarm's end, so a scorer or a reader need not replay records.
+- **A final board snapshot for scorers and the viewer**: a store entry or `SwarmEvent` with the board at the swarm's end, so a scorer or a reader need not replay records.
 - **Seeding the board** (`initial_data`), **read-only members**, and a **`reach` setting** for arms that restrict the board to top loops; none has a user yet.
 - **Owner-protected files**, as a policy example or a channel option, for arms that test sabotage between members.
 - **A viewer rendering** for `<peer_file>` fences (ts-mono), alongside the one swarm-communication.md lists.
