@@ -25,7 +25,6 @@ from inspect_swarm import (
     Controller,
     MemberInfo,
     MemberState,
-    NoticeLine,
     Record,
     StopReason,
     SwarmControl,
@@ -65,9 +64,6 @@ class _BoardState:
     def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
         self.applied.append(record)
         return list(record.recipients), {"size": len(self.applied)}
-
-    def notice_lines(self, member: str) -> list[NoticeLine]:
-        return []
 
 
 class _Board(Channel):

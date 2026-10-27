@@ -20,7 +20,6 @@ from inspect_swarm import (
     member,
     shared_memory,
     swarm,
-    swarm_on_continue,
     swarm_tools,
 )
 from inspect_swarm._background import MemberBackground
@@ -120,7 +119,7 @@ async def test_records_rejections_and_reads_are_counted_per_member_and_channel(
 
 
 @pytest.mark.anyio
-async def test_notices_are_counted_per_member_and_channel(tmp_path: Path) -> None:
+async def test_a_subagents_records_are_counted_for_its_member(tmp_path: Path) -> None:
     def call(function: str, **arguments: Any) -> ModelOutput:
         return ModelOutput.for_tool_call("mockllm", function, arguments)
 
@@ -132,8 +131,8 @@ async def test_notices_are_counted_per_member_and_channel(tmp_path: Path) -> Non
             file_text="x",
         )
 
-    # w's synchronous child writes in each of w's first two turns, so each is news to
-    # w at the boundary after it; the calls are made in this order
+    # w's synchronous child writes in each of w's first two turns; the calls are made
+    # in this order
     script = Script(
         [
             call("agent", prompt="child task"),
@@ -155,7 +154,6 @@ async def test_notices_are_counted_per_member_and_channel(tmp_path: Path) -> Non
                         "tools": [swarm_tools()],
                         "subagents": [general()],
                         "todo_write": False,
-                        "on_continue": swarm_on_continue(),
                     },
                     name="w",
                 ),
@@ -167,7 +165,7 @@ async def test_notices_are_counted_per_member_and_channel(tmp_path: Path) -> Non
         tmp_path,
     )
     assert {m.name: m.comm for m in metrics} == {
-        "w": {"shared_memory": CommMetrics(records=2, record_bytes=2, notices=2)},
+        "w": {"shared_memory": CommMetrics(records=2, record_bytes=2)},
         "q": {"shared_memory": CommMetrics()},
     }
 

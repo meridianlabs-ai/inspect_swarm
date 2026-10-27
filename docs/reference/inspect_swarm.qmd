@@ -27,7 +27,6 @@ description: Swarms, members, controllers, channels and the budget view.
 ### filesystem
 ### shared_memory
 ### swarm_tools
-### swarm_on_continue
 ### swarm_channel
 ### Channel
 ### ChannelRun
@@ -35,7 +34,6 @@ description: Swarms, members, controllers, channels and the budget view.
 ### WaitingState
 ### WaitSpec
 ### WaitNews
-### NoticeLine
 ### Record
 
 ## Budget view

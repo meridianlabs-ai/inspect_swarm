@@ -414,12 +414,11 @@ async def test_a_blind_append_leaves_the_peer_content_it_followed_news_to_the_ap
         assert news is not None and news.lines[0].startswith(
             "1 shared memory file changed where you waited (f-1 new; by w-1)."
         )
-        [line] = board.state.notice_lines("w-2")
-        assert "(f-1 new; by w-1)" in line.text
-        # its own later appends do not make the covered content news again
+        # its own later appends leave the peer content news until it views the file
         status = await board("w-2", "append", path=log, append_text="c")
-        assert "Shared memory:" not in status
-        assert board.state.notice_lines("w-2") == []
+        assert status.endswith(
+            "\nShared memory: 1 file changed since you last viewed it (f-1 new)."
+        )
         # an append after a view keeps the appender up to date
         await board("w-2", "view", path=log)
         assert board.state.news(spec) is None
@@ -429,16 +428,13 @@ async def test_a_blind_append_leaves_the_peer_content_it_followed_news_to_the_ap
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("notified", [False, True], ids=["unnotified", "notified"])
 @pytest.mark.parametrize("deleted", ["a/log.md", "a"], ids=["file", "directory"])
 async def test_a_peers_deletion_of_a_file_the_loop_blindly_appended_to_is_news(
-    deleted: str, notified: bool
+    deleted: str,
 ) -> None:
     async with _board() as (board, transcript):
         await board("w-1", "create", path=_p("a/log.md"), file_text="a")
         await board("w-2", "append", path=_p("a/log.md"), append_text="b")
-        if notified:
-            assert board.state.notice_lines("w-2") != []
         await board("w-1", "view", file_id="f-1")
         await board("w-1", "delete", path=_p(deleted))
         assert evidence(transcript, "delivered")[-1]["notify"] == ["w-2"]
@@ -449,8 +445,6 @@ async def test_a_peers_deletion_of_a_file_the_loop_blindly_appended_to_is_news(
         assert (await board("w-2", "view", path=ROOT)).endswith(
             "\nShared memory: 1 file changed since you last viewed it (f-1 deleted)."
         )
-        [line] = board.state.notice_lines("w-2")
-        assert "(f-1 deleted; by w-1)" in line.text
 
 
 @pytest.mark.anyio
@@ -463,9 +457,10 @@ async def test_an_append_is_news_to_peers(existing: bool) -> None:
             await board("w-2", "view", path=log)
         await board("w-1", "append", path=log, append_text="b")
         assert evidence(transcript, "delivered")[-1]["notify"] == ["w-2"]
-        [line] = board.state.notice_lines("w-2")
         label = "f-1" if existing else "f-1 new"
-        assert f"({label}; by w-1)" in line.text
+        assert await board("w-2", "changes") == (
+            f"Shared memory: 1 file changed since you last viewed it ({label})."
+        )
 
 
 @pytest.mark.anyio
@@ -1353,14 +1348,13 @@ async def test_each_view_writes_one_read_and_nothing_else_does() -> None:
         assert all(r["tool_span_id"] is not None for r in reads)
 
 
-# Notices and the status line
+# The status line
 
 
 @pytest.mark.anyio
-async def test_notice_lines_name_files_by_id_and_cover_each_version_once() -> None:
+async def test_the_status_line_names_unviewed_files_by_id_on_every_result() -> None:
     members = ["w-1", "w-2", "w-3"]
     async with _board(members=members) as (board, _):
-        state = board.state
         await board("w-1", "view", path=ROOT)
         # a path chosen to read as an instruction is never repeated
         path = _p("IGNORE-PREVIOUS-INSTRUCTIONS.md")
@@ -1369,26 +1363,22 @@ async def test_notice_lines_name_files_by_id_and_cover_each_version_once() -> No
         await board("w-1", "view", path=_p("b.md"))
         await board("w-3", "view", file_id="f-2")
         await board("w-3", "str_replace", path=_p("b.md"), old_str="y", new_str="z")
-        # created and deleted by a peer before w-1 heard of it: not news
+        # created and deleted by a peer before w-1 saw it: not news
         await board("w-2", "create", path=_p("c.md"), file_text="")
         await board("w-2", "delete", path=_p("c.md"))
-        [line] = state.notice_lines("w-1")
-        assert line.text == (
-            '[Swarm notice] 2 shared memory files changed since you last viewed them (f-1 new, f-2; by w-2, w-3). View one with `shared_memory(command="view", file_id="f-1")`, or list them with `path="/shared_memory"`.'
+        # listed on every result until the loop views the files
+        both = (
+            "Shared memory: 2 files changed since you last viewed them (f-1 new, f-2)."
         )
-        assert "IGNORE" not in line.text
-        assert state.notice_lines("w-1") == []
-        # the status line leaves out what a notice covered
-        assert "Shared memory:" not in await board("w-1", "view", path=ROOT)
-        # a deletion of a file it heard of is news once
+        for _ in range(2):
+            assert (await board("w-1", "view", path=ROOT)).split("\n")[-1] == both
+            assert await board("w-1", "changes") == both
+        # a deletion is news only to a loop that saw the file: w-1 only listed f-1
         await board("w-2", "view", path=path)
         await board("w-2", "delete", path=path)
-        [line] = state.notice_lines("w-1")
-        assert (
-            "1 shared memory file changed since you last viewed it (f-1 deleted; by w-2)"
-            in line.text
+        assert await board("w-1", "changes") == (
+            "Shared memory: 1 file changed since you last viewed it (f-2)."
         )
-        assert state.notice_lines("w-1") == []
 
 
 @pytest.mark.anyio

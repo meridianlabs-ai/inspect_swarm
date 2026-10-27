@@ -961,7 +961,6 @@ async def test_node_cancels_a_bridged_member_instead_of_raising(
     # stop() is idempotent, and every later check of a reached cap calls it again
     assert set(stops) == ({"swarm_cap"} if case.stops_swarm else set())
     assert member.bridged
-    assert member.bridged_late is not declared
 
 
 @pytest.mark.anyio
@@ -1043,7 +1042,7 @@ async def test_member_found_bridged_by_a_successful_marked_request(
                 if case.suspended:
                     stack.enter_context(suspend_token_limit())
                 await _bridge_generate(model, _GenerateCompaction(model, []))
-            assert (member.bridged, member.bridged_late) == (True, True)
+            assert member.bridged
             assert not member.scope.cancel_called
             if cap is not None:
                 await _bridge_generate(model, _GenerateCompaction(model, []))

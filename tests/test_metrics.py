@@ -205,6 +205,41 @@ async def test_a_member_with_no_model_call_never_acted() -> None:
 
 
 @agent
+def wired(model: Model) -> Agent:
+    """Resolve the swarm tools, then generate once."""
+
+    async def execute(state: AgentState) -> AgentState:
+        await resolve()
+        state.output = await model.generate(state.messages)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "channels,unwired",
+    [(["shared_memory"], ["unwired"]), ([], [])],
+    ids=["tools", "no-tools"],
+)
+async def test_members_that_acted_without_resolving_swarm_tools_are_unwired(
+    channels: list[str], unwired: list[str]
+) -> None:
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(wired(scripted_model()), name="wired"),
+                member(generator(scripted_model()), name="unwired"),
+                member(sleeper(0), name="idle"),
+            ],
+            channels=channels,
+            controller=leaderless(stop_on_submission=False),
+        )
+    )
+    assert _metrics(outcome.transcript).tools_unwired == unwired
+
+
+@agent
 def replaying(model: Model) -> Agent:
     """Generate once, with the cache."""
 

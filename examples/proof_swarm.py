@@ -35,7 +35,6 @@ from inspect_swarm import (
     member,
     shared_memory,
     swarm,
-    swarm_on_continue,
     swarm_tools,
 )
 
@@ -96,10 +95,7 @@ def prover(sandbox_name: str) -> Agent:
         _, result = await run_check(sandbox_name)
         return result
 
-    inner = react(
-        tools=[bash(timeout=60), ToolDef(check).as_tool(), swarm_tools()],
-        on_continue=swarm_on_continue(),
-    )
+    inner = react(tools=[bash(timeout=60), ToolDef(check).as_tool(), swarm_tools()])
 
     async def execute(state: AgentState) -> AgentState:
         state = await inner(state)

@@ -29,7 +29,7 @@ _DESCRIPTION = (
 
 _PATH = "A shared memory file or directory to watch, such as `/shared_memory/results`. Without it or `file_id`, any change to shared memory wakes you."
 
-_FILE_ID = "In place of `path`: the id of a shared memory file to watch, such as `f-3`, as notices name files."
+_FILE_ID = "In place of `path`: the id of a shared memory file to watch, such as `f-3`, as shared memory results name files."
 
 _ALL_WAITING = (
     "Nothing can change: every member is waiting, has ended or has not started."

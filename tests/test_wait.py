@@ -249,9 +249,9 @@ async def test_an_unviewed_change_returns_every_wait_at_once_until_it_is_viewed(
 
 
 @pytest.mark.anyio
-async def test_status_lines_and_notices_mark_nothing_for_the_wait() -> None:
-    # the same writes and calls with and without waits give the same status lines and
-    # notices, and a file they named but the loop did not view still ends a wait
+async def test_status_lines_mark_nothing_for_the_wait() -> None:
+    # the same writes and calls with and without waits give the same status lines, and
+    # a file they named but the loop did not view still ends a wait
     async def script(with_waits: bool) -> list[str]:
         async with run() as (r, _):
             seen: list[str] = []
@@ -261,13 +261,13 @@ async def test_status_lines_and_notices_mark_nothing_for_the_wait() -> None:
                 assert await r.wait("w-1", path=_p("d")) == changed(
                     "f-1 new", "w-2", "f-1"
                 )
-            seen.extend(line.text for line in r.state.notice_lines("w-1"))
+            seen.append(await r.sm("w-1", "changes"))
             await r.sm("w-2", "create", path=_p("d/b.md"), file_text="x")
             if with_waits:
                 assert await r.wait("w-1", path=_p("d")) == changed(
                     "f-1 new, f-2 new", "w-2", "f-1", count=2
                 )
-            seen.extend(line.text for line in r.state.notice_lines("w-1"))
+            seen.append(await r.sm("w-1", "changes"))
             seen.append(await r.sm("w-1", "view", path=ROOT))
             return seen
 

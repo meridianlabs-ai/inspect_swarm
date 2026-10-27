@@ -17,7 +17,6 @@ from ._channel import (
     Channel,
     ChannelRun,
     ChannelState,
-    NoticeLine,
     WaitNews,
     WaitSpec,
     swarm_channel,
@@ -43,14 +42,15 @@ _MARKER_RULE = f"Files on the board cannot contain a {', '.join(_TAGS[:-1])} or 
 
 _FILE_ID = re.compile(r"f-[1-9][0-9]{0,13}")
 
-# the addressing grammar of member names, which appear in fence attributes and notices
+# the addressing grammar of member names, which appear in fence attributes and wait
+# results
 _MEMBER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,47}")
 
 # file ids, versions and counts are given at most this many bytes when the read budget
 # is computed
 _ID_BYTES = 16
 
-# at most this many file ids in a status line or notice
+# at most this many file ids in a status line or wait result
 _LISTED_IDS = 10
 
 # a loop key that is no loop's agent span, for a member whose own loop has not called
@@ -60,8 +60,9 @@ _NO_LOOP = "\0"
 _INSTRUCTIONS = (
     f"Every member of the swarm, and their subagents, share one board of files, which you reach with the shared_memory tool under {ROOT}. "
     "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them. "
-    "Notices name changed files by ids such as f-3, which the view command takes as its file_id. "
+    "Every shared_memory result ends with a status line that names the files other agents changed since you last viewed them, by ids such as f-3, which the view command takes as its file_id; the changes command returns that line alone. "
     "View a file in its current version before you overwrite it with create, insert into it, rename it or delete it. "
+    "To check what other agents changed without viewing anything, use the changes command. "
     "To wait for another member's work, call swarm_wait rather than polling."
 )
 
@@ -74,7 +75,7 @@ _DESCRIPTION = (
     "Use insert only when the position matters. "
     "Write commands return a short acknowledgment, not the file; view a file to see it. "
     "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view takes as its file_id. "
-    "The changes command returns that list alone."
+    "The changes command returns that list alone: use it to check what other agents changed without viewing anything."
 )
 
 
@@ -293,8 +294,6 @@ class _SharedMemoryState:
         # loop agent span -> file id -> the version that loop has seen; 0 when it knows
         # the file only from its own blind append, which shows it none of the content
         self._seen: dict[str | None, dict[str, int]] = {}
-        # member -> file id -> the version its last notice covered
-        self._covered: dict[str, dict[str, int]] = {}
         # member -> the agent span of its own loop, once that loop has called the tool
         self._top: dict[str, str | None] = {}
         # the changes admission computed for the record about to be applied, and those
@@ -407,37 +406,13 @@ class _SharedMemoryState:
             if self._bus.running(name)
             and any(
                 f.loop != self._top_loop(name)
-                and self._is_news(name, self._top_loop(name), f)
+                and self._is_news(self._top_loop(name), f)
                 for f in written
             )
         ]
         return notify, {
             "files": [change.entry(record.kind) for change in changes],
         }
-
-    def notice_lines(self, member: str) -> list[NoticeLine]:
-        # the files whose current versions are news to the member's own loop and no
-        # earlier notice covered, which this notice then covers
-        files = self._news(member, self._top_loop(member), own=True)
-        if not files:
-            return []
-        labels = self._labels(member, self._top_loop(member), files, own=True)
-        covered = self._covered.setdefault(member, {})
-        for f in files:
-            covered[f.id] = f.version
-        writers = _writers(files, self._top_loop(member))
-        return [
-            NoticeLine(
-                f"[Swarm notice] {_files_changed(len(files), 'shared memory ')} ({labels}; by {writers}). "
-                f'View one with `shared_memory(command="view", file_id="{files[0].id}")`, or list them with `path="{ROOT}"`.',
-                {
-                    "files": [
-                        {"file": f.id, "version": f.version, "record": f.record}
-                        for f in files
-                    ]
-                },
-            )
-        ]
 
     # waiting: what a swarm_wait of a loop watches, by D-1's `seen` alone; nothing here
     # marks anything
@@ -461,18 +436,9 @@ class _SharedMemoryState:
         files = [f for f in self._files.values() if self._reportable(spec, f)]
         if not files:
             return None
-        seen = self._seen.get(spec.loop, {})
-        labels = [
-            f"{f.id} deleted"
-            if f.deleted
-            else f"{f.id} new"
-            if not seen.get(f.id)
-            else f.id
-            for f in files
-        ]
         writers = _writers(files, spec.loop)
         line = _changed_where_you_waited(
-            len(files), _id_list(labels, len(files)), writers, files[0].id
+            len(files), self._labels(spec.loop, files), writers, files[0].id
         )
         return WaitNews(
             lines=[line],
@@ -483,14 +449,8 @@ class _SharedMemoryState:
         )
 
     def _reportable(self, spec: WaitSpec, f: _BoardFile) -> bool:
-        # a version under the filter written by another loop and above what the waiting
-        # loop has seen; a tombstone only when the loop saw an earlier version
-        if not _watched(spec, f):
-            return False
-        seen = self._seen.get(spec.loop, {})
-        if _by_others(f, spec.loop)[0] <= seen.get(f.id, 0):
-            return False
-        return not f.deleted or f.id in seen
+        # news to the waiting loop under the wait's filter
+        return _watched(spec, f) and self._is_news(spec.loop, f)
 
     # the tool
 
@@ -523,7 +483,7 @@ class _SharedMemoryState:
                 old_path: Required for `rename`: the current path of a file or directory.
                 new_path: Required for `rename`: the new path, which must not exist.
                 append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
-                file_id: Optional for `view`, in place of `path`: the id of a file, such as `f-3`, as notices and status lines name files.
+                file_id: Optional for `view`, in place of `path`: the id of a file, such as `f-3`, as status lines name files.
             """
             return await self._call(
                 command,
@@ -579,7 +539,7 @@ class _SharedMemoryState:
             self._top[member] = loop
         if command == "changes":
             return (
-                self._status_line(member, loop, own)
+                self._status_line(loop)
                 or "Shared memory: no files changed since you last viewed them."
             )
         if command == "view":
@@ -606,7 +566,7 @@ class _SharedMemoryState:
             )
         else:
             raise ToolError(f"Unknown command: {command}")
-        status = self._status_line(member, loop, own)
+        status = self._status_line(loop)
         return f"{result}\n{status}" if status else result
 
     async def _write(
@@ -987,48 +947,31 @@ class _SharedMemoryState:
     def _top_loop(self, member: str) -> str | None:
         return self._top.get(member, _NO_LOOP)
 
-    def _is_news(self, member: str, loop: str | None, f: _BoardFile) -> bool:
+    def _is_news(self, loop: str | None, f: _BoardFile) -> bool:
         # a version written by another loop, newer than any this loop has seen; a
-        # tombstone only when the loop saw, or its member was notified of, the file
-        # before
+        # tombstone only when the loop saw the file before
         seen = self._seen.get(loop, {})
         if _by_others(f, loop)[0] <= seen.get(f.id, 0):
             return False
-        heard = f.id in seen or (
-            loop == self._top_loop(member) and f.id in self._covered.get(member, {})
-        )
-        return not f.deleted or heard
+        return not f.deleted or f.id in seen
 
-    def _news(self, member: str, loop: str | None, own: bool) -> list[_BoardFile]:
-        # for the member's own loop, without what a notice has already covered
-        covered = self._covered.get(member, {}) if own else {}
-        return [
-            f
-            for f in self._files.values()
-            if self._is_news(member, loop, f)
-            and covered.get(f.id, 0) < _by_others(f, loop)[0]
-        ]
-
-    def _labels(
-        self, member: str, loop: str | None, files: Sequence[_BoardFile], own: bool
-    ) -> str:
+    def _labels(self, loop: str | None, files: Sequence[_BoardFile]) -> str:
         seen = self._seen.get(loop, {})
-        covered = self._covered.get(member, {}) if own else {}
         labels = [
             f"{f.id} deleted"
             if f.deleted
             else f"{f.id} new"
-            if not seen.get(f.id) and f.id not in covered
+            if not seen.get(f.id)
             else f.id
             for f in files
         ]
         return _id_list(labels, len(files))
 
-    def _status_line(self, member: str, loop: str | None, own: bool) -> str | None:
-        files = self._news(member, loop, own)
+    def _status_line(self, loop: str | None) -> str | None:
+        files = [f for f in self._files.values() if self._is_news(loop, f)]
         if not files:
             return None
-        return _status(len(files), self._labels(member, loop, files, own))
+        return _status(len(files), self._labels(loop, files))
 
 
 def _by_others(f: _BoardFile, loop: str | None) -> tuple[int, str | None]:
@@ -1158,10 +1101,10 @@ def _shown(f: _BoardFile, lines: str | None) -> JsonValue:
     }
 
 
-def _files_changed(count: int, kind: str = "") -> str:
+def _files_changed(count: int) -> str:
     if count == 1:
-        return f"1 {kind}file changed since you last viewed it"
-    return f"{count} {kind}files changed since you last viewed them"
+        return "1 file changed since you last viewed it"
+    return f"{count} files changed since you last viewed them"
 
 
 def _id_list(labels: Sequence[str], count: int) -> str:
