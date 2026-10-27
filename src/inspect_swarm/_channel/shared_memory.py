@@ -12,7 +12,7 @@ from .._bus._record import Draft, FrozenJson, Record, thaw_json
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
 from .._evidence import comm_read
-from .._fence import FENCE_TAGS, fence, has_marker, utf8_bytes
+from .._fence import fence, utf8_bytes
 from ._channel import (
     Channel,
     ChannelRun,
@@ -38,8 +38,6 @@ _COMPONENT = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _MAX_COMPONENTS = 8
 _MAX_PATH_BYTES = 160
 _PATH_RULE = f"paths are {ROOT} followed by 1 to {_MAX_COMPONENTS} components separated by /, each 1 to 64 of the characters A-Z a-z 0-9 . _ - and not . or .., with at most {_MAX_PATH_BYTES} bytes in all"
-_TAGS = [f"<{tag}" for tag in FENCE_TAGS]
-_MARKER_RULE = f"Files on the board cannot contain a {', '.join(_TAGS[:-1])} or {_TAGS[-1]} tag, opening or closing, in any letter case."
 
 _FILE_ID = re.compile(r"f-[1-9][0-9]{0,13}")
 
@@ -120,6 +118,8 @@ def shared_memory(
     """A board of files that every member of the swarm, and their subagents, read and write.
 
     Each member gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` over files under `/shared_memory`. Every write goes through the swarm's bus as a record from the member that made it. A view shows a file inside a fence that names its last writer and version, and lists of changed files name them by ids such as `f-3`, which `view` takes as its `file_id`. A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `append` needs no view: it adds text on a new line at the end of a file, creating the file if it does not exist. `changes` returns only the list of files other agents changed since the loop last viewed them, which ends every result.
+
+    A fence is a label for the reader, not a protection: a member can write text that looks like a fence, another member's file, a status line or a notice.
 
     The board lives for one run of the swarm. A result longer than the tool output limit is truncated in the middle, as Inspect truncates any tool's result.
 
@@ -1040,12 +1040,8 @@ def _required(value: str | None, name: str, command: str, empty: bool = False) -
 def _content(composed: str) -> str:
     # a file as a write composes it: line endings normalised as memory() does, in the
     # whole file since a carriage return at the payload's end joins the newline after
-    # it; and refused with a fence marker, which str_replace can assemble from old and
-    # new text
-    content = composed.replace("\r\n", "\n").replace("\r", "\n")
-    if has_marker(content):
-        raise ToolError(_MARKER_RULE)
-    return content
+    # it
+    return composed.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _appended(content: str, text: str) -> str:

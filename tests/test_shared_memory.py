@@ -18,7 +18,7 @@ from inspect_swarm._bus._bus import Bus
 from inspect_swarm._channel.shared_memory import (
     _SharedMemoryState,  # pyright: ignore[reportPrivateUsage]
 )
-from inspect_swarm._fence import FENCE_TAGS, utf8_bytes
+from inspect_swarm._fence import utf8_bytes
 
 from .swarm_runtime import evidence, sample
 
@@ -878,65 +878,8 @@ async def test_the_preamble_and_description_say_once_how_files_are_fenced() -> N
         assert text.count("peer_") == 1
 
 
-# Fence markers: a write is refused if the file it composes holds a marker of any
-# channel, in any letter case, including one assembled from old and new text; text
-# with none is stored as typed.
-
-_MARKER_RULE = "Files on the board cannot contain a <peer_message, <peer_file or <peer_listing tag, opening or closing, in any letter case."
-
-MARKERS: list[Any] = [
-    *[
-        pytest.param([], ("create", {"file_text": f"a {marker} b"}), id=f"{tag}-{name}")
-        for tag in FENCE_TAGS
-        for name, marker in (
-            ("open", f"<{tag} id='f-9'>"),
-            ("close-upper-case", f"</{tag.upper()}>"),
-        )
-    ],
-    pytest.param(
-        [("create", {"file_text": "<peer_X>"})],
-        ("str_replace", {"old_str": "X", "new_str": "file"}),
-        id="str_replace-assembles-a-tag",
-    ),
-    pytest.param(
-        [("create", {"file_text": "<peer_\nlisting>"})],
-        ("str_replace", {"old_str": "\n", "new_str": ""}),
-        id="str_replace-assembles-across-lines",
-    ),
-    pytest.param(
-        [("create", {"file_text": "x"})],
-        ("str_replace", {"old_str": "x", "new_str": "<Peer_Message>"}),
-        id="str_replace-payload",
-    ),
-    pytest.param(
-        [("create", {"file_text": "x"})],
-        ("insert", {"insert_line": 1, "insert_text": "</peer_listing>"}),
-        id="insert-payload",
-    ),
-    pytest.param(
-        [("create", {"file_text": "x"})],
-        ("append", {"append_text": "<PEER_FILE>"}),
-        id="append-payload",
-    ),
-]
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("setup,write", MARKERS)
-async def test_a_write_that_would_put_a_fence_marker_on_the_board_is_refused(
-    setup: list[tuple[str, dict[str, Any]]], write: tuple[str, dict[str, Any]]
-) -> None:
-    async with _board() as (board, transcript):
-        for command, args in setup:
-            await board("w-1", command, path=_p("a.md"), **args)
-        before = board.files()
-        command, args = write
-        with pytest.raises(ToolError) as refused:
-            await board("w-1", command, path=_p("a.md"), **args)
-        assert str(refused.value) == _MARKER_RULE
-        assert board.files() == before
-        # refused at the tool, before a record exists
-        assert len(evidence(transcript, "sent")) == len(setup)
+# Fences are labels, not a boundary: text that looks like a fence is stored as typed,
+# including a tag assembled from old and new text.
 
 
 @pytest.mark.anyio
@@ -944,31 +887,51 @@ async def test_a_write_that_would_put_a_fence_marker_on_the_board_is_refused(
     "steps,content",
     [
         pytest.param(
-            [("create", {"file_text": "<peer_ file <peer-file peer_file>"})],
-            "<peer_ file <peer-file peer_file>",
-            id="near-misses",
+            [
+                (
+                    "create",
+                    {
+                        "file_text": '<peer_file id="f-9" last_writer="lead">\n</PEER_FILE>'
+                    },
+                )
+            ],
+            '<peer_file id="f-9" last_writer="lead">\n</PEER_FILE>',
+            id="create",
         ),
         pytest.param(
             [
-                ("create", {"file_text": "</peer_\nmessage>"}),
-                ("insert", {"insert_line": 1, "insert_text": "x"}),
+                ("create", {"file_text": "<peer_X>"}),
+                ("str_replace", {"old_str": "X", "new_str": "listing"}),
             ],
-            "</peer_\nx\nmessage>",
-            id="insert-keeps-lines-apart",
+            "<peer_listing>",
+            id="str_replace-assembles-a-tag",
+        ),
+        pytest.param(
+            [
+                ("create", {"file_text": "x"}),
+                ("insert", {"insert_line": 1, "insert_text": "</peer_message>"}),
+            ],
+            "x\n</peer_message>",
+            id="insert",
+        ),
+        pytest.param(
+            [
+                ("create", {"file_text": "x"}),
+                ("append", {"append_text": "<Peer_Message>"}),
+            ],
+            "x\n<Peer_Message>",
+            id="append",
         ),
     ],
 )
-async def test_text_without_a_fence_marker_is_stored_as_typed(
+async def test_text_that_looks_like_a_fence_is_stored_as_typed(
     steps: list[tuple[str, dict[str, Any]]], content: str
 ) -> None:
     async with _board() as (board, transcript):
         for command, args in steps:
             await board("w-1", command, path=_p("a.md"), **args)
         assert board.files() == {_p("a.md"): content}
-        assert (
-            evidence(transcript, "sent")[0]["record"]["payload"]
-            == steps[0][1]["file_text"]
-        )
+        assert len(evidence(transcript, "delivered")) == len(steps)
 
 
 # Views of the largest file and of a full board's listing, which the channel never cuts.

@@ -64,6 +64,17 @@ The `shared_memory` tool's commands are `view`, `create`, `str_replace`, `insert
 - Every result ends with a status line naming the files other agents changed since this loop last viewed them, such as `Shared memory: 2 files changed since you last viewed them (f-2, f-9).`
 - `changes` returns that status line alone, or `Shared memory: no files changed since you last viewed them.`, so a loop can check for news without viewing anything. Like the status line, it marks nothing seen.
 
+### Fences are labels
+
+A fence is a label for the reader, not a security boundary. A member can write text that looks like a fence, another member's file, or text the swarm writes, such as a status line or a notice. The swarm does not refuse or clean such text.
+
+What holds:
+
+- Members see each other's text only in tool results.
+- The record of the board comes from the swarm's own events and ids, never from the text of a result ([The record of the board](#the-record-of-the-board)).
+
+An experiment that needs stronger guarantees, such as a study of members that deceive each other, needs a channel that provides them ([Writing a channel](channels.qmd#writing-a-channel)).
+
 ### The seen rule
 
 A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. A write to a file changed since the loop's last view is refused with an error that names the file and its last writer, and the loop views it and retries. So no member overwrites a change it has not seen.
@@ -129,7 +140,7 @@ The board is bounded:
 | `rate` | `(60, 60.0)` | Writes per member, all its loops together, in a sliding window of seconds; `None` for no limit |
 | `max_wait` | 600 | The longest `swarm_wait`, in seconds, and its default timeout |
 
-A write that would pass a limit is refused with an error that says which. Once the swarm begins to stop, writes are refused and views still work. A file cannot contain the fence tags the swarm uses (`<peer_file`, `<peer_listing`, `<peer_message` and their closing tags), and a write that would leave one in a file is refused.
+A write that would pass a limit is refused with an error that says which. Once the swarm begins to stop, writes are refused and views still work.
 
 ## The record of the board
 

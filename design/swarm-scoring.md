@@ -337,7 +337,7 @@ In inspect_ai unless noted, in addition to [what M1 relies on](#current-behaviou
 - **What controllers see of a verdict.** `VerdictSummary(passed, value)`, on `MemberHandle.verdict` and `MemberEnded.verdict`. A member counts as running until the runtime has taken its submission's verdict and queued its `MemberEnded`. The explanation stays in the result record.
 - **Logging.** `swarm(result=)` is logged as the type name `"ResultSpec"`. A raw-solver replay (`--solver inspect_swarm/swarm -S ...`) passes that string back, and `swarm()` raises `TypeError` for it. The supported routes are the task, or a registered swarm builder ([Logging and replay](swarm-api.md#logging-and-replay)).
 - **Task identity.** Scorers are not hashed into `task_identifier()`, and a member's in-loop scoring makes the task's scorer part of the trajectory. A scorer ablation is therefore an arm of its own, chosen by a task argument ([Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
-- **Fencing (M2).** Peer text is fenced in tagged envelopes, and a payload holding a fence marker is refused, not cleaned ([Fencing](swarm-communication.md#fencing)).
+- **Fencing (M2).** Peer text is fenced in tagged envelopes. The fence is a label for the reader, not a security boundary: nothing in peer text is refused or cleaned, so it can hold text that looks like a fence (decision: Ransom, 2026-10-27; [Fencing](swarm-communication.md#fencing)).
 
 ### The result contract
 
@@ -516,7 +516,7 @@ def final_chain(final: FinalSpec | None, result: ResultSpec | None) -> list[Fina
 | `vote` | `result.answer_key` | The earliest submission in the plurality group of answer keys; one vote per member; `None` keys do not vote. A tied plurality goes to the group whose first submission is earliest, and `tie` is recorded | no submission has a key |
 | `first` | nothing | As in M1 ([The final answer](#the-final-answer-first)) | there are no submissions |
 | `last` | nothing | As in M2 ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)) | there are no submissions |
-| `synthesize` | `kind="answer"` | One extra model call over the submissions ([below](#synthesize)) | there are no submissions, every submission holds a fence marker, or the call fails recoverably |
+| `synthesize` | `kind="answer"` | One extra model call over the submissions ([below](#synthesize)) | there are no submissions, or the call fails recoverably |
 | `reporter` | a coordinator topology | Reserved; no built-in controller accepts it yet | |
 
 **The default.** With the controller's `final=None` (the default of `leaderless()`), the chain is built from what the task supplies:
@@ -559,7 +559,7 @@ So a task with both gets `["verify", "vote", "first"]`, and one with neither get
   - an instruction to give one final answer in the format the task asks for. `prompt` replaces that instruction, not the header or the fencing.
 
   The fencing rules:
-  - **Marker refusal** follows the communication design's rule. `<member_submission` joins the fence tags in `src/inspect_swarm/_fence.py`, and a submission holding any case-insensitive fence marker is left out of the prompt whole; nothing is removed. The other submissions are unaffected, so a member can only leave itself out (decision: Ransom, 2026-10-23). When every submission is left out, `synthesize` makes no call and produces nothing: the chain moves to its next mode and `synthesize_error` records why, as for a recoverable failure.
+  - **A label, not a boundary.** The fence follows the communication design's rule: each submission is quoted as written, and nothing in it is refused or removed, so a member can write text that looks like a fence or another member's submission (decision: Ransom, 2026-10-27).
   - **Attribute values** are roster names and sequence numbers. Roster names come from the eval author, but no name grammar applies unless the messages channel is enabled, so the fence escapes them as XML attribute values.
   - **Text only.** The payload is the submission's completion. Members' tool calls, transcripts and messages are never included.
   - **One fencing implementation.** `synthesize` reuses the bus's fencing code with its own tag, so the two cannot drift. That code is `src/inspect_swarm/_fence.py`, which M2's shared-memory channel uses (M2-8 in [swarm-implementation-plan.md](swarm-implementation-plan.md#m2-pull-requests)).
@@ -845,10 +845,9 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
   - Its exception fails the sample. Neither scoring nor re-scoring calls it.
   - Its verdict is on the member's `MemberEnded` and handle as a `VerdictSummary` before the controller sees the event, and no event or handle field contains the explanation.
 - **`synthesize`.**
-  - The prompt holds each submission in a `<member_submission>` envelope; a submission holding a fence marker, in any letter case, is left out and the others are kept; a roster name containing `"` and `<` escaped, and no tool calls or messages.
+  - The prompt holds each submission in a `<member_submission>` envelope, as written, including one that holds text that looks like a fence; a roster name containing `"` and `<` escaped, and no tool calls or messages.
   - The shared fence code gives the same results on the communication design's `<peer_message>` cases.
   - A provider error, a refusal and an empty output fall through the chain with `synthesize_error` set.
-  - When every submission holds a fence marker, no call is made and the chain falls through with `synthesize_error` set.
   - A sample-level `LimitExceededError`, `TerminateSampleError` and cancellation propagate, the sample records its limit, and the provisional answer is the output.
   - An `ExceptionGroup` holding a sample limit (from a model API that uses a task group), and a mixed group of a limit and an ordinary error, propagate whole, on both backends.
 - **Record additions.** Keys, verdicts and chain fields are written as specified. An M1 record reads with them absent.
@@ -993,7 +992,7 @@ Untrusted input reaching the new code:
     - `answer_key`, task code that must accept any text and return `None` rather than raise on unparseable input;
     - the verifier, which may execute the answer (code) and must do so only inside the sandbox;
     - the member scorer, as they would from a single agent, and only after the solve (`completed=True`);
-    - `synthesize`'s prompt, in the communication design's envelope with harness-written attributes and any submission holding a fence marker left out ([`synthesize`](#synthesize)), in a separate call outside every member's context. That is weaker than tool output, so `synthesize` is never a default.
+    - `synthesize`'s prompt, in the communication design's envelope with harness-written attributes, a label and not a boundary ([`synthesize`](#synthesize)), in a separate call outside every member's context. That is weaker than tool output, so `synthesize` is never a default.
 - **Answer attribution.** A member's output must not be credited with the team's environment. The answer-scored contract forbids scorers that read the answer from the environment, and the empty-output backstop keeps the commonest case from reaching the scorer at all.
 - **The target.** Neither the verifier, nor `answer_key`, nor any member tool is given the target. Agents that consult the task's scorer in the loop are flagged by the analysis.
 - **Controllers.** A controller sees no member text (swarm-api.md). After M2 it sees a verdict only as `VerdictSummary(passed, value)`. The verifier's explanation may quote the answer or a judge model, so it stays in the record, and a controller cannot relay member text through a verdict.
