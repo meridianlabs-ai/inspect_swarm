@@ -823,11 +823,11 @@ Kimi K2.6 (up to 300 subagents with "context sharding") and xAI's Grok 4.20 mult
 - It refuses the most common configuration, `member(deepagent, count=4)`, because deepagent adds `memory()` by default. The fixes are `deepagent(memory=False)` or a separate member record per copy, each with its own `memory(instance=...)`. It cannot see tools a builder creates inside its invocation, a `ToolSource`'s tools or a bridged member's.
 - Rejected in favour of the tool-state scope (decision: Ransom, 2026-10-09). A warning instead of a refusal (option (c)) would fire on that common configuration every time and be ignored; also rejected.
 
-**A new event type from day one.**
+**First-class transcript event types.**
 
 - Clean, and gives the viewer a real view.
-- A public schema contract before the shape was known, and one that must also fit bridged traffic.
-- Not chosen for M1, which used `InfoEvent`s with a versioned payload, as ORBIT does. The event types are now decided ([open question 1](#open-questions), [swarm-event-types.md](swarm-event-types.md)), with the communication type shaped for bridged traffic without waiting for it to be built.
+- A public schema contract, which must also fit bridged traffic.
+- Chosen (decision: Ransom, 2026-10-27; [open question 1](#open-questions)): [swarm-event-types.md](swarm-event-types.md) designs the two types, with the communication type shaped for bridged traffic before that traffic is mapped.
 
 ## Compatibility and migration
 
@@ -929,14 +929,7 @@ The milestones are defined by their audiences (decision: Ransom, 2026-10-13). [s
 
 ## Open questions
 
-1. **Transcript representation for swarm evidence** (decided 2026-10-27). M1 wrote versioned `InfoEvent`s as its working default.
-   - (a) Keep `InfoEvent`s until bridged swarms are built, then propose a first-class event in inspect_ai shared with bridged traffic.
-   - (b) Propose the event type alongside M2.
-   - (c) Keep `InfoEvent`s indefinitely.
-
-   Recommendation was (a): the shape should be settled with bridged traffic in view, and the schema change is costly.
-
-   Decided: two event types in inspect_ai, both added now (decision: Ransom, 2026-10-27). A communication event for the `comm` evidence, shaped as agent communication in general so that bridged agents' traffic can use it later, and a swarm event for the rest, with `kind` and versioned `data` owned by inspect_swarm. Keeping the non-communication evidence as `InfoEvent`s was rejected: satellite packages already have event types in inspect_ai, and the viewer can hide filter toggles for types a sample does not contain. [swarm-event-types.md](swarm-event-types.md) designs them.
+1. **Transcript representation for swarm evidence.** Decided: two event types in inspect_ai, added together (decision: Ransom, 2026-10-27). A communication event for the `comm` evidence, shaped as agent communication in general so that bridged agents' traffic can use it later, and a swarm event for the rest, with `kind` and versioned `data` owned by inspect_swarm. Keeping the non-communication evidence as `InfoEvent`s was rejected: satellite packages already have event types in inspect_ai, and the viewer can hide filter toggles for types a sample does not contain. [swarm-event-types.md](swarm-event-types.md) designs them.
 
 2. **How the swarm keeps members' tool state apart** (decided 2026-10-09, below). Built-in tools share their store state between agents in a sample unless each has its own `instance`, and `deepagent()` adds a shared `memory()` by default ([The sample store](#the-sample-store)).
    - (a) A tool-state scope in inspect_ai: the runtime scopes each member, built-in tools resolve their default instance to it, and deepagent's own child skill instances are made private to it ([Members](#members)). Costs a small inspect_ai PR before M1; covers deepagent's memory and skills and `count` copies; custom tools can opt in. Tool state a setup solver prepares at the default instance does not reach members, a documented M1 restriction.
