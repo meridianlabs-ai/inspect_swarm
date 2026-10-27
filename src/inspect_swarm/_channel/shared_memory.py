@@ -60,9 +60,9 @@ _NO_LOOP = "\0"
 _INSTRUCTIONS = (
     f"Every member of the swarm, and their subagents, share one board of files, which you reach with the shared_memory tool under {ROOT}. "
     "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them. "
-    "Every shared_memory result ends with a status line that names the files other agents changed since you last viewed them, by ids such as f-3, which the view command takes as its file_id; the changes command returns that line alone. "
+    "Every shared_memory result ends with a status line that names the files other agents changed since you last viewed them, by ids such as f-3, which the view command takes as its file_id. "
     "View a file in its current version before you overwrite it with create, insert into it, rename it or delete it. "
-    "To check what other agents changed without viewing anything, use the changes command. "
+    "To check what other agents changed without viewing anything, use the changes command, which returns that line alone. "
     "To wait for another member's work, call swarm_wait rather than polling."
 )
 
