@@ -19,7 +19,7 @@ The CLI's own tool calls do not emit Inspect `ToolEvent`s, so the tool-event evi
 ## What the log records
 
 - Members' `ToolEvent`s are the record of what they did, except for bridged members.
-- The shared-memory channel's writes, views, notices and waits are `comm` events ([Shared Memory](shared-memory.qmd#the-record-of-the-board)).
+- The shared-memory channel's writes, views and waits are `comm` events ([Shared Memory](shared-memory.qmd#the-record-of-the-board)).
 - Files members share in a sandbox, tool instances they share, and the result record read while the swarm runs are channels the swarm observes but does not record ([Channels](channels.qmd#shared-files-are-observed-not-recorded)).
 
 Spans inside a swarm log no `StoreEvent`s. The swarm's span logs the net change to the store, which says what changed but not which member changed it. If an error, limit or cancellation escapes the swarm and ends the sample, the log may have no `StoreEvent` for the swarm's writes. `sample.store` is always the record of the final store.

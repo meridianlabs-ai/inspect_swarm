@@ -12,12 +12,11 @@ from .._bus._record import Draft, FrozenJson, Record, thaw_json
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
 from .._evidence import comm_read
-from .._fence import FENCE_TAGS, fence, fence_bytes, has_marker, utf8_bytes
+from .._fence import fence, utf8_bytes
 from ._channel import (
     Channel,
     ChannelRun,
     ChannelState,
-    NoticeLine,
     WaitNews,
     WaitSpec,
     swarm_channel,
@@ -27,7 +26,7 @@ CHANNEL = "shared_memory"
 ROOT = "/shared_memory"
 
 Command = Literal[
-    "view", "create", "str_replace", "insert", "append", "delete", "rename"
+    "view", "create", "str_replace", "insert", "append", "delete", "rename", "changes"
 ]
 
 _WRITES = ("create", "str_replace", "insert", "append", "delete", "rename")
@@ -38,19 +37,14 @@ _COMPONENT = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _MAX_COMPONENTS = 8
 _MAX_PATH_BYTES = 160
 _PATH_RULE = f"paths are {ROOT} followed by 1 to {_MAX_COMPONENTS} components separated by /, each 1 to 64 of the characters A-Z a-z 0-9 . _ - and not . or .., with at most {_MAX_PATH_BYTES} bytes in all"
-_TAGS = [f"<{tag}" for tag in FENCE_TAGS]
-_MARKER_RULE = f"Files on the board cannot contain a {', '.join(_TAGS[:-1])} or {_TAGS[-1]} tag, opening or closing, in any letter case."
 
 _FILE_ID = re.compile(r"f-[1-9][0-9]{0,13}")
 
-# the addressing grammar of member names, which appear in fence attributes and notices
+# the addressing grammar of member names, which appear in fence attributes and wait
+# results
 _MEMBER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,47}")
 
-# file ids, versions and counts are given at most this many bytes when the read budget
-# is computed
-_ID_BYTES = 16
-
-# at most this many file ids in a status line or notice
+# at most this many file ids in a status line or wait result
 _LISTED_IDS = 10
 
 # a loop key that is no loop's agent span, for a member whose own loop has not called
@@ -59,21 +53,23 @@ _NO_LOOP = "\0"
 
 _INSTRUCTIONS = (
     f"Every member of the swarm, and their subagents, share one board of files, which you reach with the shared_memory tool under {ROOT}. "
-    "Files are shown between <peer_file> tags whose writer attribute names the agent that last wrote them. "
-    "Notices name changed files by ids such as f-3, which the view command accepts as its path. "
+    "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them. "
+    "Every shared_memory result ends with a status line that names the files other agents changed since you last viewed them, by ids such as f-3, which the view command takes as its file_id. "
     "View a file in its current version before you overwrite it with create, insert into it, rename it or delete it. "
+    "To check what other agents changed without viewing anything, use the changes command, which returns that line alone. "
     "To wait for another member's work, call swarm_wait rather than polling."
 )
 
 _DESCRIPTION = (
     f"A board of files under {ROOT}, shared by every agent in the swarm and their subagents. "
-    "Files are shown between <peer_file> tags whose writer attribute names the agent that last wrote them. "
+    "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them. "
     "View a file in its current version before you overwrite it with create, insert into it, rename it or delete it; "
     "str_replace needs no view, since it fails unless old_str occurs exactly once in the file as it is now. "
     "To add an entry to a shared log or list, use append, which needs no view: it adds append_text on a new line at the end of the file as it is when the write lands, and creates the file if it does not exist. "
     "Use insert only when the position matters. "
     "Write commands return a short acknowledgment, not the file; view a file to see it. "
-    "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view accepts as its path."
+    "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view takes as its file_id. "
+    "The changes command returns that list alone: use it to check what other agents changed without viewing anything."
 )
 
 
@@ -122,31 +118,33 @@ def shared_memory(
 ) -> Channel:
     """A board of files that every member of the swarm, and their subagents, read and write.
 
-    Each member gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` over files under `/shared_memory`. Every write goes through the swarm's bus as a record from the member that made it. A view shows a file inside a fence that names its last writer and version, and lists of changed files name them by ids such as `f-3`. A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `append` needs no view: it adds text on a new line at the end of a file, creating the file if it does not exist.
+    Each member gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` over files under `/shared_memory`. Every write goes through the swarm's bus as a record from the member that made it. A view shows a file inside a fence that names its last writer and version, and lists of changed files name them by ids such as `f-3`, which `view` takes as its `file_id`. A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `append` needs no view: it adds text on a new line at the end of a file, creating the file if it does not exist. `changes` returns only the list of files other agents changed since the loop last viewed them, which ends every result.
 
-    The board lives for one run of the swarm. Its bounds keep every file viewable whole in one result.
+    A fence is a label for the reader, not a protection: a member can write text that looks like a fence, another member's file or a status line.
+
+    The board lives for one run of the swarm. A result longer than the tool output limit is truncated in the middle, as Inspect truncates any tool's result.
 
     Each member, and each of its subagents, also gets `swarm_wait`, which blocks until a file it watches has a change it has not viewed, another member ends, every member is waiting, the swarm stops, or a timeout passes. A wait is wall-clock time inside a tool call: it counts towards the member's time limit, the swarm's time cap, and the sample's time and working limits. It makes no model call, so it adds no tokens, cost or steps.
 
     Args:
-        max_files: The most files on the board, from 1 to 10,000.
-        max_file_bytes: The most UTF-8 bytes in one file, from 1 to 262,144.
-        max_file_lines: The most lines in one file, from 1 to 100,000.
-        max_board_bytes: The most UTF-8 bytes in all files together, from `max_file_bytes` to 16,777,216.
+        max_files: The most files on the board, at least 1.
+        max_file_bytes: The most UTF-8 bytes in one file, at least 1.
+        max_file_lines: The most lines in one file, at least 1.
+        max_board_bytes: The most UTF-8 bytes in all files together, at least `max_file_bytes`.
         rate: The most writes one member may make, all its loops together, in a sliding window of seconds, as `(count, seconds)`; `None` for no limit.
-        max_wait: The longest `swarm_wait` in seconds, from 1 to 3,600, and its default timeout.
+        max_wait: The longest `swarm_wait` in seconds, at least 1, and its default timeout.
 
     Returns:
         The channel.
 
     Raises:
-        ValueError: If a bound is out of its range, or `rate` is not a positive count and a finite, positive window.
+        ValueError: If a bound is below its minimum, or `rate` is not a positive count and a finite, positive window.
     """
-    _check_bound("max_files", max_files, 1, 10_000)
-    _check_bound("max_file_bytes", max_file_bytes, 1, 262_144)
-    _check_bound("max_file_lines", max_file_lines, 1, 100_000)
-    _check_bound("max_board_bytes", max_board_bytes, max_file_bytes, 16_777_216)
-    _check_bound("max_wait", max_wait, 1, 3_600)
+    _check_bound("max_files", max_files, 1)
+    _check_bound("max_file_bytes", max_file_bytes, 1)
+    _check_bound("max_file_lines", max_file_lines, 1)
+    _check_bound("max_board_bytes", max_board_bytes, max_file_bytes)
+    _check_bound("max_wait", max_wait, 1)
     return _SharedMemory(
         _Limits(max_files, max_file_bytes, max_file_lines, max_board_bytes),
         None if rate is None else _rate(rate),
@@ -154,14 +152,10 @@ def shared_memory(
     )
 
 
-def _check_bound(name: str, value: object, low: int, high: int) -> None:
-    if (
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or not low <= value <= high
-    ):
+def _check_bound(name: str, value: object, low: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < low:
         raise ValueError(
-            f"shared_memory(): {name} must be a whole number from {low:,} to {high:,}, got {value!r}."
+            f"shared_memory(): {name} must be a whole number of at least {low:,}, got {value!r}."
         )
 
 
@@ -292,8 +286,6 @@ class _SharedMemoryState:
         # loop agent span -> file id -> the version that loop has seen; 0 when it knows
         # the file only from its own blind append, which shows it none of the content
         self._seen: dict[str | None, dict[str, int]] = {}
-        # member -> file id -> the version its last notice covered
-        self._covered: dict[str, dict[str, int]] = {}
         # member -> the agent span of its own loop, once that loop has called the tool
         self._top: dict[str, str | None] = {}
         # the changes admission computed for the record about to be applied, and those
@@ -301,7 +293,6 @@ class _SharedMemoryState:
         self._admitted: tuple[str, list[_Change]] | None = None
         self._applied: dict[str, list[_Change]] = {}
         self._tool: Tool | None = None
-        self.read_budget = _read_budget(limits, self._roster)
 
     def tools(self) -> list[Tool]:
         if self._tool is None:
@@ -406,7 +397,7 @@ class _SharedMemoryState:
             if self._bus.running(name)
             and any(
                 f.loop != self._top_loop(name)
-                and self._is_news(name, self._top_loop(name), f)
+                and self._is_news(self._top_loop(name), f)
                 for f in written
             )
         ]
@@ -414,36 +405,16 @@ class _SharedMemoryState:
             "files": [change.entry(record.kind) for change in changes],
         }
 
-    def notice_lines(self, member: str) -> list[NoticeLine]:
-        # the files whose current versions are news to the member's own loop and no
-        # earlier notice covered, which this notice then covers
-        files = self._news(member, self._top_loop(member), own=True)
-        if not files:
-            return []
-        labels = self._labels(member, self._top_loop(member), files, own=True)
-        covered = self._covered.setdefault(member, {})
-        for f in files:
-            covered[f.id] = f.version
-        writers = _writers(files, self._top_loop(member))
-        return [
-            NoticeLine(
-                f"[Swarm notice] {_files_changed(len(files), 'shared memory ')} ({labels}; by {writers}). "
-                f'View one with shared_memory(command="view", path="{files[0].id}"), or list them with path="{ROOT}".',
-                {
-                    "files": [
-                        {"file": f.id, "version": f.version, "record": f.record}
-                        for f in files
-                    ]
-                },
-            )
-        ]
-
     # waiting: what a swarm_wait of a loop watches, by D-1's `seen` alone; nothing here
     # marks anything
 
     def wait_check(self, spec: WaitSpec) -> None:
-        if spec.path is not None and not _FILE_ID.fullmatch(spec.path):
+        if spec.path is not None and spec.file_id is not None:
+            raise ToolError("swarm_wait takes path or file_id, not both.")
+        if spec.path is not None:
             _path(spec.path)
+        if spec.file_id is not None:
+            _file_id(spec.file_id)
 
     def wakes(self, spec: WaitSpec, record: Record) -> bool:
         # only the files the record changed, so the cost is per write, not per board
@@ -456,18 +427,9 @@ class _SharedMemoryState:
         files = [f for f in self._files.values() if self._reportable(spec, f)]
         if not files:
             return None
-        seen = self._seen.get(spec.loop, {})
-        labels = [
-            f"{f.id} deleted"
-            if f.deleted
-            else f"{f.id} new"
-            if not seen.get(f.id)
-            else f.id
-            for f in files
-        ]
         writers = _writers(files, spec.loop)
         line = _changed_where_you_waited(
-            len(files), _id_list(labels, len(files)), writers, files[0].id
+            len(files), self._labels(spec.loop, files), writers, files[0].id
         )
         return WaitNews(
             lines=[line],
@@ -478,14 +440,8 @@ class _SharedMemoryState:
         )
 
     def _reportable(self, spec: WaitSpec, f: _BoardFile) -> bool:
-        # a version under the filter written by another loop and above what the waiting
-        # loop has seen; a tombstone only when the loop saw an earlier version
-        if not _watched(spec.path, f):
-            return False
-        seen = self._seen.get(spec.loop, {})
-        if _by_others(f, spec.loop)[0] <= seen.get(f.id, 0):
-            return False
-        return not f.deleted or f.id in seen
+        # news to the waiting loop under the wait's filter
+        return _watched(spec, f) and self._is_news(spec.loop, f)
 
     # the tool
 
@@ -502,12 +458,13 @@ class _SharedMemoryState:
             old_path: str | None = None,
             new_path: str | None = None,
             append_text: str | None = None,
+            file_id: str | None = None,
         ) -> str:
             """Shared memory.
 
             Args:
-                command: Command to execute (view, create, str_replace, insert, append, delete, rename).
-                path: Required for `view`, `create`, `str_replace`, `insert`, `append` and `delete`. Path to a file or directory under /shared_memory, e.g. `/shared_memory/notes.md` or `/shared_memory/notes`. For `view`, also a file id such as `f-3`.
+                command: Command to execute (view, create, str_replace, insert, append, delete, rename, changes).
+                path: Required for `create`, `str_replace`, `insert`, `append` and `delete`, and for `view` without `file_id`. Path to a file or directory under /shared_memory, e.g. `/shared_memory/notes.md` or `/shared_memory/notes`.
                 file_text: Required for `create`: the content of the file. It replaces the file if it exists.
                 old_str: Required for `str_replace`: the text in `path` to replace, which must occur there exactly once.
                 new_str: Optional for `str_replace`: the new text (if not given, `old_str` is deleted).
@@ -517,10 +474,12 @@ class _SharedMemoryState:
                 old_path: Required for `rename`: the current path of a file or directory.
                 new_path: Required for `rename`: the new path, which must not exist.
                 append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
+                file_id: Optional for `view`, in place of `path`: the id of a file, such as `f-3`, as status lines name files.
             """
             return await self._call(
                 command,
                 path=path,
+                file_id=file_id,
                 file_text=file_text,
                 old_str=old_str,
                 new_str=new_str,
@@ -537,8 +496,6 @@ class _SharedMemoryState:
             name="shared_memory",
             description=_DESCRIPTION,
             parallel=True,
-            # the read budget bounds every view, so nothing truncates a fence
-            max_output=0,
         ).as_tool()
 
     async def _call(
@@ -546,6 +503,7 @@ class _SharedMemoryState:
         command: str,
         *,
         path: str | None,
+        file_id: str | None,
         file_text: str | None,
         old_str: str | None,
         new_str: str | None,
@@ -568,8 +526,19 @@ class _SharedMemoryState:
         own = not self._bus.nested(context)
         if own:
             self._top[member] = loop
+        if command == "changes":
+            return (
+                self._status_line(loop)
+                or "Shared memory: no files changed since you last viewed them."
+            )
         if command == "view":
-            result = self._view(member, context.span_id, loop, own, path, view_range)
+            result = self._view(
+                member, context.span_id, loop, own, path, file_id, view_range
+            )
+        elif command in _WRITES and file_id is not None:
+            raise ToolError(
+                f"{command} takes the file's path, not file_id; a view of the file shows its path."
+            )
         elif command in _WRITES:
             result = await self._write(
                 command,
@@ -586,7 +555,7 @@ class _SharedMemoryState:
             )
         else:
             raise ToolError(f"Unknown command: {command}")
-        status = self._status_line(member, loop, own)
+        status = self._status_line(loop)
         return f"{result}\n{status}" if status else result
 
     async def _write(
@@ -876,15 +845,17 @@ class _SharedMemoryState:
         loop: str | None,
         own: bool,
         path: str | None,
+        file_id: str | None,
         view_range: list[int] | None,
     ) -> str:
-        path = _required(path, "path", "view")
-        if _FILE_ID.fullmatch(path):
-            f = self._files.get(path)
+        if path is not None and file_id is not None:
+            raise ToolError("view takes path or file_id, not both.")
+        if file_id is not None:
+            f = self._files.get(_file_id(file_id))
             if f is None:
-                raise ToolError(f"There is no file {path}.")
+                raise ToolError(f"There is no file {file_id}.")
         else:
-            path = _path(path)
+            path = _path(_required(path, "path or file_id", "view"))
             f = self._live(path)
             if f is None:
                 if not self._is_dir(path):
@@ -907,7 +878,7 @@ class _SharedMemoryState:
             ("id", f.id),
             ("path", f.path),
             ("version", str(f.version)),
-            ("writer", f.writer),
+            ("last_writer", f.writer),
         ]
         line_range = f"{start}-{end}" if view_range else None
         self._seen.setdefault(loop, {})[f.id] = f.version
@@ -929,8 +900,13 @@ class _SharedMemoryState:
         )
         if not files:
             return f"{ROOT} has no files."
+        widths = (
+            max(len(f.id) for f in files),
+            max(len(str(f.version)) for f in files),
+            max(len(f.writer) for f in files),
+        )
         body = "\n".join(
-            _listing_line(f.id, str(f.version), f.writer, f.path) for f in files
+            _listing_line(f.id, str(f.version), f.writer, f.path, widths) for f in files
         )
         return fence("peer_listing", [], body)
 
@@ -960,48 +936,31 @@ class _SharedMemoryState:
     def _top_loop(self, member: str) -> str | None:
         return self._top.get(member, _NO_LOOP)
 
-    def _is_news(self, member: str, loop: str | None, f: _BoardFile) -> bool:
+    def _is_news(self, loop: str | None, f: _BoardFile) -> bool:
         # a version written by another loop, newer than any this loop has seen; a
-        # tombstone only when the loop saw, or its member was notified of, the file
-        # before
+        # tombstone only when the loop saw the file before
         seen = self._seen.get(loop, {})
         if _by_others(f, loop)[0] <= seen.get(f.id, 0):
             return False
-        heard = f.id in seen or (
-            loop == self._top_loop(member) and f.id in self._covered.get(member, {})
-        )
-        return not f.deleted or heard
+        return not f.deleted or f.id in seen
 
-    def _news(self, member: str, loop: str | None, own: bool) -> list[_BoardFile]:
-        # for the member's own loop, without what a notice has already covered
-        covered = self._covered.get(member, {}) if own else {}
-        return [
-            f
-            for f in self._files.values()
-            if self._is_news(member, loop, f)
-            and covered.get(f.id, 0) < _by_others(f, loop)[0]
-        ]
-
-    def _labels(
-        self, member: str, loop: str | None, files: Sequence[_BoardFile], own: bool
-    ) -> str:
+    def _labels(self, loop: str | None, files: Sequence[_BoardFile]) -> str:
         seen = self._seen.get(loop, {})
-        covered = self._covered.get(member, {}) if own else {}
         labels = [
             f"{f.id} deleted"
             if f.deleted
             else f"{f.id} new"
-            if not seen.get(f.id) and f.id not in covered
+            if not seen.get(f.id)
             else f.id
             for f in files
         ]
         return _id_list(labels, len(files))
 
-    def _status_line(self, member: str, loop: str | None, own: bool) -> str | None:
-        files = self._news(member, loop, own)
+    def _status_line(self, loop: str | None) -> str | None:
+        files = [f for f in self._files.values() if self._is_news(loop, f)]
         if not files:
             return None
-        return _status(len(files), self._labels(member, loop, files, own))
+        return _status(len(files), self._labels(loop, files))
 
 
 def _by_others(f: _BoardFile, loop: str | None) -> tuple[int, str | None]:
@@ -1024,12 +983,8 @@ def _required(value: str | None, name: str, command: str, empty: bool = False) -
 def _content(composed: str) -> str:
     # a file as a write composes it: line endings normalised as memory() does, in the
     # whole file since a carriage return at the payload's end joins the newline after
-    # it; and refused with a fence marker, which str_replace can assemble from old and
-    # new text
-    content = composed.replace("\r\n", "\n").replace("\r", "\n")
-    if has_marker(content):
-        raise ToolError(_MARKER_RULE)
-    return content
+    # it
+    return composed.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _appended(content: str, text: str) -> str:
@@ -1056,11 +1011,24 @@ def _is_path(path: str) -> bool:
 
 def _path(path: str | None) -> str:
     # checked against the grammar and never normalised; the error does not repeat what
-    # was typed
+    # was typed, except a file id, whose grammar makes it safe to
     assert path is not None
+    if _FILE_ID.fullmatch(path):
+        raise ToolError(
+            f"{path} is a file id, not a path; view and swarm_wait take it as file_id, and a view of the file shows its path."
+        )
     if path != ROOT and not _is_path(path):
         raise ToolError(f"Invalid path: {_PATH_RULE}.")
     return path
+
+
+def _file_id(file_id: str) -> str:
+    # the error does not repeat what was typed
+    if not _FILE_ID.fullmatch(file_id):
+        raise ToolError(
+            "Invalid file_id: file ids are f- followed by a number, such as f-3."
+        )
+    return file_id
 
 
 def _edit(f: _BoardFile, content: str) -> _Change:
@@ -1101,8 +1069,11 @@ def _numbered(lines: Sequence[str], start: int) -> str:
     return "\n".join(f"{n + start:6}\t{line}" for n, line in enumerate(lines))
 
 
-def _listing_line(file: str, version: str, writer: str, path: str) -> str:
-    return f"{file}  version {version}  {writer}  {path}"
+def _listing_line(
+    file: str, version: str, writer: str, path: str, widths: tuple[int, int, int]
+) -> str:
+    file_width, version_width, writer_width = widths
+    return f"{file:<{file_width}}  version {version:>{version_width}}  {writer:<{writer_width}}  {path}"
 
 
 def _shown(f: _BoardFile, lines: str | None) -> JsonValue:
@@ -1115,10 +1086,10 @@ def _shown(f: _BoardFile, lines: str | None) -> JsonValue:
     }
 
 
-def _files_changed(count: int, kind: str = "") -> str:
+def _files_changed(count: int) -> str:
     if count == 1:
-        return f"1 {kind}file changed since you last viewed it"
-    return f"{count} {kind}files changed since you last viewed them"
+        return "1 file changed since you last viewed it"
+    return f"{count} files changed since you last viewed them"
 
 
 def _id_list(labels: Sequence[str], count: int) -> str:
@@ -1131,19 +1102,19 @@ def _status(count: int, labels: str) -> str:
     return f"Shared memory: {_files_changed(count)} ({labels})."
 
 
-def _watched(path: str | None, f: _BoardFile) -> bool:
+def _watched(spec: WaitSpec, f: _BoardFile) -> bool:
     # whether a wait's filter covers a file: the whole board, the file's id, or its
     # current path (a tombstone's, the path it had) at or under the filter's
-    if path is None:
+    if spec.file_id is not None:
+        return f.id == spec.file_id
+    if spec.path is None:
         return True
-    if _FILE_ID.fullmatch(path):
-        return f.id == path
-    return f.path == path or f.path.startswith(path + "/")
+    return f.path == spec.path or f.path.startswith(spec.path + "/")
 
 
 def _changed_where_you_waited(count: int, labels: str, writers: str, first: str) -> str:
     files = "1 shared memory file" if count == 1 else f"{count} shared memory files"
-    return f'{files} changed where you waited ({labels}; by {writers}). View one with shared_memory(command="view", path="{first}").'
+    return f'{files} changed where you waited ({labels}; by {writers}). View one with shared_memory(command="view", file_id="{first}").'
 
 
 def _acknowledgment(command: str, args: _Args, changes: Sequence[_Change]) -> str:
@@ -1171,38 +1142,3 @@ def _acknowledgment(command: str, args: _Args, changes: Sequence[_Change]) -> st
             return f"Renamed {args.old_path} to {args.new_path} ({first.file}, now version {first.version})."
         case _:
             return f"Renamed {args.old_path} to {args.new_path} ({len(changes)} file{'' if len(changes) == 1 else 's'})."
-
-
-def _read_budget(limits: _Limits, roster: Sequence[str]) -> int:
-    # the most UTF-8 bytes a view can return for this configuration and roster: the
-    # larger of a whole file of the largest size and a listing of the most files, with
-    # ids, versions and counts of up to 16 bytes, the longest path and member name
-    writer = max(utf8_bytes(name) for name in roster)
-    count = "9" * _ID_BYTES
-    status = utf8_bytes(
-        "\n"
-        + _status(
-            int(count),
-            _id_list([f"{'x' * _ID_BYTES} deleted"] * (_LISTED_IDS + 1), int(count)),
-        )
-    )
-    file_view = (
-        fence_bytes(
-            "peer_file",
-            [
-                ("id", _ID_BYTES),
-                ("path", _MAX_PATH_BYTES),
-                ("version", _ID_BYTES),
-                ("writer", writer),
-            ],
-        )
-        # each line numbered in six columns and a tab
-        + limits.max_file_bytes
-        + 7 * limits.max_file_lines
-    )
-    listing_line = utf8_bytes(
-        _listing_line("x" * _ID_BYTES, count, "x" * writer, "x" * _MAX_PATH_BYTES)
-    )
-    listing = fence_bytes("peer_listing", []) + limits.max_files * (listing_line + 1)
-    tombstone = utf8_bytes(f"{'x' * _ID_BYTES} was deleted by {'x' * writer}.")
-    return max(file_view, listing, tombstone) + status

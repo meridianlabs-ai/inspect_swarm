@@ -67,36 +67,38 @@ Each sample runs four `react()` members, `react-1` to `react-4`, at the same tim
 
 - Members: agents registered with `@agent`, given as `member()` records with a name, role, count, limits and sandbox. A member builder, an `@agent` function that builds the member's agent, is where it gets the swarm's tools. See [Members](https://meridianlabs-ai.github.io/inspect_swarm/members.html).
 - A controller: which members start and when the swarm stops. The default, `leaderless`, starts every member and stops at the first submission. See [Controllers](https://meridianlabs-ai.github.io/inspect_swarm/controllers.html), which also covers writing one.
-- Channels: how members share information. `filesystem`, the default, describes a shared directory in the sample's sandbox. `shared_memory` is a board of files with notices and `swarm_wait`. See [Channels](https://meridianlabs-ai.github.io/inspect_swarm/channels.html).
+- Channels: how members share information. `filesystem`, the default, describes a shared directory in the sample's sandbox. `shared_memory` is a board of files with `swarm_wait`. See [Channels](https://meridianlabs-ai.github.io/inspect_swarm/channels.html).
 - A budget: caps on cost, tokens and time, taken from the sample's limits by default, shared or split between members. See [Budgets](https://meridianlabs-ai.github.io/inspect_swarm/budget.html).
 - Sandboxes: members share the sample's sandbox, or each works in its own. See [Sandboxes](https://meridianlabs-ai.github.io/inspect_swarm/sandboxes.html).
 
 ## The shared-memory channel
 
-`shared_memory()` gives the swarm one board of files that every member reads and writes with a `shared_memory` tool, and a `swarm_wait` tool to wait for other members instead of polling. Members get the tools from `swarm_tools()`, and notices of other members' changes between turns from `swarm_on_continue()`. Call both inside a member builder registered with `@agent`, and pass the builder to `member()` without calling it. The log records a builder by name and arguments, so the swarm can be rebuilt from the log; it cannot rebuild `swarm_tools()` or `swarm_on_continue()` passed in `args` or in an agent you built.
+`shared_memory()` gives the swarm one board of files that every member reads and writes with a `shared_memory` tool, and a `swarm_wait` tool to wait for other members instead of polling. Members get the tools from `swarm_tools()`. Call it inside a member builder registered with `@agent`, and pass the builder to `member()` without calling it. The log records a builder by name and arguments, so the swarm can be rebuilt from the log; it cannot rebuild `swarm_tools()` passed in `args` or in an agent you built.
 
 ```python
 from inspect_ai.agent import Agent, agent, react
 from inspect_ai.tool import bash
 
-from inspect_swarm import member, shared_memory, swarm, swarm_on_continue, swarm_tools
+from inspect_swarm import member, shared_memory, swarm, swarm_tools
 
 
 @agent
 def worker() -> Agent:
-    return react(tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
+    return react(tools=[bash(), swarm_tools()])
 
 
 solver = swarm(members=member(worker, name="w", count=3), channels=[shared_memory()])
 ```
 
-At each turn boundary where other agents have changed files since its last notice, a member gets one notice, such as:
+Every `shared_memory` result ends with a status line that names the files other agents changed since the member last viewed them, such as:
 
 ```
-[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".
+Shared memory: 1 file changed since you last viewed it (f-1 new).
 ```
 
-The swarm logs every write, view, notice and wait. See [Shared Memory](https://meridianlabs-ai.github.io/inspect_swarm/shared-memory.html) for the tool's commands, waiting, subagents, limits, monitoring with Inspect Sentinel, and migrating from `memory(instance=...)`.
+`shared_memory(command="changes")` returns that line alone. The swarm adds no messages to a member's conversation.
+
+The swarm logs every write, view and wait. See [Shared Memory](https://meridianlabs-ai.github.io/inspect_swarm/shared-memory.html) for the tool's commands, waiting, subagents, limits, monitoring with Inspect Sentinel, and migrating from `memory(instance=...)`.
 
 ## Results
 

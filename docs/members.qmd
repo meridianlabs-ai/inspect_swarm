@@ -86,18 +86,18 @@ A member builder is a function registered with `@agent` that builds the member's
 from inspect_ai.agent import Agent, agent, react
 from inspect_ai.tool import bash
 
-from inspect_swarm import member, shared_memory, swarm, swarm_on_continue, swarm_tools
+from inspect_swarm import member, shared_memory, swarm, swarm_tools
 
 
 @agent
 def worker() -> Agent:
-    return react(tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
+    return react(tools=[bash(), swarm_tools()])
 
 
 solver = swarm(members=member(worker, name="w", count=3), channels=[shared_memory()])
 ```
 
-Use a builder for anything the swarm gives a member at run time: `swarm_tools()` and `swarm_on_continue()` ([Shared Memory](shared-memory.qmd)). The log records a builder by its name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild `swarm_tools()` or `swarm_on_continue()` passed in `args` or inside an agent you built.
+Use a builder for anything the swarm gives a member at run time, such as `swarm_tools()` ([Shared Memory](shared-memory.qmd)). The log records a builder by its name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild `swarm_tools()` passed in `args` or inside an agent you built.
 
 A builder is also the place for anything each member must have its own of. Every member built from one record gets the same objects from `args`, and two built agents given the same tool object share it, across members and samples. Inspect's built-in tools keep their state in the sample store or the sandbox, so this matters only for a custom tool or helper that keeps state in its Python object (a counter, a cache, a client). The swarm calls a builder once for each member in each sample, so what the builder creates belongs to one member. [`examples/stop_on_proof.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/stop_on_proof.py) keeps a per-member flag this way.
 

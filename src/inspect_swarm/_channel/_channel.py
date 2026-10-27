@@ -39,7 +39,7 @@ class Channel:
     """The prefix of the channel's record ids (`"w"` gives `w-1`), set exactly when `name` is. No two channels of a swarm may share it."""
 
     reach: ClassVar[Literal["loop", "member"]] = "loop"
-    """Which of a member's agent loops get the channel's tools from `swarm_tools()`. `"loop"` (the default): only the member's own loop, the first in which it resolves `swarm_tools()`. `"member"`: also the member's nested loops, such as a `deepagent()` member's subagents, which then act as the member."""
+    """Which of a member's agent loops get the channel's tools from `swarm_tools()`. `"loop"` (the default): only the member's own loop, the first in which it resolves `swarm_tools()`. `"member"`: also any nested loop the member's agent gives `swarm_tools()`, such as a `deepagent()` member's `general()` subagents, which then act as the member. Which nested loops get `swarm_tools()` is the agent's choice; `reach` filters the channel tools they get and which channels can wake their `swarm_wait`. A channel whose reads consume something for the member, such as an inbox that marks messages read, keeps `"loop"` so that it has one reader."""
 
     storm: StormControls = StormControls()
     """The storm controls the bus applies to the channel's records. By default there are none."""
@@ -92,17 +92,6 @@ class ChannelRun:
     """The swarm's members."""
 
 
-@dataclass(frozen=True)
-class NoticeLine:
-    """A line of a member's notice, which `swarm_on_continue()` adds at the member's turn boundary."""
-
-    text: str
-    """The line: a fixed template whose only variables are counts, swarm-assigned ids and roster names, never anything a member wrote or chose."""
-
-    ids: Mapping[str, JsonValue]
-    """The swarm ids the line names, such as `{"files": [{"file": "f-2", "version": 3, "record": "w-7"}]}`, given as `ids` in the notice's metadata and in its `notified` evidence."""
-
-
 class ChannelState(Protocol):
     """A channel's state in one run of the swarm, which only the bus changes.
 
@@ -142,20 +131,7 @@ class ChannelState(Protocol):
             record: The record.
 
         Returns:
-            The members to notify, and a JSON mapping for the record's `delivered` evidence, or `None`.
-        """
-        ...
-
-    def notice_lines(self, member: str) -> list[NoticeLine]:
-        """The lines of the member's next notice, which they then cover.
-
-        Called at the member's turn boundary, only when the notice will be added, so a line covers what it names: the next call leaves it out until it changes again.
-
-        Args:
-            member: The member the notice is for.
-
-        Returns:
-            The lines, or `[]` when there is nothing new for the member.
+            The members whose own loop the record is news to, given as `notify` in the record's `delivered` evidence, and a JSON mapping for that evidence, or `None`.
         """
         ...
 
@@ -177,7 +153,10 @@ class WaitSpec:
     """Whether that loop is the member's own, not one of its subagents'."""
 
     path: str | None
-    """The shared memory's filter as the model gave it, or `None` for the whole board. Later channels add filters of their own."""
+    """The shared memory's path filter as the model gave it, or `None`. Later channels add filters of their own."""
+
+    file_id: str | None = None
+    """The shared memory's file id filter as the model gave it, or `None`. With neither filter, the wait watches the whole board."""
 
 
 @dataclass(frozen=True)

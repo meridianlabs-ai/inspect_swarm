@@ -1,9 +1,15 @@
-# Code owners for release-gating.
+# Code owners.
 #
-# Only the release PR touches these files (Release Please maintains them), so
-# requiring code-owner review on them gates *release* PRs to the owners below
-# without affecting normal feature PRs. Pair with the branch ruleset's
-# "Require review from Code Owners".
+# The catch-all line requests a review from @ransomr on every PR when it is
+# opened or marked ready for review. The last matching line wins, so it must
+# stay above the release-gating lines below.
+#
+# Only the release PR touches the release-gating files (Release Please
+# maintains them). If the branch ruleset's "Require review from Code Owners"
+# is turned on, the catch-all line makes @ransomr's approval required on
+# every PR, not just release PRs.
+
+*                                @ransomr
 
 /CHANGELOG.md                    @ransomr @jjallaire @dragonstyle
 /.release-please-manifest.json   @ransomr @jjallaire @dragonstyle

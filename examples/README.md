@@ -5,7 +5,7 @@ Runnable swarms. Each file defines one task at the bottom. Read them in this ord
 | Example | What it shows | Needs |
 |---------|---------------|-------|
 | `getting_started.py` | `k` `react()` members on each question; the first submission is the answer | |
-| `shared_memory.py` | The shared-memory channel: members split a count, `append` their parts to a board, and wait for each other with `swarm_wait`; notices with `swarm_on_continue()` | |
+| `shared_memory.py` | The shared-memory channel: members split a count, `append` their parts to a board, and wait for each other with `swarm_wait` | |
 | `stop_on_proof.py` | Writing a controller: `until_proved()` stops the swarm at the first checked answer, and a member builder that makes a normal return mean a passed check | |
 | `budget_sweep.py` | Agent count, budget and split as task parameters; the `swarm_resources()` tool | Cost data for the model |
 | `shared_sandbox.py` | Members with `bash()` in one shared container, the `filesystem` channel, and a scorer that reads what they left | Docker |

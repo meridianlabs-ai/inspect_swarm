@@ -30,7 +30,6 @@ For each member, in roster order:
 - `running_time`: seconds from its start to its end, `null` for a member never started.
 - `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member, whose tool calls leave no tool events.
 - `gate_checks`, `gate_passes`, `first_pass_time`: its in-loop checks ([Scoring](scoring.qmd#checks-during-the-run)).
-- `delivery_effective`: `notify` or `poll`, the mode it ran in ([Shared Memory](shared-memory.qmd#notices)).
 - `comm`, `waits`, `waits_by_outcome`, `wait_time`, `idle_time`: below.
 
 ### Communication
@@ -40,7 +39,6 @@ Each member's `comm` has an entry, by channel name, for each channel with record
 - `records` and `record_bytes`: its writes delivered to the channel, and their size.
 - `rejections`: its writes the swarm refused, by the control that refused them, such as `rate`.
 - `reads` and `listings`: its views of files and of directories.
-- `notices`: the notices it got with a line for the channel.
 
 A member's subagents count as the member. Every member has an entry for every such channel the swarm opened, zeros included. A swarm with none (`filesystem` only, or `channels=[]`) has `comm` `{}` for every member: communication through files is observed, not recorded, so it is not reported as zero ([Channels](channels.qmd#shared-files-are-observed-not-recorded)).
 
@@ -57,12 +55,7 @@ In a swarm with no `swarm_wait` (`filesystem` only, or `channels=[]`) the four a
 
 ### Wiring checks
 
-The metrics also check that members are wired to the channels:
-
-- `notify_unwired`: members in `notify` mode whose own loop, not a subagent's, completed two or more model calls, to whose own loop a change was news, and whose own loop never ran `swarm_on_continue()`. It is a heuristic: two own calls usually mean the member reached a turn boundary. Any extra completed model call in the member's own span before its first turn boundary can list a correctly wired member.
-- `tools_unwired`: in a swarm with a channel that has tools, members with a completed model call whose loops never resolved `swarm_tools()`.
-
-A member listed in either did not get what the channel offers, so it ran a different experiment from the one configured.
+The metrics also check that members are wired to the channels. `tools_unwired` lists, in a swarm with a channel that has tools, the members with a completed model call whose loops never resolved `swarm_tools()`. A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.
 
 ## Samples dataframe
 
