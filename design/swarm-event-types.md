@@ -273,7 +273,7 @@ Both are written with `transcript()._event(event)`, the private, synchronous cal
 
 So `data` for the ledger and metrics is the store entry itself, and `SwarmLedger.model_validate(event.data)` reads it. The versions stay 1: the event type tells the new format apart from the `InfoEvent`s, and the rule that the evidence `version` tracks the payload's shape, not the tools' texts (decision: Ransom, 2026-10-23), applies to `data`. The swarm writes no `InfoEvent` after the switch.
 
-The private helpers become two: `_comm(kind, *, agent, agent_span_id, loop, nested, channel, **typed, data)` builds and writes a `CommunicationEvent`, and `swarm_event(kind, *, member, version=1, **data)` replaces `evidence()` for `_control.py:599` and `_final.py:113`. A typed field the validator refuses raises at the writer, which a test of each kind catches.
+The private helpers become two: `_comm(kind, *, agent, agent_span_id, loop, nested, channel, data, **typed)` builds and writes a `CommunicationEvent`, and `swarm_event(kind, *, member, version=1, **data)` replaces `evidence()` for `_control.py:599` and `_final.py:113`. A typed field the validator refuses raises at the writer, which a test of each kind catches.
 
 ### How inspect_swarm reads them
 
@@ -310,7 +310,7 @@ All in ts-mono, in the files `ReviewEvent` is wired into, which are the ones a n
 - **`inspect ctl`.** `HIGH_SIGNAL_EVENT_TYPES` gains `communication` and `swarm`, since `info`, where the evidence was, is in it. The compact projection and the terminal summary get a branch for each, as `info` has, so the evidence does not shrink to the common header when it leaves `InfoEvent`:
   - `_project` (`src/inspect_ai/_control/events.py:490`), metadata tier: for `communication`, `source`, `kind`, `agent`, `nested`, `channel`, `records`, `recipients`, `seq`, the rejecting `control` (as `rejected`), and the wait's `channels`, `outcome` and `duration` (as `channels`, `outcome` and `duration`), all names, ids, numbers and producer vocabulary; for `swarm`, `kind`, `member` and `version`. Content tier (`content=True`), truncated with `_truncate` as `info`'s `data` is: the record's `content`, the rejection `reason` and `data` for `communication`, and `data` for `swarm`, since each can hold model text. `full` returns the raw event, as for every type.
   - `_event_summary` (`src/inspect_ai/_cli/ctl/_render.py:475`): `communication` as `agent → channel: kind records` (`agent waited on <channels>: outcome` for a wait, from the projected `channels`, `outcome` and `duration`), then the content when projected; `swarm` as `kind · member`, then `data` when projected. Every field goes through `_sanitize_control` at its interpolation site, as the other branches do.
-- **Textual display.** A one-line renderer for each type in `_renderers`, as `ReviewEvent` has.
+- **Textual display.** A one-line renderer for each type in `_renderers`, as `ReviewEvent` has. Note for the inspect_ai PR's review: the line shows event strings (record content, rejection reasons, producer data) as literal text, through Rich `Text` or escaping as the Sentinel renderer does, never interpolated into markup as `ReviewEvent`'s is, with a test that markup-looking text such as `[/red]` renders unchanged.
 - **Docs.** `docs/reference/inspect_ai.event.qmd` lists both.
 - **Schema.** `python src/inspect_ai/_view/schema.py` regenerates `inspect-openapi.json` and ts-mono's generated types; the PR lands with the ts-mono PR by inspect_ai's two-phase gitlink procedure.
 
