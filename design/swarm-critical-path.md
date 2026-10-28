@@ -2,7 +2,7 @@
 
 ## Overview
 
-When a swarm ends, its metrics gain `critical_steps_to_answer`: the length, in model calls (steps), of the longest chain of steps that the answer depended on. Steps of one agent loop follow each other. A step that reads another loop's work follows the step that wrote it: a shared-memory `view` links every write in the shown file version's history to whatever the reading loop does next (its next model call, the next subagent it starts, the next file it writes, or its return), and a `swarm_wait` does the same for the peer writes and member ends its result named. A member's subagents are loops of their own: each starts from what its parent had when it started it, and its result reaches the parent's later steps once it has returned, so subagents that run in parallel count once, by the slowest, as Kimi's CriticalSteps counts them. The chain ends where the answering member's agent returned, so background work still running then, drained after the answer, is left out, even when the agent peeked at its partial output.
+When a swarm ends, its metrics gain `critical_steps_to_answer`: the number of model calls (steps) on the longest chain of events that the answer depended on. The chain runs through one happens-before graph of the members' recorded events (model calls, tool calls, shared-memory reads and writes, wait results, subagents starting and returning, members ending), built by one rule: an event follows the previous one in its own loop or tool call; a subagent or tool call starts from what started it, and its return is followed by whatever its caller does next; a read or wait result follows the writes it showed (a `view`, every write in the shown file version's history). Subagents that run in parallel therefore count once, by the slowest, as Kimi's CriticalSteps counts them, and work run in sequence counts in full. The chain ends where the answering member's agent returned, so background work still running then, drained after the answer, is left out, even when the agent peeked at its partial output.
 
 It is the measure latency curves are interpreted by, beside the existing `steps_to_answer` and `longest_member_steps`, which stay as they are. It is computed at run end from events the swarm's event log already sees, with no change to the bus or the evidence. It counts only dependencies the swarm records (shared memory, waits, and subagents starting and returning), so when members, or a member's own subagents, can also share information another way, such as a sandbox, it is a lower bound.
 
@@ -101,80 +101,74 @@ If B answers, `critical_steps_to_answer` is 7 (A's six steps, then B's view and 
 
 ### The graph
 
-**Nodes** are steps, as the existing counts define them: completed model calls in a member's spans, cache replays included. Each weighs one.
+The metric is the longest path in one happens-before graph of the members' recorded events. There is one rule for every call shape: an event follows what came before it in its own sequence of code, a subagent or tool call starts from what started it, its return is followed by what its caller does next, and a read follows the writes it showed. Each shape the earlier reviews raised is then a case of that rule, not a rule of its own ([The shapes](#the-shapes)).
 
-**Loops.** Every agent span in a member's span tree is a loop; the member's span is its root loop. A step belongs to the nearest agent span enclosing its `ModelEvent`'s span (`_agent_span()`, `_metrics.py:290-293`), through any span that is not an agent span (a `checkpoint` span, or a model-graded check inside a tool span). A loop's steps are ordered by when their calls began.
+**Positions.** Every span begin and end, model call and evidence event has a position: its index in the transcript, as defined above. The answering member's return has the position `returned_at` ([Where the answer ends](#where-the-answer-ends)).
 
-**Positions.** Every span begin and end, model call and evidence event has a position: its index in the transcript, as defined above.
+**Contexts.** A context is a sequence of code that runs in order:
 
-**Anchors.** Something that happens inside a loop L (an evidence event, a nested loop's span) is placed in L by its **anchor**: the outermost tool span on its way up to L, which is the tool call one of L's generations proposed, however deep it sits under `checkpoint` or other grouping spans. When there is no tool span on the way, L's own code did it (a wrapper's `run()`), and the anchor is the thing itself: the nested loop's span, or the evidence event's position.
+- **a loop**: an agent span in a member's span tree, from its begin to its end; the member's span is its root loop, whose end is its agent's return, `returned_at`, not the span's end after the drain;
+- **a tool call**: the outermost tool span inside a loop, from its begin to its end; tool spans inside it are part of it.
 
-**What a loop has at a point.** For a loop L and a position x, `has(L, x)` is the longest chain that what L does at x can depend on:
+`checkpoint` spans and other grouping spans are not contexts: what is inside them belongs to the loop or tool call around them.
 
-```
-has(L, x) = max(
-    entry(L),
-    value(s)     for each step s of L that began before x,
-    returned(N)  for each nested loop N of L whose span ended before x,
-    shown(e)     for each read or wait e of L whose anchor ended before x,
-)
-returned(L) = has(L, end of L's span)
-value(s) = 1 + has(L, begin of s)              # L: s's loop
-```
+**Nodes**, each in the innermost context that contains it:
 
-`returned(N)` is what a nested loop hands back when it returns: its own work, what it read, and the loops it ran that had returned by then. A loop that ends after its parent has ended, such as background work outliving the loop that started it, is in no `has()` of that parent at or before the parent's end, so later work never feeds an earlier return.
+| Node | Context | Weight |
+|---|---|---|
+| a completed model call (a step as the existing counts define it, cache replays included) | its loop, or the tool call it is made in | 1 |
+| a write (`delivered`), a read (`read`, not a listing), a wait result (`waited`) of a roster member | the loop or tool call the tool runs in | 0 |
+| a tool call's begin and end | the tool call | 0 |
+| a loop's begin and end: a child's start and return; for the root loop, the member span's begin and the agent's return at `returned_at` | the loop | 0 |
+| the member's end (`member_result`) | none | 0 |
 
-**Inside one tool call.** A tool call T of L is proposed by one generation, and the tool's own code then runs in order. So what happens inside T starts from that generation plus what had already happened inside T, and not from sibling tool calls of the same turn:
+Errored, cancelled and still-pending model calls are not nodes, as they are not steps. A model call made inside a tool is a node of that tool call: for the existing counts it is still a step of its loop (`_agent_span()`, `_metrics.py:290-293`), but in the graph it runs in the tool's sequence.
 
-```
-within(L, T, x) = max(
-    value of L's last step that began before T,    # the proposer; has(L, begin of T) when there is none
-    returned(N)  for each nested loop N anchored at T whose span ended before x,
-    shown(e)     for each read or wait e of L anchored at T, positioned before x,
-)
-start(L, a, x) = within(L, a, x)  if the anchor a is a tool span
-                 has(L, x)        otherwise       # L's own code
-entry(root of a member) = 0
-entry(N)  = start(P, anchor of N, begin of N)    # P: the loop N is nested in
-source(w) = start(W, anchor of w, position of w) # W: the loop that made write w
-```
+**Edges.** Every edge goes from a node to a node with a later position:
 
-**What a read or wait shows.**
+1. **Order.** Each node follows the previous node of its own context.
+2. **Fork.** A context's begin node follows the last node, before it, of the context it was started from: a tool call's begin follows its loop's last node, which is the model call that proposed it; a nested loop's begin follows the last node of the tool call or loop its span lies in. A tool call's end is not a node of its loop, so two tool calls proposed in one turn both fork from the proposing model call, whichever runs first.
+3. **Join.** A context's end node is followed by the next node, after it, of the context it was started from. If that context has already ended, the join goes up one level when it was a tool call whose loop is still running (to that loop's next node), and otherwise to the member's end. So a child's return joins the next thing its caller does: the next node of the tool that ran it, the loop's next model call after a tool call ends, or, for work still running when its parent returned, the member's end. A return is frozen when it happens: a loop's end node follows only what came before it in its own context and the returns that had joined it by then.
+4. **Member end.** The member's end follows the end node of every loop of the member, which covers descendants still running at the agent's return and drained after it.
+5. **Writes to reads.** A read or wait result follows the writes it showed:
 
-```
-shown(e) = max(0,
-    source(w)      for each write w in a viewed live version's history by a loop other than e's,
-    source(w)      for the deleting write w of a viewed deleted file,
-    source(w)      for each version a wait names: w is the latest write in that file's history,
-                   up to the named version, by a loop other than the waiter's,
-    member_end(M)  for each member M a wait names as ended,
-)
-member_end(M) = has(root of M, position of M's member_result event)
-```
-
-Joins need no rule of their own: a nested loop's return, and what a read or wait showed, are in `has()` of every later point of the loop, so they feed its next step, the next nested loop its own code starts, its next write and its return.
-
-**The answer.** `critical_steps_to_answer = has(root of A, returned_at(A))`, where A is the answering member and `returned_at(A)` the position at which its agent returned ([Where the answer ends](#where-the-answer-ends)).
-
-**Edges, by question.**
-
-1. **Concurrent loops of a member: one chain per loop.** A nested loop starts from what its parent had when the loop started. For a `general()` child, synchronous or background, the anchor is the parent's `agent(...)` tool span, so it starts from the generation that proposed the call, even when the child's span begins after that tool span ended. Two children dispatched in one turn both start from that generation, even when deepagent runs them one after the other, because a turn's tool calls are proposed together and do not see each other's results; both feed the parent's next turn, which takes the slower: the parent's steps plus the slowest child's per stage, Kimi's CriticalSteps. A background child that has finished feeds the parent's first generation after its end, which carries deepagent's notice; the parent may fetch the result later with `agent_status`, so this can be early, which only lengthens chains through the parent. A loop the parent's own code runs (`run()` in a wrapper's body) has no tool span, so it starts from everything the parent had, including loops that had already returned and what the parent had read: two `run()` calls in sequence chain, and two run concurrently (both begun before either ends) take the slower. The same holds inside one tool call: a custom tool that runs a planner and then a solver on the planner's output chains them through `within()`, while separate tool calls of one turn each start from their own proposer.
-2. **Endpoints.** A write's source is the generation that proposed the call, the last step of W that began before the call's tool span began, plus what had happened earlier inside that tool call: `start(W, anchor, position)`. A read or wait enters the reading loop's `has()` when the call's tool span ends: from then on it feeds the loop's next generation, whose input holds the tool result, and also the next subagent the loop's code starts, the next write it makes and its return, which matters when no model call comes between (a wrapper that views a file and hands it to a solver, or code that calls `swarm_tools()` directly). Inside the same tool call it enters `within()` at its own position. Steps are matched by position, never by tool call id. Under `checkpoint` spans the tool span is still the anchor, so a turn's write and read keep their own generations.
-3. **Which reads make edges:**
-
-   | What the loop was shown | What it adds (`shown(e)`) |
+   | What the loop was shown | Edges from |
    |---|---|
-   | `view` of a file, full or with `view_range` | every write in the shown version's history (versions 1 to the shown one of that file id) by a loop other than the reader; in practice the latest such write of each writing loop, since a loop's earlier writes precede its later ones on its own chain |
+   | `view` of a live file, full or with `view_range` | every write in the shown version's history (versions 1 to the shown one of that file id) |
    | `view` of a deleted file's id | the deleting write: the reader is shown that the file was deleted and by whom, not its content |
    | `view` of a directory (listing) | none |
    | the status line, `changes` | none (no evidence, and the step that sees them was not blocked on them) |
-   | `swarm_wait` result | for each version its `files` names, the latest write up to that version by a loop other than the waiter: the peer write the result reports, since when the waiter's own blind append made the current version, the result names the current version but reports the peer write before it (`news()` and `_by_others()`, `shared_memory.py:426`, `:973-982`); `member_end()` of each member its `ended` names; nothing from a cancelled wait |
+   | `swarm_wait` result | for each version its `files` names, the latest write up to that version by a loop other than the waiter's: the peer write the result reports, since when the waiter's own blind append made the current version, the result names that version but reports the peer write before it (`news()` and `_by_others()`, `shared_memory.py:426`, `:973-982`); the member's end of each member its `ended` names; nothing from a cancelled wait |
 
-   A partial view links the whole version, as [swarm-memory-channel.md Evidence](swarm-memory-channel.md#evidence) says: the evidence records the range, but which lines came from which write would need the board replayed line by line, and over-approximating an edge errs towards a longer chain. A listing shows ids, versions, writers and peer-chosen paths of up to the whole board; linking every listed file's writer would tie the reader to nearly every earlier step, so listings make no edge. A loop that acts on a listing views what it needs, and that view makes the edge.
+**The metric.** `critical_steps_to_answer` is the largest number of model-call nodes on a path into the answering member's root loop end, at `returned_at`.
 
-   **A wait is an edge, from what its result named, not from `woken_by`.** A wait blocks the loop until a write or an end it cares about, so the waiter's next step depends on it as much as on a view; that step usually views the file, which adds the content edge one step later, and the extra step is a real cost of the wait-then-view protocol. `files` and `ended` are what reached the model. `woken_by` is not: a wait that finds news at once has `woken_by: []`, and a release whose news vanished keeps a commit the result never named. `woken_by` stays what [swarm-wait.md](swarm-wait.md#evidence) uses it for, joining idle time to the commits that ended it.
-4. **This run's evidence only.** An evidence event counts when its `member` is in this swarm's roster; a wait's `ended` names only roster members too. A nested swarm's evidence names its own members and is left out, so its board's ids never mix with this board's. Its members' loops still count as nested loops of the outer member whose span holds them: their steps chain, start and return as any nested loop's do, and only the inner board's edges are missing, which the inner swarm's own metric counts.
-5. **Every edge points forward.** A write's source began before the write's tool span, which holds its `delivered` event; any read or wait that shows its version comes after that event, inside the reader's tool span, and the reader's next step begins after that span ends. `start()` uses only what began before the anchor, `has()` only what began or ended before its point, and a member's `member_result` follows all its work. `within()` uses only what happened inside the tool call before its point. So every value is computed from positions before its own, and one pass in position order computes them all. A background grandchild that outlives its parent, views a file the grandparent wrote after the parent returned, and then makes a step feeds nothing back into the parent's return: that return is `has(parent, parent's end)`, and the grandchild had not ended by then.
+**Acyclic.** Every edge points forward in position. Order and fork edges come from earlier nodes; a join goes into a later node; a member's `member_result` follows its drain, so every loop's end; a read follows the `delivered` event of each version it shows, which committed before it; a wait result follows the writes it names and the `member_result` of the members it names. So the graph is a DAG, and one pass in position order computes the longest path into every node. A background grandchild that outlives its parent, views a file the grandparent wrote after the parent returned and then makes a step cannot feed the parent's return: that return is a node before the grandchild's end, and the grandchild joins the member's end.
+
+**The view rules.** A partial view links the whole version, as [swarm-memory-channel.md Evidence](swarm-memory-channel.md#evidence) says: the evidence records the range, but which lines came from which write would need the board replayed line by line, and over-approximating an edge errs towards a longer chain. A listing shows ids, versions, writers and peer-chosen paths of up to the whole board; linking every listed file's writer would tie the reader to nearly every earlier step, so listings make no edge. A loop that acts on a listing views what it needs, and that view makes the edge. A view links every write in the history, its own loop's included, because the reader's own earlier writes may have come from a sibling tool call it does not follow.
+
+**A wait is an edge, from what its result named, not from `woken_by`.** A wait blocks the loop until a write or an end it cares about, so what the waiter does next depends on it as much as on a view; the waiter usually views the file next, which adds the content edge one step later, and the extra step is a real cost of the wait-then-view protocol. `files` and `ended` are what reached the model. `woken_by` is not: a wait that finds news at once has `woken_by: []`, and a release whose news vanished keeps a commit the result never named. `woken_by` stays what [swarm-wait.md](swarm-wait.md#evidence) uses it for, joining idle time to the commits that ended it.
+
+**This run's evidence only.** An evidence event is a node when its `member` is in this swarm's roster, and a wait's `ended` names only roster members. A nested swarm's evidence names its own members and is left out, so its board's ids never mix with this board's. Its members' loops are still nested loops of the outer member whose span holds them, with their own model calls, forks and joins; only the inner board's edges are missing, which the inner swarm's own metric counts.
+
+### The shapes
+
+Each shape below is the rule above applied, with the length it gives:
+
+| Shape | How the rule handles it | Length |
+|---|---|---|
+| B in [At a glance](#at-a-glance): wait, view, submit | the wait result follows a5's write, the view follows a5's and a6's writes; B's next model calls follow them by order | 7 |
+| C: two `general()` children dispatched in one turn, run one after the other | both tool calls fork from c1; each child forks from its tool call and joins its end; both tool ends join c2 | 8 (the slower child), not 11 |
+| D: a wrapper's `run(plan)` then `run(solve)` with no model call between | both children are nested loops of the root; `solve`'s begin follows `plan`'s return by order in the root | 6 |
+| A planning call, then a delegated three-step solver returning the answer | the solver's return joins the root, whose end follows it | 4 |
+| A custom tool that runs a two-step planner, then a three-step solver on its output, between two parent calls | both children run in the tool call's sequence | 7 |
+| A tool that views a ten-step peer's file, calls a model with it and writes the result | the model call is a node of the tool call, after the read; the write after it | 11 at the model call and the write |
+| Two tool calls of one turn: one views a ten-step peer's file and creates a file, the other blindly appends to that file; a one-step reader then views it | the two writes fork from one model call and differ in depth; the view follows every write in the file's history | 11 |
+| A wrapper that views a ten-step writer's file and returns, or hands it to a one-step solver, with no model call of its own | the read is followed by the root's end, or by the solver's begin, by order | 10, or 11 |
+| Turns grouped in `checkpoint` spans | not contexts; nodes stay in their loop or tool call | unchanged |
+| A background child still running at the return | joins the member's end, not the answer | left out |
+| A child N that starts background G and returns; G makes three model calls and ends during the drain; a waiter with one call before and one after its wait names the member's end | N's return is frozen before G ends; G joins the member's end; the wait result follows the member's end | 4 for the waiter |
+| A background grandchild that outlives its parent and reads a later write of the grandparent | forward edges only; it joins the member's end | no cycle |
+| A wait after the waiter's own blind append | the wait follows the peer write before the waiter's append | the peer's chain |
 
 ### Where the answer ends
 
@@ -188,10 +182,10 @@ The transcript has no event at that point: the member's span stays open through 
 # src/inspect_swarm/_metrics.py, SwarmMetrics
     # critical path, the dependency-linked definition: the longest chain of steps
     # (completed model calls, cache replays included) ending where the answering
-    # member's agent returned, in which a step follows the previous steps of its agent
-    # loop and what returned to that loop before it began, a nested loop starts from
-    # what its parent had when it started it, and a step follows the shared-memory
-    # writes and member ends that a read or wait of its loop showed it
+    # member's agent returned, through a happens-before graph of the members' recorded
+    # events: each event follows the previous one of its loop or tool call, a child
+    # forks from what started it and joins what its caller does next, and a read or
+    # wait follows the shared-memory writes and member ends it showed
     # (_critical_path.py). It counts only those dependencies, so it is a lower bound
     # when members, or one member's loops, can share information in other ways: a
     # shared sandbox (a member's subagents share its own sandbox), a shared volume, a
@@ -205,7 +199,7 @@ The transcript has no event at that point: the member's span stays open through 
 - **Always reported**, whatever the swarm's configuration, with no list of unobserved sharing (decision: Ransom, 2026-10-28). The ways members can share outside the evidence are the experimenter's own configuration, a list could never rule out shared tools, store keys or services, and it would flag nearly every arm, since a member's subagents share its sandbox. The field comment and the user docs say what the number counts and that it is a lower bound when any other sharing is possible.
 - **Unit: steps.** A step is the unit of the existing counts and of Kimi's CriticalSteps, and it is independent of provider latency and of `max_connections`. A chain's span in seconds, from its first step to the answer, is about the answer's own time, which the record already has (`MemberResult.time`); a sum of call durations along it mixes connection waits and retries in, which plan decision 12 ruled out for per-member timing until it can follow Inspect's working-time accounting ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 12).
 - **The existing fields stay** with their meaning, and their comment is corrected: they bound each member's own sequential depth from above, not the swarm's. The new number is not bounded by them: a chain through two members can be longer than either member's step count, and a member's parallel children make its step count larger than its chain.
-- **Over-approximations**, each of which can only lengthen the chain: a partial view links the whole version; a version's history links writes whose text a later edit removed; a background child joins the parent's first step after it finished; work finished before the answer's return counts though the agent may not have used it; a read in a loop's last turn counts towards its return though no later generation saw it; concurrent generations inside one agent span (a custom agent, or a bridged CLI agent's own subagents) form one chain, as the existing counts treat them.
+- **Over-approximations**, each of which can only lengthen the chain: a partial view links the whole version; a version's history links writes whose text a later edit removed; a background child joins its parent loop's next node after it finished, though the parent may fetch the result later; work finished before the answer's return counts though the agent may not have used it; a read in a loop's last turn reaches its return though no later generation saw it; concurrent generations inside one agent span (a custom agent, or a bridged CLI agent's own subagents) form one chain, as the existing counts treat them.
 
 ### Where it is computed
 
@@ -240,7 +234,7 @@ def critical_steps_to_answer(
 
 - **Recording.** `EventLog.__call__` passes each event the first time the transcript reports it (by uuid; an update is not passed again) to its `PathLog` with `transcript().history.event_count` as its position: span begins and ends, model events, `comm` events and `member_result` events. The `PathLog` keeps only ids, positions, span types, loop ids, file ids, versions and member names: nothing a member wrote. `CommRecord` and `WaitRecord` are unchanged. `places` is passed as a callable so that `_critical_path.py` imports nothing from `_ledger.py`, which imports it.
 - **Returning.** `_run_member()` sets `outcome.returned_at = transcript().history.event_count` right after `_call_agent()` returns (`_member.py:520`); `MemberOutcome` gains the field, defaulting to `None`.
-- **Computing.** `critical_steps_to_answer()` keeps the evidence of roster members only, builds each member's loops from `places` and the span parents, orders each loop's steps (model events in it that `completed()` accepts) by position, and walks steps, span ends, writes, reads, waits and member ends in position order once. Per loop it keeps its running `has()` (the latest step value, the returns of nested loops as they end, what reads and waits showed as their tool calls end), and per open tool span its running `within()`. Per file id it keeps the latest write of each loop to the file's current version, so a read costs one entry per writing loop, and a map of `(file, version)` to write for tombstone views and waits. Spans outside every member (the controller's, the final step's) are ignored. It returns `has(root of A, returned_at)`, or `None` without an answer or `returned_at`.
+- **Computing.** `critical_steps_to_answer()` keeps the evidence of roster members only, builds each member's contexts (loops and their outermost tool calls) from `places`, the span parents and span types, assigns every node to its innermost context, and walks the nodes in position order once, giving each the longest path into it: the largest of its in-edges' values, plus one for a model call. It keeps the last node of each open context (for order and fork edges), the pending joins of contexts that have ended (taken by the next node of the context they join), and for each member the largest value among its loops' ends (for the member's end). For a file it keeps the largest value among all the writes in its history, which is what a live view of its current version follows, and each version's write with its loop and value, from which a tombstone view takes the deleting write and a wait walks back from the named version to the latest write by another loop. Spans outside every member (the controller's, the final step's) are ignored. It returns the value at the answering member's root loop end, or `None` without an answer or `returned_at`.
 - **Inconsistent evidence.** A read whose shown version is not the file's current version at its position, or a named version no roster write produced, would mean the ordering assumption broke. The function then logs a warning naming the file and versions and returns `None`; it never raises, so the metric cannot fail a run that succeeds without it.
 - **Wiring.** `swarm_metrics()` takes `member_spans` (the `spans` mapping `_control.py` already builds for `places`) and the answering member's `returned_at`, calls `critical_steps_to_answer()` with the event log's `PathLog` and `completed` built from `EventLog.calls`, and fills the field. Everything stays synchronous, as the rest of the `finally` is.
 
@@ -249,8 +243,10 @@ def critical_steps_to_answer(
 ## Alternatives considered
 
 - **One chain per member.** Each member's steps in begin order, cross-member edges only. It equals the existing count for a member with no edges, so it charges a deepagent member every parallel child, the problem this metric exists to fix.
-- **Joining a nested loop into its parent's next step only** (fork from the step before it, join into the step after it). Loses sequential delegation in a body with no model call between two `run()` calls, and the delegated solver after the root's last call; `has()` carries returned work forward to whatever the parent does next.
-- **A loop's exit including everything it ever started.** Background work that outlives the loop would feed the loop's earlier return and can form a cycle; `returned(L)` takes only what had returned by L's end.
+- **Frontier recurrences over model calls** (what a loop has at a point, a separate frontier inside each tool call, and what a read showed, each a rule of its own). Each call shape the reviews found (reads with no later model call, children run in sequence inside a tool, model calls inside a tool, sibling tool calls writing at different depths, descendants drained at the member's end) needed another special case. The happens-before graph makes every recorded event a node with the same order, fork, join and write-to-read edges, so each shape follows from one rule ([The shapes](#the-shapes)).
+- **Joining a nested loop into its parent's next model call only.** Loses sequential delegation in a body with no model call between two `run()` calls, and the delegated solver after the root's last call; joining the parent's next node, whatever it is, keeps them.
+- **A loop's return including everything it ever started.** Background work that outlives the loop would feed the loop's earlier return and can form a cycle; a return is frozen when it happens, and later work joins the member's end.
+- **Keeping only the latest write of each loop for a live view.** Two tool calls of one turn can write a file in either order at different depths, so a loop's latest write need not be its deepest; the largest value over the whole history is the full-history rule.
 - **Ending the answer at the root loop's last model call, or at the member span's end.** The first misses a solver the root delegated to after its last call; the second includes the drain. Recording the return position is the only way to place the end exactly, as no event marks it.
 - **An evidence event at the agent's return.** Would let a log helper place the end too, but it changes the evidence for a value only the runtime needs now; it can come with that helper.
 - **`woken_by` as the wait's edge.** Misses waits that returned at once (`woken_by: []`) and adds commits whose news never reached the loop.
@@ -279,18 +275,14 @@ No untrusted text reaches the computation. It reads span ids and types, position
 
 All async tests run on asyncio and trio through the `anyio_backend` fixture.
 
-- **`tests/test_critical_path.py`**: table-driven tests of `critical_steps_to_answer()` over hand-built `PathLog`s:
-  - a single loop (its steps); two members with a wait and a view (B above, 7);
-  - a wait that returned at once (`woken_by: []`, edge from `files`); a wait released by a write whose news vanished (no edge); a wait naming an ended member (edge from `member_end()`); a cancelled wait (no edge); a wait after the waiter's own blind append, whose named version is the waiter's (edge from the peer write before it), between two members and between two loops of one member;
-  - a listing (no edge); a wrapper that views a ten-step writer's file and makes no model call before returning (10) or before starting a one-step solver (11); code that views a file and writes another with no model call between (the write carries the view's chain); a tombstone view (deleting write only); a version history written by two loops (an edge from each);
-  - turns grouped in `checkpoint` spans: a write and a read keep their own generations;
-  - parallel `general()` children run one after the other in one turn (C above, 8, not the sum); a background child that finishes before the parent's next step, and one still running at the return whose output the parent read with `agent_status` (left out, as documented);
-  - a custom tool that runs a two-step planner and then a three-step solver on its output, between two parent calls (7), beside two tool calls of one turn that each run one child (the slower);
-  - a wrapper's planning call then a delegated three-step solver (4); two sequential `run()` stages (D above, 6) and two concurrent ones (the slower);
-  - a background grandchild that outlives its parent and reads a later write of the grandparent (no cycle; the parent's return excludes it);
+- **`tests/test_critical_path.py`**: table-driven tests of `critical_steps_to_answer()` over hand-built `PathLog`s, one row per shape in [The shapes](#the-shapes), with the length given there, and:
+  - a single loop (its steps);
+  - a wait that returned at once (`woken_by: []`, edge from `files`); a wait released by a write whose news vanished (no edge); a cancelled wait (no edge); a wait after the waiter's own blind append, between two members and between two loops of one member;
+  - a listing (no edge); a tombstone view (the deleting write only); code that views a file and writes another with no model call between (the write follows the view);
+  - two concurrent `run()` children in a wrapper (the slower); a background child that finishes before its parent's next model call (joins it), and one still running at the return whose output the parent read with `agent_status` (left out, as documented);
   - a nested swarm's evidence with its own `f-1` inside a member (ignored, no warning);
   - an inconsistent read version (`None` and a warning); errored and cache-replayed model events; no answer, and no `returned_at` (`None`).
-- **`tests/test_metrics.py`**: mockllm swarms through `run_swarm()`, asserting the field: two `react()` members, one writing and one waiting and viewing (as B above); a deepagent member with two `general()` children dispatched in one turn, and one with a background child still running when it submits; a delegating wrapper member as in `tests/test_metrics.py:290`; a member running a nested swarm with shared memory (as `tests/test_background_members.py:1090`); a `react()` member with Inspect's sample checkpointing on, so its turns sit in `checkpoint` spans.
+- **`tests/test_metrics.py`**: mockllm swarms through `run_swarm()`, asserting the field: two `react()` members, one writing and one waiting and viewing (as B above); a deepagent member with two `general()` children dispatched in one turn, and one with a background child still running when it submits; a delegating wrapper member as in `tests/test_metrics.py:290`; a member running a nested swarm with shared memory (as `tests/test_background_members.py:1090`); a `react()` member with Inspect's sample checkpointing on, so its turns sit in `checkpoint` spans; a member whose tool calls a model, as `tests/test_background_members.py:959-968` does; a member whose child starts background work and returns before it ends, with a peer waiting for the member's end.
 - **Runtime and log agree**: one swarm run through `eval_async()`, whose logged sample's `events`, fed to a fresh `EventLog`, build the same `PathLog` as the run's own `EventLog` did. This guards the ordering assumption and a later log helper.
 
 No test needs Docker, a network or a model provider.
