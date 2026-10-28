@@ -243,6 +243,11 @@ def test_member_validates_from_its_logged_dict(record: Callable[[], Member]) -> 
     assert replayed.model_dump() == logged
 
 
+def test_a_member_given_as_data_without_choose_name_is_told_its_name() -> None:
+    record = Member.model_validate({"factory": "member_worker"})
+    assert record.choose_name is False
+
+
 def test_member_unknown_factory_name_raises() -> None:
     with pytest.raises(ValueError, match="not a registered agent"):
         Member.model_validate({"factory": "no_such_factory", "args": {}})

@@ -62,6 +62,11 @@ class MemberHandle(Protocol):
         ...
 
     @property
+    def choose_name(self) -> bool:
+        """Whether the member chooses its own name and is not told `name`."""
+        ...
+
+    @property
     def state(self) -> MemberState:
         """The member's lifecycle state."""
         ...
@@ -119,7 +124,7 @@ class SwarmControl(Protocol):
     ) -> None:
         """Start a member, and return at once.
 
-        The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm's input when `input` is `None`, followed by the member's preamble: its name, role and roster size, how the budget is split, and each channel's instructions.
+        The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm's input when `input` is `None`, followed by the member's preamble: its name unless `choose_name=True`, its role and the roster size, how the budget is split, and each channel's instructions.
 
         Args:
             member: The member, or its name.
@@ -184,6 +189,7 @@ class MemberRun:
         self.record = record
         self.name = name
         self.role = record.role
+        self.choose_name = record.choose_name
         self.sandbox = member_sandbox(record, name)
         self.state: MemberState = "pending"
         self.status: str | None = None
@@ -222,6 +228,7 @@ class MemberRun:
         return MemberResult(
             name=self.name,
             role=self.role,
+            choose_name=self.choose_name,
             state=self.state,
             status=self.status,
             submitted=self.submitted,

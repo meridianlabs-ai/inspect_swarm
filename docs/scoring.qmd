@@ -28,8 +28,8 @@ The swarm keeps a record of what it did in the sample store under `inspect_swarm
 {
   "version": 1,
   "members": [
-    {"name": "react-1", "role": null, "state": "ended", "status": "submitted", "submitted": true, "time": 41.2, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null},
-    {"name": "react-2", "role": null, "state": "ended", "status": "swarm_cap", "submitted": false, "time": 57.9, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null}
+    {"name": "react-1", "role": null, "choose_name": false, "state": "ended", "status": "submitted", "submitted": true, "time": 41.2, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null},
+    {"name": "react-2", "role": null, "choose_name": false, "state": "ended", "status": "swarm_cap", "submitted": false, "time": 57.9, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null}
   ],
   "final": {"mode": "first", "member": "react-1", "reason": null, "provisional": false}
 }
@@ -37,6 +37,7 @@ The swarm keeps a record of what it did in the sample store under `inspect_swarm
 
 - A member's `state` is `pending` (never started), `running` or `ended`, and `status` says how it ended ([Members](members.qmd#how-a-member-ends)).
 - `time` is seconds from the swarm's start to the member's end.
+- `choose_name` is `true` for a member that chose its own name ([Members](members.qmd#members-that-choose-their-names)). `name` is still the swarm's name for it; the name it chose is in its transcript.
 - `sandbox` is the member's own sandbox, or `null` when it shares the sample's.
 - `gate_checks`, `gate_passes` and `first_pass_time` count the member's in-loop checks ([Checks during the run](#checks-during-the-run)).
 - `final.mode` is `first`, `last` or `controller`, and `final.member` names the chosen member. Under `controller`, `final.reason` is the reason the controller gave. With no submission, `mode` and `member` are `null` and `final.reason` is `"no_submissions"`.

@@ -518,6 +518,41 @@ async def test_no_member_text_reaches_the_controller() -> None:
     assert seen and not any(secret in text for text in [*seen, repr(swarm_evidence)])
 
 
+@pytest.mark.anyio
+async def test_the_controller_and_the_record_see_which_members_choose_their_names() -> (
+    None
+):
+    checked: list[tuple[str, bool]] = []
+    handles: list[tuple[str, bool]] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        handles.extend((m.name, m.choose_name) for m in control.members)
+        return await _start_all(control)
+
+    @swarm_controller(name="controller_test_choose_name")
+    def factory() -> Controller:
+        return Controller(
+            run,
+            check=lambda roster: checked.extend(
+                (m.name, m.choose_name) for m in roster
+            ),
+        )
+
+    model = scripted_model()
+    stop = await run_swarm(
+        swarm(
+            [
+                member(generator(model, calls=1), name="lead"),
+                member(generator(model, calls=1), name="w", choose_name=True),
+            ],
+            controller=factory(),
+        )
+    )
+    expected = [("lead", False), ("w", True)]
+    assert checked == handles == expected
+    assert [(m.name, m.choose_name) for m in stop.record.members] == expected
+
+
 @agent
 def counted(builds: list[str | None], calls: list[str]) -> Agent:
     # built in the member's tool-state scope; counts its own calls in its closure

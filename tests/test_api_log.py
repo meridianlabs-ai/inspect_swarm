@@ -69,6 +69,7 @@ def _record(**fields: Any) -> dict[str, Any]:
     return {
         "name": None,
         "role": None,
+        "choose_name": False,
         "count": 1,
         "limits": [],
         "bridged": None,
@@ -114,7 +115,7 @@ def _agent_tool(name: str) -> dict[str, Any]:
                 react(prompt="a"),
                 member(deepagent, args={"tools": [bash(), python()]}, count=2),
                 member(react(prompt="b"), name="lead", role="coordinator"),
-                member(never_built),
+                member(never_built, choose_name=True),
             ],
             [
                 _agent_dict("react", prompt="a"),
@@ -131,6 +132,7 @@ def _agent_tool(name: str) -> dict[str, Any]:
                 _record(
                     factory="inspect_swarm/log_test_never_built",
                     args={},
+                    choose_name=True,
                 ),
             ],
             id="mixed-list",
@@ -185,7 +187,7 @@ def test_factory_args_log_as_the_built_agents_params() -> None:
                 react(prompt="a"),
                 member(deepagent, args={"tools": [bash(), python()]}, count=2),
                 member(react(prompt="b"), name="lead"),
-                member(never_built),
+                member(never_built, choose_name=True),
             ],
             id="mixed-list",
         ),
@@ -282,12 +284,17 @@ def _cap_arm(cap: Any) -> Any:
     return member(react(prompt="a"), limits=[cost_limit(cap)])
 
 
+def _choose_name_arm(choose_name: Any) -> Any:
+    return member(react(prompt="a"), choose_name=choose_name)
+
+
 @pytest.mark.parametrize(
     "arm,a,b",
     [
         pytest.param(_built_arm, "a", "b", id="built-agent-params"),
         pytest.param(_factory_arm, "a", "b", id="factory-args"),
         pytest.param(_cap_arm, 0.5, 1.5, id="limit-cap"),
+        pytest.param(_choose_name_arm, False, True, id="choose-name"),
     ],
 )
 def test_eval_set_arms_are_distinct(arm: Callable[[Any], Any], a: Any, b: Any) -> None:

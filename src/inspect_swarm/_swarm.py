@@ -58,14 +58,14 @@ def swarm(
 
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
-        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet), some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
+        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
     """
     records = _members(members)
     names = member_names(records)
     _check_distinct_agents(records, names)
     _check_phase_names(names)
     roster = [
-        MemberInfo(name=name, role=record.role)
+        MemberInfo(name=name, role=record.role, choose_name=record.choose_name)
         for record, record_names in zip(records, names, strict=True)
         for name in record_names
     ]
@@ -75,6 +75,8 @@ def swarm(
     if resolved_controller.check is not None:
         resolved_controller.check(roster)
     _check_bus_channels(resolved_channels, records, names, roster)
+    _check_chosen_names(resolved_channels, roster)
+    choosers = any(info.choose_name for info in roster)
     resolved_budget = _budget(budget)
     runs = [
         (record, name)
@@ -107,6 +109,7 @@ def swarm(
                 len(roster),
                 resolved_channels,
                 own_sandboxes,
+                choosers,
                 split_sentence(resolved_budget, caps, i, len(roster)),
             )
             for i, info in enumerate(roster)
@@ -134,13 +137,22 @@ def _preamble(
     size: int,
     channels: Sequence[Channel],
     own_sandboxes: bool,
+    choosers: bool,
     split: str | None,
 ) -> str:
-    parts = [
-        f"You are {member.name}, one of {size} agents in a swarm working on this task at the same time."
-        if size > 1
-        else f"You are {member.name}, the only agent in this swarm."
-    ]
+    if member.choose_name:
+        intro = (
+            f"You are one of {size} agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is."
+            if size > 1
+            else "You are the only agent in this swarm. Choose a name for yourself."
+        )
+    else:
+        intro = (
+            f"You are {member.name}, one of {size} agents in a swarm working on this task at the same time."
+            if size > 1
+            else f"You are {member.name}, the only agent in this swarm."
+        )
+    parts = [intro]
     if member.role is not None:
         parts.append(f"Your role: {member.role}.")
     if split is not None:
@@ -155,7 +167,12 @@ def _preamble(
                 "You work in your own sandbox, which no other member can reach."
             )
     for channel in channels:
-        text = channel.instructions(member)
+        if choosers:
+            # beside a member that chooses, only the filesystem channel is accepted
+            assert isinstance(channel, FilesystemChannel)
+            text = channel.member_instructions(member, choosers=True)
+        else:
+            text = channel.instructions(member)
         if text:
             parts.append(text)
     return "\n\n".join(parts)
@@ -304,6 +321,23 @@ def _check_bus_channels(
         if is_bridged(cast(Agent, agent), record.bridged):
             raise ValueError(
                 f"swarm(): member {record_names[0]!r} is bridged, and bridged members cannot use bus channels such as {registry_info(bus_channels[0]).name} yet. Leave the channel out, or the member."
+            )
+
+
+# A member that chooses its own name is never told the swarm's names, which channels
+# with records show through their tools and the bus, and which a user channel's
+# instructions may contain in a form no check can find. So beside one, only the
+# built-in filesystem channel, whose instructions honour the flag, is accepted.
+def _check_chosen_names(
+    channels: Sequence[Channel], roster: Sequence[MemberInfo]
+) -> None:
+    chooser = next((info for info in roster if info.choose_name), None)
+    if chooser is None:
+        return
+    for channel in channels:
+        if type(channel) is not FilesystemChannel:
+            raise ValueError(
+                f"swarm(): member {chooser.name!r} chooses its own name (choose_name=True), which the swarm supports only with the filesystem channel or channels=[]; {registry_info(channel).name} is not supported with it. Leave the channel out, or set choose_name=False."
             )
 
 

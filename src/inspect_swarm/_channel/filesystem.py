@@ -17,6 +17,11 @@ class FilesystemChannel(Channel):
         self.shared_volume = shared_volume
 
     def instructions(self, member: MemberInfo) -> str | None:
+        return self.member_instructions(member, choosers=member.choose_name)
+
+    # the channel's text for a member of a roster in which some member chooses its own
+    # name (`choosers`), which a member that chooses implies
+    def member_instructions(self, member: MemberInfo, choosers: bool) -> str:
         notes = f"Read {self.notes} before you start and again as you work, and add what you learn or decide to the end of it, without changing what others wrote."
         if self.shared_volume:
             return (
@@ -28,8 +33,17 @@ class FilesystemChannel(Channel):
             "The other members work in the same sandbox as you, at the same time, so files they change can change under you. "
             f"Share files with them in {self.shared}. "
             f"{notes} "
-            f"Keep your own work in {self.scratch.format(member=member.name)}, which no other member uses."
+            f"{self._scratch_sentence(member, choosers)}"
         )
+
+    def _scratch_sentence(self, member: MemberInfo, choosers: bool) -> str:
+        if member.choose_name:
+            scratch = self.scratch.format(member="<your name>")
+            return f"Keep your own work in {scratch}, a directory named with the name you chose; check that no other member uses the same one."
+        scratch = self.scratch.format(member=member.name)
+        if choosers:
+            return f"Keep your own work in {scratch}; some other members choose their own names and name their directories after them, so check that none of them uses the same one."
+        return f"Keep your own work in {scratch}, which no other member uses."
 
 
 @swarm_channel
@@ -50,7 +64,7 @@ def filesystem(
     Args:
         shared: The directory for files members share. With `shared_volume=True`, an absolute path where the volume is mounted.
         notes: The notes file members read and append to, relative to `shared` (or an absolute path). With `shared_volume=True` it must be inside `shared`.
-        scratch: Each member's own directory. `{member}` is replaced by the member's name. Not used with `shared_volume=True`.
+        scratch: Each member's own directory. `{member}` is replaced by the member's name. For a member that chooses its own name, `{member}` is shown as `<your name>`, and when any member chooses, no member is told its directory is unused. Not used with `shared_volume=True`.
         shared_volume: Whether members have their own sandboxes that each mount one shared volume at `shared`. `swarm()` accepts the channel beside per-member sandboxes only with `True`, and refuses `True` when members share the sample's sandbox.
 
     Returns:

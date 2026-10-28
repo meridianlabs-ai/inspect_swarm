@@ -179,6 +179,38 @@ def test_a_bridged_member_is_refused() -> None:
         swarm(member(react(), bridged=True), channels=["shared_memory"])
 
 
+@pytest.mark.parametrize(
+    "members,channels",
+    [
+        (lambda: member(react, name="w", count=2, choose_name=True), ["shared_memory"]),
+        (
+            lambda: [
+                member(react(), name="lead"),
+                member(react(), name="w-1", choose_name=True),
+            ],
+            ["shared_memory"],
+        ),
+        (
+            lambda: [
+                member(react(), name="lead"),
+                member(react(), name="w-1", choose_name=True),
+            ],
+            ["filesystem", "shared_memory"],
+        ),
+    ],
+)
+def test_a_member_that_chooses_its_name_is_refused(
+    members: Any, channels: list[str]
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "member 'w-1' chooses its own name (choose_name=True), which the swarm supports only with the filesystem channel or channels=[]; inspect_swarm/shared_memory is not supported with it."
+        ),
+    ):
+        swarm(members(), channels=channels)
+
+
 # The channel in a running swarm, with scripted members. Each speaker's tool calls are
 # in order; once they are done it submits. A speaker is a member, by its preamble, or
 # a member's subagent, by the prompt "child of <member>".

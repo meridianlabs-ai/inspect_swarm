@@ -107,6 +107,9 @@ class Member(BaseModel):
     role: str | None = None
     """The member's role, given to the controller and in the member's preamble."""
 
+    choose_name: bool = False
+    """Whether the member chooses its own name. `True` leaves the member's name out of its preamble, which asks it to choose a name and tell the other members; the swarm still uses `name` for everything it records."""
+
     count: int = 1
     """How many members this record stands for. Above 1 needs the factory form."""
 
@@ -183,6 +186,7 @@ class Member(BaseModel):
             data["args"] = extract_named_params(self.factory, False, **self.args)
         data["name"] = self.name
         data["role"] = self.role
+        data["choose_name"] = self.choose_name
         data["count"] = self.count
         data["limits"] = [_limit_dict(limit) for limit in self.limits]
         data["bridged"] = self.bridged
@@ -197,6 +201,7 @@ def member(
     *,
     name: str | None = None,
     role: str | None = None,
+    choose_name: bool = False,
     count: int = 1,
     limits: Sequence[Limit] | None = None,
     bridged: bool | None = None,
@@ -221,6 +226,8 @@ def member(
 
     Sandboxes. Members share the sample's sandbox by default. With `sandbox`, a member works in its own: the swarm makes that environment the member's default, so `sandbox()` in its tools returns it, and hides the sample's other environments from the member except those in `visible_sandboxes`, such as a shared service. Tools that choose a sandbox without a name, such as `text_editor()`, `bash_session()` and the agent bridge, use the member's own; a visible service is reached only by name. `sandbox="{member}"` gives each copy of a counted member the environment named after it: `member(factory, name="agent", count=2, sandbox="{member}")` runs `agent-1` and `agent-2` in the environments of those names. The sample's sandbox configuration provides the environments (for Docker, a compose service for each), and the swarm checks that they exist when it starts. When one member has its own sandbox, every member must have one, no two the same, and the `filesystem` channel, which describes a shared sandbox, can be used only as `filesystem(shared_volume=True)`, for sandboxes that each mount one shared volume. A service in `visible_sandboxes` is reachable from any of the member's tools that take a sandbox name, so list only services every member may use.
 
+    Chosen names. With `choose_name=True` the member is not told its name: its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members, and the `filesystem` channel tells it to keep its work in a directory named with the name it chose. Its role, if it has one, is still stated. The swarm's records, spans, tool-state scopes and budget shares still use `name`. A swarm in which any member chooses its name can use only the `filesystem` channel or no channel (`channels=[]`), since other channels show members to each other by name. Text you give the member yourself is not changed: the sample input, a controller's `start(input=...)`, the agent's prompt and the sandbox configuration.
+
     Scoring with member sandboxes. The task's scorers run after the swarm, outside every member, where `sandbox()` is `default`. A scorer that grades the members' work names each member's sandbox itself, as in `sandbox("agent-1")`, and the `sandbox` field of each member in the swarm's result record says which member used which.
 
     Background work belongs to the member. Work its agent starts with `background()`, such as `deepagent(background=...)` subagents, spends through the member's limits and share, and is the member's in the ledger. When the member's agent returns, the swarm stops the background work from starting model calls, gives it the swarm's grace period to finish calls and tool calls in flight, and cancels what is left. The member ends after that, with the status its agent ended with; `Budget.grace=0` cancels background work at once. A member time limit bounds its agent only: after the agent returns, its background work gets the grace period too, and the cancelled work's cleanup is awaited. Background work must be started by the agent while it runs; a factory that starts it while building the agent makes the member `errored`. A sourceless custom limit error raised in background work ends only the task that raised it; the member's agent and its other background work continue. Work started outside `background()` (an `asyncio` task, a process left running in the sandbox) is not stopped. Bridged members cannot have background work: `background()` raises in a member declared or found bridged, and a member that uses the agent bridge after starting background work (through a bridged subagent, for example) is cancelled and ends `errored`.
@@ -230,8 +237,9 @@ def member(
     Args:
         agent: A built, registered agent, or a registered `@agent` factory.
         args: The factory's keyword arguments. Only for a factory.
-        name: The member's name. Defaults to the agent's or factory's registry name, without its package; a default name that more than one member has is numbered across the roster. With `count` above 1 the members are `name-1` to `name-k`. It names the member's tool-state scope, so it cannot be empty or contain "/" or "#".
+        name: The member's name. Defaults to the agent's or factory's registry name, without its package; a default name that more than one member has is numbered across the roster. With `count` above 1 the members are `name-1` to `name-k`. It names the member's tool-state scope, so it cannot be empty or contain "/" or "#". With `choose_name=True` the member is not told it.
         role: The member's role, given to the controller and in the member's preamble.
+        choose_name: Whether the member chooses its own name instead of being told `name`.
         count: How many members this record stands for. Above 1 needs a factory.
         limits: The member's own token, cost, turn, message or time limits.
         bridged: Whether the agent is bridged (runs a CLI in the sandbox through Inspect's agent bridge). `None` counts inspect_swe's agents as bridged and others as native. Pass `True` for any other bridged agent: the swarm stops a bridged member by cancelling it, because a limit error raised inside the bridge would end the sample, and it must know before the member's first model request. Bridged members cannot use channels with tools and records yet, and `swarm()` refuses one beside such a channel. A bridged agent that is not declared and not in the `inspect_swe/` namespace is not refused: it cannot reach those channels' tools, so it runs without them. Pass `True` to have it refused instead.
@@ -252,6 +260,7 @@ def member(
             "args": dict(args or {}),
             "name": name,
             "role": role,
+            "choose_name": choose_name,
             "count": count,
             "limits": list(limits or []),
             "bridged": bridged,

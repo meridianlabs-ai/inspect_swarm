@@ -63,7 +63,11 @@ class Bus:
         waiting: dict[str, WaitingState] = {}
         max_wait: int | None = None
         run = ChannelRun(
-            bus=self, roster=[MemberInfo(name=m.name, role=m.role) for m in members]
+            bus=self,
+            roster=[
+                MemberInfo(name=m.name, role=m.role, choose_name=m.choose_name)
+                for m in members
+            ],
         )
         for channel in channels:
             state = channel.open(run)

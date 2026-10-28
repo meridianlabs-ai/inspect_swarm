@@ -18,6 +18,9 @@ class MemberResult(BaseModel):
     role: str | None
     """The member's role, if it has one."""
 
+    choose_name: bool = False
+    """Whether the member chose its own name, and was not told `name`. The name it chose is in its transcript, not here."""
+
     state: MemberState
     """The member's lifecycle state."""
 

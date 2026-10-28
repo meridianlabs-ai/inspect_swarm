@@ -1,8 +1,10 @@
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
+from inspect_ai._util.registry import registry_info
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.dataset import Sample
 from inspect_ai.util import sandbox
@@ -19,16 +21,19 @@ from inspect_swarm import (
     swarm_channel,
     swarm_controller,
 )
+from inspect_swarm._budget import current_member
+from inspect_swarm._channel.filesystem import FilesystemChannel
 
 from .swarm_runtime import run_swarm
+from .test_bus import bus_test_locks
 
 
 @agent
 def preamble_recorder(preambles: dict[str, str]) -> Agent:
     async def execute(state: AgentState) -> AgentState:
-        preamble = state.messages[-1].text
-        name = preamble.split(",")[0].removeprefix("You are ")
-        preambles[name] = preamble
+        context = current_member.get()
+        assert context is not None
+        preambles[context.name] = state.messages[-1].text
         return state
 
     return execute
@@ -42,6 +47,15 @@ class _Locks(Channel):
 @swarm_channel
 def channel_test_locks() -> Channel:
     return _Locks()
+
+
+class _Filesystem(FilesystemChannel):
+    pass
+
+
+@swarm_channel
+def channel_test_filesystem() -> Channel:
+    return _Filesystem("/shared", "notes.md", "/scratch/{member}", False)
 
 
 @pytest.mark.anyio
@@ -95,6 +109,116 @@ async def test_each_member_gets_each_channels_instructions(
             assert text.format(member=name) in rest
         if not expected:
             assert rest == ""
+
+
+def _choose(size: int) -> str:
+    # the first paragraph of a preamble for a member that chooses its own name
+    return (
+        f"You are one of {size} agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is."
+        if size > 1
+        else "You are the only agent in this swarm. Choose a name for yourself."
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("count", [2, 1])
+@pytest.mark.parametrize("role", [None, "tester"])
+@pytest.mark.parametrize(
+    "channels,scratch",
+    [
+        (("filesystem",), "/scratch/<your name>"),
+        ([filesystem(scratch="/tmp/{member}/work")], "/tmp/<your name>/work"),
+        ([], None),
+    ],
+)
+async def test_a_member_that_chooses_its_name_is_told_no_members_name(
+    count: int, role: str | None, channels: Any, scratch: str | None
+) -> None:
+    preambles: dict[str, str] = {}
+    await run_swarm(
+        swarm(
+            member(
+                preamble_recorder,
+                args={"preambles": preambles},
+                name="zeta",
+                role=role,
+                count=count,
+                choose_name=True,
+            ),
+            channels=channels,
+        )
+    )
+    assert len(preambles) == count
+    intro = _choose(count) + ("" if role is None else f"\n\nYour role: {role}.")
+    for preamble in preambles.values():
+        assert preamble.startswith(intro)
+        assert "zeta" not in preamble
+        if scratch is None:
+            assert preamble == intro
+        else:
+            assert preamble.endswith(
+                f"Keep your own work in {scratch}, a directory named with the name you chose; check that no other member uses the same one."
+            )
+
+
+@pytest.mark.anyio
+async def test_named_members_beside_members_that_choose_are_told_their_directory_may_be_taken() -> (
+    None
+):
+    preambles: dict[str, str] = {}
+    await run_swarm(
+        swarm(
+            [
+                member(preamble_recorder, args={"preambles": preambles}, name="lead"),
+                member(
+                    preamble_recorder,
+                    args={"preambles": preambles},
+                    name="zeta",
+                    count=2,
+                    choose_name=True,
+                ),
+            ]
+        )
+    )
+    lead = preambles.pop("lead")
+    assert lead.startswith(
+        "You are lead, one of 3 agents in a swarm working on this task at the same time."
+    )
+    assert lead.endswith(
+        "Keep your own work in /scratch/lead; some other members choose their own names and name their directories after them, so check that none of them uses the same one."
+    )
+    assert "which no other member uses" not in lead
+    assert sorted(preambles) == ["zeta-1", "zeta-2"]
+    for preamble in preambles.values():
+        assert preamble.startswith(_choose(3))
+        assert "zeta" not in preamble and "lead" not in preamble
+        assert preamble.endswith(
+            "Keep your own work in /scratch/<your name>, a directory named with the name you chose; check that no other member uses the same one."
+        )
+
+
+@pytest.mark.parametrize(
+    "channel",
+    [channel_test_locks, bus_test_locks, channel_test_filesystem],
+)
+def test_swarm_refuses_other_channels_beside_a_member_that_chooses_its_name(
+    channel: Any,
+) -> None:
+    channels = [filesystem(), channel()]
+    swarm(member(preamble_recorder, args={"preambles": {}}, count=2), channels=channels)
+    name = registry_info(channels[1]).name
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"member 'preamble_recorder-1' chooses its own name (choose_name=True), which the swarm supports only with the filesystem channel or channels=[]; {name} is not supported with it."
+        ),
+    ):
+        swarm(
+            member(
+                preamble_recorder, args={"preambles": {}}, count=2, choose_name=True
+            ),
+            channels=channels,
+        )
 
 
 @pytest.mark.parametrize(

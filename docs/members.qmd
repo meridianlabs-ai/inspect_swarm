@@ -74,6 +74,29 @@ solver = swarm(members=[member(react, args={"prompt": p}) for p in prompts])
 
 These are `react-1` to `react-3`. Names you give with `name` are not numbered across records, so give each record its own.
 
+### Members that choose their names
+
+With `choose_name=True` a member is not told its name. Its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:
+
+```python
+from inspect_ai.agent import react
+from inspect_ai.tool import bash
+
+from inspect_swarm import member, swarm
+
+solver = swarm(
+    members=member(react, args={"tools": [bash()]}, count=4, choose_name=True),
+)
+```
+
+Each member starts with `You are one of 4 agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is.` Its role, if it has one, is still stated. The log still names the members `react-1` to `react-4`: the swarm's timelines, spans, tool state, budget shares and result record use those names. The name a member chose is in its transcript, not in the swarm's records.
+
+A roster can mix the two, for example a lead you name and workers that name themselves. The `filesystem` channel then tells every member that its scratch directory may be taken by another member ([Channels](channels.qmd#the-filesystem-channel)).
+
+A swarm in which any member chooses its name can use only the `filesystem` channel or no channel (`channels=[]`). Other channels, including [shared memory](shared-memory.qmd) and your own, show members to each other by name, so `swarm()` refuses them.
+
+The swarm does not change text you give the member yourself: the sample input, a controller's `start(input=...)`, the agent's prompt, and the sandbox configuration.
+
 ## Limits
 
 `limits` takes token, cost, turn, message and time limits for that member alone. Working limits are refused. A member that reaches one ends with status `member_limit:<type>`, and the others continue. The swarm's own caps are set with `budget=` ([Budgets](budget.qmd)).

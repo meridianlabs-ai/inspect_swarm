@@ -28,6 +28,7 @@ from inspect_ai.util._sandbox.context import (
 from pydantic import BaseModel
 
 from inspect_swarm import Member, filesystem, leaderless, member, swarm
+from inspect_swarm._budget import current_member
 from inspect_swarm._record import RECORD_KEY
 
 from .swarm_runtime import evidence, run_swarm
@@ -138,7 +139,10 @@ def prober(seen: dict[str, dict[str, str]], names: list[str]) -> Agent:
             except ValueError:
                 reach[name] = "refused"
         reach["marker"] = _name(await sandbox_with("marker"))
-        seen[_member_name(state)] = reach
+        # by the swarm's name, which a member that chooses its own is not told
+        context = current_member.get()
+        assert context is not None
+        seen[context.name] = reach
         return state
 
     return execute
@@ -299,6 +303,33 @@ async def test_the_filesystem_channel_describes_a_shared_volume_beside_own_sandb
             "Share files with the other members there. They use it at the same time as you, so files they change there can change under you. "
             f"Read {notes} before you start and again as you work, and add what you learn or decide to the end of it, without changing what others wrote."
         )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "channels,shared",
+    [
+        ([], ""),
+        (
+            [filesystem(shared_volume=True)],
+            ", except for the shared directory described below",
+        ),
+    ],
+)
+async def test_a_member_that_chooses_its_name_in_its_own_sandbox_is_told_no_members_name(
+    channels: Any, shared: str
+) -> None:
+    seen: dict[str, dict[str, str]] = {}
+    with environments("default", "agent-1", "agent-2"):
+        await run_swarm(swarm(_probers(seen, choose_name=True), channels=channels))
+    assert sorted(seen) == ["agent-1", "agent-2"]
+    for reach in seen.values():
+        assert reach["preamble"].startswith(
+            "You are one of 2 agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is.\n\n"
+            f"You work in your own sandbox, which no other member can reach{shared}."
+        )
+        assert "agent-1" not in reach["preamble"]
+        assert "agent-2" not in reach["preamble"]
 
 
 @pytest.mark.anyio

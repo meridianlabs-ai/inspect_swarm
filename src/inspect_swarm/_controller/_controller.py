@@ -21,6 +21,9 @@ class MemberInfo:
     role: str | None
     """The member's role, if it has one."""
 
+    choose_name: bool = False
+    """Whether the member chooses its own name, so that nothing the swarm tells it contains `name`. `swarm()` accepts such a member only with the `filesystem` channel or no channel."""
+
 
 class Controller:
     """How a swarm runs: which members start, when and with what input, and when the swarm is done.

@@ -32,6 +32,7 @@ class _Member:
     state: MemberState = "running"
     status: str | None = None
     role: str | None = None
+    choose_name: bool = False
     context: MemberContext = field(init=False)
 
     def __post_init__(self) -> None:

@@ -29,6 +29,8 @@ solver = swarm(
 )
 ```
 
+A member that chooses its own name ([Members](members.qmd#members-that-choose-their-names)) is told to keep its work in `/scratch/<your name>`, a directory named with the name it chose, and to check that no other member uses the same one. The members you named are still told `/scratch/<member>`, and, when any member chooses, that a member that chooses could pick the same directory, so they check that no other member uses it.
+
 When members have their own sandboxes and each sandbox mounts one shared volume, use `filesystem(shared_volume=True)`. Set `shared=` to the absolute path where the volume is mounted; `notes=` must be inside it. The preamble then says that `shared` and the notes file in it are the same in every member's sandbox, and gives no scratch directory, since each sandbox is already private. The swarm cannot check that the volume is mounted, and it refuses `shared_volume=True` when members share the sample's sandbox. See [Sandboxes](sandboxes.qmd#a-shared-volume).
 
 [`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) runs `bash()` members in one container with this channel.

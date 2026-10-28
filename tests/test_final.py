@@ -466,6 +466,7 @@ async def test_the_record_is_written_at_start_and_on_each_start_and_end() -> Non
     assert set(after_end_stored["members"][0]) == {
         "name",
         "role",
+        "choose_name",
         "state",
         "status",
         "submitted",
