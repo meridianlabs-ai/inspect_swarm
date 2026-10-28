@@ -2,9 +2,9 @@
 
 ## Overview
 
-The turn seam hands a member's state to eval-author code at every turn boundary of the member's own agent loop: before its first generation and before each one after it, with no model call or tool call of the loop in flight. The code is a *boundary callback*, registered on the member's handle by a controller (ORBIT's scheduler, a coordinator that wakes a persistent member, an operator's pause). It may wait as long as it likes, then continue the member unchanged, continue it with a replaced conversation, or end it. While callbacks run, the member is *held*, and the swarm knows it: its time limit does not run, the sample's working time counts the hold as waiting, `swarm_wait` does not count it as active, and a stop ends it at once with status `stopped`.
+The turn seam hands a member's state to eval-author code at every turn boundary of the member's own agent loop: before its first generation and before each one after it, with no model call or tool call of the loop in flight. The code is a *boundary callback*, registered on the member's handle by a controller (ORBIT's scheduler, a coordinator that wakes a persistent member, an operator's pause). It may wait as long as it likes, then continue the member unchanged, continue it with a replaced conversation, or end it; and any code holding the handle can end the member while a callback still waits. While callbacks run, the member is *held*, and the swarm knows it: its time limit does not run, `swarm_wait` does not count it as active, and a stop ends it at once with status `stopped`. Work a callback does counts as working time; a callback marks its own idle waits with Inspect's `suspend_working_limit()`.
 
-The boundary is a small hook in inspect_ai's agent channel: a private turn gate that `before_turn()` awaits, which the swarm installs for every member. So every `react()` and `deepagent()` member has the seam, its first turn and the turns that recover from a context overflow or an interrupt included, without its author wiring anything; nested loops pass through untouched. When a callback rewrites the conversation, react resets its compaction state so the model sees the rewrite. Every change a callback makes is recorded as one event, with the callback's origin and the ids and hashes of the messages appended, removed and replaced, not their text. Members the seam cannot hold (bridged CLIs, members with background work running, agents with no agent channel) are refused with an error. What callers do at the boundary (scheduling, snapshots, attack input, defences, waking with new work) is their own code and their own designs.
+The boundary is a small hook in inspect_ai's agent channel: a private turn gate that `before_turn()` awaits, which the swarm installs for every member. So every `react()` and `deepagent()` member has the seam, its first turn and the turns that recover from a context overflow or an interrupt included, without its author wiring anything; nested loops pass through untouched. When a callback rewrites the conversation, react resets its compaction state so the model sees the rewrite. Every change a callback makes is recorded as one event, with the callback's origin and the ids and hashes of the messages it added (with their positions), removed and replaced, not their text. Members the seam cannot hold (bridged CLIs, members with background work running, agents with no agent channel) are refused with an error. What callers do at the boundary (scheduling, snapshots, attack input, defences, waking with new work) is their own code and their own designs.
 
 ## Why
 
@@ -32,7 +32,7 @@ Goals:
 
 - One boundary callback contract: the member's state in; continue, replace the conversation, or end out; the member held while callbacks run. ORBIT's scheduler, an operator pause and waking a persistent member are all callers of it.
 - Every boundary of the member's own loop, its first and its recovery turns included, with no wiring by agent authors.
-- The runtime's knowledge of a held member: status, time limits, the sample's working time, `swarm_wait`'s all-waiting release, and release at a stop.
+- The runtime's knowledge of a held member: status, time limits, `swarm_wait`'s all-waiting release, and release at a stop, of the swarm or of that member alone.
 - A standard record of every change a callback makes at a boundary.
 - A clear error for every member the seam cannot hold.
 
@@ -87,7 +87,7 @@ A throwaway patch of `AgentChannel.before_turn` parked members of a real `swarm(
 
 - A member held before it started parked at its first boundary, before its first generation, with its preamble as the last message.
 - A message appended in place to the list `before_turn()` received was in the member's next `ModelEvent` input.
-- One member held for 1 s while the other worked: total 1.94 s, working time 1.47 s on asyncio. The held time counted as working while the other member's tool calls ran and as waiting after it ended. Both held for 1 s: total 1.82 s, working 0.73 s.
+- With the park wrapped in `sample_wait()` (which `suspend_working_limit()` returns): one member held for 1 s while the other worked gave total 1.94 s, working time 1.47 s on asyncio, the held time counting as working while the other member's tool calls ran and as waiting after it ended; both held for 1 s gave total 1.82 s, working 0.73 s.
 - Every sample ended with status `success`.
 
 ### What the uses need
@@ -110,7 +110,7 @@ Member shapes in use: `react()` and `deepagent()` members in the examples and do
 
 ```python
 # inspect_ai: src/inspect_ai/agent/_channel/gate.py (new, private)
-TurnGate = Callable[[AgentChannel, Sequence[ChatMessage]], Awaitable[list[ChatMessage] | None]]
+TurnGate = Callable[[AgentChannel, Sequence[ChatMessage], AgentState | None], Awaitable[list[ChatMessage] | None]]
 
 @contextmanager
 def turn_gate(gate: TurnGate | None) -> Iterator[None]: ...   # the gate for channels opened in the block
@@ -132,6 +132,7 @@ class MemberHandle(Protocol):                           # the existing handle, p
     @property
     def held(self) -> bool: ...                         # its boundary callbacks are running
     def on_boundary(self, callback: BoundaryCallback, *, origin: str) -> Callable[[], None]: ...
+    def end(self, *, origin: str) -> None: ...         # end it at its current or next boundary
 ```
 
 ### The callback contract
@@ -145,15 +146,17 @@ class MemberHandle(Protocol):                           # the existing handle, p
 
 - `index` counts the boundaries of the member's own loop from 0.
 - `after` is what the conversation ends with: `start` at index 0; `tools` after a tool result; `reply` after an assistant message with no tool calls, which only an agent that continues after a reply reaches (an `on_continue` that returns the state); `user` after anything else (react's continue prompt, an incorrect-answer message, an operator's redirect after an interrupt).
-- `state` is a detached deep copy of the member's messages and output. The first callback gets the member's state; each later one gets the state as the callbacks before it left it. Changing the copy in place changes nothing; a callback changes the member only by what it returns.
+- `state` is a detached deep copy of the loop's own state, its messages and its output, as the loop passes it to `before_turn()` (below); the runtime never rebuilds an output from messages. The first callback gets the member's state; each later one gets the state as the callbacks before it left it. Changing the copy in place changes nothing; a callback changes the member only by what it returns.
 
 A callback returns:
 
 - **`None`**: continue with the state as it received it.
 - **A list of messages**: the conversation the member continues with. Messages keep their ids, and a new message gets one when it is built, so a message with no id, or two with the same id, is an error in the callback.
-- **`"end"`**: end the member. The remaining callbacks do not run, and the member ends `stopped`, with the reason `ended by <origin>` in its lever's message.
+- **`"end"`**: end the member. The remaining callbacks do not run, and the member ends `stopped`, with the reason `ended by <origin>` in its lever's message. It is always `stopped`, never a submission, even after a reply (decision: Ransom, 2026-10-28); persistent members (#116) add a submitted ending, with its rule for which reply is the answer, if they need one.
 
-A callback may wait as long as it likes (for a scheduler's go, an operator's resume, new work), and it may call models and tools of its own. Its time is held time ([Time](#time)); its model calls run under the member's limit nodes, so they count towards the member's token and cost limits and its ledger line, as an approval judge's do.
+A callback may wait as long as it likes (for a scheduler's go, an operator's resume, new work), and it may call models and tools of its own. Its time is held time for the member's time limit ([Time](#time)), and its model calls run under the member's limit nodes, so they count towards the member's token and cost limits and its ledger line, as an approval judge's do.
+
+**Working time is the callback's to mark.** The seam does not wrap callbacks in a wait: model calls, sandbox commands and tool calls a callback makes are working time like any other. A callback marks its own idle waits with Inspect's public `inspect_ai.util.suspend_working_limit()`, around the `await` that waits for a go, a resume or new work, and an author who wants some work left uncharged (a defence treated like a monitor, say) wraps it the same way. A callback that waits without it has its hold counted as working time, which can trip the sample's working limit while nothing works.
 
 **When the chain finishes**, the runtime compares the final state with the member's live conversation, by message id and content hash:
 
@@ -167,11 +170,19 @@ The runtime writes the evidence ([Evidence](#evidence)) and returns to the gate.
 
 **Composition.** Every caller's callbacks run at every boundary, so callers compose without knowing each other: an operator's pause callback registered after ORBIT's scheduler holds the member after the scheduler has activated it, and a scheduler activation waits for the operator's resume. A caller that wants to act only at some boundaries returns `None` at the others.
 
+**Ending a member from outside the chain.** Because the chain is serial, a callback can end the member only when its turn in the chain comes, and an earlier callback may wait indefinitely. So the handle has `end(origin=...)`, which any code holding the handle calls, synchronously and without the other callers' cooperation:
+
+- If the member's callbacks are running, `end()` cancels the chain through the gate's own cancel scope: the callback that is waiting gets a cancellation, the ones after it do not run, and no change from the chain is applied. The member ends `stopped`, with the reason `ended by <origin>`.
+- If the member is mid-turn, `end()` closes its lever, so its next model call is refused, and the gate ends it at its next boundary in the same way. If it is pending, it ends at boundary 0 once started, before any generation.
+- A second `end()`, or one for a member that has ended, changes nothing. Other members and the swarm go on.
+
+A callback returning `"end"` is the same as `end()` with its own origin, without the cancellation. `end()` is the primitive an operator's "stop this member" (#119) needs; the operator's surface stays that design's.
+
 **What callers build on it.** Nothing here is a scheduling API; callers bring their own:
 
-- **ORBIT's activation** is its own callback per member that signals "parked" and awaits the scheduler's go, so `activate()` sets that member's go and awaits its next park or its end (`MemberEnded` through `events()`). `model_step` is one boundary; `completion` keeps going until a boundary with `after == "reply"`. Snapshots read `Boundary.state`, interventions return the new conversation, and the scheduler stays ORBIT's code. inspect_swarm ships no `activate()` and no `round_robin`: each is a few lines over this contract in the caller's code, and as swarm API they would bring back the problem of an activation that must wait past another holder's pause, which composition by callbacks does not have.
-- **An operator's pause** is a callback that waits while paused; its "stop this member" returns `"end"`.
-- **Waking a persistent member** is a callback that, at a boundary with `after == "reply"`, waits for the next piece of work and returns the conversation with it appended.
+- **ORBIT's activation** is its own callback per member that signals "parked" and awaits the scheduler's go inside `suspend_working_limit()`, so `activate()` sets that member's go and awaits its next park or its end (`MemberEnded` through `events()`). `model_step` is one boundary; `completion` keeps going until a boundary with `after == "reply"`. Snapshots read `Boundary.state`, interventions return the new conversation, and the scheduler stays ORBIT's code. inspect_swarm ships no `activate()` and no `round_robin`: each is a few lines over this contract in the caller's code, and as swarm API they would bring back the problem of an activation that must wait past another holder's pause, which composition by callbacks does not have.
+- **An operator's pause** is a callback that waits inside `suspend_working_limit()` while paused; its "stop this member" calls `end(origin="operator")`, which works whichever callback holds the member.
+- **Waking a persistent member** is a callback that, at a boundary with `after == "reply"`, waits inside `suspend_working_limit()` for the next piece of work and returns the conversation with it appended.
 - **Push delivery** would register a runtime callback with origin `swarm` that returns the conversation with a reminder or injection appended.
 
 ### The inspect_ai change: a turn gate and a compaction reset
@@ -179,7 +190,7 @@ The runtime writes the evidence ([Evidence](#evidence)) and returns to the gate.
 **The gate.** A new private module, `src/inspect_ai/agent/_channel/gate.py`, holds a `ContextVar[TurnGate | None]` and the `turn_gate(gate)` context manager that sets it. It is a seam for a runtime that runs agents, as inspect_swarm is, in the way the private `background_target` seam serves its background owner.
 
 - **`agent_channel()`** reads the current gate when it creates a channel and keeps it on the channel. Every loop opened in the block gets the same gate, nested loops included; the gate receives the channel, so the runtime decides which loop it holds, and inspect_ai stays unaware of swarms. The inert channel never has a gate.
-- **`before_turn(messages)`**, when its channel has a gate, first awaits `gate(channel, messages)`:
+- **`before_turn(messages, state=None)`** gains a keyword argument, the loop's own `AgentState`. Both react loops pass the state they continue with (`ch.before_turn(state.messages, state=state)`), which is the state their last generation produced, even when a custom model agent returned a fresh one (`_react.py:271-273`, `:511-513`, `_agent_generate` at `:716-753`). A loop that follows the documented pattern without it passes nothing. When its channel has a gate, `before_turn()` first awaits `gate(channel, messages, state)`:
   - `None`: the conversation is unchanged.
   - A list that starts with the same message objects as `messages`: an append. `before_turn()` extends `messages` with the rest.
   - Any other list: a rewrite. `before_turn()` assigns it in place (`messages[:] = result`), so the caller's list, which react extends and keeps, holds it, and marks the channel rewritten. If `messages` is not a `list`, it raises `TypeError` saying that a gate that rewrites the conversation needs the loop's own message list.
@@ -189,7 +200,7 @@ The runtime writes the evidence ([Evidence](#evidence)) and returns to the gate.
 
 **The compaction reset.** The handler that `compaction()` returns gains `reset(prefix)`, also added to the `Compact` protocol: it clears the handler's kept input, the ids it has folded in, its token baseline and its memory-warning flag, in place so that a checkpointer tracking that state keeps tracking it, and replaces its prefix. After `before_turn()`, both react loops check whether the channel was marked rewritten (a private read that clears the mark), and if so call `compact.reset()` with the prefix derived from the new conversation, as `_agent_compact()` derives it. The next `compact_input()` then starts from the rewritten conversation: below the threshold it sends it as it is; above, it compacts it, which for a summary strategy is another model call. An append needs no reset, since the handler adds messages it has not seen.
 
-Without a gate nothing changes: no `react()` behaviour, ACP, log-schema or public API change beyond `reset()`.
+Without a gate nothing changes: no `react()` behaviour, ACP, log-schema or public API change beyond `reset()` and `before_turn()`'s optional `state`.
 
 ### The member's gate
 
@@ -203,19 +214,22 @@ Each member's run gets one `MemberGate` (new module `src/inspect_swarm/_seam.py`
 
 `swarm_tools()` keeps binding `MemberContext.loop` when it resolves first, and now also sets a separate `MemberContext.tools` flag, which the `tools_unwired` check reads instead of the binding, so that check is unchanged. Binding happens once per member run and is never undone.
 
+**The loop's state.** At every boundary of the own loop the gate keeps a reference to the `AgentState` the loop passed, the loop's live object. When the member's agent raises rather than returns (an end at a boundary, a limit, an error), the member wrapper takes the member's output from that state rather than from the state it called the agent with, which a custom model agent's fresh state may have left behind; without a boundary it uses the state it called the agent with, as today.
+
 **At each boundary of the own loop:**
 
-1. If the swarm is stopping, end the member ([Stopping](#stopping)).
+1. If the swarm is stopping, or `end()` was called for the member, end the member ([Stopping](#stopping)).
 2. If no callback is registered, return `None` with no `await`.
-3. If any of the member's background work is running, refuse ([Supported members](#supported-members)).
-4. Hold: mark the member held, pause its time limit, recheck the swarm's waits, and open inspect_ai's `sample_wait()`. Run the callbacks in a cancel scope of the gate's own, which a stop cancels.
-5. Release: close the wait, resume the time limit, clear the mark, recheck the waits, write the evidence, and return the result: `None`, the live list with the added messages appended, the rewritten conversation, or for `"end"`, the member's end.
+3. If the loop passed no state, or any of the member's background work is running, refuse ([Supported members](#supported-members)).
+4. Hold: mark the member held, pause its time limit and recheck the swarm's waits. Run the callbacks in a cancel scope of the gate's own, which a stop or `end()` cancels.
+5. Release: resume the time limit, clear the mark, recheck the waits, write the evidence, and return the result: `None`, the live list with the added messages appended, the rewritten conversation, or for `"end"`, the member's end.
 
 ### Stopping
 
 - **A stop ends a member at its boundary.** `stop(reason)`, in its synchronous first part, cancels every gate's running callbacks, and from then on every boundary of any member ends it. The gate ends a member by closing its lever and raising the lever's limit error, which the member wrapper already classifies as the lever's: the member ends `stopped`, as a member the stop reaches between calls does, with its last output as its output. No generation follows, so a cached reply or cached tool calls cannot run after the stop, and the member never returns normally to be read as `submitted`.
 - Held members therefore end at once; they need no grace period or hard stop and leave no cancelled loop in the ledger. A change a cancelled callback had not returned is never applied, and the `boundary` event records the outcome `stop`.
-- **`"end"`** takes the same path with the reason `ended by <origin>`, and the rest of the swarm goes on.
+- **`end()` and `"end"`** take the same path for one member, with the reason `ended by <origin>`, and the rest of the swarm goes on.
+- **The ledger.** Cancelling a chain is not a hard stop, so the member's ledger line is not `cancelled`, unless a callback had a model call of its own in flight when the chain was cancelled (a model event begun in the member's span during the chain and not completed), whose usage is then unknown.
 - **Outside cancellations** (the sample's limits, an operator's interrupt of the sample, the hard stop) cancel the callbacks like any other `await`.
 
 ### Time
@@ -225,12 +239,12 @@ Each member's run gets one `MemberGate` (new module `src/inspect_swarm/_seam.py`
 | The member's time limit | does not count: the limit pauses while the member is held |
 | The swarm's time cap | counts |
 | The sample's time limit | counts |
-| The sample's working time | a sample wait: working only while other known work runs in the sample; a fully held swarm stops it |
+| The sample's working time | the callback's to mark: its work counts, and its idle waits are waiting time when it wraps them in `suspend_working_limit()` |
 | The metrics' `running_time` | counts; `held_time` (new) gives the held part |
 | `swarm_wait`'s idle time | not idle: a held member has no wait |
 
 - **The member's time limit pauses.** A member time limit becomes a `SwarmTimeNode`, a subclass of Inspect's time limit as the swarm's token, turn and message nodes subclass Inspect's. When the gate holds the member, the node sets its scope's deadline to infinity; when it releases, it moves its start time on by the held time and re-derives the deadline, so its deadline and its reported usage both count only time the member was not held. It raises Inspect's time limit error as before, so the member's status is still `member_limit:time`. The swarm's time cap and the sample's time limit are deadlines for the whole run and keep counting.
-- **Working time.** The callbacks run inside `sample_wait()`, so the hold is waiting time unless other known work runs in the sample. Model calls a callback makes there are not known work either: a defence's model call during a hold counts as waiting, which slightly understates working time when callbacks call models.
+- **Working time.** The seam opens no wait of its own (decision: Ransom, 2026-10-28). A callback's model calls, sandbox commands and tool calls count as working time. An idle wait wrapped in `suspend_working_limit()` is waiting time, except while other known work runs in the sample, so a swarm whose members all wait that way stops its working time. A callback that waits unwrapped has its hold counted as working time and can trip the sample's working limit; work an author wants left uncharged is wrapped the same way.
 - **`swarm_wait`.** A held member counts as not active: the all-waiting check becomes "no member is running, not waiting and not held", and the gate rechecks the waits when it holds and releases. So when every other member is waiting or held, the waits return (`all_waiting`) rather than wait for members that will not move until their callbacks return.
 
 ### Supported members
@@ -242,7 +256,8 @@ Each member's run gets one `MemberGate` (new module `src/inspect_swarm/_seam.py`
 | `deepagent(background=True)` or an integer `background` | `on_boundary()` raises `ValueError`, detected from the agent's registry name, `inspect_ai/deepagent`, and its `background` argument, as M1 refused these members. Holding the top-level loop would leave its background subagents generating, which breaks every use's guarantee that a held member does nothing. |
 | A custom agent that calls `background()` itself | Checked at every boundary with callbacks, before the member counts as held: if any of its background tasks is running, the gate does not hold it, and the member ends `errored` with a `RuntimeError` naming the member and saying that a member with background work running cannot be held. Tasks that have finished do not matter, and none can start while the loop is held. |
 | Bridged members, declared or in the `inspect_swe/` namespace | `on_boundary()` raises `ValueError`: the CLI runs its own turns, and no agent channel is opened. |
-| Members found unable to be held: a bridged member found by its first bridged call, or an agent with no agent channel of its own | Found at a model call the member makes, with a callback registered, before its own loop has ever reached the gate, in the same node checks that find bridged members. The member is cancelled and ends `errored` with a `RuntimeError` naming it and the reason, as a bridged member that starts background work ends today; a later `on_boundary()` raises. |
+| Members found unable to be held: a bridged member found by its first bridged call, or an agent with no agent channel of its own | Found at the first model event in the member's context, while it has a callback registered and its own loop has never reached the gate. The swarm's transcript subscription, which the ledger already keeps (`_ledger.py:367-370`), sees every model event synchronously in the generating task, cached generations included; the limit nodes' checks are not used, because a cache hit is returned before them (`src/inspect_ai/model/_model.py:1525-1558`). A supported member's own loop reaches the gate before its first generation, so only an unsupported loop is caught; its subagents' and callbacks' later model events are not. The member is cancelled and ends `errored` with a `RuntimeError` naming it and the reason, as a bridged member that starts background work ends today, after at most the one generation that event belongs to; a later `on_boundary()` raises. |
+| A custom loop that calls `before_turn()` without its state | Refused at its first boundary with a callback registered: the member ends `errored` with a `RuntimeError` saying that its loop does not pass its state, so a callback could not be given its output. Without callbacks it runs as today. |
 | A nested swarm inside a member | Its members have gates of their own, installed by its own runtime; the outer member's gate never binds their loops. |
 
 ### Evidence
@@ -251,17 +266,17 @@ Two `InfoEvent`s of type `turn`, in the member's span, with the swarm's evidence
 
 - **`boundary`**, once per such boundary: `boundary` (the index), `after`, `origins` (the callbacks' origins in order), `held_for` (seconds), `outcome` (`continue`, `end` or `stop`), `messages` before and after.
 - **`changed`**, once for each callback whose result differs from the state it received: `boundary`, `origin`, and the change, found by diffing on message id:
-  - `appended`: the ids and hashes of messages new at the end;
+  - `added`: every message whose id was not in the state the callback received, wherever it was put, with its id, its hash and its index in the result, in order; an append is the case where every index is at the end;
   - `removed`: the ids of messages no longer there;
   - `replaced`: for each message kept under its id with new content, its id and its hashes before and after;
-  - `moved`: whether the kept messages changed order;
+  - `order`: present only when the kept messages changed their relative order, the result's full list of ids;
   - `applied`: whether the member continued with the change (false when a later callback ended it, or the stop came first).
 
 A hash is the SHA-256 of the message as the log serializes it, its id excluded, so analysis can match a message in the conversation or in a `ModelEvent`'s input to the change that made it, where Inspect has not combined or compacted it. Returning the same content is no change and writes no `changed` event.
 
-**Ids and hashes, not content.** The content of an appended or replaced message is in the member's conversation and in the next `ModelEvent`'s input, and a removed message's is in earlier ones. Recording it again would grow the log with every activation for a defence that rewrites much of the conversation each time. A caller that wants its own content record writes its own event; ORBIT already writes its own.
+**Ids and hashes, not content.** The content of an added or replaced message is in the member's conversation and in the next `ModelEvent`'s input, and a removed message's is in earlier ones. Recording it again would grow the log with every activation for a defence that rewrites much of the conversation each time. A caller that wants its own content record writes its own event; ORBIT already writes its own.
 
-**One event per callback**, with the origin given at registration, rather than one per operation inside a callback. A caller that wants changes told apart (attack input, then a defence) registers a callback for each, in the order they must run. `changed` takes the place of swarm-orbit.md P5's `intervened` event: the same appended, removed and replaced ids and hashes, written by the runtime for every caller rather than by ORBIT's interventions; P5's `committed: false` for operations staged at a stop becomes `applied: false`, since staging is the caller's.
+**One event per callback**, with the origin given at registration, rather than one per operation inside a callback. A caller that wants changes told apart (attack input, then a defence) registers a callback for each, in the order they must run. `changed` takes the place of swarm-orbit.md P5's `intervened` event: the same added, removed and replaced ids and hashes, written by the runtime for every caller rather than by ORBIT's interventions; P5's `committed: false` for operations staged at a stop becomes `applied: false`, since staging is the caller's.
 
 The metrics gain two fields per member, `holds` (boundaries at which callbacks ran) and `held_time`, which default to 0 so that metrics written before them load.
 
@@ -298,10 +313,16 @@ Rejected: the gate covers every turn of every `react()`-based member, wired or n
 
 **Leaving the stop to the closed lever.** A released member would end at its next model call. But a cached reply is returned before the lever's check, so a released `react(submit=False)` member can answer from the cache and end `submitted` after the stop. Rejected for ending the member at the boundary.
 
+**Callbacks inside a wait the seam opens.** The seam would wrap the whole chain in `sample_wait()`, so no callback needs to mark its waits. But work inside such a wait is not charged at all, so a defence that spends its time in model calls at the boundary would never count towards the sample's working limit. Rejected: callback work counts, and callbacks mark their idle waits themselves (decision: Ransom, 2026-10-28).
+
+**Detecting unsupported members in the limit nodes' checks**, as bridged members are found. A cached generation is returned before those checks run, so a member with no agent channel answering from the cache would never be found and its callbacks would be silently skipped. Rejected for the transcript subscription, which sees every model event.
+
+**Building the boundary's output from the messages.** The gate would need only the messages. But a custom model agent's output carries its stop reason and usage, which no chat message holds. Rejected for passing the loop's state to `before_turn()`.
+
 ## Compatibility and migration
 
-- **inspect_ai.** Without a gate nothing changes. The gate is a private module; `reset()` is added to the compaction handler and the `Compact` protocol, so a custom class that a type checker matched against `Compact` must add it. inspect_swarm needs an inspect_ai release with both.
-- **inspect_swarm's API** gains `on_boundary()` and `held` on the handle, and `Boundary` and `BoundaryCallback`, additions only. `MemberHandle` is a protocol that only the runtime implements. `SwarmEvent` and `MemberState` are unchanged.
+- **inspect_ai.** Without a gate nothing changes. The gate is a private module; `before_turn()` gains an optional keyword argument; `reset()` is added to the compaction handler and the `Compact` protocol, so a custom class that a type checker matched against `Compact` must add it. inspect_swarm needs an inspect_ai release with both.
+- **inspect_swarm's API** gains `on_boundary()`, `end()` and `held` on the handle, and `Boundary` and `BoundaryCallback`, additions only. `MemberHandle` is a protocol that only the runtime implements. `SwarmEvent` and `MemberState` are unchanged.
 - **Behaviour without callbacks.** Two changes, both for every member:
   - A member that reaches a boundary after the swarm began to stop ends there, `stopped`, rather than at its next model call; the status is the same, and a cached call can no longer run after the stop.
   - The member's own loop is bound when its first agent channel calls the gate, before any tool resolves, rather than at the first `swarm_tools()` resolution. For `react()` and `deepagent()` members it is the same loop. A custom agent that resolves `swarm_tools()` before it opens a channel keeps that binding, and the gate follows it. `tools_unwired` reads the new flag and is unchanged.
@@ -321,32 +342,35 @@ Rejected: the gate covers every turn of every `react()`-based member, wired or n
 All with mockllm, no network or Docker.
 
 - **inspect_ai** (`tests/agent/test_channel/test_channel.py`, `tests/agent/test_agent_react.py`):
-  - `before_turn()` awaits the gate before draining, with the channel and the messages; `None` leaves the list unchanged; a list that extends it by identity is appended; any other list replaces it in place and marks the channel; past the message limit both raise the limit error; a rewrite of a tuple raises `TypeError`; an exception from the gate propagates;
+  - `before_turn()` awaits the gate before draining, with the channel, the messages and the state react passes (`None` from a loop that passes none); `None` leaves the list unchanged; a list that extends it by identity is appended; any other list replaces it in place and marks the channel; past the message limit both raise the limit error; a rewrite of a tuple raises `TypeError`; an exception from the gate propagates;
   - a nested `agent_channel()` gets the same gate; the inert channel never calls one; with no gate, `before_turn()` is unchanged;
   - a `react()` loop calls the gate before its first generation, after a turn with tool calls, after a recovered context overflow (a mock output with `stop_reason="model_length"`), and after an interrupt recovery;
   - with `react(compaction=CompactionTrim(...))` below its threshold, and with `deepagent()`'s default compaction: a rewrite that replaces a message under the same id, and one that deletes a message, reach the next model input as rewritten; an append does not reset the handler.
 - **inspect_swarm** (`tests/test_turn_seam.py`, new, on asyncio and trio through `tests/conftest.py`):
+  - with a custom model agent that returns a fresh `AgentState` (as Inspect documents custom generation), `Boundary.state.output` is that agent's output, its `max_tokens` stop reason and usage intact, and a member then ended at the boundary by `end()` or a stop keeps that output in the result record;
   - a callback registered on a pending member gets boundary 0 with `after == "start"` before any model call, and the member is `held` while it waits; a returned conversation with an added user message is in the next model input;
   - `after` is `tools` after a tool turn, and `reply` for a `react(submit=False)` member whose `on_continue` returns its state;
   - two callbacks run in order, the second receives the first's result, and a pause callback registered second holds the member after a scheduler callback lets it go; a scheduler built on callbacks alternates two members turn by turn while a third caller pauses one of them and later resumes it;
   - unregistering takes effect at the next boundary; in-place changes to the copy change nothing; duplicate ids in a result raise and end the member `errored`;
   - `"end"` ends the member `stopped` with no further model call, and the rest of the swarm goes on;
+  - `end(origin="operator")` while a scheduler callback waits, with the operator's callback registered before the scheduler's and after it, and called after the first callback is already waiting: the waiting callback is cancelled, later ones do not run, no change of the chain is applied, the `boundary` event's outcome is `end`, and the member ends `stopped` with `ended by operator` while another member runs on; `end()` mid-turn ends the member at its next boundary, and on a pending member at boundary 0;
   - a stop while held, and a stop before a member's next boundary, each end the member `stopped` with no further generation, with a cached plain reply and with cached tool calls waiting for it, and its ledger line is not `cancelled`;
   - a member time limit does not run while held: a member with `time_limit(0.5)` held for 1 s, then working 0.3 s, is not stopped; held for 1 s and working 0.6 s, it ends `member_limit:time`;
-  - every member held: the sample's working time stops while the held wall clock passes (a real sample, through `eval_async()`, as `tests/test_binding.py` runs one);
+  - working time (a real sample, through `eval_async()`, as `tests/test_binding.py` runs one): every member held by a callback that waits inside `suspend_working_limit()` stops the sample's working time; the same wait unwrapped counts as working time; a callback's own model call counts as working time;
   - a member in `swarm_wait` is released with `all_waiting` when the only other running member is held;
-  - refusals: `ValueError` from `on_boundary()` for a declared bridged member, for `deepagent(background=True)` and `background=4`, and for an invalid origin; `RuntimeError` for an ended member and while stopping; a custom agent whose tool starts `background()` after a callback was registered ends `errored` at its next boundary while the task runs, and is held normally once it has finished; a custom agent that generates without opening an agent channel ends `errored` at its first model call;
+  - refusals: `ValueError` from `on_boundary()` for a declared bridged member, for `deepagent(background=True)` and `background=4`, and for an invalid origin; `RuntimeError` for an ended member and while stopping; a custom agent whose tool starts `background()` after a callback was registered ends `errored` at its next boundary while the task runs, and is held normally once it has finished; a custom agent that generates without opening an agent channel ends `errored` at its first model call, uncached and served from the cache, with no member message, turn or token limit; a custom loop that calls `before_turn()` without its state ends `errored` at its first boundary with a callback;
   - a `deepagent()` member's synchronous subagent is never held, and the callback runs when the subagent's tool call returns;
-  - the `boundary` and `changed` events: one `changed` per changing callback with its origin, an append, a deletion, a same-id replacement and a reorder each recorded as such, the hashes matching the messages in the next `ModelEvent`'s input, `applied: false` after a later `"end"`, no event for a callback that returns the same content, and no text in either event; the `holds` and `held_time` metrics; `tools_unwired` still names a `react()` member in a shared-memory swarm that was not given `swarm_tools()`.
+  - the `boundary` and `changed` events: one `changed` per changing callback with its origin, an append, an insertion at the start and in the middle (each in `added` with its index), a deletion, a same-id replacement and a reorder (`order` present only then) each recorded as such, the hashes matching the messages in the next `ModelEvent`'s input, `applied: false` after a later `"end"`, no event for a callback that returns the same content, and no text in either event; the `holds` and `held_time` metrics; `tools_unwired` still names a `react()` member in a shared-memory swarm that was not given `swarm_tools()`.
 
 ## Implementation plan
 
-1. **inspect_ai: the turn gate and the compaction reset.** `src/inspect_ai/agent/_channel/gate.py` (new), `channel.py` (`before_turn()`, the channel's gate and rewrite mark), `__init__.py` (`agent_channel()` reads the gate), `src/inspect_ai/model/_compaction/_compaction.py` and `types.py` (`reset()`), `src/inspect_ai/agent/_react.py` (reset after a rewrite, in both loops); the inspect_ai tests above.
+1. **inspect_ai: the turn gate and the compaction reset.** `src/inspect_ai/agent/_channel/gate.py` (new), `channel.py` (`before_turn()`, the channel's gate and rewrite mark), `__init__.py` (`agent_channel()` reads the gate), `src/inspect_ai/model/_compaction/_compaction.py` and `types.py` (`reset()`), `src/inspect_ai/agent/_react.py` (pass the state to `before_turn()`, reset after a rewrite, in both loops); the inspect_ai tests above.
 2. **inspect_swarm: the seam.** Needs step 1 in an inspect_ai that inspect_swarm can depend on.
    - `src/inspect_swarm/_seam.py` (new): `MemberGate`, `Boundary`, `BoundaryCallback`, binding, the callback chain, the diff and its evidence.
-   - `src/inspect_swarm/_member.py`: install the gate around the agent call; member time limits as `SwarmTimeNode`; the background-dispatch check for `on_boundary()`.
-   - `src/inspect_swarm/_controller/_control.py`: `on_boundary()` and `held` on `MemberRun`, the stop's cancellation of callbacks, `MemberWiring` from the tools flag.
-   - `src/inspect_swarm/_budget.py`: `SwarmTimeNode`; ending a member through its lever at a boundary; the `tools` flag on `MemberContext`; finding a member that cannot be held in the node checks.
+   - `src/inspect_swarm/_member.py`: install the gate around the agent call; the output from the gate's last state when the agent raises; member time limits as `SwarmTimeNode`; the background-dispatch check for `on_boundary()`.
+   - `src/inspect_swarm/_controller/_control.py`: `on_boundary()`, `end()` and `held` on `MemberRun`, the stop's cancellation of callbacks, `MemberWiring` from the tools flag.
+   - `src/inspect_swarm/_budget.py`: `SwarmTimeNode`; ending a member through its lever at a boundary; the `tools` flag on `MemberContext`.
+   - `src/inspect_swarm/_ledger.py`: in its transcript subscription, finding a member that cannot be held at its first model event, and model calls in flight in a cancelled chain.
    - `src/inspect_swarm/_bus/_tools.py`: set the tools flag; `src/inspect_swarm/_bus/_wait.py`: held members are not active.
    - `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/__init__.py`.
    - Docs: `docs/controllers.qmd` (boundary callbacks), `docs/members.qmd` (time limits while held), `docs/analysis.qmd` (the events and metrics).
@@ -354,7 +378,7 @@ All with mockllm, no network or Docker.
 
 ## Open questions
 
-1. **The status of a member a callback ends.** `"end"` always gives `stopped`, so a persistent or conversational member ended after its last reply is not a submission, and under swarm-scoring.md's rule only submissions are answers. The alternative is `"end"` with a status, letting a callback end a member `submitted` after a reply. Recommendation: `stopped` only here; #116, which decides how a persistent member's answers count, adds a submitted ending if it needs one, with the rule for which reply is the answer.
+None.
 
 ## Not this design
 
