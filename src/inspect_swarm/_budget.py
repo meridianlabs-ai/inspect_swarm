@@ -303,21 +303,13 @@ def is_bridged(agent: Agent, bridged: bool | None) -> bool:
 class MemberContext:
     name: str
     bridged: bool
-    # the member's configured delivery mode; None for the default
-    delivery: Literal["notify", "poll"] | None = None
     scope: anyio.CancelScope = field(default_factory=anyio.CancelScope)
     stop_cause: str | None = None
     span_id: str | None = None
-    # counted as native, but found bridged at its first marked bridge generation
-    bridged_late: bool = False
     # the agent channel of the member's own loop, bound by swarm_tools() where it is
     # first resolved, and whether ACP was bound to that channel then
     loop: AgentChannel | None = None
     acp_bound: bool | None = None
-    # for the wiring checks: whether swarm_on_continue() has run in a loop of the
-    # member's other than a nested one, and whether a record was news to the member
-    hooked: bool = False
-    news: bool = False
     # set when the member starts background work, which bridged members cannot have
     background: bool = False
     # the member's background tasks not yet finished, kept by its owner, for the bus's
@@ -325,15 +317,6 @@ class MemberContext:
     background_running: int = 0
     # the error for bridge use found after the member started background work
     refusal: RuntimeError | None = None
-
-    @property
-    def delivery_effective(self) -> Literal["notify", "poll"]:
-        # a bridged member has no react() hook to give notices; no M2 channel has a
-        # mode of its own, so the default is notify. A native member found bridged
-        # late (a bridged descendant) keeps its own loop's hook, and its mode.
-        if self.bridged and not self.bridged_late:
-            return "poll"
-        return self.delivery or "notify"
 
 
 def bridged_background_error(name: str) -> RuntimeError:
@@ -364,7 +347,6 @@ class SwarmNode(Limit):
         member = current_member.get()
         if member is not None and not member.bridged and in_bridge_model_generate():
             member.bridged = True
-            member.bridged_late = True
             if member.background:
                 # its nodes would now cancel the member, background work and all, with
                 # no error to say why; a raise here would end the sample, so the member

@@ -55,7 +55,7 @@ def filesystem(shared: str = "/shared", notes: str = "notes.md", scratch: str = 
 class Channel:
     def instructions(self, member: MemberInfo) -> str | None: ...   # M1: text for the member's preamble
     # M2: name, prefix, reach, check() and open(), which returns a per-run ChannelState with the
-    # communication deep dive's operations (tools, validate, admit, apply, notice_lines, quiescent)
+    # communication deep dive's operations (tools, validate, admit, apply, quiescent)
 ```
 
 - **Members** are built agents or pydantic `member()` records. A record holds a built agent, or a registered `@agent` factory and its arguments: `member(deepagent, args={"tools": [bash()]}, count=4)`, which the runtime builds once for each member in each sample. `count > 1` needs the factory form, and one agent object cannot be in two members, so no agent object runs twice at once in one sample ([Members](#members)).
@@ -74,7 +74,7 @@ The API's shape matches the components, with a controller registry object in pla
 - **The component boundaries in the call.** The final-answer default and the valid modes depend on the topology (`reporter` for coordinators, the verify/vote/first chain for leaderless swarms; swarm.md, [Final answer](swarm.md#controller-topology-termination-final-answer)). Passed as two separate settings, they must be validated against each other; held by one controller object, they cannot disagree.
 - **Arguments that reach the log faithfully.** Inspect logs an agent's arguments by its own rules ([How arguments reach the log](#how-arguments-reach-the-log)). In inspect_ai, an argument `cost_limit(40.0)` is logged as the string `"_CostLimit"`, and inside a list as `null`; a frozen dataclass is logged as its type name. Two `eval_set` arms that differ only in such an argument get the same task identifier, and `eval_set` refuses them: "The task 'arm' is not distinct." (spike below). Sweepability is a goal of swarm.md ("agent count, topology, communication channels and budget split ordinary, sweepable task parameters"), so this matters.
 - **Members that do not share an agent.** Inspect builds a task's agent once and runs it for every sample, so an agent must keep per-sample state in its invocation ([Current behaviour](#registry-objects-are-shared-by-concurrent-samples)). A swarm asks more: `count=4` runs one record four times at once in the same sample, sandbox and store. State an agent's factory keeps in its closure (hooks, caches, tool objects, a session id) is then shared by the copies, silently. inspect_swe's `claude_code()` is a real case: it allocates its Claude Code session id once per agent object, so four copies of one object would run `claude --session-id` with the same id in one sandbox. Sharing a built agent across samples is how Inspect runs every solver, since samples have their own sandboxes and stores; running one object twice at once in a sample is the new hazard. The API closes it instead of documenting it: copies come from a factory, and the same object cannot be two members (decision: Ransom, 2026-10-14).
-- **One place for the sibling deep dives' parameters.** Each adds parameters to `swarm()`: `budget=Budget(...)`, `result=`, a `final=` chain, `messages(...)` in `channels=`, a later `policy=`, `routes=`, `member(delivery=, bridged=, input=)`, and an activation-policy protocol. Without one shape for the call, those land as a flat list of keyword arguments with no rule for which component each belongs to or how it is logged.
+- **One place for the sibling deep dives' parameters.** Each adds parameters to `swarm()`: `budget=Budget(...)`, `result=`, a `final=` chain, `messages(...)` in `channels=`, a later `policy=`, `routes=`, `member(bridged=, input=)`, and an activation-policy protocol. Without one shape for the call, those land as a flat list of keyword arguments with no rule for which component each belongs to or how it is logged.
 
 ## Goals and non-goals
 
@@ -241,7 +241,7 @@ class Member(BaseModel):
     role: str | None = None               # data; given to the controller and in the member's preamble
     count: int = 1                        # members from this record: name-1 ... name-k when count > 1 (factory form only)
     limits: list[Limit] = []              # the member's own limits (limits deep dive); serialised by kind and value
-    # fields the sibling deep dives add: delivery and, after M2, remind (communication), bridged (limits),
+    # fields the sibling deep dives add: after M2, remind (communication), bridged (limits),
     # input (ORBIT)
 
 def build_member(record: Member) -> Agent:  # private: the agent, or record.factory(**record.args); only the runtime calls it
@@ -309,10 +309,10 @@ The two forms:
   ```python
   @agent
   def worker(prompt: str = WORKER_PROMPT) -> Agent:
-      return react(prompt=prompt, tools=[bash(), python(), swarm_tools()], on_continue=swarm_on_continue())
+      return react(prompt=prompt, tools=[bash(), python(), swarm_tools()])
   ```
 
-  `member(worker, args={"prompt": "..."}, count=3)` logs `{"factory": "worker", "args": {"prompt": "..."}, "count": 3, ...}`, and replay looks `worker` up and calls it with that prompt. `member(worker(prompt="..."), name="w")` is the built form, logged as `{"agent": {"type": "agent", "name": "worker", "params": {"prompt": "..."}}, ...}`. In the factory form a builder is a factory like any other, so its body runs once per member per sample, and the hooks and tools it builds are that member's own. The examples below use builders wherever a member has hooks.
+  `member(worker, args={"prompt": "..."}, count=3)` logs `{"factory": "worker", "args": {"prompt": "..."}, "count": 3, ...}`, and replay looks `worker` up and calls it with that prompt. `member(worker(prompt="..."), name="w")` is the built form, logged as `{"agent": {"type": "agent", "name": "worker", "params": {"prompt": "..."}}, ...}`. In the factory form a builder is a factory like any other, so its body runs once per member per sample, and the hooks and tools it builds are that member's own. The examples below use builders wherever a member has hooks or tool sources.
 
 ### Controllers
 
@@ -432,16 +432,16 @@ class Channel:
         return None
 
     # M2 adds the communication deep dive's name, prefix, reach, check() and open(); open() gives a
-    # per-run ChannelState with tools, validate, admit, apply, notice_lines and quiescent.
+    # per-run ChannelState with tools, validate, admit, apply and quiescent.
 
 def swarm_channel(func=None, *, name: str | None = None): ...   # as @swarm_controller, with type "swarm_channel"
 ```
 
-- **Built-ins.** `inspect_swarm/filesystem` (M1) carries the shared-sandbox convention as parameters, for example `filesystem(shared="/shared", notes="notes.md", scratch="/scratch/{member}")`; its `instructions()` states them for each member. It adds instructions only and creates no directories. `scratch` must contain a bare `{member}` field and no other field (`ValueError` at construction otherwise), so each member is given its own directory. M2's first channel with tools is a shared memory routed through the bus, `inspect_swarm/shared_memory` ([swarm-memory-channel.md](swarm-memory-channel.md), D-1 in [swarm-implementation-plan.md](swarm-implementation-plan.md#designs)). `inspect_swarm/messages`, later work, is the communication deep dive's `messages(delivery=, max_bytes=, ...)` as a `@swarm_channel` factory. Later channels (notes, task list, board) are more `@swarm_channel` factories.
+- **Built-ins.** `inspect_swarm/filesystem` (M1) carries the shared-sandbox convention as parameters, for example `filesystem(shared="/shared", notes="notes.md", scratch="/scratch/{member}")`; its `instructions()` states them for each member. It adds instructions only and creates no directories. `scratch` must contain a bare `{member}` field and no other field (`ValueError` at construction otherwise), so each member is given its own directory. M2's first channel with tools is a shared memory routed through the bus, `inspect_swarm/shared_memory` ([swarm-memory-channel.md](swarm-memory-channel.md), D-1 in [swarm-implementation-plan.md](swarm-implementation-plan.md#designs)). `inspect_swarm/messages`, later work, is the communication deep dive's `messages(max_bytes=, ...)` as a `@swarm_channel` factory. Later channels (notes, task list, board) are more `@swarm_channel` factories.
 - **User channels.** In M1 a user channel can only add instructions, which already makes named, sweepable conventions possible: `lockfiles(dir="/shared/locks")`, after the C compiler's lock files, against `filesystem()` alone. From M2 a user channel implements the communication deep dive's operations; the first release calls them experimental ([swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 6).
 - **Per-sample state.** `Channel` objects are shared by concurrent samples, so their state cannot live on them. Inboxes, versions and other run state live on a `ChannelState` the runtime opens per run ([swarm-communication.md](swarm-communication.md#how-channels-plug-into-the-bus)).
 - **No channel, no instructions.** `channels=[]` gives members no channel instructions or swarm tools. The shared sandbox is still shared: what is shared is the sandbox topology's business (swarm.md, [Sandbox topology](swarm.md#sandbox-topology)), not the channel list's.
-- **The name.** The component is called Channels (decision: Ransom, 2026-10-08: "channels is fine for now", so the name may be revisited). inspect_ai's unrelated `AgentChannel`, the per-execution queue that delivers notices, is always called the *agent channel* in these documents, as swarm.md's [The agent channel](swarm.md#the-agent-channel) does. The names compared are in the [appendix](#appendix-why-the-component-is-called-channels).
+- **The name.** The component is called Channels (decision: Ransom, 2026-10-08: "channels is fine for now", so the name may be revisited). inspect_ai's unrelated `AgentChannel`, the per-execution queue that delivers operator messages, is always called the *agent channel* in these documents, as swarm.md's [The agent channel](swarm.md#the-agent-channel) does. The names compared are in the [appendix](#appendix-why-the-component-is-called-channels).
 
 ### Observer
 
@@ -571,10 +571,10 @@ The rule a task author follows is the one `eval_set()`'s error message gives: di
 | Scoring | `reporter` mode, reserved | valid only on controllers with a reporter; `coordinator(lead=...)` defaults to it |
 | Scoring | `baseline(member, result)` | after M2, `swarm(members=member, controller=leaderless(final="first"), channels=[], result=result)`, where `member` is a built agent or a `Member` record, as `members=` takes |
 | Communication | `channels=["filesystem", messages(...)]` | the same call; `messages` is a `@swarm_channel` factory, `"messages"` resolves to it |
-| Communication | `member(delivery=)`; after M2, `member(remind=)` | `member()` fields |
+| Communication | after M2, `member(remind=)` and `member(inject=)`, depending on [swarm-communication.md open question 2](swarm-communication.md#open-questions) | `member()` fields |
 | Communication | `swarm(policy=)` | Not in M2, where sentinel is the only monitor. If the bus hook is later a setting rather than the sentinel adapter, `swarm(policy=)` is the setting of the observer's interception point; a callable, so it is logged by name and varied across arms through a task argument or a registered swarm builder ([Task identity](#task-identity-what-makes-two-arms-distinct)) |
 | Communication | the `Channel` protocol | M2's operations on `Channel`, with per-sample state on a per-run `ChannelState` |
-| Communication | `swarm_tools()`, `swarm_on_continue()`, `swarm_bridged_tools()` | member-side helpers, not `swarm()` arguments; a member using them is a registered member builder, which builds them per member and which the log can name |
+| Communication | `swarm_tools()`, `swarm_bridged_tools()` | member-side helpers, not `swarm()` arguments; a member using them is a registered member builder, which builds them per member and which the log can name |
 | [ORBIT](swarm-orbit.md) | `member(input=, role=)` | `member()` fields; `input` is the default for `SwarmControl.start(input=None)`. ORBIT's `exposure=` is gone: exposure is ORBIT's own observer's ([swarm-orbit.md P3](swarm-orbit.md#p3-exposure)) |
 | [ORBIT](swarm-orbit.md) | `ActivationPolicy`, `SwarmControl`, `MemberHandle` | a controller's `run`, and methods added to these handles |
 | [ORBIT](swarm-orbit.md) | `round_robin(max_rounds=)` | a `@swarm_controller` |
@@ -650,28 +650,28 @@ def leaderless(
 
 `stop_on_submission` (M1, on by default; decision: Ransom, 2026-10-21) is meaningful only with the `first` chain: the first submission is then the answer, so nothing the other members do after it can change it. With `verify` or `vote` in the chain a later member can still change the answer. How the two combine, and the default once the default chain is not `first` alone, is for the post-M2 work to settle; refusing the combination is the likely answer. M2 refuses it with `last`: `leaderless(final="last")` raises `ValueError` unless `stop_on_submission=False`. `stop_on_submission=False` keeps every member running to its end, for tasks whose scorer reads a shared artifact after the drain, arms that measure each member's result (team@k), and agents for which any normal return counts as a submission.
 
-**A coordinator swarm (later: coordinator topologies, on the later messages channel).** A lead and three workers. All start together; workers wait for the lead's instructions with `swarm_wait` ([swarm-wait.md](swarm-wait.md)), and the lead's submission is the answer. Members with hooks and tool sources are registered builders, passed uncalled, so the log can name them and each member gets its own hooks ([Members](#tool-state-and-member-builders)).
+**A coordinator swarm (later: coordinator topologies, on the later messages channel).** A lead and three workers. All start together; workers wait for the lead's instructions with `swarm_wait` ([swarm-wait.md](swarm-wait.md)), and the lead's submission is the answer. Members with tool sources are registered builders, passed uncalled, so the log can name them and each member gets its own tool source ([Members](#tool-state-and-member-builders)).
 
 ```python
 from inspect_ai.agent import Agent, agent, react
 from inspect_ai.tool import bash, python
-from inspect_swarm import coordinator, member, messages, swarm, swarm_on_continue, swarm_tools
+from inspect_swarm import coordinator, member, messages, swarm, swarm_tools
 
 
 @agent
 def lead(prompt: str = LEAD_PROMPT) -> Agent:
-    return react(prompt=prompt, tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
+    return react(prompt=prompt, tools=[bash(), swarm_tools()])
 
 
 @agent
 def worker(prompt: str = WORKER_PROMPT) -> Agent:
-    return react(prompt=prompt, tools=[bash(), python(), swarm_tools()], on_continue=swarm_on_continue())
+    return react(prompt=prompt, tools=[bash(), python(), swarm_tools()])
 
 
 swarm(
     members=[member(lead, name="lead", role="coordinator"), member(worker, name="worker", count=3)],
     controller=coordinator(lead="lead"),
-    channels=["filesystem", messages(delivery="notify")],
+    channels=["filesystem", messages()],
 )
 ```
 
@@ -890,7 +890,7 @@ The names compared for the component that says how members share information:
 
 | Name | For | Against |
 |---|---|---|
-| **Channels** (chosen: decision: Ransom, 2026-10-08, "for now") | The argument (`channels=["filesystem"]`) and the column heading of swarm.md's channel table. ORBIT's vocabulary (channels with readers and writers) and Codex's board. The communication deep dive's `Channel` uses it. swarm.md calls the filesystem an implicit channel. | inspect_ai has an unrelated `AgentChannel`, the per-execution queue that delivers notices. The documents say "agent channel" for that one, as swarm.md's [The agent channel](swarm.md#the-agent-channel) does. |
+| **Channels** (chosen: decision: Ransom, 2026-10-08, "for now") | The argument (`channels=["filesystem"]`) and the column heading of swarm.md's channel table. ORBIT's vocabulary (channels with readers and writers) and Codex's board. The communication deep dive's `Channel` uses it. swarm.md calls the filesystem an implicit channel. | inspect_ai has an unrelated `AgentChannel`, the per-execution queue that delivers operator messages. The documents say "agent channel" for that one, as swarm.md's [The agent channel](swarm.md#the-agent-channel) does. |
 | Comms / communication | Plain; matches the communication deep dive's title. | The filesystem, a task list and a board are shared state more than messages; informal as an API word. |
 | Shared state | Accurate for the filesystem, notes, tasks and board. | Wrong for direct messages, which are not shared. |
 | Commons | Names what members hold in common without implying messaging. | Unfamiliar in eval APIs; one more term to learn. |

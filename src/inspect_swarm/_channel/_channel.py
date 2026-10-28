@@ -92,17 +92,6 @@ class ChannelRun:
     """The swarm's members."""
 
 
-@dataclass(frozen=True)
-class NoticeLine:
-    """A line of a member's notice, which `swarm_on_continue()` adds at the member's turn boundary."""
-
-    text: str
-    """The line: a fixed template whose only variables are counts, swarm-assigned ids and roster names, never anything a member wrote or chose."""
-
-    ids: Mapping[str, JsonValue]
-    """The swarm ids the line names, such as `{"files": [{"file": "f-2", "version": 3, "record": "w-7"}]}`, given as `ids` in the notice's metadata and in its `notified` evidence."""
-
-
 class ChannelState(Protocol):
     """A channel's state in one run of the swarm, which only the bus changes.
 
@@ -142,20 +131,7 @@ class ChannelState(Protocol):
             record: The record.
 
         Returns:
-            The members to notify, and a JSON mapping for the record's `delivered` evidence, or `None`.
-        """
-        ...
-
-    def notice_lines(self, member: str) -> list[NoticeLine]:
-        """The lines of the member's next notice, which they then cover.
-
-        Called at the member's turn boundary, only when the notice will be added, so a line covers what it names: the next call leaves it out until it changes again.
-
-        Args:
-            member: The member the notice is for.
-
-        Returns:
-            The lines, or `[]` when there is nothing new for the member.
+            The members whose own loop the record is news to, given as `notify` in the record's `delivered` evidence, and a JSON mapping for that evidence, or `None`.
         """
         ...
 
