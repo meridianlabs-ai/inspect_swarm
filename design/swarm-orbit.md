@@ -305,7 +305,7 @@ So ORBIT's `model_step` scheduling, and its repeatable conversational `completio
 | `auto` | None for ORBIT's channel | Injection on the later messages channel depends on whether that channel pushes messages at all ([swarm-communication.md](swarm-communication.md#open-questions), open question 2). |
 | Dialogue and activity projections, `peer_messages`, `summary` | None | They put peer text in a conversation outside a tool result, and stay on ORBIT's executor. |
 | Scheduler modes, plans, quanta | ORBIT's `@swarm_controller` driving `activate()` ([P4](#p4-scheduled-mode-the-turn-seam-and-activation)) | `model_step` and `completion` only. |
-| `visibility="step_start"` | `activate(read_cutoff=)` checked against the bus's commit sequence (`delivered.seq`) ([P2](#p2-bus-extensions), [P4](#p4-scheduled-mode-the-turn-seam-and-activation)) | |
+| `visibility="step_start"` | `activate(read_cutoff=)` checked against the bus's commit sequence (the `delivered` event's `delivery.seq`) ([P2](#p2-bus-extensions), [P4](#p4-scheduled-mode-the-turn-seam-and-activation)) | |
 | `max_turns`, halt conditions, hooks | The controller's `run`; its reasons are recorded as `controller:<reason>` | |
 | `sent`, `read`, `model_exposure` | `sent`, `read`, and ORBIT's own `model_exposure` written through `record_exposure()` ([P3](#p3-exposure)) | |
 | ORBIT `notified` (a notice reached a successful input) | `model_exposure` with `notice` set, through `record_exposure()` ([P3](#p3-exposure)) | The swarm has no `notified` kind of its own. |
@@ -360,7 +360,7 @@ Three extensions are needed, and one choice is left to the ORBIT work:
   - A channel therefore declares `recipients: ClassVar[Literal["running", "roster"]] = "running"`. With `"roster"`, step 0 resolves addresses against the roster alone and step 2 skips the recipients' liveness check (the sender's still applies), so pending and ended readers get the record in the channel's state.
   - The `delivered` event records each recipient's state. A pending reader sees the notice at its first boundary after it starts.
   - The bus still refuses every send once the swarm is stopping. The messages channel keeps `"running"`.
-- **The commit sequence.** ORBIT's sequence is the bus's commit sequence, the run-wide number step 4 gives each applied record and writes as `delivered.seq` ([swarm-memory-channel.md Changes to the bus](swarm-memory-channel.md#changes-to-the-bus)), not the number in a record id: ids are given before the policy's `await`, so a record held by the policy can commit after a step-start cutoff with a lower id number, and comparing ids would show it to a reader that started before it existed (decision: Ransom, 2026-10-15).
+- **The commit sequence.** ORBIT's sequence is the bus's commit sequence, the run-wide number step 4 gives each applied record and writes as the `delivered` event's `delivery.seq` ([swarm-memory-channel.md Changes to the bus](swarm-memory-channel.md#changes-to-the-bus)), not the number in a record id: ids are given before the policy's `await`, so a record held by the policy can commit after a step-start cutoff with a lower id number, and comparing ids would show it to a reader that started before it existed (decision: Ransom, 2026-10-15).
   - `Delivery.seq` returns the number to the sender's tool, and `SwarmControl.sequence()` returns the latest one committed, 0 before any ([P4](#p4-scheduled-mode-the-turn-seam-and-activation)).
   - `Bus.sequence()` returns the same number to a channel. Because the bus gives the number before it calls `apply()`, and steps 2 to 4 have no `await`, inside `apply()` it is the applied record's own, so ORBIT's channel stores it with the record in its canonical messages there, before any reader can see the record.
   - Step-start visibility compares a record's stored commit number with the activation's cutoff. `Record` gains no sequence field.
@@ -479,7 +479,7 @@ class MemberHandle(Protocol):                    # swarm-api.md's, plus:
 
 
 class SwarmControl(Protocol):                    # swarm-api.md's, plus:
-    def sequence(self) -> int: ...               # the latest commit sequence (delivered.seq); 0 before any
+    def sequence(self) -> int: ...               # the latest commit sequence (delivery.seq of a delivered event); 0 before any
 
 
 @dataclass(frozen=True)
@@ -812,7 +812,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, with no network and no 
 - **Bus extensions** (`tests/test_bus.py`):
   - a `recipients="roster"` test channel delivers to pending and ended members, and records their states in `delivered`, while the default channel still rejects them;
   - every send is refused once stopping;
-  - the commit sequence increases monotonically across channels in commit order, and `Delivery.seq`, `delivered.seq` and `Bus.sequence()` read inside `apply()` agree; `SwarmControl.sequence()` returns the latest committed;
+  - the commit sequence increases monotonically across channels in commit order, and `Delivery.seq`, the `delivered` event's `delivery.seq` and `Bus.sequence()` read inside `apply()` agree; `SwarmControl.sequence()` returns the latest committed;
   - a record held by a test policy while a later record commits gets the higher commit number, and a read cutoff taken from `SwarmControl.sequence()` between the two commits hides it, although its record id is the lower;
   - a read tool honouring `activation_read_cutoff()` hides later records;
   - `record_read()` called inside a test channel's read tool writes the `read` event in the tool span, returns the read id; the way the observer finds the result message is tested with the option the ORBIT work chooses ([P2](#p2-bus-extensions)).

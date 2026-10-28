@@ -2,7 +2,7 @@
 
 ## Overview
 
-inspect_ai gains two event types, and inspect_swarm writes its evidence with them instead of `InfoEvent`s. A `CommunicationEvent` (`event: "communication"`) records one act of communication between agents: a record sent, a record delivered, a read of shared content, or a wait for others. Its typed fields say who acted, on which channel, with which records, and for a send the record itself (sender, addresses, recipients, content). Producer-specific details, such as the shared memory's file versions, ride in a free-form `data` object, so the type fits any agent communication: inspect_swarm's channels now, and bridged agents' traffic (Codex `agent_message`, Claude Code agent-team messages) later. A `SwarmEvent` (`event: "swarm"`) records the rest of the swarm's evidence: each member's result, the final selection, the ledger and the metrics. It has a `kind`, the `member` it concerns, and versioned `data` whose format inspect_swarm owns, so the ledger and metrics schemas stay out of inspect_ai.
+inspect_ai gains two event types, and inspect_swarm writes its evidence with them instead of `InfoEvent`s. A `CommunicationEvent` (`event: "communication"`) records one act of communication between agents: a record sent, a record delivered, a read of shared content, or a wait for others. Its typed fields say who acted, on which channel and with which records (`record_ids`, the one join from a send to its delivery and the reads of what it changed), and each kind's own details are one typed object: a send's record (sender, addresses, recipients, content) and refusal, a delivery's recipients and order, a wait's channels and outcome. Producer-specific details, such as the shared memory's file versions, ride in a free-form `data` object, so the type fits any agent communication: inspect_swarm's channels now, and bridged agents' traffic (Codex `agent_message`, Claude Code agent-team messages) later. A `SwarmEvent` (`event: "swarm"`) records the rest of the swarm's evidence: each member's result, the final selection, the ledger and the metrics. It has a `kind`, the `member` it concerns, and versioned `data` whose format inspect_swarm owns, so the ledger and metrics schemas stay out of inspect_ai.
 
 The viewer (ts-mono) renders a communication event as one line (who, which channel, what) and a swarm event as a one-line header over collapsed data, keeps both out of the left-nav outline as it keeps info events, and gives each its own toggle in the transcript filter. The work is one inspect_ai PR, one ts-mono PR, and an inspect_swarm PR that switches the writers and readers.
 
@@ -84,7 +84,7 @@ These are the only kinds the code writes. The logs above also have `notified` (1
 
 | | inspect_ai | ts-mono | inspect_swarm |
 |---|---|---|---|
-| `CommunicationEvent` | the event, its record, rejection and wait models; union, schema, condensing, `inspect ctl` | one-line renderer; outline and filter | `sent`, `delivered`, `read`, `waited`; the ledger reads it |
+| `CommunicationEvent` | the event and its send, delivery and wait models; union, schema, condensing, `inspect ctl` | one-line renderer; outline and filter | `sent`, `delivered`, `read`, `waited`; the ledger reads it |
 | `SwarmEvent` | the event; union, schema, condensing, `inspect ctl` | header over collapsed data; outline and filter | `member_result`, `final`, `ledger`, `metrics` |
 
 ### `CommunicationEvent`
@@ -96,54 +96,74 @@ CommunicationKind = Literal["sent", "delivered", "read", "waited"]
 
 
 class CommunicationRecord(BaseModel):
-    """What one agent communicated: a message, or a change to state other agents read."""
+    """For `sent`, what one agent communicated: a message, or a change to state other agents read."""
 
     id: str | None = Field(default=None)
-    """The producer's id for the record, if it has one."""
+    """For `sent`, the producer's id for the record, if it has one."""
 
     kind: str
-    """What the record does in its channel, in the channel's terms (`"message"`, `"create"`, `"append"`)."""
+    """For `sent`, what the record does in its channel, in the channel's terms (`"message"`, `"create"`, `"append"`)."""
 
     sender: str
-    """The name of the agent that sent it."""
+    """For `sent`, the name of the agent that sent it."""
 
     to: list[str] = Field(default_factory=list)
-    """The addresses as written. Empty for an unaddressed record, such as a write to shared state."""
+    """For `sent`, the addresses as written. Empty for an unaddressed record, such as a write to shared state."""
 
     recipients: list[str] = Field(default_factory=list)
-    """The agents the addresses resolved to."""
+    """For `sent`, the agents the addresses resolved to."""
 
     content: str | None = Field(default=None)
-    """The text it carries, or `None` when the producer cannot see it (such as encrypted content)."""
+    """For `sent`, the text it carries, or `None` when the producer cannot see it (such as encrypted content)."""
 
     reply_to: str | None = Field(default=None)
-    """The id of a record this one answers."""
+    """For `sent`, the id of a record this one answers."""
 
 
 class CommunicationRejection(BaseModel):
-    """Why a record that was sent was not delivered."""
+    """For `sent`, why a record that was sent was not delivered."""
 
     control: str
-    """The control that refused it, in the producer's terms (`"rate"`, `"admit"`)."""
+    """For `sent`, the control that refused it, in the producer's terms (`"rate"`, `"admit"`)."""
 
     reason: str
-    """The reason the sender was given."""
+    """For `sent`, the reason the sender was given."""
+
+
+class CommunicationSend(BaseModel):
+    """For `sent`, the record an agent sent, and why it was refused if it was."""
+
+    record: CommunicationRecord
+    """For `sent`, the record."""
+
+    rejected: CommunicationRejection | None = Field(default=None)
+    """For `sent`, why the record was refused; `None` when it was delivered."""
+
+
+class CommunicationDelivery(BaseModel):
+    """For `delivered`, whom a record reached and in what order."""
+
+    recipients: list[str] = Field(default_factory=list)
+    """For `delivered`, the agents it reached."""
+
+    seq: int | None = Field(default=None)
+    """For `delivered`, the delivery's position in the order the producer delivered records, across its channels."""
 
 
 class CommunicationWait(BaseModel):
-    """An agent waiting for other agents."""
+    """For `waited`, an agent waiting for other agents."""
 
     id: str | None = Field(default=None)
-    """The producer's id for the wait."""
+    """For `waited`, the producer's id for the wait."""
 
     channels: list[str] = Field(default_factory=list)
-    """The channels it waited on."""
+    """For `waited`, the channels it waited on."""
 
     outcome: str
-    """What ended it, in the producer's terms (`"news"`, `"timeout"`, `"cancelled"`)."""
+    """For `waited`, what ended it, in the producer's terms (`"news"`, `"timeout"`, `"cancelled"`)."""
 
     duration: float
-    """Seconds from the start of the wait until it ended."""
+    """For `waited`, seconds from the start of the wait until it ended."""
 
 
 class CommunicationEvent(BaseEvent):
@@ -155,7 +175,7 @@ class CommunicationEvent(BaseEvent):
     event: Literal["communication"] = Field(default="communication")
 
     kind: CommunicationKind
-    """`sent`: an agent sent a record, which was delivered or refused (`rejected`). `delivered`: a record reached its channel and recipients. `read`: an agent read what others communicated, or a listing of it. `waited`: an agent waited for others."""
+    """`sent`: an agent sent a record, which was delivered or refused (`send`). `delivered`: a record reached its channel and recipients (`delivery`). `read`: an agent read what others communicated, or a listing of it. `waited`: an agent waited for others (`wait`)."""
 
     source: str
     """What produced the event (`"inspect_swarm"`). It names the owner of `data`."""
@@ -175,39 +195,35 @@ class CommunicationEvent(BaseEvent):
     channel: str | None = Field(default=None)
     """The channel the communication went through. `None` for a wait, whose channels are in `wait`."""
 
-    records: list[str] = Field(default_factory=list)
+    record_ids: list[str] = Field(default_factory=list)
     """The ids of the records the event concerns: the record sent or delivered, or, for `read`, the producer's records for what was read (for the shared memory, each file's last write at the version read). They identify state, not text: a listing or a partial view names a record whose content it did not show."""
 
-    record: CommunicationRecord | None = Field(default=None)
-    """The record, for `sent`."""
+    send: CommunicationSend | None = Field(default=None)
+    """For `sent`, the record and its refusal."""
 
-    rejected: CommunicationRejection | None = Field(default=None)
-    """For `sent`, why the record was refused; `None` when it was delivered."""
-
-    recipients: list[str] = Field(default_factory=list)
-    """For `delivered`, the agents it reached."""
-
-    seq: int | None = Field(default=None)
-    """For `delivered`, the delivery's position in the order the producer delivered records, across its channels."""
+    delivery: CommunicationDelivery | None = Field(default=None)
+    """For `delivered`, the recipients and the delivery's order."""
 
     wait: CommunicationWait | None = Field(default=None)
-    """The wait, for `waited`."""
+    """For `waited`, the wait."""
 
     data: dict[str, JsonValue] = Field(default_factory=dict)
     """Further details in the format `source` defines, such as a channel's operation or the versions of files read."""
 ```
 
-A `model_validator(mode="after")` refuses the shapes no producer writes, so a bug fails at the writer rather than in a reader: `sent` without `record`, or with `records` other than `[record.id]` when the record has an id; `rejected` on any kind but `sent`; `recipients` or `seq` on any kind but `delivered`; `waited` without `wait`, or with a `channel`; `wait` on any other kind; and `sent`, `delivered` or `read` without a `channel`. Log reads run the same validator, so these restrictions are part of the stored format: a future writer that needs a shape refused here needs a reader that accepts it, even with the same event type and kind.
+The fields every kind has (`source`, `agent`, the span ids, `nested`, `channel`, `record_ids`, `data`) are at the top; what only one kind has is in one typed object per kind, named with a noun: `send` for `sent`, `delivery` for `delivered`, `wait` for `waited`, and none for `read`, which has `record_ids` and producer `data` only. `record_ids` is the one join across kinds: a send's id, the same id on its delivery, and the reads of the state it made (decision: Ransom, 2026-10-28). Every docstring of a field or model that one kind uses opens with that kind ("For `sent`, ...").
+
+A `model_validator(mode="after")` refuses the shapes no producer writes, so a bug fails at the writer rather than in a reader: `send` is present exactly when `kind` is `sent`, `delivery` exactly when it is `delivered` and `wait` exactly when it is `waited`, so a `read` has none; `sent`, `delivered` and `read` have a `channel` and `waited` has none; and a `sent` whose record has an id has `record_ids == [send.record.id]`. Log reads run the same validator, so these restrictions are part of the stored format: a future writer that needs a shape refused here needs a reader that accepts it, even with the same event type and kind.
 
 **Why these fields.** The typed fields are those a reader needs without knowing the producer, taken from what the swarm writes and what its ledger, metrics and the viewer read:
 
 - *Who and where*: `agent`, `agent_span_id`, `loop_span_id`, `nested`, `channel`. The swarm's `member`, `span_id`, `loop` and `nested`, renamed for agents in general: a member is the swarm's word, and `span_id` is already `BaseEvent`'s, the span the event is in.
-- *What*: the record of a send, with the fields every message system has (Codex's `agent_message` has an author, a recipient and content; Claude Code's teammate messages a sender, a recipient and text); the ids that join a send to its delivery and a delivery to the reads of the state it made (`records`); a delivery's order (`seq`), which the swarm's critical-path analysis and `swarm_wait`'s `woken_by` use.
+- *What*: the record of a send, with the fields every message system has (Codex's `agent_message` has an author, a recipient and content; Claude Code's teammate messages a sender, a recipient and text); the ids that join a send to its delivery and a delivery to the reads of the state it made (`record_ids`); a delivery's order (`delivery.seq`), which the swarm's critical-path analysis and `swarm_wait`'s `woken_by` use.
 - *Outcome*: a send's rejection, by control, which the metrics count; a wait's channels, outcome and duration, which they total.
 
-Everything the swarm writes beyond these is shared-memory or bus mechanics and stays in `data`, owned by inspect_swarm: the operation and its files, `routed_out`, `wake`, `notify`, a read's files and listing flag, a wait's filters, timeout, idle time, wake-ups and ends. `kind` is a closed literal because the four kinds are the vocabulary readers render and count; a new kind is an inspect_ai change, and older readers would refuse it, like a new event type. Values that are producer vocabulary (`record.kind`, `rejected.control`, `wait.outcome`) are strings.
+Everything the swarm writes beyond these is shared-memory or bus mechanics and stays in `data`, owned by inspect_swarm: the operation and its files, `routed_out`, `wake`, `notify`, a read's files and listing flag, a wait's filters, timeout, idle time, wake-ups and ends. `kind` is a closed literal because the four kinds are the vocabulary readers render and count; a new kind is an inspect_ai change, and older readers would refuse it, like a new event type. Values that are producer vocabulary (`send.record.kind`, `send.rejected.control`, `wait.outcome`) are strings.
 
-**What a bridged producer would write**, for the later mapping, to check the shape (not designed here): a Codex `agent_message` from `explorer` to the parent is a `sent` with `record.sender="explorer"`, `to` and `recipients` the recipient, and `content` the text or `None` when it is encrypted, then a `delivered` when it enters the recipient's input; Codex's `wait` on spawned agents is a `waited`; a Claude Code teammate's mailbox read is a `read`. Each would have its own `source`.
+**What a bridged producer would write**, for the later mapping, to check the shape (not designed here): a Codex `agent_message` from `explorer` to the parent is a `sent` with `send.record.sender="explorer"`, `to` and `recipients` the recipient, and `content` the text or `None` when it is encrypted, then a `delivered` when it enters the recipient's input; Codex's `wait` on spawned agents is a `waited`; a Claude Code teammate's mailbox read is a `read`. Each would have its own `source`.
 
 ### `SwarmEvent`
 
@@ -251,13 +267,13 @@ Both are written with `transcript()._event(event)`, the private, synchronous cal
 | — | `source="inspect_swarm"` |
 | `member`, `span_id`, `loop`, `nested` | `agent`, `agent_span_id`, `loop_span_id`, `nested` |
 | `channel` (sent, delivered, read) | `channel` |
-| sent `record.id`, `kind`, `sender`, `to`, `recipients`, `payload`, `reply_to` | `record.id`, `kind`, `sender`, `to`, `recipients`, `content`, `reply_to`; `records=[record.id]` |
+| sent `record.id`, `kind`, `sender`, `to`, `recipients`, `payload`, `reply_to` | `send.record` with `id`, `kind`, `sender`, `to`, `recipients`, `content`, `reply_to`; `record_ids=[record.id]` |
 | sent `record.channel` | dropped: it is `channel` |
 | sent `record.routed_out`, `op`, `wake`, `sender_span_id`, `tool_span_id` | `data["record"]` with these five keys |
-| sent `rejected` | `rejected` |
-| delivered `record`, `recipients`, `seq` | `records=[record]`, `recipients`, `seq` |
+| sent `rejected` | `send.rejected` |
+| delivered `record`, `recipients`, `seq` | `record_ids=[record]`, `delivery` (`recipients`, `seq`) |
 | delivered `notify`, `result` | `data` |
-| read `files` | `data["files"]` (each file's id, version, last record, line range and `deleted`); `records` the distinct non-null `record` values of `files`, in order: each file's last write at the version read, whether the read was a listing, a partial or full view, or a tombstone |
+| read `files` | `data["files"]` (each file's id, version, last record, line range and `deleted`); `record_ids` the distinct non-null `record` values of `files`, in order: each file's last write at the version read, whether the read was a listing, a partial or full view, or a tombstone |
 | read `read`, `tool_span_id`, `listing` | `data` |
 | waited `wait`, `channels`, `outcome`, `duration` | `wait` (`id`, `channels`, `outcome`, `duration`) |
 | waited `path`, `file_id`, `timeout`, `started`, `idle`, `woken_by`, `files`, `ended` | `data` |
@@ -273,13 +289,13 @@ Both are written with `transcript()._event(event)`, the private, synchronous cal
 
 So `data` for the ledger and metrics is the store entry itself, and `SwarmLedger.model_validate(event.data)` reads it. The versions stay 1: the event type tells the new format apart from the `InfoEvent`s, and the rule that the evidence `version` tracks the payload's shape, not the tools' texts (decision: Ransom, 2026-10-23), applies to `data`. The swarm writes no `InfoEvent` after the switch.
 
-The private helpers become two: `_comm(kind, *, agent, agent_span_id, loop, nested, channel, data, **typed)` builds and writes a `CommunicationEvent`, and `swarm_event(kind, *, member, version=1, **data)` replaces `evidence()` for `_control.py:599` and `_final.py:113`. A typed field the validator refuses raises at the writer, which a test of each kind catches.
+The private helpers become two: `_comm(kind, *, agent, agent_span_id, loop, nested, channel, data, **typed)` (`typed` being `record_ids` and the kind's `send`, `delivery` or `wait`) builds and writes a `CommunicationEvent`, and `swarm_event(kind, *, member, version=1, **data)` replaces `evidence()` for `_control.py:599` and `_final.py:113`. A typed field the validator refuses raises at the writer, which a test of each kind catches.
 
 ### How inspect_swarm reads them
 
 `EventLog.__call__` (`_ledger.py:318-326`) matches `isinstance(event, CommunicationEvent) and event.source == "inspect_swarm"` and builds the same records from typed fields:
 
-- `CommRecord`: `kind`, `member=event.agent`, `channel`, `record=event.records[0]` for `sent` and `delivered` (else `None`), `rejected=event.rejected.control` if rejected, `payload_bytes` from `utf8_bytes(event.record.content)` for an accepted `sent` (a rejected payload is still not measured, since it can hold text no UTF-8 encoder takes), and `listing=event.data.get("listing") is True`.
+- `CommRecord`: `kind`, `member=event.agent`, `channel`, `record=event.record_ids[0]` for `sent` and `delivered` (else `None`), `rejected=event.send.rejected.control` if rejected, `payload_bytes` from `utf8_bytes(event.send.record.content)` for an accepted `sent` (a rejected payload is still not measured, since it can hold text no UTF-8 encoder takes), and `listing=event.data.get("listing") is True`.
 - `WaitRecord`: `member=event.agent`, `outcome=event.wait.outcome`, `duration=event.wait.duration`, `idle=event.data["idle"]`.
 
 `_comm_metrics` and `_waits` read these records and do not change. Matching on `source` keeps other producers' communication (a later bridged member's, or another library's) out of the swarm's metrics, as the source check does today. `swarm_ledger()` and the analysis columns read the store and do not change.
@@ -288,12 +304,12 @@ The private helpers become two: `_comm(kind, *, agent, agent_span_id, loop, nest
 
 All in ts-mono, in the files `ReviewEvent` is wired into, which are the ones a new type touches:
 
-- **Types.** Regenerate `packages/inspect-common/src/types/generated.ts` from inspect_ai's schema and add the aliases (`CommunicationEvent`, `CommunicationRecord`, `CommunicationRejection`, `CommunicationWait`, `SwarmEvent`) in `packages/inspect-common/src/types/index.ts`; add both to the hand-kept unions (`IC/types.ts` `EventType` and `eventTypeValues`, `apps/inspect/src/app/types.ts`, `apps/inspect/src/client/api/types.ts`), the scout debug tree's exhaustive switch (`apps/scout/src/app/transcript/debugEventTree.ts:117`), the test factories (`packages/inspect-common/src/testing/index.ts`), `eventTitle` (`IC/event/utils.ts`) and `extractEventFields` (`IC/eventText.ts`), so search and copy include a record's content and the swarm event's kind and member.
+- **Types.** Regenerate `packages/inspect-common/src/types/generated.ts` from inspect_ai's schema and add the aliases (`CommunicationEvent`, `CommunicationRecord`, `CommunicationRejection`, `CommunicationSend`, `CommunicationDelivery`, `CommunicationWait`, `SwarmEvent`) in `packages/inspect-common/src/types/index.ts`; add both to the hand-kept unions (`IC/types.ts` `EventType` and `eventTypeValues`, `apps/inspect/src/app/types.ts`, `apps/inspect/src/client/api/types.ts`), the scout debug tree's exhaustive switch (`apps/scout/src/app/transcript/debugEventTree.ts:117`), the test factories (`packages/inspect-common/src/testing/index.ts`), `eventTitle` (`IC/event/utils.ts`) and `extractEventFields` (`IC/eventText.ts`), so search and copy include a record's content and the swarm event's kind and member.
 - **Filter labels.** `eventTypes` (`hooks.ts:11`) gains `communication: "Communication"` and `swarm: "Swarm"`. Neither is hidden by default: the point is to see the swarm's communication, and to be able to hide it alone.
 - **`CommunicationEventView`** (`IC/CommunicationEventView.tsx`), an `EventRow` like `ReviewEventView`, one line per event:
-  - `sent`: `counter-6 → shared_memory: create (w-1)`, then `to b, c` when addressed, then the first line of `record.content`, truncated; a rejected send shows `refused (rate)` styled as a refusal, with the reason inline.
-  - `delivered`: `counter-6 → shared_memory: delivered w-1 (#1)`, and `to b, c` when `recipients` is not empty.
-  - `read`: `counter-2 ← shared_memory: read w-4` for a view, with `(lines 3-8)` for a partial one and `(deleted)` for a tombstone; `listed 3 files` for a listing; `read (nothing)` with no records. The line reads the optional `data` keys `listing` and `files` (each entry's `lines` and `deleted`), which the shared memory writes; a producer without them gets `read` and its `records`.
+  - `sent`: `counter-6 → shared_memory: create (w-1)`, then `to b, c` when addressed, then the first line of `send.record.content`, truncated; a rejected send shows `refused (rate)` styled as a refusal, with the reason inline.
+  - `delivered`: `counter-6 → shared_memory: delivered w-1 (#1)`, and `to b, c` when `delivery.recipients` is not empty; the number is `delivery.seq`.
+  - `read`: `counter-2 ← shared_memory: read w-4` for a view, with `(lines 3-8)` for a partial one and `(deleted)` for a tombstone; `listed 3 files` for a listing; `read (nothing)` with no records. The line reads the optional `data` keys `listing` and `files` (each entry's `lines` and `deleted`), which the shared memory writes; a producer without them gets `read` and its `record_ids`.
   - `waited`: `counter-5 waited 4.2s on shared_memory: news`.
   - `nested` adds `(subagent)` after the agent's name. Clicking the row expands the whole event (typed fields and `data`) as a `JSONPanel`. Content is rendered as plain text, never Markdown ([Security](#security)).
 - **`SwarmEventView`** (`IC/SwarmEventView.tsx`), an `EventPanel` titled `Swarm: <kind>` with `member` beside it when set and `data` as a collapsed `JSONPanel`, as `InfoEventView` renders a payload. It knows no kind: inspect_swarm's formats change without a ts-mono PR.
@@ -305,11 +321,11 @@ All in ts-mono, in the files `ReviewEvent` is wired into, which are the ones a n
 
 ### inspect_ai changes besides the events
 
-- **The union.** `CommunicationEvent` and `SwarmEvent` join `Event` (`_event.py`), and `tests/log/test_event_discriminator.py` counts 27 members. `event/__init__.py` exports the two events and `CommunicationKind`, `CommunicationRecord`, `CommunicationRejection` and `CommunicationWait`.
-- **Condensing.** `walk_event` (`_condense.py:991`) gets `walk_communication_event`, which passes `record.content` and `rejected.reason` through `content_fn` and `data` through `walk_json_value`, and `walk_swarm_event`, which passes `data` through `walk_json_value`, so large payloads and refusal reasons become attachments, and repeated ones share one, as they do in `InfoEvent`s today. Resolving attachments uses the same walker, so it restores the same fields.
+- **The union.** `CommunicationEvent` and `SwarmEvent` join `Event` (`_event.py`), and `tests/log/test_event_discriminator.py` counts 27 members. `event/__init__.py` exports the two events and `CommunicationKind`, `CommunicationRecord`, `CommunicationRejection`, `CommunicationSend`, `CommunicationDelivery` and `CommunicationWait`.
+- **Condensing.** `walk_event` (`_condense.py:991`) gets `walk_communication_event`, which passes `send.record.content` and `send.rejected.reason` through `content_fn` and `data` through `walk_json_value`, and `walk_swarm_event`, which passes `data` through `walk_json_value`, so large payloads and refusal reasons become attachments, and repeated ones share one, as they do in `InfoEvent`s today. Resolving attachments uses the same walker, so it restores the same fields.
 - **`inspect ctl`.** `HIGH_SIGNAL_EVENT_TYPES` gains `communication` and `swarm`, since `info`, where the evidence was, is in it. The compact projection and the terminal summary get a branch for each, as `info` has, so the evidence does not shrink to the common header when it leaves `InfoEvent`:
-  - `_project` (`src/inspect_ai/_control/events.py:490`), metadata tier: for `communication`, `source`, `kind`, `agent`, `nested`, `channel`, `records`, `recipients`, `seq`, the rejecting `control` (as `rejected`), and the wait's `channels`, `outcome` and `duration` (as `channels`, `outcome` and `duration`), all names, ids, numbers and producer vocabulary; for `swarm`, `kind`, `member` and `version`. Content tier (`content=True`), truncated with `_truncate` as `info`'s `data` is: the record's `content`, the rejection `reason` and `data` for `communication`, and `data` for `swarm`, since each can hold model text. `full` returns the raw event, as for every type.
-  - `_event_summary` (`src/inspect_ai/_cli/ctl/_render.py:475`): `communication` as `agent → channel: kind records` (`agent waited on <channels>: outcome` for a wait, from the projected `channels`, `outcome` and `duration`), then the content when projected; `swarm` as `kind · member`, then `data` when projected. Every field goes through `_sanitize_control` at its interpolation site, as the other branches do.
+  - `_project` (`src/inspect_ai/_control/events.py:490`), metadata tier: for `communication`, `source`, `kind`, `agent`, `nested`, `channel`, `record_ids`, the delivery's `recipients` and `seq` (as `recipients` and `seq`), the rejecting `send.rejected.control` (as `rejected`), and the wait's `channels`, `outcome` and `duration` (as `channels`, `outcome` and `duration`), all names, ids, numbers and producer vocabulary; for `swarm`, `kind`, `member` and `version`. Content tier (`content=True`), truncated with `_truncate` as `info`'s `data` is: `send.record.content` (as `content`), `send.rejected.reason` (as `reason`) and `data` for `communication`, and `data` for `swarm`, since each can hold model text. `full` returns the raw event, as for every type.
+  - `_event_summary` (`src/inspect_ai/_cli/ctl/_render.py:475`): `communication` as `agent → channel: kind record_ids` (`agent waited on <channels>: outcome` for a wait, from the projected `channels`, `outcome` and `duration`), then the content when projected; `swarm` as `kind · member`, then `data` when projected. Every field goes through `_sanitize_control` at its interpolation site, as the other branches do.
 - **Textual display.** A one-line renderer for each type in `_renderers`, as `ReviewEvent` has. Note for the inspect_ai PR's review: the line shows event strings (record content, rejection reasons, producer data) as literal text, through Rich `Text` or escaping as the Sentinel renderer does, never interpolated into markup as `ReviewEvent`'s is, with a test that markup-looking text such as `[/red]` renders unchanged.
 - **Docs.** `docs/reference/inspect_ai.event.qmd` lists both.
 - **Schema.** `python src/inspect_ai/_view/schema.py` regenerates `inspect-openapi.json` and ts-mono's generated types; the PR lands with the ts-mono PR by inspect_ai's two-phase gitlink procedure.
@@ -318,6 +334,7 @@ All in ts-mono, in the files `ReviewEvent` is wired into, which are the ones a n
 
 - **Keep the non-communication evidence as `InfoEvent`s.** Rejected by Ransom (2026-10-27): satellite packages already have event types, and a filter that shows only the types a sample has (a separate change) keeps the list from growing for everyone else.
 - **One swarm event for everything, communication included.** Simpler in inspect_ai, but communication is the evidence other producers share, and the one the viewer renders per kind; a swarm-owned `data` gives it no typed fields to render or count.
+- **Kind-specific fields at the top level** (`record`, `rejected`, `recipients`, `seq` beside `wait`). One level less to read, but `record` and the id list read as singular and plural of one thing, a reader cannot tell which fields a kind has, and the validator needs a rule per field. One object per kind, as `wait` was, says both in the type (decision: Ransom, 2026-10-28).
 - **Typing every communication field.** The shared memory's files, operations and wait filters would become inspect_ai schema that no other producer writes, and each channel's change an upstream PR. `data` keeps them with their owner.
 - **`kind: str` on `CommunicationEvent`.** New kinds without an inspect_ai change, but readers could not rely on the vocabulary, and the viewer's per-kind lines would need a fallback anyway. The four kinds are general (ORBIT uses three of them); a fifth is rare enough to be an inspect_ai change.
 - **A typed ledger and metrics in inspect_ai.** Discussed under [`SwarmEvent`](#swarmevent).
@@ -330,7 +347,7 @@ All in ts-mono, in the files `ReviewEvent` is wired into, which are the ones a n
 - **New logs and old readers.** A log with a `CommunicationEvent` or `SwarmEvent` cannot be read by an inspect_ai or viewer that predates them: the discriminated union rejects the unknown `event` value, and with it the log. inspect_ai has accepted this cost for each new type (sentinel, review, checkpoint, branch, anchor, compaction events). It applies to every swarm log written after the switch, a swarm of one included.
 - **Old logs and the new inspect_swarm.** Logs written before the switch keep their `InfoEvent`s and still open in every viewer. What they lose: inspect_swarm's tests, docs and helpers no longer describe their evidence, a reader written against the new types finds none in them, and the viewer's compact lines and the new toggles do not apply to them. inspect_swarm itself reads nothing back from old logs' events: `swarm_ledger()` and the analysis columns read the store entries, whose format does not change. No compatibility path is provided, as the format is experimental ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6).
 - **inspect_swarm's dependency.** The switch needs an inspect_ai with the new events in `src/`, so the floor rises to the release that has them, or, until it is released, `pyproject.toml` points at inspect_ai `main` by git reference as `AGENTS.md` allows.
-- **Public API.** inspect_ai adds the two events and four models to `inspect_ai.event`, marked experimental. inspect_swarm renames its controller alias `SwarmEvent` to `ControlEvent` ([`SwarmEvent`](#swarmevent)); code that imports `SwarmEvent` from `inspect_swarm` breaks and must import `ControlEvent`, while code that tests `MemberEnded` does not change. The switch PR is marked breaking (`feat!:`) so the release notes name the rename. Its documented log format changes.
+- **Public API.** inspect_ai adds the two events and six models to `inspect_ai.event`, marked experimental. inspect_swarm renames its controller alias `SwarmEvent` to `ControlEvent` ([`SwarmEvent`](#swarmevent)); code that imports `SwarmEvent` from `inspect_swarm` breaks and must import `ControlEvent`, while code that tests `MemberEnded` does not change. The switch PR is marked breaking (`feat!:`) so the release notes name the rename. Its documented log format changes.
 - **Scout.** inspect_scout's event filters list types by literal (`src/inspect_scout/_transcript/types.py`, `_scanner/filter.py`, `_scanner/validate.py`), so a scanner cannot ask for the new types until Scout adds them; scanners that take all events see them. Its viewer copy of the generated types needs nothing for a new type.
 - **ORBIT.** The port design's viewer change reads the swarm's `CommunicationEvent`s and its `model_exposure` `SwarmEvent`s, beside ORBIT's own `InfoEvent`s ([swarm-orbit.md](swarm-orbit.md#compatibility-and-migration)).
 
@@ -346,7 +363,7 @@ All in ts-mono, in the files `ReviewEvent` is wired into, which are the ones a n
 inspect_ai (mockllm, no network or Docker):
 
 - `tests/log/test_event_discriminator.py`: the member count.
-- `tests/log/test_swarm_events.py` (new): a round trip of each new event through `EvalLog` JSON and the `.eval` format; each kind's valid shape constructs and each refused shape the validator names raises `ValueError` (table-driven); a long `record.content`, a long `rejected.reason` (two events with the same reason share one attachment) and a long string in either event's `data` become attachments and resolve back.
+- `tests/log/test_swarm_events.py` (new): a round trip of each new event through `EvalLog` JSON and the `.eval` format; each kind's valid shape constructs and each refused shape the validator names raises `ValueError` (table-driven); a long `send.record.content`, a long `send.rejected.reason` (two events with the same reason share one attachment) and a long string in either event's `data` become attachments and resolve back.
 - `tests/_control/test_events.py`: the high-signal set, and `_project` of each new type, a `waited` event included (its `channels`, `outcome` and `duration` at both tiers), at the metadata tier (no `content`, `reason` or `data`), the content tier (those fields, truncated) and `full`. The ctl render tests: `_event_summary` of each type from both tiers, the wait line naming its channels, with a control sequence in an agent-written field sanitized.
 - The schema check CI already runs (`check-schema-and-types`).
 
@@ -360,7 +377,7 @@ inspect_swarm (mockllm, asyncio and trio):
 
 - `tests/swarm_runtime.py` gets `comm_events(transcript, kind)` and `swarm_events(transcript, kind)`, returning the typed events, in place of `evidence()`, and the thirteen test files under [Who reads it](#who-reads-it) match `CommunicationEvent` and `SwarmEvent` and assert typed fields and `data` keys instead of payload keys.
 - `tests/test_comm_evidence.py`: one run writes each kind with every field of the mapping table, and the swarm writes no `InfoEvent` with source `inspect_swarm`.
-- `tests/test_shared_memory.py`: the `read` event of a listing, a partial view, a full view of a file written twice and a tombstone, each with `records` the last write at the version read and `data` with `listing` and each file's `lines` and `deleted`.
+- `tests/test_shared_memory.py`: the `read` event of a listing, a partial view, a full view of a file written twice and a tombstone, each with `record_ids` the last write at the version read and `data` with `listing` and each file's `lines` and `deleted`.
 - The ledger and metrics tests pass unchanged in what they assert: the metrics computed from the new events equal those from the same scripted run's expectations today.
 - `tests/test_metrics.py`: a member timeline contains its members' `CommunicationEvent`s and `member_result`, and the ledger's `SwarmEvent.data` validates as `SwarmLedger` and equals the store entry.
 
