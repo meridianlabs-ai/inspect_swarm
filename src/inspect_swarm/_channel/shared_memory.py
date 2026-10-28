@@ -44,7 +44,7 @@ _FILE_ID = re.compile(r"f-[1-9][0-9]{0,13}")
 # results
 _MEMBER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,47}")
 
-# at most this many file ids in a status line or wait result
+# at most this many file ids in a status line that ends a result, or in a wait result
 _LISTED_IDS = 10
 
 # a loop key that is no loop's agent span, for a member whose own loop has not called
@@ -56,7 +56,7 @@ _INSTRUCTIONS = (
     "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them. "
     "Every shared_memory result ends with a status line that names the files other agents changed since you last viewed them, by ids such as f-3, which the view command takes as its file_id. "
     "View a file in its current version before you overwrite it with create, insert into it, rename it or delete it. "
-    "To check what other agents changed without viewing anything, use the changes command, which returns that line alone. "
+    f"To check what other agents changed without viewing anything, use the changes command, which returns that line alone and names every changed file, where the status line names at most {_LISTED_IDS}. "
     "To wait for another member's work, call swarm_wait rather than polling."
 )
 
@@ -69,7 +69,7 @@ _DESCRIPTION = (
     "Use insert only when the position matters. "
     "Write commands return a short acknowledgment, not the file; view a file to see it. "
     "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view takes as its file_id. "
-    "The changes command returns that list alone: use it to check what other agents changed without viewing anything."
+    f"The changes command returns that list alone and names every changed file, where a result names at most {_LISTED_IDS}: use it to check what other agents changed without viewing anything."
 )
 
 
@@ -118,7 +118,7 @@ def shared_memory(
 ) -> Channel:
     """A board of files that every member of the swarm, and their subagents, read and write.
 
-    Each member gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` over files under `/shared_memory`. Every write goes through the swarm's bus as a record from the member that made it. A view shows a file inside a fence that names its last writer and version, and lists of changed files name them by ids such as `f-3`, which `view` takes as its `file_id`. A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `append` needs no view: it adds text on a new line at the end of a file, creating the file if it does not exist. `changes` returns only the list of files other agents changed since the loop last viewed them, which ends every result.
+    Each member gets a `shared_memory` tool with the commands and parameters of inspect_ai's `memory()` over files under `/shared_memory`. Every write goes through the swarm's bus as a record from the member that made it. A view shows a file inside a fence that names its last writer and version, and lists of changed files name them by ids such as `f-3`, which `view` takes as its `file_id`. A loop must view a file in its current version before it overwrites it with `create`, inserts into it, renames it or deletes it. `append` needs no view: it adds text on a new line at the end of a file, creating the file if it does not exist. `changes` returns only the list of files other agents changed since the loop last viewed them, which ends every result. That list names at most 10 files at the end of a result, and every file in `changes`.
 
     A fence is a label for the reader, not a protection: a member can write text that looks like a fence, another member's file or a status line.
 
@@ -528,7 +528,7 @@ class _SharedMemoryState:
             self._top[member] = loop
         if command == "changes":
             return (
-                self._status_line(loop)
+                self._status_line(loop, None)
                 or "Shared memory: no files changed since you last viewed them."
             )
         if command == "view":
@@ -944,7 +944,12 @@ class _SharedMemoryState:
             return False
         return not f.deleted or f.id in seen
 
-    def _labels(self, loop: str | None, files: Sequence[_BoardFile]) -> str:
+    def _labels(
+        self,
+        loop: str | None,
+        files: Sequence[_BoardFile],
+        listed: int | None = _LISTED_IDS,
+    ) -> str:
         seen = self._seen.get(loop, {})
         labels = [
             f"{f.id} deleted"
@@ -954,13 +959,15 @@ class _SharedMemoryState:
             else f.id
             for f in files
         ]
-        return _id_list(labels, len(files))
+        return _id_list(labels, listed)
 
-    def _status_line(self, loop: str | None) -> str | None:
+    def _status_line(
+        self, loop: str | None, listed: int | None = _LISTED_IDS
+    ) -> str | None:
         files = [f for f in self._files.values() if self._is_news(loop, f)]
         if not files:
             return None
-        return _status(len(files), self._labels(loop, files))
+        return _status(len(files), self._labels(loop, files, listed))
 
 
 def _by_others(f: _BoardFile, loop: str | None) -> tuple[int, str | None]:
@@ -1092,10 +1099,11 @@ def _files_changed(count: int) -> str:
     return f"{count} files changed since you last viewed them"
 
 
-def _id_list(labels: Sequence[str], count: int) -> str:
-    listed = ", ".join(labels[:_LISTED_IDS])
-    more = count - min(count, _LISTED_IDS)
-    return f"{listed}, and {more} more" if more else listed
+def _id_list(labels: Sequence[str], listed: int | None) -> str:
+    shown = labels if listed is None else labels[:listed]
+    more = len(labels) - len(shown)
+    text = ", ".join(shown)
+    return f"{text}, and {more} more" if more else text
 
 
 def _status(count: int, labels: str) -> str:

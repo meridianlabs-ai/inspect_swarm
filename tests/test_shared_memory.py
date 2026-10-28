@@ -464,6 +464,22 @@ async def test_an_append_is_news_to_peers(existing: bool) -> None:
 
 
 @pytest.mark.anyio
+async def test_changes_names_every_file_a_status_line_counts() -> None:
+    async with _board() as (board, _):
+        for n in range(12):
+            await board("w-1", "create", path=_p(f"{n}.md"), file_text="x")
+        created = await board("w-2", "create", path=_p("own.md"), file_text="x")
+        listed = ", ".join(f"f-{n} new" for n in range(1, 11))
+        assert created.split("\n")[-1] == (
+            f"Shared memory: 12 files changed since you last viewed them ({listed}, and 2 more)."
+        )
+        every = ", ".join(f"f-{n} new" for n in range(1, 13))
+        assert await board("w-2", "changes") == (
+            f"Shared memory: 12 files changed since you last viewed them ({every})."
+        )
+
+
+@pytest.mark.anyio
 async def test_positional_arguments_keep_their_places() -> None:
     # `append_text` and `file_id` come after every parameter the tool had before them
     async with _board() as (board, _):

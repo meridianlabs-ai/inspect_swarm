@@ -60,8 +60,8 @@ The `shared_memory` tool's commands are `view`, `create`, `str_replace`, `insert
 - Each file has an id, such as `f-3`, which it keeps through renames. Status lines and `swarm_wait` results name files by id. `view` takes an id as `file_id`, in place of `path`. A view shows the file's path, which the write commands take.
 - A file view shows the file inside a `<peer_file>` fence that names its id, path, version and last writer. A directory view lists every file under it at any depth, with its id, version and last writer.
 - Write commands return a short acknowledgment, not the file. View a file to see it.
-- Every result ends with a status line naming the files other agents changed since this loop last viewed them, such as `Shared memory: 2 files changed since you last viewed them (f-2, f-9).`
-- `changes` returns that status line alone, or `Shared memory: no files changed since you last viewed them.`, so a loop can check for news without viewing anything. Like the status line, it marks nothing seen.
+- Every result ends with a status line naming the files other agents changed since this loop last viewed them, such as `Shared memory: 2 files changed since you last viewed them (f-2, f-9).` It names at most 10 files and counts the rest, as in `(f-1, ..., f-10, and 2 more)`.
+- `changes` returns that status line alone, naming every changed file, or `Shared memory: no files changed since you last viewed them.`, so a loop can check for news without viewing anything. Like the status line, it marks nothing seen.
 
 ### Fences are labels
 
@@ -88,7 +88,7 @@ Two commands need no view:
 The swarm adds no messages to a member's conversation. A member learns what other agents changed only through its tools:
 
 - The status line that ends every `shared_memory` result.
-- `shared_memory(command="changes")`, which returns the status line alone, to check for changes without viewing anything.
+- `shared_memory(command="changes")`, which returns the status line alone, naming every changed file, to check for changes without viewing anything.
 - `swarm_wait`, which blocks until a file the member watches changes ([Waiting for other members](#waiting-for-other-members)).
 
 A changed file stays in the status line until the loop views it. A deleted file is listed only to a loop that previously viewed or wrote it, including a blind append. These lists hold counts, file ids and member names, never a file path or file contents.
