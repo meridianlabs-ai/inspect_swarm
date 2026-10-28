@@ -215,7 +215,7 @@ All tests use mockllm with scripted outputs, need no network or Docker, and run 
   - It is written at start with every member `pending` and updated on each start and end.
   - Statuses are the limits deep dive's, and `submitted` is true only for `submitted`.
   - A controller that starts only some members leaves the rest `pending`.
-  - The `member_result` and `final` events carry `version`, `type`, `kind`, `member` and `span_id`, and no member text.
+  - The `member_result` and `final` events follow the result-event mapping in [swarm-event-types.md](swarm-event-types.md#how-inspect_swarm-writes-them) and contain no member output text.
 - **The returned state.** Its `output` is the chosen member's `ModelOutput`, unchanged. Its messages are the sample's input plus the final message with its metadata.
 - **Existing scorers unchanged** (`tests/test_task_scorers.py`):
   - a task with `match()` scores the swarm's first submission;
