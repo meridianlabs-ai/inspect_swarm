@@ -114,7 +114,9 @@ class TurnGate(Protocol):
     async def before_turn(
         self, channel: AgentChannel, messages: Sequence[ChatMessage], state: AgentState | None
     ) -> list[ChatMessage] | None: ...
-    def redirect_wait(self, channel: AgentChannel) -> AbstractAsyncContextManager[None]: ...   # around after_cancel()'s wait
+    def redirect_wait(
+        self, channel: AgentChannel, messages: Sequence[ChatMessage], state: AgentState | None
+    ) -> AbstractAsyncContextManager[None]: ...   # around after_cancel()'s wait
 
 @contextmanager
 def turn_gate(gate: TurnGate | None) -> Iterator[None]: ...   # the gate for channels opened in the block
@@ -204,11 +206,15 @@ A callback returning `"end"` is the same as `end()` with its own origin, without
   - Any other list: a rewrite. `before_turn()` assigns it in place (`messages[:] = result`), so the caller's list, which react extends and keeps, holds it, and marks the channel rewritten. If `messages` is not a `list`, it raises `TypeError` saying that a gate that rewrites the conversation needs the loop's own message list.
 
   Either way a limited list checks the message limit for the growth. An exception the gate raises propagates from `before_turn()`. Then it drains the queue and returns the operator's messages as today, so an operator's message posted during a hold reaches the turn it was meant for.
-- **`after_cancel(messages)`** keeps its contract: it returns the repairs for the interrupted calls and then the operator's redirect, and never returns without a redirect, so no generation follows an interrupt before the operator speaks. When its channel has a gate and no redirect is queued, it awaits the redirect inside `gate.redirect_wait(channel)`. An exception that leaves that block, such as the gate ending the member, propagates from `after_cancel()` after it has appended the repairs to `messages` in place, so the conversation the member ends with answers every tool call. With a redirect already queued it does not wait and does not enter the block. Both react loops call it the same way (`_react.py:368-373`, `:550-552`), so both are covered.
+- **`after_cancel(messages, state=None)`** gains the same keyword argument as `before_turn()`, and both react loops pass the state they hold when the interrupt is caught (`ch.after_cancel(state.messages, state=state)`), which may be a custom model agent's fresh state that no boundary has seen yet (`_react.py:271-273`, `:368-373`, `:511-513`, `:550-552`). It returns the repairs for the interrupted calls and then the operator's redirect. Without a gate it behaves exactly as today. With a gate:
+  - With a redirect already queued it does not wait and does not call the gate.
+  - Otherwise it enters `gate.redirect_wait(channel, messages, state)` once and receives inside it until a `UserMessage` arrives: a batch of `Cancel` items alone (a second interrupt while no turn scope is bound, which `_interrupt()` posts as a plain item, `channel.py:164-180`, and which `coalesce()` drops) is kept and does not end the wait, so the gated path never returns without a redirect and no generation follows an interrupt before the operator speaks. Today's single `_recv()` returns on any item (`channel.py:377-390`, `:455-479`); the ungated path keeps that.
+  - An exception that leaves the block, such as the gate ending the member, propagates from `after_cancel()` after it has put the repairs at the end of `messages` with the base `list.extend`, so the conversation the member ends with answers every tool call. That append is terminal bookkeeping for a conversation that is never sent to another generation, so it skips the message-limit check a limited list makes on growth (`src/inspect_ai/util/_limited_conversation.py:25-28`); otherwise a member already at its message cap would raise the message limit's error there, leave the conversation unrepaired and mask the exception that ended it. The exception that propagates is always the one that left the block.
+  - On the ordinary path, when the redirect arrives, the repairs and the redirect are returned and react appends them under the limit check, as today.
 
 **The compaction reset.** The handler that `compaction()` returns gains `reset(prefix)`, also added to the `Compact` protocol: it clears the handler's kept input, the ids it has folded in, its token baseline and its memory-warning flag, in place so that a checkpointer tracking that state keeps tracking it, and replaces its prefix. After `before_turn()`, both react loops check whether the channel was marked rewritten (a private read that clears the mark), and if so call `compact.reset()` with the prefix derived from the new conversation, as `_agent_compact()` derives it. The next `compact_input()` then starts from the rewritten conversation: below the threshold it sends it as it is; above, it compacts it, which for a summary strategy is another model call. An append needs no reset, since the handler adds messages it has not seen.
 
-Without a gate nothing changes: no `react()` behaviour, ACP, log-schema or public API change beyond `reset()` and `before_turn()`'s optional `state`.
+Without a gate nothing changes: no `react()` behaviour, ACP, log-schema or public API change beyond `reset()` and the optional `state` of `before_turn()` and `after_cancel()`.
 
 ### The member's gate
 
@@ -222,7 +228,7 @@ Each member's run gets one `MemberGate` (new module `src/inspect_swarm/_seam.py`
 
 `swarm_tools()` keeps binding `MemberContext.loop` when it resolves first, and now also sets a separate `MemberContext.tools` flag, which the `tools_unwired` check reads instead of the binding, so that check is unchanged. Binding happens once per member run and is never undone.
 
-**The loop's state.** At every boundary of the own loop the gate keeps a reference to the `AgentState` the loop passed, the loop's live object. When the member's agent raises rather than returns (an end at a boundary, a limit, an error), the member wrapper takes the member's output from that state rather than from the state it called the agent with, which a custom model agent's fresh state may have left behind; without a boundary it uses the state it called the agent with, as today.
+**The loop's state.** At every boundary of the own loop, and on entering every redirect wait of it, before it can wait or end the member, the gate keeps a reference to the `AgentState` the loop passed, the loop's live object. When the member's agent raises rather than returns (an end at a boundary or in a redirect wait, a limit, an error), the member wrapper takes the member's output and conversation from that state rather than from the state it called the agent with, which a custom model agent's fresh state may have left behind; without a boundary it uses the state it called the agent with, as today.
 
 **At each boundary of the own loop:**
 
@@ -236,10 +242,12 @@ Each member's run gets one `MemberGate` (new module `src/inspect_swarm/_seam.py`
 
 After an operator interrupts a member's turn (through ACP), react waits in `after_cancel()` for the operator's redirect, with the turn's calls already cancelled, before it reaches the next boundary. For the own loop, the gate's `redirect_wait()` makes that wait a hold the runtime knows about:
 
+- It first keeps the loop's state ([The loop's state](#the-members-gate)), so a member ended here is recorded with the latest output and the repaired conversation, even when a custom model agent's fresh state has not reached a boundary.
 - If the swarm is stopping, or `end()` was called, it ends the member at once, before waiting; the repairs are kept, as above.
 - Otherwise it marks the member held, pauses its time limit, rechecks the swarm's waits, and lets the wait run in a cancel scope of the gate's own, which a stop or `end()` cancels; a cancellation that way ends the member `stopped` through its lever, as at a boundary.
-- When the redirect arrives, it releases the hold, and react goes on to the next boundary, where callbacks run as at any other; a callback registered during the wait sees that boundary.
+- A further interrupt during the wait does not release it; when the redirect, a `UserMessage`, arrives, it releases the hold, and react goes on to the next boundary, where callbacks run as at any other; a callback registered during the wait sees that boundary.
 - Working time during the wait is as Inspect counts it today; the seam adds no wait or work span around it.
+- **Status at an exhausted message cap.** Ending the member raises its lever's error, and the repairs are appended without a limit check, so a member whose last assistant message filled its member or sample message cap still ends `stopped`, never `member_limit:message`, with every tool call answered.
 - For other loops (subagents, background tasks) `redirect_wait()` does nothing.
 
 ### Stopping
@@ -339,7 +347,7 @@ Rejected: the gate covers every turn of every `react()`-based member, wired or n
 
 ## Compatibility and migration
 
-- **inspect_ai.** Without a gate nothing changes. The gate is a private module; `before_turn()` gains an optional keyword argument; `reset()` is added to the compaction handler and the `Compact` protocol, so a custom class that a type checker matched against `Compact` must add it. inspect_swarm needs an inspect_ai release with both.
+- **inspect_ai.** Without a gate nothing changes. The gate is a private module; `before_turn()` and `after_cancel()` gain an optional keyword argument, and `after_cancel()`'s wait changes only when a gate is set; `reset()` is added to the compaction handler and the `Compact` protocol, so a custom class that a type checker matched against `Compact` must add it. inspect_swarm needs an inspect_ai release with both.
 - **inspect_swarm's API** gains `on_boundary()`, `end()` and `held` on the handle, and `Boundary` and `BoundaryCallback`, additions only. `MemberHandle` is a protocol that only the runtime implements. `SwarmEvent` and `MemberState` are unchanged.
 - **Behaviour without callbacks.** Two changes, both for every member:
   - A member that reaches a boundary after the swarm began to stop ends there, `stopped`, rather than at its next model call; the status is the same, and a cached call can no longer run after the stop.
@@ -363,7 +371,7 @@ All with mockllm, no network or Docker.
   - `before_turn()` awaits the gate before draining, with the channel, the messages and the state react passes (`None` from a loop that passes none); `None` leaves the list unchanged; a list that extends it by identity is appended; any other list replaces it in place and marks the channel; past the message limit both raise the limit error; a rewrite of a tuple raises `TypeError`; an exception from the gate propagates;
   - a nested `agent_channel()` gets the same gate; the inert channel never calls one; with no gate, `before_turn()` is unchanged;
   - a `react()` loop calls the gate before its first generation, after a turn with tool calls, after a recovered context overflow (a mock output with `stop_reason="model_length"`), and after an interrupt recovery;
-  - in both react loops, an interrupt with no redirect queued waits inside `redirect_wait()`, and one with a redirect already queued does not enter it; a gate that ends the member there makes `after_cancel()` raise with the repairs already in the conversation, and no generation follows; with a delayed redirect the loop generates only after it;
+  - in both react loops, an interrupt with no redirect queued waits inside `redirect_wait()`, and one with a redirect already queued does not enter it; a gate that ends the member there makes `after_cancel()` raise with the repairs already in the conversation, and no generation follows; with a delayed redirect the loop generates only after it; two further cancels posted during the wait, then a redirect, keep the gated wait open until the redirect and return the repairs and the redirect, while without a gate the first cancel returns as today; the gate receives the state react passed; a gate that ends the member while its conversation is at a `message_limit()` makes `after_cancel()` raise the gate's error, not the limit's, with the repairs present, and below the cap the ordinary path appends them under the limit check;
   - with `react(compaction=CompactionTrim(...))` below its threshold, and with `deepagent()`'s default compaction: a rewrite that replaces a message under the same id, and one that deletes a message, reach the next model input as rewritten; an append does not reset the handler.
 - **inspect_swarm** (`tests/test_turn_seam.py`, new, on asyncio and trio through `tests/conftest.py`):
   - with a custom model agent that returns a fresh `AgentState` (as Inspect documents custom generation), `Boundary.state.output` is that agent's output, its `max_tokens` stop reason and usage intact, and a member then ended at the boundary by `end()` or a stop keeps that output in the result record;
@@ -373,6 +381,9 @@ All with mockllm, no network or Docker.
   - unregistering takes effect at the next boundary; in-place changes to the copy change nothing; duplicate ids in a result raise and end the member `errored`;
   - `"end"` ends the member `stopped` with no further model call, and the rest of the swarm goes on;
   - `end()` called while a final submit tool runs ends the member `stopped`, not `submitted`, and its submission is not eligible as the answer; so does `end()` during a `react(submit=False)` turn that ends with a reply; with no `end()`, the same members end `submitted`;
+  - a custom model agent that returns a fresh `AgentState` with tool calls whose batch is interrupted, then `end()` and, separately, a swarm stop during the redirect wait: the member ends `stopped` with that fresh output (its stop reason and usage) and its repaired conversation in the result record, for `react()` and `react(submit=False)`;
+  - a member whose tool-calling assistant message reaches its member `message_limit()`, interrupted mid-tool and then ended during the redirect wait, ends `stopped` with the repairs in its conversation; the same member below its cap is the control;
+  - repeated interrupts while a member waits for its redirect keep it held until the redirect arrives;
   - an operator interrupt with the redirect delayed: the member is `held` and its time limit paused while it waits; `end()` and a swarm stop during the wait each end it `stopped` at once with its repairs in its conversation and no generation; a redirect that arrives continues it to a boundary where callbacks run; an absent redirect with no stop holds it until the swarm's time cap; one already queued passes without a hold; for `react()` and `react(submit=False)` members;
   - `end(origin="operator")` while a scheduler callback waits, with the operator's callback registered before the scheduler's and after it, and called after the first callback is already waiting: the waiting callback is cancelled, later ones do not run, no change of the chain is applied, the `boundary` event's outcome is `end`, and the member ends `stopped` with `ended by operator` while another member runs on; `end()` mid-turn ends the member at its next boundary, and on a pending member at boundary 0;
   - a stop while held, and a stop before a member's next boundary, each end the member `stopped` with no further generation, with a cached plain reply and with cached tool calls waiting for it, and its ledger line is not `cancelled`;
@@ -385,7 +396,7 @@ All with mockllm, no network or Docker.
 
 ## Implementation plan
 
-1. **inspect_ai: the turn gate and the compaction reset.** `src/inspect_ai/agent/_channel/gate.py` (new), `channel.py` (`before_turn()`, the channel's gate and rewrite mark), `__init__.py` (`agent_channel()` reads the gate), `channel.py` (`after_cancel()`'s wait inside `redirect_wait()`, repairs kept on an exception), `src/inspect_ai/model/_compaction/_compaction.py` and `types.py` (`reset()`), `src/inspect_ai/agent/_react.py` (pass the state to `before_turn()`, reset after a rewrite, in both loops); the inspect_ai tests above.
+1. **inspect_ai: the turn gate and the compaction reset.** `src/inspect_ai/agent/_channel/gate.py` (new), `channel.py` (`before_turn()`, the channel's gate and rewrite mark), `__init__.py` (`agent_channel()` reads the gate), `channel.py` (`after_cancel()`'s `state` argument, its gated wait inside `redirect_wait()` until a `UserMessage`, terminal repairs on an exception), `src/inspect_ai/model/_compaction/_compaction.py` and `types.py` (`reset()`), `src/inspect_ai/agent/_react.py` (pass the state to `before_turn()` and `after_cancel()`, reset after a rewrite, in both loops); the inspect_ai tests above.
 2. **inspect_swarm: the seam.** Needs step 1 in an inspect_ai that inspect_swarm can depend on.
    - `src/inspect_swarm/_seam.py` (new): `MemberGate`, `Boundary`, `BoundaryCallback`, binding, the callback chain in known-work spans, the redirect wait, the diff and its evidence.
    - `src/inspect_swarm/_member.py`: install the gate around the agent call; the output from the gate's last state when the agent raises; a pending end request read on a normal return; member time limits as `SwarmTimeNode`; the background-dispatch check for `on_boundary()`.
