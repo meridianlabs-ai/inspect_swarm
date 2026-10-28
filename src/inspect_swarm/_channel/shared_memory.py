@@ -109,10 +109,10 @@ class _SharedMemory(Channel):
 
 @swarm_channel
 def shared_memory(
-    max_files: int = 100,
-    max_file_bytes: int = 16_000,
-    max_file_lines: int = 1_000,
-    max_board_bytes: int = 400_000,
+    max_files: int = 10_000,
+    max_file_bytes: int = 1_000_000,
+    max_file_lines: int = 100_000,
+    max_board_bytes: int = 100_000_000,
     rate: tuple[int, float] | list[int | float] | None = (60, 60.0),
     max_wait: int = 600,
 ) -> Channel:

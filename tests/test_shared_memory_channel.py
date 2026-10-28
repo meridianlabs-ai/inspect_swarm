@@ -39,10 +39,10 @@ from inspect_swarm._channel.shared_memory import (
 from inspect_swarm._registry import resolve
 
 DEFAULTS = {
-    "max_files": 100,
-    "max_file_bytes": 16_000,
-    "max_file_lines": 1_000,
-    "max_board_bytes": 400_000,
+    "max_files": 10_000,
+    "max_file_bytes": 1_000_000,
+    "max_file_lines": 100_000,
+    "max_board_bytes": 100_000_000,
 }
 
 
@@ -134,7 +134,7 @@ def test_eval_set_arms_are_distinct() -> None:
         {"max_files": True},
         {"max_file_bytes": 0},
         {"max_file_lines": 0},
-        {"max_board_bytes": 15_999},
+        {"max_board_bytes": 999_999},
         {"rate": (0, 60.0)},
         {"rate": (1.5, 60.0)},
         {"rate": (1, 0)},

@@ -109,10 +109,10 @@ The bus needs inspect_ai's swarm registry types ([AI-1](swarm-implementation-pla
 # src/inspect_swarm/_channel/shared_memory.py
 @swarm_channel
 def shared_memory(
-    max_files: int = 100,                         # files on the board
-    max_file_bytes: int = 16_000,                 # UTF-8 bytes of one file's content
-    max_file_lines: int = 1_000,                  # lines in one file
-    max_board_bytes: int = 400_000,               # UTF-8 bytes of all files together
+    max_files: int = 10_000,                      # files on the board
+    max_file_bytes: int = 1_000_000,              # UTF-8 bytes of one file's content
+    max_file_lines: int = 100_000,                # lines in one file
+    max_board_bytes: int = 100_000_000,           # UTF-8 bytes of all files together
     rate: tuple[int, float] | None = (60, 60.0),  # writes per member per sliding window (s); None disables
     max_wait: int = 600,                          # seconds; the longest swarm_wait (swarm-wait.md)
 ) -> Channel: ...
@@ -301,10 +301,10 @@ The file and board limits are checked in `admit()`, so the `sent` event records 
 | Control | Default | On violation (a `ToolError`, evidenced at step 2) |
 |---|---|---|
 | `rate`, per member, all its loops together | 60 writes per 60 s | "rate limit: retry in N s" |
-| `max_file_bytes`, a file's content after the write, UTF-8 | 16,000 | "f-3 would be 16,240 bytes; the limit is 16000" |
-| `max_file_lines` | 1,000 | "f-3 would have 1,012 lines; the limit is 1000" |
-| `max_files` | 100 | "the board has 100 files, the limit; delete one first" |
-| `max_board_bytes` | 400,000 | "the board would hold 401,200 bytes; the limit is 400000" |
+| `max_file_bytes`, a file's content after the write, UTF-8 | 1,000,000 | "f-3 would be 1,000,240 bytes; the limit is 1000000" |
+| `max_file_lines` | 100,000 | "f-3 would have 100,012 lines; the limit is 100000" |
+| `max_files` | 10,000 | "the board has 10000 files, the limit; delete one first" |
+| `max_board_bytes` | 100,000,000 | "the board would hold 100,001,200 bytes; the limit is 100000000" |
 
 - **A long view is truncated as any tool's result is.** The tool has no `max_output`, so a result over the generate config's `max_tool_output`, else 16 KiB, is cut by Inspect in the middle: it keeps the first and last halves inside a "too long to be displayed" notice (`src/inspect_ai/_util/text.py:98-116`). A file view keeps its opening tag and first lines, and its last lines, closing tag and status line; a listing keeps its first and last files. A model reads the rest of a file with `view_range`. `max_file_bytes` and `max_file_lines` bound what the board stores, not what one result shows.
 - **How this relates to memory()'s limits.** memory() has none; its views are truncated by Inspect at 16 KiB, so a large file is shown cut ([Current behaviour](#inspect_ais-memory)). The channel's views are truncated the same way, and it also bounds files and the board. An arm that wants smaller or larger results sets `max_tool_output`.

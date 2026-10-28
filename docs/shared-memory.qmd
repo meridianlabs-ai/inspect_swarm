@@ -127,10 +127,10 @@ The board is bounded:
 
 | Argument | Default | Limit |
 |---|---|---|
-| `max_files` | 100 | Files on the board |
-| `max_file_bytes` | 16,000 | UTF-8 bytes in one file |
-| `max_file_lines` | 1,000 | Lines in one file |
-| `max_board_bytes` | 400,000 | UTF-8 bytes in all files together |
+| `max_files` | 10,000 | Files on the board |
+| `max_file_bytes` | 1,000,000 | UTF-8 bytes in one file |
+| `max_file_lines` | 100,000 | Lines in one file |
+| `max_board_bytes` | 100,000,000 | UTF-8 bytes in all files together |
 | `rate` | `(60, 60.0)` | Writes per member, all its loops together, in a sliding window of seconds; `None` for no limit |
 | `max_wait` | 600 | The longest `swarm_wait`, in seconds, and its default timeout |
 
