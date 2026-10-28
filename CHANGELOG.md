@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.1](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.2.0...0.2.1) (2026-10-28)
+
+
+### Features
+
+* raise shared_memory's default size limits ([#110](https://github.com/meridianlabs-ai/inspect_swarm/issues/110)) ([114cf7a](https://github.com/meridianlabs-ai/inspect_swarm/commit/114cf7a4c3574546da7d1bbbffd28bb029cadce5))
+* the changes command names every changed file ([#109](https://github.com/meridianlabs-ai/inspect_swarm/issues/109)) ([f84ee01](https://github.com/meridianlabs-ai/inspect_swarm/commit/f84ee01bc37ce52ee73a65f1903a851f06989e0d))
+* the shared memory preamble puts tool names, paths and ids in markdown backticks ([#99](https://github.com/meridianlabs-ai/inspect_swarm/issues/99)) ([ab8bd2c](https://github.com/meridianlabs-ai/inspect_swarm/commit/ab8bd2c008231a72351e60fd74f5530f32cab2d0))
+
 ## [0.2.0](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.1.0...0.2.0) (2026-10-27)
 
 
