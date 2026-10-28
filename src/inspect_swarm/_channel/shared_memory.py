@@ -56,7 +56,7 @@ _INSTRUCTIONS = (
     "Files are shown between <peer_file> tags whose last_writer attribute names the agent that last wrote them. "
     "Every shared_memory result ends with a status line that names the files other agents changed since you last viewed them, by ids such as f-3, which the view command takes as its file_id. "
     "View a file in its current version before you overwrite it with create, insert into it, rename it or delete it. "
-    f"To check what other agents changed without viewing anything, use the changes command, which returns that line alone and names every changed file, where the status line names at most {_LISTED_IDS}. "
+    "To check what other agents changed without viewing anything, use the changes command, which returns that line alone. "
     "To wait for another member's work, call swarm_wait rather than polling."
 )
 
@@ -69,7 +69,7 @@ _DESCRIPTION = (
     "Use insert only when the position matters. "
     "Write commands return a short acknowledgment, not the file; view a file to see it. "
     "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view takes as its file_id. "
-    f"The changes command returns that list alone and names every changed file, where a result names at most {_LISTED_IDS}: use it to check what other agents changed without viewing anything."
+    "The changes command returns that list alone: use it to check what other agents changed without viewing anything."
 )
 
 
