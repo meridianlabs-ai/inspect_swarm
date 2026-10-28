@@ -28,11 +28,12 @@ from inspect_swarm import (
     swarm_controller,
 )
 from inspect_swarm._controller._control import SwarmRun
-from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
+from inspect_swarm._record import RECORD_KEY
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
     Script,
+    after,
     evidence,
     generator,
     run_swarm,
@@ -58,19 +59,6 @@ async def _start_all(control: SwarmControl) -> StopReason:
     async for _ in control.events():
         pass
     return "all_done"
-
-
-@agent
-def after(names: list[str], inner: Agent) -> Agent:
-    # waits, making no model call, until the named members have ended, then runs inner
-    async def execute(state: AgentState) -> AgentState:
-        while True:
-            record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
-            if all(m.state == "ended" for m in record.members if m.name in names):
-                return await inner(state)
-            await anyio.sleep(0.01)
-
-    return execute
 
 
 @pytest.mark.anyio

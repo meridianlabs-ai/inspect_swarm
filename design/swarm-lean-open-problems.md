@@ -1,7 +1,5 @@
 # Inspect Swarm: Epoch's LeanOpenProblems swarm, compared
 
-Status: proposed, 2026-10-13. Issue: none. Author: agent (Claude), reviewed by Codex; see the PR.
-
 ## Overview
 
 Epoch Research's LeanOpenProblems repository evaluates whether models can settle open conjectures stated in Lean. Its `agent-swarm` branch adds a swarm: for each conjecture it starts N identical, leaderless agents (5 in a smoke config, 32 in an Erdős problem 3 config with a \$1,600 budget), each a `react()` or `deepagent()` in its own Docker or Kubernetes sandbox. The agents talk to each other only through inspect_ai's `memory()` tool, which keeps its files in the sample store, so every member sees one shared board. They draw on the sample's cost and working-time limits as one pool, which the prompt tells them is shared. Each member keeps submitting proofs to a trusted Comparator checker until one passes, and the sample's score records every member's verdict separately.
@@ -21,7 +19,7 @@ It recommends, in priority order: per-member sandboxes as an opt-in member field
 Goals:
 
 - Describe their swarm precisely, with references: topology, member construction, sandbox topology, channel, budget, termination, scoring, logging and configuration.
-- Compare it with inspect_swarm's merged designs ([swarm-overview.md](swarm-overview.md), [swarm.md](swarm.md), [swarm-api.md](swarm-api.md), [swarm-communication.md](swarm-communication.md), [swarm-limits.md](swarm-limits.md), [swarm-scoring.md](swarm-scoring.md)), classifying each difference.
+- Compare it with inspect_swarm's designs ([swarm-overview.md](swarm-overview.md), [swarm.md](swarm.md), [swarm-api.md](swarm-api.md), [swarm-communication.md](swarm-communication.md), [swarm-limits.md](swarm-limits.md), [swarm-scoring.md](swarm-scoring.md)), classifying each difference.
 - Say whether inspect_swarm as designed could express their experiment, what it would take, and what they would gain and lose.
 - Recommend changes to our designs, prioritised and tied to a section and a milestone, with open questions where a recommendation would change a standing decision.
 - Judge whether they would be a good early user, and sketch a port.
@@ -39,7 +37,7 @@ Non-goals:
 - **LeanOpenProblems** (`epoch-research/LeanOpenProblems`, branch `agent-swarm`, head `0aff742d616a6f2fef2906323308723237421970`, commits 85cdb89ad to 0aff742d6, 2026-09-30 to 2026-10-06). References are `path:line` at 0aff742d6. The touched files were read from the exported patch; `apn/limits.py`, `apn/checker.py`, `apn/tools.py` and `apn/layout.py` were fetched as text at the same commit.
 - **inspect_ai at 0.3.273** (`9e44f1b77`, 2026-09-29), the version the Erdős 3 config pins (`configs/erdos3-swarm32-sol61-1600usd.yaml:60`). The smoke config pins 0.3.259 (`configs/b68-solved5-swarm.yaml:72`). References prefixed `inspect_ai:`.
 - **inspect_boltons** at `35b794e`, the commit LeanOpenProblems pins (`pyproject.toml:9`), for its `resources()` tool and loop limits. References prefixed `inspect_boltons:`.
-- **inspect_swarm's designs** on `main` at `b96353d`, cited by section.
+- **inspect_swarm's designs**, cited by section.
 
 ### Their swarm
 
@@ -99,13 +97,13 @@ Non-goals:
 
 ### Our plan, in brief
 
-From the merged designs; each line links to its section.
+From the designs; each line links to its section.
 
 - `swarm()` is an `Agent`; members are built agents or `member()` records, and copies (`count`) name a registered `@agent` factory and its arguments, from which the runtime builds each member's agent in each sample; a `@swarm_controller` decides who starts and when the swarm is done; `@swarm_channel` objects say how members share information ([swarm-api.md](swarm-api.md#the-api-at-a-glance)).
 - M1: a leaderless swarm with the filesystem of a shared sandbox as its channel; members' work must stay inside their invocation, so background deepagents are rejected; each member's built-in tool state is private through a tool-state scope ([swarm.md M1](swarm.md#implementation-plan), [Members](swarm.md#members), [Sandbox topology](swarm.md#sandbox-topology)).
 - Budget: caps derived from the sample's limits minus a 5% reserve, a pool by default with optional splits, a soft stop with grace, and a ledger of realized cost per member with stated coverage ([swarm-limits.md](swarm-limits.md#the-budget-parameter)).
-- Final answer `first` in M1; a per-member result record in the store; the task's scorers unchanged; per-member scores, `verify`, `vote` and `baseline()` after M2 ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)).
-- M2: the bus with a shared-memory channel, fenced tool-output delivery and metadata-only notices ([swarm-communication.md](swarm-communication.md)), and most of the recommendations below ([swarm-implementation-plan.md](swarm-implementation-plan.md)); direct messages, notes, task list and board later.
+- Final answer `first` in M1, with `last` and a controller's choice from M2 ([swarm-scoring.md](swarm-scoring.md#last-and-the-controllers-choice-m2)); a per-member result record in the store; the task's scorers unchanged; per-member scores, `verify`, `vote` and `baseline()` after M2 ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)).
+- M2: the bus with a shared-memory channel, fenced tool-output delivery, and a status line and `swarm_wait` through which members learn of changes; the swarm adds no message to a member's conversation ([swarm-communication.md](swarm-communication.md)), and most of the recommendations below ([swarm-implementation-plan.md](swarm-implementation-plan.md)); direct messages, notes, task list and board later.
 
 ## Comparison
 
@@ -148,7 +146,7 @@ This is an analysis, so its "design" is the answer to the task's questions: whet
 3. **The board becomes per member.** Under the tool-state scope, `memory()` with the default instance is private to each member ([Members](swarm.md#members)). Ported unchanged, every member would get an empty private memory and believe the prompt that it is shared. A port must name the instance, `memory(instance="board")`; our design then treats it as an observed channel shared on purpose ([swarm-communication.md](swarm-communication.md#tool-state-in-the-sample-store)). The failure mode is silent, which is a documentation point for M1 ([Recommendation 7](#7-m2-a-shared-memory-channel-through-the-bus)).
 4. **A looping member would end the sample.** Their custom loop limit has no `source`. Our member wrapper classifies a limit error by whether its source is one of the swarm's or the member's nodes; anything else is foreign, so the member is `errored` and the error propagates, cancelling every member ([swarm-limits.md](swarm-limits.md#stopping), "Member wrapper and statuses"). A builder that caught the error and returned would make the member's status `submitted`, which `first` would select. Neither is right. The custom limit stays foreign until M2 ([Recommendation 2](#2-m2-an-agent-raised-custom-limit-ends-only-the-member)). (A `react()` member that returns after three refusals or an unhandled context overflow is `unsubmitted` in M1, not `submitted`: [Recommendation 6](#6-m1-tighten-submitted-m2-document-stopping-on-the-first-proof).)
 
-**With recommendations 1 and 2 it can, except for background subagents.** Their experiment then needs: 32 member records each naming its sandbox, a deliberately shared `memory(instance="board")`, `Budget()` deriving the pooled cap from the Hawk `cost_limit`, their scorer unchanged, and a synchronous deepagent until recommendation 3 lands. Once M2-5 lands, their builder keeps `background=64`, with each member's children stopped at that member's end ([swarm-background-members.md](swarm-background-members.md)).
+**With recommendations 1 and 2 it can, except for background subagents.** Their experiment then needs: 32 member records each naming its sandbox, a deliberately shared `memory(instance="board")`, `Budget()` deriving the pooled cap from the Hawk `cost_limit`, their scorer unchanged, and a synchronous deepagent until recommendation 3 lands. With M2-5, their builder keeps `background=64`, with each member's children stopped at that member's end ([swarm-background-members.md](swarm-background-members.md)).
 
 ### What they would gain and lose
 
@@ -164,19 +162,19 @@ Gains, in M1:
 
 Gains in M2, beyond what the port needs to run:
 
-- **Early stop.** A ten-line custom controller stops the swarm when the first member ends `submitted`, once the member builder raises a member-local custom limit on any return without a passing check, so that `submitted` means verified ([Recommendation 6](#6-m1-tighten-submitted-m2-document-stopping-on-the-first-proof)). It needs M2: before M2-2 that custom limit has no `source`, so it is foreign and ends the sample ([Recommendation 2](#2-m2-an-agent-raised-custom-limit-ends-only-the-member)).
-- A shared-memory channel through the bus, with notices on change and evidence of who wrote what ([Recommendation 7](#7-m2-a-shared-memory-channel-through-the-bus)).
+- **Early stop.** A ten-line custom controller stops the swarm when the first member ends `submitted`, once the member builder raises a member-local custom limit on any return without a passing check, so that `submitted` means verified ([Recommendation 6](#6-m1-tighten-submitted-m2-document-stopping-on-the-first-proof)). It needs M2: without M2-2 that custom limit has no `source`, so it is foreign and ends the sample ([Recommendation 2](#2-m2-an-agent-raised-custom-limit-ends-only-the-member)).
+- A shared-memory channel through the bus, with a status line of changed files and evidence of who wrote what ([Recommendation 7](#7-m2-a-shared-memory-channel-through-the-bus)).
 - Monitoring of board writes: sentinel's tool stages see native members' channel tool calls, and the bus hook sees every record.
 
 Gains after M2, if they choose them:
 
 - `member_scores` with `best_member` (team@k) and `mean_member`, `baseline()` and select@k, compared on realized cost ([Comparison quantities](swarm-scoring.md#comparison-quantities)).
-- The messages channel with notices.
+- The messages channel.
 
 Losses and costs:
 
-- **Background deepagents** until M2-5 lands, in M2: the one change they cannot work around.
-- **inspect_ai version coupling.** inspect_swarm tracks inspect_ai `main` and needs its registry types and the tool-state scope; their configs pin 0.3.273 "in sync with epoch-research/benchmarks@main" (`configs/erdos3-swarm32-sol61-1600usd.yaml:57-60`). Python is not a problem: they require 3.13 (`pyproject.toml:7`), inside our 3.11+.
+- **Background deepagents** until M2-5, in M2: the one change they cannot work around.
+- **inspect_ai version coupling.** inspect_swarm needs an inspect_ai with its registry types, the tool-state scope and the store-event switch ([AI-1, AI-2 and AI-7](swarm-implementation-plan.md#inspect_ai)) and the background seam ([AI-5](swarm-implementation-plan.md#inspect_ai-1)); their configs pin 0.3.273 "in sync with epoch-research/benchmarks@main" (`configs/erdos3-swarm32-sol61-1600usd.yaml:57-60`). Python is not a problem: they require 3.13 (`pyproject.toml:7`), inside our 3.11+.
 - **A young dependency** with M1's API still settling.
 - **Their own conveniences.** `_only_sandboxes` uses a private inspect_ai name; a port keeps it, as inspect_swarm may ([Goals](swarm.md#goals)). Their per-sample check lock needs a new home: their builder is called once per member, so a lock it created would be per member, while the lock must be shared by the members of one sample ([swarm-api.md](swarm-api.md#the-member-contract)).
 
@@ -192,7 +190,7 @@ from inspect_ai.tool import text_editor
 from inspect_ai.util import LimitExceededError, store
 from inspect_swarm import (
     Budget, Controller, MemberEnded, StopReason, SwarmControl,
-    member, swarm, swarm_controller, swarm_on_continue, swarm_tools,
+    member, swarm, swarm_controller, swarm_tools,
 )
 
 
@@ -205,7 +203,7 @@ def lean_member(name: str, sandbox_name: str, agent_type: AgentType = "react") -
         tools=[text_editor(), bash(timeout=300), resources(), swarm_tools()],   # the shared_memory tool (Rec. 7)
         attempts=AgentAttempts(attempts=99_999_999, incorrect_message=gated_incorrect_message),
         submit=AgentSubmit(tool=submit(), name="submit_proof", keep_in_messages=True),
-        on_continue=swarm_on_continue(continue_unless_looping("Continue working on the problem.")),  # board notices
+        on_continue=continue_unless_looping("Continue working on the problem."),
         compaction=CompactionSummary(threshold=300_000),
     )
 
@@ -284,13 +282,13 @@ Where each part of their swarm goes:
 
 - **Members.** One record per member, because each names its own sandbox and its builder takes the member's name and sandbox (a counted member would use Recommendation 1's `{member}` template, and its builder could read its copy's name from `tool_state_instance(None)`, which returns the member's tool-state scope). Their builder becomes a registered `@agent` with ordinary parameters, passed uncalled with its arguments in `args`, so the plan logs it faithfully and the runtime builds each member's agent from it ([swarm-api.md Members](swarm-api.md#members)). `name=f"agent-{i}"` keeps their names; count expansion would give `agent-1` to `agent-32`.
 - **Prompt.** Their task prompt, with its "shared budget" sentence, moves to a setup solver that sets the sample input, as their single-agent `lean_prover` does (`apn/solver.py:222-227`). Their swarm paragraph becomes the swarm's preamble (name, roster size) plus the shared-memory channel's instructions, and their prompt's tool and path names (`memory`, `/memories`) become `shared_memory` and `/shared_memory`. Once Recommendation 4 lets the preamble state the split, the budget sentence can come out of their prompt.
-- **Channel.** `"shared_memory"` in `channels=` and `swarm_tools()` in every member's tools, with `swarm_on_continue()` around their continue hook for change notices ([swarm-memory-channel.md](swarm-memory-channel.md#relation-to-memoryinstance), migration steps 1 to 4). Members and their `general()` subagents read and write the board as the member ([Descendants](swarm-memory-channel.md#descendants)); a `"deep"` member passes `memory=False`, because deepagent cannot see the board as a memory tool and would otherwise add a private `memory()`. Writes that replace, move or delete content need a current view, and files and the board are bounded, which is what changes for their members. Before the channel exists, the same port keeps `memory(instance="board")` in every member's tools under an instructions-only channel, an observed board shared by every member and subagent. These are different experimental conditions: the observed shared memory tool keeps today's behaviour, while the bus channel adds bounded files, checked writes and delivery evidence ([swarm-communication.md Tool state in the sample store](swarm-communication.md#tool-state-in-the-sample-store)).
+- **Channel.** `"shared_memory"` in `channels=` and `swarm_tools()` in every member's tools; members learn of changes from the tool's status line, its `changes` command and `swarm_wait` ([swarm-memory-channel.md](swarm-memory-channel.md#relation-to-memoryinstance), migration steps 1 to 4). Members and their `general()` subagents read and write the board as the member ([Descendants](swarm-memory-channel.md#descendants)); a `"deep"` member passes `memory=False`, because deepagent cannot see the board as a memory tool and would otherwise add a private `memory()`. Writes that replace, move or delete content need a current view, and files and the board are bounded, which is what changes for their members. Before the channel exists, the same port keeps `memory(instance="board")` in every member's tools under an instructions-only channel, an observed board shared by every member and subagent. These are different experimental conditions: the observed shared memory tool keeps today's behaviour, while the bus channel adds bounded files, checked writes and delivery evidence ([swarm-communication.md Tool state in the sample store](swarm-communication.md#tool-state-in-the-sample-store)).
 - **Budget.** `Budget()` reads the Hawk config's per-sample `cost_limit` (\$1,600) and stops at \$1,520, keeping \$80 for overshoot. Their 72-hour `working_limit` gets the swarm's start-up warning ([swarm-limits.md](swarm-limits.md#the-budget-parameter)). Cost data comes from their `model_cost_config`.
 - **Termination.** `leaderless(stop_on_submission=False)` reproduces today's behaviour; `until_proved` adds the early stop as a separate arm. The default `leaderless` would stop at the first submission too, which here is the first verified proof, recorded as `submitted` rather than `controller:proved`. Either way the stop reason is recorded. With background members `until_proved` works unchanged: it sees the proving member's `MemberEnded` after that member's drain, so the other members are stopped up to one effective grace later, plus the cancelled children's cleanup ([swarm-background-members.md Statuses, ended, and the record](swarm-background-members.md#statuses-ended-and-the-record)).
 - **Scoring.** Their scorer gains one line: on a passing in-loop check it sets `verified:<member>` in the store, which the builder reads when the inner agent returns. Otherwise it is unchanged. In the loop it still runs inside the member's context, where the runtime has entered the member's sandbox (Recommendation 1) and the builder has set their workspace ContextVar. At the end it re-checks every member. Because the builder turns every unverified return into `member_limit:custom`, `first` picks the earliest verified member's output, which their scorer ignores; the result record says which member it was. A member that wrote a valid proof but was stopped before `submit_proof` still passes the end-of-sample re-check without being `submitted`, which is why [Recommendation 8](#8-after-m2-per-member-sandboxes-in-the-scoring-contract) keeps the final-artifact grade apart from the selected answer.
 - **Check lock.** Their per-sample `anyio.Lock` cannot be created in the builder, which runs once per member, because the members of one sample must share it, nor held on any object every sample shares. `comparator_lock()` returns one lock per sample from a module-level `weakref.WeakKeyDictionary` keyed on the sample's comparator `SandboxEnvironment`, with no new API ([Not this design](#not-this-design)).
 - **Arms in Hawk.** Unchanged in shape: `swarm_size`, `agent_type` and a new `stop` are task arguments, so arms stay distinct; `cost_limit` and `working_limit` stay eval-set options.
-- **What it cannot do yet.** `agent_type="deep"` with background dispatch, until recommendation 3 (M2-5). Until then the port must disable background dispatch in its builder. Direct background deepagents are rejected at construction; a custom wrapper such as `lean_member` hides its inner agent's parameters from the registry (`inspect_ai: src/inspect_ai/agent/_agent.py:173-208`), so it must obey the documented restriction itself ([Members](swarm.md#members)). Once M2-5 lands, the builder keeps `background=64`: the member's owner catches its children whatever wraps the deepagent, and stops them at the member's end ([swarm-background-members.md Lifting the refusal](swarm-background-members.md#lifting-the-refusal)).
+- **What it cannot do yet.** `agent_type="deep"` with background dispatch, until recommendation 3 (M2-5). Without it the port must disable background dispatch in its builder. Direct background deepagents are rejected at construction; a custom wrapper such as `lean_member` hides its inner agent's parameters from the registry (`inspect_ai: src/inspect_ai/agent/_agent.py:173-208`), so it must obey the documented restriction itself ([Members](swarm.md#members)). With M2-5, the builder keeps `background=64`: the member's owner catches its children whatever wraps the deepagent, and stops them at the member's end ([swarm-background-members.md Lifting the refusal](swarm-background-members.md#lifting-the-refusal)).
 
 ### Would they be a good early user?
 
@@ -300,7 +298,7 @@ Where each part of their swarm goes:
 - Their task is verifier-gated with no target, which exercises in-loop scoring as a gate, whose metrics are M2's (Recommendation 5), and paths that stay later work: `verify` semantics and per-member artifacts.
 - They already run Inspect at scale on Hawk, so the port changes their solver, not their pipeline.
 - Their choices test our defaults: per-member sandboxes against our shared default, a shared memory against our scoped tool state. Feedback from them would be concrete.
-- Risks: their \$1,600 runs make a library bug expensive, and their pinned inspect_ai version would have to move to one with the registry types, the tool-state scope and the seam for `background()` (AI-5). A first port on the 5-member smoke config would limit both.
+- Risks: their \$1,600 runs make a library bug expensive, and their pinned inspect_ai version would have to move to one with the registry types (AI-1), the tool-state scope (AI-2) and the seam for `background()` (AI-5). A first port on the 5-member smoke config would limit both.
 
 ## Alternatives considered
 
@@ -387,7 +385,7 @@ In priority order. Each names the section it would change and the milestone. The
 
 **Why.** Both of their configs use background deepagents. The plan follows user feedback (decision: Ransom, 2026-10-07); this is that feedback. Without it a port must run their deepagents synchronously, which changes their experiment. It needs no standing decision changed.
 
-**Milestone.** M2: a design (D-2, merged as [swarm-background-members.md](swarm-background-members.md)), the inspect_ai seam (AI-5) and the swarm side (M2-5). The rejection of an integer `background` is M1 (M1-3).
+**Milestone.** M2: a design (D-2, [swarm-background-members.md](swarm-background-members.md)), the inspect_ai seam (AI-5) and the swarm side (M2-5). The rejection of an integer `background` is M1 (M1-3).
 
 ### 4. M2: members can see the budget that will stop them
 
@@ -401,7 +399,7 @@ In priority order. Each names the section it would change and the milestone. The
 
 ### 5. M2: gate checks as metrics
 
-**Change.** Record, per member, the in-loop checks of its own submissions: `gate_checks` (how many submissions were checked), `gate_passes`, and the swarm time of the first passing check. A gate check is an intermediate `ScoreEvent` from the task's **first** scorer, because `react()` decides on `answer_scores[0]` alone (`inspect_ai: src/inspect_ai/agent/_react.py:321-326`), whose nearest enclosing agent span is the member's own, not a descendant subagent's. A pass is that score's value at 1.0 under Inspect's default `value_to_float`, which is what `AgentAttempts.score_value` defaults to. Passes assume that default for every member, so a member configured with its own `score_value` can record passes that differ from its own gate. A member's converter cannot be read for every member shape: a built `react()` logs only the function's name, and a member builder hides it (decision: Ransom, 2026-10-20; this replaces reporting such passes as unknown). Events from the task's other scorers are not checks. Add the three fields to the metrics and to `MemberResult`, and refine swarm-scoring.md's "each member submits at most once in M1" to say that a member's own retries are visible as gate checks and counted.
+**Change.** Record, per member, the in-loop checks of its own submissions: `gate_checks` (how many submissions were checked), `gate_passes`, and the swarm time of the first passing check. A gate check is an intermediate `ScoreEvent` from the task's **first** scorer, because `react()` decides on `answer_scores[0]` alone (`inspect_ai: src/inspect_ai/agent/_react.py:321-326`), whose nearest enclosing agent span is the member's own, not a descendant subagent's. A pass is that score's value at 1.0 under Inspect's default `value_to_float`, which is what `AgentAttempts.score_value` defaults to. Passes assume that default for every member, so a member configured with its own `score_value` can record passes that differ from its own gate. A member's converter cannot be read for every member shape: a built `react()` logs only the function's name, and a member builder hides it (decision: Ransom, 2026-10-20). Events from the task's other scorers are not checks. Add the three fields to the metrics and to `MemberResult`, and refine swarm-scoring.md's "each member submits at most once in M1" to say that a member's own retries are visible as gate checks and counted.
 
 Two limits are stated with the metric. `react()` does not score the submission that uses up its last permitted attempt (`_react.py:316-319`), so a member that exhausts a finite `attempts` has one more submission than checks. And an agent that checks submissions some other way (a custom tool, a bridged CLI's own loop) records none; its task supplies its own count.
 
@@ -420,21 +418,21 @@ Two limits are stated with the metric. `react()` does not score the submission t
 
 **Sections.** [swarm-scoring.md Terms](swarm-scoring.md#terms) and [The final answer: `first`](swarm-scoring.md#the-final-answer-first); [swarm-limits.md Stopping](swarm-limits.md#stopping) (the status set); [swarm-api.md Examples](swarm-api.md#examples).
 
-**Why.** Their swarm keeps 31 members spending after one has proved the conjecture, and from M2 a swarm can stop earlier with no new API: the controller needs only M1's surface, but the builder's member-local custom limit needs M2-2 ([Recommendation 2](#2-m2-an-agent-raised-custom-limit-ends-only-the-member)); in M1 that limit is foreign and ends the sample. But the obvious controller is wrong without the precondition, and `first` has the same hole for any `react()` member: the round-1 review reproduced a `react()` agent that returned successfully with no checks and the output "I cannot help." after three content-filter responses.
+**Why.** Their swarm keeps 31 members spending after one has proved the conjecture, and from M2 a swarm can stop earlier with no new API: the controller needs only M1's surface, but the builder's member-local custom limit needs M2-2 ([Recommendation 2](#2-m2-an-agent-raised-custom-limit-ends-only-the-member)); in M1 that limit is foreign and ends the sample. But the obvious controller is wrong without the precondition, and `first` has the same hole for any `react()` member: a `react()` agent given three content-filter responses returns successfully, with no checks and the output "I cannot help.".
 
-**Milestone.** M1 for the status (M1-9); the controller is an example in M2's documentation (M2-11).
+**Milestone.** M1 for the status (M1-9); the controller is an example in M2's documentation (M2-11; [Stopping on the first proof](https://meridianlabs-ai.github.io/inspect_swarm/controllers.html#stopping-on-the-first-proof)).
 
 ### 7. M2: a shared-memory channel through the bus
 
-**Change.** Make the first structured channel a `@swarm_channel` with memory's command set (view, create, str_replace, insert, delete, rename) over per-run channel state. Writes are bus records with the bus-bound sender, so reads fence each file with its last writer and notices tell members when files changed. `str_replace` is the compare-and-swap; `create` over an existing file and `delete` of another member's file are refused or versioned (to be decided in its design; [swarm-memory-channel.md](swarm-memory-channel.md#the-tool) decided both are allowed only to a loop that has viewed the file's current version). Notes, tasks and the board follow in any order.
+**Change.** Make the first structured channel a `@swarm_channel` with memory's command set (view, create, str_replace, insert, delete, rename) over per-run channel state. Writes are bus records with the bus-bound sender, so reads fence each file with its last writer and every result names the files that changed. `str_replace` is the compare-and-swap; `create` over an existing file and `delete` of another member's file are allowed only to a loop that has viewed the file's current version ([swarm-memory-channel.md The tool](swarm-memory-channel.md#the-tool)). Notes, tasks and the board follow in any order.
 
-In M1, document in `member()` and the sample-store section that a board shared on purpose is `memory(instance="...")`, that the default instance is private, and that a hand-rolled swarm relying on the shared default loses its channel silently.
+In M1, document in `member()` and the sample-store section that a board shared on purpose is `memory(instance="...")`, that the default instance is private, and that a hand-rolled swarm relying on the shared default loses its channel silently ([Tool state](https://meridianlabs-ai.github.io/inspect_swarm/members.html#tool-state)).
 
-**Sections.** [swarm.md Channels](swarm.md#channels) (the table's order), [swarm-communication.md Tool state in the sample store](swarm-communication.md#tool-state-in-the-sample-store) and [How channels plug into the bus](swarm-communication.md#how-channels-plug-into-the-bus); swarm.md's [Not this design](swarm.md#not-this-design) item "Routing deliberately shared tool state through the bus" would move into the plan.
+**Sections.** [swarm.md Channels](swarm.md#channels) (the table's order), [swarm-communication.md Tool state in the sample store](swarm-communication.md#tool-state-in-the-sample-store) and [How channels plug into the bus](swarm-communication.md#how-channels-plug-into-the-bus).
 
-**Why.** A shared memory is the channel the only external swarm we know chose, and models already know the tool. Today it is our least-observed channel: no sender, no fence, no evidence, last writer wins. Routing it through the bus gives it the same treatment as messages, and the notices address the reported reluctance of agents to read boards ([swarm-communication.md Why](swarm-communication.md#why)).
+**Why.** A shared memory is the channel the only external swarm we know chose, and models already know the tool. Today it is our least-observed channel: no sender, no fence, no evidence, last writer wins. Routing it through the bus gives it the same treatment as messages, and the status line addresses the reported reluctance of agents to read boards ([swarm-communication.md Why](swarm-communication.md#why)).
 
-**Milestone.** M2, with the bus it needs: its design (D-1, started during M1 and merged as [swarm-memory-channel.md](swarm-memory-channel.md)), then the bus, binding and the channel (M2-6 to M2-8). The documentation part is M1 (M1-3, M1-13) ([Open questions](#open-questions), item 2).
+**Milestone.** M2, with the bus it needs: its design (D-1, [swarm-memory-channel.md](swarm-memory-channel.md)), then the bus, binding and the channel (M2-6 to M2-8). The documentation part is M1 (M1-3, M1-13) ([Open questions](#open-questions), item 2).
 
 ### 8. After M2: per-member sandboxes in the scoring contract
 
@@ -457,7 +455,7 @@ They coincide only when every member whose final sandbox passes also had a passi
 None. The two this analysis raised are decided:
 
 1. **Per-member sandboxes are an M2 opt-in.** `member(sandbox=..., visible_sandboxes=...)` routes a member to its own sandbox (Recommendation 1), and the shared sandbox stays the default (decisions: Ransom, 2026-10-07 and 2026-10-13; [swarm-implementation-plan.md](swarm-implementation-plan.md#where-the-deep-dives-milestone-items-land)).
-2. **A shared memory routed through the bus is M2's bus channel**, with sender binding, fencing, notices and evidence (Recommendation 7); notes, a task list and a board are later work. The tool-state scope is unchanged: the default `memory()` instance stays private to each member (decision: Ransom, 2026-10-09). (Decision: Ransom, 2026-10-14; [swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 2.)
+2. **A shared memory routed through the bus is M2's bus channel**, with sender binding, fencing, a status line of changed files and evidence (Recommendation 7); notes, a task list and a board are later work. The tool-state scope is unchanged: the default `memory()` instance stays private to each member (decision: Ransom, 2026-10-09). (Decision: Ransom, 2026-10-14; [swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 2.)
 
 ## Not this design
 

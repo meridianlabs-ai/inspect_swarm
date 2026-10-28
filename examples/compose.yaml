@@ -1,0 +1,6 @@
+# One container that every member shares (shared_sandbox.py).
+services:
+  default:
+    image: python:3.12-slim
+    command: tail -f /dev/null
+    network_mode: none

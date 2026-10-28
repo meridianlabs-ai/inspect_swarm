@@ -1,5 +1,5 @@
-from collections.abc import Callable, Sequence
-from contextlib import nullcontext
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -36,7 +36,16 @@ from inspect_ai.util import (
     token_limit,
     turn_limit,
 )
-from inspect_ai.util._limit import suspend_token_limit
+from inspect_ai.util._limit import (
+    _MessageLimit,
+    _TimeLimit,
+    _TokenLimit,
+    suspend_token_limit,
+)
+from inspect_ai.util._limit_overrides import (
+    sample_limit_override_scope,
+    set_sample_limit_override,
+)
 
 from inspect_swarm import (
     Budget,
@@ -953,13 +962,36 @@ async def test_a_cancellation_the_sample_does_not_explain_records_an_unknown_end
     )
 
 
+@contextmanager
+def _expiring_time_limit() -> Generator[Callable[[], None]]:
+    # ends the sample's time limit when called, as a live override of 0 from
+    # `inspect ctl config` does, so a test orders it after its own events
+    task_id = uuid4().hex
+    limits = sample_limits()
+    with sample_limit_override_scope(
+        task_id,
+        time=cast(_TimeLimit, limits.time),
+        token=cast(_TokenLimit, limits.token),
+        message=cast(_MessageLimit, limits.message),
+    ):
+        try:
+            yield lambda: set_sample_limit_override(task_id, "time_limit", 0)
+        finally:
+            set_sample_limit_override(task_id, "time_limit", None)
+
+
 @agent
 def limited_cleanup(
-    model: Model, owned: list[LimitExceededError], self_stop: bool = False
+    model: Model,
+    owned: list[LimitExceededError],
+    expire: Callable[[], None],
+    self_stop: bool = False,
 ) -> Agent:
     # reaches its own limit (or stops itself) in one task, still cleaning up when the
     # sample's time limit cancels it, while another task's cleanup fails
     async def execute(state: AgentState) -> AgentState:
+        cancelled = anyio.Event()
+
         async def limited() -> None:
             try:
                 if self_stop:
@@ -967,19 +999,19 @@ def limited_cleanup(
                 await model.generate(state.messages)
             except LimitExceededError as ex:
                 owned.append(ex)
+                # the sample's time limit expires only once the member's is raised
+                expire()
                 raise
             finally:
                 # until the sample's time limit has cancelled the other task
-                deadline = sample_limits().time
-                assert deadline.limit is not None
                 with anyio.CancelScope(shield=True):
-                    while deadline.usage < deadline.limit + 0.05:
-                        await anyio.sleep(0.005)
+                    await cancelled.wait()
 
         async def failing_cleanup() -> None:
             try:
                 await anyio.sleep_forever()
             finally:
+                cancelled.set()
                 raise RuntimeError("cleanup failed")
 
         async with anyio.create_task_group() as tg:
@@ -1000,15 +1032,19 @@ async def test_a_cancellation_grouped_with_errors_loses_the_swarms_leaves(
     # member's limit, and the wrapper the agent's stop of itself
     owned: list[LimitExceededError] = []
     with pytest.raises(BaseException) as raised:
-        async with sample(time=0.2):
-            await swarm(
-                member(
-                    limited_cleanup(scripted_model(), owned, self_stop=self_stop),
-                    limits=[] if self_stop else [token_limit(1)],
-                ),
-                channels=[],
-                budget=Budget(time=60),
-            )(AgentState(messages=[ChatMessageUser(content="task")]))
+        # the member ends the sample's time limit; 10 s only bounds a failing run
+        async with sample(time=10):
+            with _expiring_time_limit() as expire:
+                await swarm(
+                    member(
+                        limited_cleanup(
+                            scripted_model(), owned, expire, self_stop=self_stop
+                        ),
+                        limits=[] if self_stop else [token_limit(1)],
+                    ),
+                    channels=[],
+                    budget=Budget(time=60),
+                )(AgentState(messages=[ChatMessageUser(content="task")]))
     # the member's limit or stop was raised before the sample's time limit
     [limit] = owned
     assert (limit.source is None) if self_stop else isinstance(limit.source, SwarmNode)

@@ -1,0 +1,3 @@
+# The API pages list their symbols in the sidebar, which would make each
+# page's Next button point at its own first symbol.
+page-navigation: false

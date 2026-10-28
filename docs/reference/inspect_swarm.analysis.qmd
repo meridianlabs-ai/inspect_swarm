@@ -1,0 +1,16 @@
+---
+reference: inspect_swarm.analysis
+description: Columns for samples_df() and the models of the swarm ledger.
+---
+
+## Columns
+
+### SwarmColumns
+
+## The ledger
+
+### swarm_ledger
+### SwarmLedger
+### MemberLedger
+### Meter
+### Calls

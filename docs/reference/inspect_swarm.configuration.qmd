@@ -1,0 +1,12 @@
+---
+title: Configuration
+reference: inspect_swarm
+description: The member record and the swarm's budget.
+---
+
+## Records
+
+`member()` returns a `Member`, and `swarm(budget=...)` takes a `Budget`. They are on their own page because `Member` and `member()` would share a heading anchor on one page.
+
+### Member
+### Budget

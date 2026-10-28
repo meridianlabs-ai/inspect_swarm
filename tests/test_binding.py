@@ -12,7 +12,6 @@ from inspect_ai.agent import (
     general,
     react,
 )
-from inspect_ai.agent._bridge.util import bridge_model_generate
 from inspect_ai.agent._channel import current_agent_channel
 from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent, SpanBeginEvent
@@ -34,18 +33,16 @@ from inspect_swarm import (
     Channel,
     ChannelRun,
     ChannelState,
-    NoticeLine,
     Record,
     member,
     swarm,
     swarm_channel,
     swarm_tools,
 )
-from inspect_swarm._budget import SwarmTurnNode, current_member
+from inspect_swarm._budget import current_member
 from inspect_swarm._bus._bus import Bus
 from inspect_swarm._bus._record import Draft
 from inspect_swarm._bus._storm import StormControls
-from inspect_swarm._controller._control import MemberRun
 
 
 # A test channel whose one tool, `<name>_write`, delivers its text as a record. The
@@ -77,9 +74,6 @@ class _WriteState:
 
     def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
         return [], None
-
-    def notice_lines(self, member: str) -> list[NoticeLine]:
-        return []
 
 
 class _Loop(Channel):
@@ -311,30 +305,3 @@ async def test_the_acp_flag_says_whether_acp_drives_the_members_loop_and_nothing
 @pytest.mark.anyio
 async def test_outside_a_swarm_there_are_no_swarm_tools() -> None:
     assert await swarm_tools().tools() == []
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    "delivery,bridged,descendant,effective",
-    [
-        pytest.param(None, False, False, "notify", id="default"),
-        pytest.param("poll", False, False, "poll", id="poll"),
-        pytest.param("notify", True, False, "poll", id="bridged"),
-        pytest.param("notify", False, True, "notify", id="bridged-descendant"),
-    ],
-)
-async def test_effective_delivery(
-    delivery: Any, bridged: bool, descendant: bool, effective: str
-) -> None:
-    run = MemberRun(member(react(), delivery=delivery, bridged=bridged), "w", ())
-    if descendant:
-        # a bridged descendant's generation, checked by one of the member's nodes,
-        # finds the member bridged for its budget's sake
-        token = current_member.set(run.context)
-        try:
-            with bridge_model_generate():
-                SwarmTurnNode(None, owner="w").detect_bridge()
-        finally:
-            current_member.reset(token)
-        assert run.context.bridged
-    assert run.context.delivery_effective == effective

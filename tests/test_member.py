@@ -336,3 +336,22 @@ def test_limit_dict_needs_a_value(
     else:
         with pytest.raises(ValueError, match="needs a 'value' key"):
             Member.model_validate(logged)
+
+
+@pytest.mark.parametrize(
+    "limit,match",
+    [
+        ({"limit": "token", "value": 2, "typ": "output"}, "unknown 'typ'"),
+        (
+            {"limit": "time", "value": 2, "secs": 5, "note": ""},
+            "unknown 'secs', 'note'",
+        ),
+        *[
+            ({"limit": kind, "value": 2, "type": "output"}, "unknown 'type'")
+            for kind in ["cost", "turn", "message", "time"]
+        ],
+    ],
+)
+def test_limit_dict_refuses_unknown_keys(limit: dict[str, Any], match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        Member.model_validate({"factory": "react", "limits": [limit]})

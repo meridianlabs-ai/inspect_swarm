@@ -116,12 +116,14 @@ async def test_two_task_errors_are_raised_as_a_group() -> None:
     assert sorted(str(e) for e in info.value.exceptions) == ["one", "two"]
 
 
-async def _caused(where: str) -> None:
+async def _caused(where: str, chain: Literal["cause", "context"] = "cause") -> None:
     async def fails() -> None:
         try:
             raise ValueError("original")
         except ValueError as ex:
-            raise RuntimeError("wrapped") from ex
+            if chain == "cause":
+                raise RuntimeError("wrapped") from ex
+            raise RuntimeError("wrapped")  # noqa: B904 (the implicit context is tested)
 
     async with MemberBackground(_member(), contain=[]):
         if where == "body":
@@ -137,6 +139,16 @@ async def test_an_error_keeps_its_cause(where: str) -> None:
         await _caused(where)
     assert isinstance(info.value.__cause__, ValueError)
     assert str(info.value.__cause__) == "original"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("where", ["body", "task"])
+async def test_an_error_keeps_its_implicit_context(where: str) -> None:
+    with pytest.raises(RuntimeError, match="wrapped") as info:
+        await _caused(where, "context")
+    assert isinstance(info.value.__context__, ValueError)
+    assert str(info.value.__context__) == "original"
+    assert not info.value.__suppress_context__
 
 
 @pytest.mark.anyio

@@ -37,6 +37,14 @@ To run a single test:
 uv run pytest tests/path/to/test.py::test_name -v
 ```
 
+## Documentation
+
+The documentation site's source is in `docs/`. Building it needs [Quarto](https://quarto.org/docs/download/) 1.9.36 or later on your `PATH`; `make docs` checks the version, installs the `doc` dependency group and renders the site into `docs/_site`. CI does not build the docs. To publish the site to GitHub Pages, after `make docs` has installed the `doc` group:
+
+```bash
+cd docs && PATH="$PWD/../.venv/bin:$PATH" quarto publish gh-pages
+```
+
 ## Code style
 
 - Type-annotate all functions (including tests). Use modern syntax (`X | None`, `list[str]`).
@@ -56,7 +64,7 @@ See [`AGENTS.md`](AGENTS.md) for the full conventions used in this repo.
 
 We use [Conventional Commits](https://www.conventionalcommits.org/). Because we squash-merge, **the PR title becomes the commit message**, so the title is what matters. Format it as `<type>: <description>`; `pr-title-lint` enforces it.
 
-Releases are paused for now: `release.yaml` has no `push` trigger, so nothing is released until a maintainer turns it on. Once on, releases are automated with [Release Please](https://github.com/googleapis/release-please): **don't edit `CHANGELOG.md` or bump the version by hand.** Release Please reads the merged commit types, opens a release PR that updates the changelog and version, and merging that PR tags the release; the publish then runs once a maintainer approves the deployment.
+Releases are automated with [Release Please](https://github.com/googleapis/release-please): **don't edit `CHANGELOG.md` or bump the version by hand.** Release Please reads the merged commit types, opens a release PR that updates the changelog and version, and merging that PR tags the release; the publish then runs once a maintainer approves the deployment.
 
 Choose the type deliberately. `feat:` and `fix:` drive the version bump and headline the release notes:
 
