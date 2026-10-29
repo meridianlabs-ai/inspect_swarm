@@ -4,7 +4,7 @@
 
 When a swarm ends, its metrics gain `critical_steps_to_answer`: the number of model calls (steps) on the longest chain of steps that the answer depended on. Each member's own steps, its loop's, its subagents' and its background work's, form one chain in the order they began, as the existing step counts treat them. Chains link between members only where the swarm recorded a dependency: a shared-memory read or a `swarm_wait` result follows the writes it showed, and a wait that names a member's end follows that member's whole chain. The chain ends where the answering member's agent returned.
 
-It is the measure latency curves are interpreted by, beside the existing `steps_to_answer` and `longest_member_steps`, which stay as they are. It is computed at run end from events the swarm's event log already sees, plus the position at which each member's agent returned, with no change to the bus or the evidence. It has two plain limits. Inside a member it over-counts: concurrent subagents and background work count one after another. Across members it is a lower bound: it sees only shared memory and waits, so information that flows another way, such as a shared sandbox, adds no link.
+It is the measure latency curves are interpreted by, beside the existing `steps_to_answer` and `longest_member_steps`, which stay as they are. It is computed only at run end, from the events the swarm's event log sees as they happen and the position at which each member's agent returned, with no change to the bus or the evidence. It reads board evidence only from the built-in shared-memory board the runtime opened for this swarm, which it knows from its own configuration, not from a channel's name. It has two plain limits. Inside a member it over-counts: concurrent subagents and background work count one after another. Across members it is a lower bound: it sees only shared memory and waits, so information that flows another way, such as a shared sandbox, adds no link.
 
 ## Background
 
@@ -30,8 +30,8 @@ Non-goals:
 - The longest chain anywhere in the swarm: overall depth stays with the existing per-member `longest_member_steps` (decision: Ransom, 2026-10-28).
 - A list of the unobserved ways members could share information (decision: Ransom, 2026-10-28; [Alternatives](#alternatives-considered)).
 - A wall-clock critical path ([The metric](#the-metric)).
-- An analysis helper that recomputes the metric from existing logs ([Not this design](#not-this-design)).
-- Edges for channels other than `shared_memory`; the later messages channel brings its own rule.
+- Recomputing the metric from a saved log, by replay or by an analysis helper ([Not this design](#not-this-design)).
+- Edges for channels other than the built-in shared-memory board, a custom channel named `shared_memory` included; the later messages channel brings its own rule.
 - Line-level attribution of a partial view.
 
 ## Current behaviour
@@ -44,7 +44,9 @@ Non-goals:
 
 ### Order
 
-The transcript notifies its subscribers synchronously when it first reports an event, before counting it, and again on each update (`inspect_ai/log/_transcript.py:691-713`, `:762-807`); so during the first notification `transcript().history.event_count` is the event's index, the count `MemberTimelines` already reads (`src/inspect_swarm/_evidence.py:216`). A `ModelEvent` is first reported when its call begins. A sample's logged `events` keep the same first-report order.
+The transcript notifies its subscribers synchronously when it first reports an event, before counting it, and again on each update (`inspect_ai/log/_transcript.py:691-713`, `:762-807`); so during the first notification `transcript().history.event_count` is the event's index, the count `MemberTimelines` already reads (`src/inspect_swarm/_evidence.py:216`). A `ModelEvent` is first reported when its call begins.
+
+There is one other way an event reaches subscribers: events restored from a checkpoint are appended and counted before they are notified (`_extend_restored_events()`, `_transcript.py:716-760`), so during their notification the count is one past their index, and the next ordinary event reads the same count. Their only caller is checkpoint hydration when a sample resumes (`inspect_ai/util/_checkpoint/hydrate.py:689-693`), which runs when the sample's first `react()` enters `checkpointer()` (`inspect_ai/agent/_react.py:213`, `inspect_ai/util/_checkpoint/checkpointer_impl.py:132-142`), inside a member and so inside the swarm's interval. The restored events are the earlier attempt's, its board evidence included, about a board this run does not have. The ledger already records whether the sample resumed (`sample_resumed()`, `_ledger.py:567-573`; `SwarmLedger.resumed`).
 
 ### The evidence
 
@@ -59,7 +61,8 @@ Each is an `InfoEvent` with source `inspect_swarm` and `type: "comm"`, written i
 - Versions of a file are consecutive: a file is created at version 1 and every write that touches it, a delete included, adds one ([swarm-memory-channel.md The board's state](swarm-memory-channel.md#the-boards-state)). A file id is never reused within a board, and renames keep it. Each run's board numbers its files from `f-1` (`shared_memory.py:276`, `:712`), so a nested swarm's board reuses ids the outer board has.
 - A `view` marks the version it shows and writes `read` in the same synchronous call, and a write's `apply()` and its `delivered` event run with no `await` between them, so within one board the order of `delivered` and `read` events in the transcript is the order in which the board changed and was read.
 - A wait that finds news already waiting returns at once with `woken_by: []` and the files it named in `files`; a release whose news has gone by the time the waiter resumes keeps its commit in `woken_by` though the result never named it ([swarm-wait.md What a wait returns](swarm-wait.md#what-a-wait-returns)). A cancelled wait records `files: []` and `ended: []` (`_wait.py:246-249`).
-- **A wait's `files` do not say which channel named them.** Every waiting channel the loop reaches adds its `WaitNews.files` to one list (`_wait.py:225-230`), and the public `WaitNews` contract lets a custom waiting channel name entries of its own shape (`src/inspect_swarm/_channel/_channel.py:162-170`); `channels` lists the channels reached, not which supplied each entry (`_evidence.py:135-156`). In this repo only `shared_memory` (`shared_memory.CHANNEL`, `shared_memory.py:25`) is a waiting channel; a channel given twice is refused (`src/inspect_swarm/_swarm.py:261-270`). `delivered` and `read` carry their `channel`.
+- **A wait's `files` do not say which channel named them.** Every waiting channel the loop reaches adds its `WaitNews.files` to one list (`_wait.py:225-230`), and the public `WaitNews` contract lets a custom waiting channel name entries of its own shape (`src/inspect_swarm/_channel/_channel.py:162-170`); `channels` lists the channels reached, not which supplied each entry (`_evidence.py:135-156`). In this repo only `shared_memory` is a waiting channel. `delivered` and `read` carry their `channel`.
+- **A channel's name does not say which implementation it is.** Names are unique within a swarm (a channel given twice is refused, `src/inspect_swarm/_swarm.py:261-270`), but none is reserved: a custom channel may call itself `shared_memory` (`_channel/_channel.py:35-39`). The runtime knows each open channel's state by name (`Bus.states`, `src/inspect_swarm/_bus/_bus.py:83`, `:93-95`), and the built-in board's state is a `_SharedMemoryState`, which only `shared_memory()`'s channel opens (`shared_memory.py:84-104`, `:275`). The bus opens every channel when the run is built, before `SwarmRun.run()` starts the interval (`_control.py:262-267`, `:382`).
 - A member's end is a `result` event of kind `member_result` naming it, written in its span when it ends, after its drain (`src/inspect_swarm/_controller/_control.py:586-608`).
 - **Which run an event belongs to.** Member names are unique in a sample, since each names a timeline and a second swarm reusing one is refused (`_evidence.py:208-216`); the communication metrics already rely on this to keep another swarm's events out (`_metrics.py:229-231`). A nested swarm's members run inside an outer member's span (`tests/test_background_members.py:1090-1100`), so their steps are the outer member's, but their evidence names the inner members.
 
@@ -105,7 +108,7 @@ The metric is the longest path in a graph of the members' recorded events.
 | Node | Member | Weight |
 |---|---|---|
 | a step (a completed model call, cache replays included), at the position where its call began | the member whose span tree holds its span (`SpanPlaces`) | 1 |
-| a write (`delivered`) or a read (`read`, not a listing) of the `shared_memory` channel, a wait result (`waited`) | its `member`, when that is in the roster | 0 |
+| a write (`delivered`) or a read (`read`, not a listing) of the built-in board, a wait result (`waited`) | its `member`, when that is in the roster | 0 |
 | the member's end (`member_result`) | the member it names | 0 |
 
 **Edges.** Every edge goes from a node to a node with a later position:
@@ -119,11 +122,13 @@ The metric is the longest path in a graph of the members' recorded events.
    | `view` of a deleted file's id | the deleting write: the reader is shown that the file was deleted and by whom, not its content |
    | `view` of a directory (listing) | none |
    | the status line, `changes` | none (no evidence, and the step that sees them was not blocked on them) |
-   | `swarm_wait` result | for each version its `files` names, the latest write up to that version by a loop other than the waiter's: the peer write the result reports, since when the waiter's own blind append made the current version, the result names that version but reports the peer write before it (`news()` and `_by_others()`, `shared_memory.py:426`, `:973-982`); only when `shared_memory` is the only channel in its `channels`, so that every entry is the board's; none from a wait that reached another waiting channel, or a cancelled wait |
+   | `swarm_wait` result | for each version its `files` names, the latest write up to that version by a loop other than the waiter's: the peer write the result reports, since when the waiter's own blind append made the current version, the result names that version but reports the peer write before it (`news()` and `_by_others()`, `shared_memory.py:426`, `:973-982`); only when the built-in board is the only channel in its `channels`, so that every entry is the board's; none from a wait that reached another waiting channel, or a cancelled wait |
 
    An edge from the reader's own member adds nothing, since its chain already passes through that write.
 
-   A wait that reached a custom waiting channel makes no file edges, alone or beside shared memory: its `files` mix entries from every channel it reached with nothing to say which named which, and a custom channel's entry can name an id the board also has, or one the board never had. Treating such entries as board versions would link an unrelated writer or turn a valid wait into inconsistent evidence; ignoring them, with no warning, makes the number a lower bound there, as any custom channel does. Its `ended` entries come from the bus, not from a channel (`_wait.py:231-244`), so they still make member-end edges.
+   **The built-in board, by instance.** The board is the open channel whose state is the built-in `_SharedMemoryState`, found from the bus's states when the run starts, not from the name in an event. Since names are unique within a swarm, the events that carry that channel's name are that board's. When the swarm has no built-in board, there is no board evidence at all: a custom channel's `delivered` and `read` events, whatever its name, make no node, and its wait entries no edge, so a custom channel named `shared_memory` is treated as any other custom channel. Member steps and member-end edges count either way.
+
+   A wait that reached a custom waiting channel makes no file edges, alone or beside the board: its `files` mix entries from every channel it reached with nothing to say which named which, and a custom channel's entry can name an id the board also has, or one the board never had. Treating such entries as board versions would link an unrelated writer or turn a valid wait into inconsistent evidence; ignoring them, with no warning, makes the number a lower bound there, as any custom channel does. Its `ended` entries come from the bus, not from a channel (`_wait.py:231-244`), so they still make member-end edges.
 3. **Member ends to waits.** A wait result follows the end (`member_result`) of each member its `ended` names, and so that member's whole chain, drained work included.
 
 **The metric.** `critical_steps_to_answer` is the largest number of steps on a path into the answering member's chain at `returned_at`: its chain's value after every node before that position.
@@ -176,18 +181,21 @@ The transcript has no event at that point: the member's span stays open through 
     # links, so across members it is a lower bound when they can share information in
     # other ways: a shared sandbox, a shared volume, a service, a custom channel, a
     # shared tool or store key, or a controller that hands one member's result to
-    # another. None without an answer, and in metrics written before this field.
+    # another. None without an answer, for a sample resumed from a checkpoint, and
+    # in metrics written before this field.
     critical_steps_to_answer: int | None = None
 ```
 
-- **Always reported**, whatever the swarm's configuration, with no list of unobserved sharing (decision: Ransom, 2026-10-28). The ways members can share outside the evidence are the experimenter's own configuration, a list could never rule out shared tools, store keys or services, and it would flag nearly every arm. The field comment and the user docs say what the number counts, that it over-counts concurrency inside a member, and that it is a lower bound across members when any other sharing is possible.
+- **Always reported**, whatever the swarm's configuration, with no list of unobserved sharing (decision: Ransom, 2026-10-28); only a sample resumed from a checkpoint has none ([Where it is computed](#where-it-is-computed)). The ways members can share outside the evidence are the experimenter's own configuration, a list could never rule out shared tools, store keys or services, and it would flag nearly every arm. The field comment and the user docs say what the number counts, that it over-counts concurrency inside a member, and that it is a lower bound across members when any other sharing is possible.
 - **Unit: steps.** A step is the unit of the existing counts and of Kimi's CriticalSteps, and it is independent of provider latency and of `max_connections`. A chain's span in seconds, from its first step to the answer, is about the answer's own time, which the record already has (`MemberResult.time`); a sum of call durations along it mixes connection waits and retries in, which plan decision 12 ruled out for per-member timing until it can follow Inspect's working-time accounting ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 12).
 - **The existing fields stay** with their meaning, and their comment is corrected: they bound each member's own sequential depth from above, not the swarm's. For an answering member that no link reaches, the new number is its steps that began before its return, which is `steps_to_answer` less any of its calls that began after; a link from a peer makes it larger.
 - **Over-approximations**, each of which can only lengthen the chain: concurrent work inside a member counts as sequential, and a read by one branch feeds the member's later steps in every branch; a background call in flight at the answer's return counts; a partial view links the whole version; a version's history links writes whose text a later edit removed; a read in a member's last turn reaches its return though no later generation saw it.
 
 ### Where it is computed
 
-**At run end, as a per-sample metric**, beside the existing ones, in the same `SwarmMetrics` event and store entry, so every new run carries it and scorers can read it. Everything it needs is seen by the runtime: the `EventLog` is subscribed for the whole interval, and the metrics are computed after every member has ended. The computation is a pure function over compact records that an `EventLog` builds from events; the logs hold the same events in the same order, so a logged sample's `events`, each passed with its index in that list as its position, build the same records, which a test checks. Only the answering member's return position is not in the log; the runtime records it.
+**At run end, as a per-sample metric**, beside the existing ones, in the same `SwarmMetrics` event and store entry, so every new run carries it and scorers can read it. Everything it needs is seen by the runtime: the `EventLog` is subscribed for the whole interval, the bus knows which channel is the built-in board, and the metrics are computed after every member has ended. It is computed only there, from the runtime's own event stream: nothing promises that a saved log's events give the same result, so the recording needs no position or board contract beyond the live run (decision: Ransom, 2026-10-29).
+
+**A resumed sample has no value.** Its transcript receives the earlier attempt's events through checkpoint hydration, inside the interval ([Order](#order)): they are counted before they are notified, so a restored event and the next ordinary one would share a position, and their board evidence describes a board this run does not have. So when the interval finds the sample resumed, the same signal as `SwarmLedger.resumed`, the metric is `None` and no restored event is read for it; outside that case every first report reaches the subscriber before it is counted, so positions are distinct and in transcript order.
 
 ### Code
 
@@ -195,13 +203,15 @@ The transcript has no event at that point: the member's span stays open through 
 
 ```python
 # What the critical path reads from the transcript, by position (the transcript's
-# event index when the event was first reported). Filled by EventLog.
+# event count when the event was first reported). Filled by EventLog, live only.
 class PathLog:
+    def __init__(self, board: str | None) -> None: ...  # the built-in board's channel name, or None
+
     steps: dict[str, tuple[str | None, int]]  # model event uuid -> (span id, position)
-    writes: list[PathWrite]   # `shared_memory` `delivered`: position, member, loop, [(file, version, deleted)]
-    reads: list[PathRead]     # `shared_memory` `read` without `listing`: position, member, [(file, version, deleted)]
-    waits: list[PathWait]     # `waited`: position, member, loop, board (`channels` == ["shared_memory"]),
-                              # [(file, version)] when board, else [], [ended members]
+    writes: list[PathWrite]   # the board's `delivered`: position, member, loop, [(file, version, deleted)]
+    reads: list[PathRead]     # the board's `read` without `listing`: position, member, [(file, version, deleted)]
+    waits: list[PathWait]     # `waited`: position, member, loop,
+                              # [(file, version)] when `channels` == [board], else [], [ended members]
     ends: dict[str, int]      # `member_result`: member -> position
 
     def __call__(self, event: Event, position: int) -> None: ...
@@ -216,18 +226,19 @@ def critical_steps_to_answer(
 ) -> int | None: ...
 ```
 
-- **Recording.** Positions come from the caller, not from the ambient transcript: `EventLog` gains a private `record(event, position)`, which does what `__call__` does today and passes the event to its `PathLog` with that position. The live subscriber, `__call__`, calls it with `transcript().history.event_count`, the event's index in the whole sample's transcript, since the transcript counts an event only after notifying its subscribers (`inspect_ai/log/_transcript.py:705-709`). Replay calls it for each event of a logged sample's full `events` list with its index there, the same coordinates, so `returned_at` keeps its meaning; reading `event_count` during replay would give every event the ambient transcript's count. The `PathLog` takes an event the first time its uuid is passed (an update is not taken again): model events, `comm` events and `member_result` events. It keeps `delivered` and `read` events of the `shared_memory` channel only (`shared_memory.CHANNEL`), and a wait's `files` only when its `channels` is exactly that channel. The `PathLog` keeps only ids, positions, loop ids, file ids, versions and member names: nothing a member wrote. `CommRecord` and `WaitRecord` are unchanged. `places` is passed as a callable so that `_critical_path.py` imports nothing from `_ledger.py`, which imports it.
+- **The board.** `SwarmRun.run()` finds the built-in board before it starts the interval: the name of the bus state whose type is `_SharedMemoryState`, or `None`. It passes that to `LedgerInterval(board=...)`, which creates its `EventLog` and the `EventLog`'s `PathLog` with it.
+- **Recording.** `EventLog.__call__` passes each event to its `PathLog` with `transcript().history.event_count` as its position, the count `returned_at` also reads; the `PathLog` takes an event the first time its uuid is passed (an update is not taken again): model events, `comm` events and `member_result` events. It parses `delivered` and `read` events only when their `channel` is the board, and a wait's `files` only when its `channels` is exactly `[board]`; with no board it parses none, and never reads a custom channel's results. The `PathLog` keeps only ids, positions, loop ids, file ids, versions and member names: nothing a member wrote. `CommRecord` and `WaitRecord` are unchanged. `places` is passed as a callable so that `_critical_path.py` imports nothing from `_ledger.py`, which imports it.
 - **Returning.** `_run_member()` sets `outcome.returned_at = transcript().history.event_count` right after `_call_agent()` returns, for every member, as the wrapper does not know which will answer (`_member.py:520`); `MemberOutcome` gains the field, defaulting to `None`, which it stays when `_call_agent()` raises or is cancelled.
 - **Computing.** `critical_steps_to_answer()` keeps the evidence of roster members only and the steps `completed` accepts, each step's member from `places`, and walks the nodes in position order once with a running value per member: a step adds one; a write records the writer's value for its file version, with its loop; a read or wait result raises the reader's value to the largest of its in-edges; a `member_result` records the member's value as its end. For a file it keeps the largest value among all the writes in its history, which is what a live view of its current version follows, and each version's write with its loop and value, from which a tombstone view takes the deleting write. For a wait, each version also keeps its predecessor by another loop: the latest earlier write whose loop differs from this version's, which is version − 1 when that write's loop differs, and otherwise version − 1's own predecessor, so it is set in constant time when the write is recorded. A wait then takes the named version's write when another loop made it, and that version's predecessor when the waiter's loop did, with no scan back through the history. Steps in spans outside every member (the controller's, the final step's) are ignored. It returns the answering member's value after the last node before `answered_at`, or `None` without an answer or `answered_at`.
 - **Inconsistent evidence.** A read whose shown version is not the file's current version at its position, or a version a shared-memory-only wait named that no roster write produced, would mean the ordering assumption broke. The function then logs a warning naming the file and versions and returns `None`; it never raises, so the metric cannot fail a run that succeeds without it.
-- **Wiring.** `swarm_metrics()` takes `answered_at`, the `returned_at` of the `MemberRun` named by `chosen` in `_control.py`, calls `critical_steps_to_answer()` with the event log's `PathLog`, `completed` built from `EventLog.calls`, `places` and the ledger's member names, and fills the field. Everything stays synchronous, as the rest of the `finally` is.
+- **Wiring.** `swarm_metrics()` takes `answered_at`, the `returned_at` of the `MemberRun` named by `chosen` in `_control.py`, calls `critical_steps_to_answer()` with the event log's `PathLog`, `completed` built from `EventLog.calls`, `places` and the ledger's member names, and fills the field; it leaves the field `None` when the ledger says the sample resumed, without calling it. Everything stays synchronous, as the rest of the `finally` is.
 
 **Configuration.** None: the metric is always on, as the other metrics are.
 
 ## Alternatives considered
 
 - **A happens-before graph inside each member** (loops and tool calls as contexts, fork and join edges at each child's start and return, ordering by reporting task), so that parallel subagents count by their slower branch. The transcript does not record what that needs: which task started a child, where its caller awaited it (a task-group join writes no event), and whether a call in flight at the return finished before or after it. Span containment and reporting-task ids stand in for these and get ordinary shapes wrong in both directions, missing a planner a parent awaited in a task group and chaining a branch to an unrelated sibling that returned first. Doing it right needs causal evidence of spawning and awaiting ([Not this design](#not-this-design)); one chain per member is the existing counts' definition and always sound as an upper bound inside the member (decision: Ransom, 2026-10-29).
-- **Placing a step at its completion rather than its begin.** Would leave out a background call that finishes in the drain, but would let a call already in flight at a read take that read's dependency, across members; the begin position is also what the log keeps, and the in-flight call is inside the member, where the number already over-counts.
+- **Placing a step at its completion rather than its begin.** Would leave out a background call that finishes in the drain, but would let a call already in flight at a read take that read's dependency, across members; the begin position is the event's first report, and the in-flight call is inside the member, where the number already over-counts.
 - **Ending the answer at the answering member's end (`member_result`) or its last step.** The first lets a drained tool call's read of a peer's file after the answer lengthen the answer's chain; the second misses a read whose content the member returned with no model call after it. Recording the return position is the only way to place the end exactly, as no event marks it.
 - **An evidence event at the agent's return.** Would let a log helper place the end too, but it changes the evidence for a value only the runtime needs now; it can come with that helper.
 - **`woken_by` as the wait's edge.** Misses waits that returned at once (`woken_by: []`) and adds commits whose news never reached the loop.
@@ -239,6 +250,9 @@ def critical_steps_to_answer(
 - **Omitting the metric when sharing outside the evidence is possible.** It would drop the metric for the default configuration, where the recorded edges still hold and give a lower bound (decision: Ransom, 2026-10-28: always report).
 - **A wall-clock path.** See [The metric](#the-metric).
 - **An analysis helper over logs instead of a run-end metric.** Works on older logs, but every arm would need the user to call it, scorers could not read the value, and it needs the return position, which the log lacks.
+- **Also promising that a saved log's events rebuild the same result**, with each event's index as its position and a test that compares the two. It needs a position contract the live stream does not need (restored events are counted before they are notified, a replay has no live count) and board identity the log does not carry; the metric is computed at run end only (decision: Ransom, 2026-10-29).
+- **The board by channel name** (`channel == "shared_memory"`). Names are not reserved, so a custom channel with that name would have its results read as board versions, and an unknown version would void the metric; the runtime knows the instance (decision: Ransom, 2026-10-29).
+- **Counting a resumed sample** from the restored events. Their positions collide with the next event's and their board evidence is the earlier attempt's; telling them apart would need inspect_ai to mark restored events to subscribers.
 - **Adding the step's index or the proposing tool call id to the evidence.** The order of events already places every node, and keeping the evidence as it is leaves every channel and log reader untouched.
 
 ## Compatibility and migration
@@ -261,27 +275,28 @@ All async tests run on asyncio and trio through the `anyio_backend` fixture.
   - a single member (its steps before `answered_at`), and steps after `answered_at`, such as a cache replay during the drain (left out of the answer, counted at the member's end);
   - a wait that returned at once (`woken_by: []`, edge from `files`); a wait released by a write whose news vanished (no edge); a cancelled wait (no edge); a wait after the waiter's own blind append, between two members and between two loops of one member; repeated waits after several blind appends by the waiter, each naming the same current version (every one links the peer's write);
   - a listing (no edge); a tombstone view (the deleting write only); `delivered` and `read` of another channel (no node);
+  - a custom channel named `shared_memory` with no built-in board (`PathLog(board=None)`): its deliveries, reads and a wait naming `f-99` version 7 make no node or edge, no warning and not `None`; member steps and its waits' `ended` entries still count;
   - waits that reached a custom waiting channel, alone or beside shared memory, with an entry naming a board id (`f-1`), an id the board never had (`f-99`), or none: no file edge, no warning, not `None`; their `ended` entries still link;
   - evidence naming a member outside the roster, with its own `f-1` (ignored, no warning), and steps in spans outside every member (ignored);
   - an inconsistent read version (`None` and a warning); errored and cache-replayed model events; no answer, and no `answered_at` (`None`).
-- **`tests/test_metrics.py`**: mockllm swarms through `run_swarm()`, asserting the field: two `react()` members, one writing and one waiting and viewing (as B above); a deepagent member with two `general()` children dispatched in one turn (the sum of their steps and its own); a member waiting for a peer's end while that peer's background work drains; a member running a nested swarm with shared memory (as `tests/test_background_members.py:1090`), whose inner board makes no edge.
-- **Runtime and log agree**: one swarm run through `eval_async()` with a write, a view and a wait, whose logged sample's full `events`, each passed to a fresh `EventLog`'s `record()` with its index in that list, build the same `PathLog`, positions included, as the run's own subscribed `EventLog` did. This guards the ordering assumption and a later log helper.
+- **`tests/test_metrics.py`**: mockllm swarms through `run_swarm()`, asserting the field: two `react()` members, one writing and one waiting and viewing (as B above); a deepagent member with two `general()` children dispatched in one turn (the sum of their steps and its own); a member waiting for a peer's end while that peer's background work drains; a member running a nested swarm with shared memory (as `tests/test_background_members.py:1090`), whose inner board makes no edge; a swarm whose only channel is a registered custom channel named `shared_memory` (no file edges, member-end waits still link); and `swarm_metrics()` leaving the field `None` for a ledger marked resumed.
 
 No test needs Docker, a network or a model provider.
 
 ## Implementation plan
 
-1. **The path and its recording.** `src/inspect_swarm/_critical_path.py` (`PathLog`, `critical_steps_to_answer()`), `src/inspect_swarm/_ledger.py` (`EventLog.record(event, position)`, which passes first reports with their positions to its `PathLog`, and `__call__` calling it with the transcript's count), `tests/test_critical_path.py`.
-2. **The metric.** `src/inspect_swarm/_member.py` (`MemberOutcome.returned_at`, set after `_call_agent()` for every member), `src/inspect_swarm/_metrics.py` (the field, the corrected comment on the existing counts, `swarm_metrics()`'s new argument), `src/inspect_swarm/_controller/_control.py` (the argument at run end), `docs/analysis.qmd` (Metrics), `tests/test_metrics.py` with the runtime-and-log test.
+1. **The path and its recording.** `src/inspect_swarm/_critical_path.py` (`PathLog`, `critical_steps_to_answer()`), `src/inspect_swarm/_ledger.py` (`LedgerInterval(board=...)`, and `EventLog` passing first reports with the transcript's count to a `PathLog` created with the board), `tests/test_critical_path.py`.
+2. **The metric.** `src/inspect_swarm/_member.py` (`MemberOutcome.returned_at`, set after `_call_agent()` for every member), `src/inspect_swarm/_metrics.py` (the field, the corrected comment on the existing counts, `swarm_metrics()`'s new argument), `src/inspect_swarm/_controller/_control.py` (the board from the bus's states before the interval starts, and the argument at run end), `docs/analysis.qmd` (Metrics), `tests/test_metrics.py`.
 
 ## Open questions
 
-None.
+- **A resumed sample's value.** The design leaves it `None`, since the restored events it would read share positions with live ones and describe the earlier attempt's board. Recommendation: keep `None`, which `swarm_resumed` already lets an analysis filter on; counting resumed samples would need inspect_ai to mark restored events to subscribers.
 
 ## Not this design
 
 - **Concurrency inside a member**, counted by its longest branch rather than its sum: a design of its own, which first records causal evidence of which task started a child and which task awaited it (and where), and when a call in flight at a member's return completed. AnyIO exposes a task's identity and its parent, but not await points, and a task-group join writes no transcript event, so it may need an inspect_ai change.
-- **An analysis helper over logs**, such as `swarm_critical_path(sample)` in `inspect_swarm.analysis`, for logs written before the metric. It needs the answering member's return position, which the log lacks, so it would come with an evidence event at the agent's return.
+- **An analysis helper over logs**, such as `swarm_critical_path(sample)` in `inspect_swarm.analysis`, for logs written before the metric: its own small design if it is ever wanted. It would need, recorded in the log, the answering member's return position, the built-in board's identity, and a position for each event that holds for restored events too.
+- **Restored events in the existing counts.** A resumed sample's restored model events reach the `EventLog` too; how `steps_to_answer` and the ledger treat them is theirs to settle.
 - **The chain itself**, as the members and step counts along it, for explaining a number; the metric records its length only.
 - **`SwarmColumns` for metrics.** The columns read the ledger; metrics are read from the store entry today.
 - **The messages channel's edges.** Its `read` evidence will name records rather than file versions; its design adds its rule here.
