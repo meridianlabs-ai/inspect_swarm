@@ -42,6 +42,8 @@ Each member's calls, its subagents' and background work's included, form one cha
 - A view of a `shared_memory` file, or a `swarm_wait` result that names a file, follows the writes it showed. A view of a file follows every write in its history; a view of a deleted file follows the delete. Directory listings and the `changes` status line make no link.
 - A `swarm_wait` result that names a member's end follows all of that member's calls.
 
+A wait links files only when `shared_memory` is the only waiting channel it reached. Its links to member ends count either way.
+
 The chain ends when the answering member ends, after its background work has finished, since that work can still change the member's output.
 
 The number over-counts work inside a member. Parallel and background subagents, tool calls of one turn, and any other concurrent work count one after another, and the answering member's background work after its agent returned, its reads included, counts whether or not it changed the answer. That excess reaches peers through the member's later writes.
