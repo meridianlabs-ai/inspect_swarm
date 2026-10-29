@@ -285,7 +285,7 @@ An operator's interrupt is outside the seam. While a member waits in `after_canc
 
 ### Evidence
 
-Two `InfoEvent`s of type `turn`, in the member's span, with the swarm's evidence fields (`version`, `type`, `kind`, `member`, `span_id`), written only at boundaries where callbacks ran:
+Two kinds of inspect_ai `SwarmEvent` ([swarm-event-types.md](swarm-event-types.md#swarmevent)), `kind="boundary"` and `kind="changed"`, with `member` set and the fields below in `data` (`data["version"] = 1`), written with `swarm_event()` in the member's span, only at boundaries where callbacks ran:
 
 - **`boundary`**, once per such boundary: `boundary` (the index), `after`, `origins` (the callbacks' origins in order), `held_for` (seconds), `outcome`, `messages` before and after. The outcome is `continue` (the chain's change, if any, is in the live list), `end` (by `"end"` or `end()`, with its origin), `stop`, `error` (a callback raised, or its result failed a check; with the origin of the one that raised and the error's type), `rejected` (applying the change to the live list raised, such as a message limit; with the error's type) or `cancelled` (a cancellation from outside the swarm). The events are written in a synchronous `finally`, so they are written however the chain ends.
 - **`changed`**, once for each callback whose result differs from the state it received: `boundary`, `origin`, and the change, found by diffing on message id:
@@ -351,10 +351,10 @@ Rejected: the gate covers every turn of every `react()`-based member, wired or n
 ## Compatibility and migration
 
 - **inspect_ai.** Without a gate nothing changes. The gate is a private module; `before_turn()` gains an optional keyword argument, and `after_cancel()` is unchanged; `reset()` is added to the compaction handler and the `Compact` protocol, so a custom class that a type checker matched against `Compact` must add it. inspect_swarm needs an inspect_ai release with both.
-- **inspect_swarm's API** gains `on_boundary()`, `end()` and `held` on the handle, and `Boundary` and `BoundaryCallback`, additions only. `MemberHandle` is a protocol that only the runtime implements. `SwarmEvent` and `MemberState` are unchanged.
+- **inspect_swarm's API** gains `on_boundary()`, `end()` and `held` on the handle, and `Boundary` and `BoundaryCallback`, additions only. `MemberHandle` is a protocol that only the runtime implements. `ControlEvent` (the controller event alias, `SwarmEvent` before the evidence switch renames it) and `MemberState` are unchanged.
 - **Behaviour without callbacks.** One change, for every member: a member that reaches a boundary after the swarm began to stop ends there, `stopped`, rather than at its next model call; the status is the same, and a cached call can no longer run after the stop. Binding changes nothing: the seam binds its own turn loop beside the bus's `MemberContext.loop`, which is still bound at the first `swarm_tools()` resolution, so tools, waits, `tools_unwired` and `acp_bound` are as today.
 - **Member time limits** are the swarm's subclass of Inspect's: logged, rebuilt and enforced as before, and identical while no callback holds the member.
-- **Logs.** New `InfoEvent` kinds of a new type, and two metrics fields with defaults; logs written before load unchanged. The result record and the ledger are unchanged. The viewer has no generated types for these.
+- **Logs.** Two new `SwarmEvent` kinds, and two metrics fields with defaults; logs written before load unchanged. The result record and the ledger are unchanged. The viewer renders the new kinds as it renders any `SwarmEvent` kind, a one-line header over collapsed data, with no change.
 
 ## Security
 
@@ -407,7 +407,7 @@ All with mockllm, no network or Docker.
 ## Implementation plan
 
 1. **inspect_ai: the turn gate and the compaction reset.** `src/inspect_ai/agent/_channel/gate.py` (new), `channel.py` (`before_turn()`, the channel's gate and rewrite mark), `__init__.py` (`agent_channel()` reads the gate and calls its `closed()`), `src/inspect_ai/model/_compaction/_compaction.py` and `types.py` (`reset()`), `src/inspect_ai/agent/_react.py` (pass the state to `before_turn()`, reset compaction and clear `overflow_compacted` after a rewrite, in both loops); the inspect_ai tests above.
-2. **inspect_swarm: the seam.** Needs step 1 in an inspect_ai that inspect_swarm can depend on.
+2. **inspect_swarm: the seam.** Needs step 1 in an inspect_ai that inspect_swarm can depend on, and the switch of the swarm's evidence to `SwarmEvent` and `CommunicationEvent` ([swarm-event-types.md](swarm-event-types.md)), so the seam writes `SwarmEvent`s from the start.
    - `src/inspect_swarm/_seam.py` (new): `MemberGate`, `Boundary`, `BoundaryCallback`, binding (the member's own task, one loop), the callback chain in known-work spans, the result checks (ids, a user message), an added system message as a rewrite, the removal of stale summaries, applying the change to the live list, the diff and its evidence.
    - `src/inspect_swarm/_member.py`: install the gate around the agent call; the output from the gate's last state when the agent raises; a pending end request read on a normal return; ending `errored` a member whose callbacks never ran because it never reached the gate; member time limits as `SwarmTimeNode`; the background-dispatch check for `on_boundary()`.
    - `src/inspect_swarm/_background.py`: refuse new background work while the member is held.
@@ -415,7 +415,7 @@ All with mockllm, no network or Docker.
    - `src/inspect_swarm/_budget.py`: `SwarmTimeNode`; ending a member through its lever at a boundary; the `turn_loop` binding on `MemberContext`.
    - `src/inspect_swarm/_ledger.py`: model calls in flight in a cancelled chain.
    - `src/inspect_swarm/_bus/_wait.py`: held members are not active.
-   - `src/inspect_swarm/_evidence.py`, `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/__init__.py`.
+   - `src/inspect_swarm/_evidence.py` (the `boundary` and `changed` kinds through `swarm_event()`), `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/__init__.py`.
    - Docs: `docs/controllers.qmd` (boundary callbacks), `docs/members.qmd` (time limits while held), `docs/analysis.qmd` (the events and metrics).
    - Tests: `tests/test_turn_seam.py`.
 
