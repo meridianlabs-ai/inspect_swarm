@@ -283,7 +283,7 @@ Both are written with `transcript()._event(event)`, the private, synchronous cal
 | `version: 1` | `data["version"] = 1` |
 | the rest (`span_id`, `status`, `time`, `sandbox`; `span_id`, `mode`, `reason`, `stop_reason`) | `data` |
 | `type: "ledger"` or `"metrics"`, then the model's fields | `kind="ledger"` or `"metrics"`, `member=None`, `data` the model's dump exactly as stored, its own `version` included |
-| `type: "result_record"`, then the record's fields ([swarm-result-record.md](swarm-result-record.md#the-event)) | `kind="result_record"`, `member=None`, `data` the `SwarmResultRecord` dump, its own `version` included |
+| `type: "result_record"`, then the record's fields ([swarm-result-record.md](swarm-result-record.md#the-event)) | `kind="result_record"`, `member=None`, `data` the `SwarmResultRecord` dump, its own `version` included, and the record's `id` |
 
 So `data` for the ledger and metrics is the store entry itself, and `SwarmLedger.model_validate(event.data)` reads it. The versions stay 1: the event type tells the new format apart from the `InfoEvent`s, and the rule that the evidence `version` tracks the payload's shape, not the tools' texts (decision: Ransom, 2026-10-23), applies to `data`. The swarm writes no `InfoEvent` after the switch.
 
