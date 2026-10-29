@@ -581,7 +581,7 @@ The scorer `member_scores(scorer, result, ...)` builds works in six steps.
 1. **Skips in-loop scoring.** If `state.completed` is `False`, it returns `None` at once. Final scoring and re-scoring both have `completed=True`.
    - `score()` drops `None` results, so in-loop callers see exactly the task scorer's feedback and call count they saw before. The callers are `react(attempts=...)`, `basic_agent`, the human agent's `/score` and the inspect_swe attempt loops.
    - During the solve the wrapper never runs the inner scorer or touches the sandbox; the swarm's record does not exist yet.
-2. **Reads the members.** It reads them from the record, `swarm_result(state)`, when the scored state's store names one. Otherwise (a plain agent, not `baseline()`) it treats the sample's `output` as one started member named `solver` with status unknown, and computes its answer key, which is a pure function. It never runs the verifier.
+2. **Reads the members.** It reads them from the record, `swarm_result(state)`, when the scored state's store names one; a record it cannot read raises ([Re-scoring](#re-scoring)). Otherwise (a plain agent, not `baseline()`) it treats the sample's `output` as one started member named `solver` with status unknown, and computes its answer key, which is a pure function. It never runs the verifier.
 3. **Checks the contract.** If `result.kind` is not `"answer"`, or the record's kind differs from `result.kind`, it returns `best_member` and `mean_member` as NaN with `reason` saying why: `"artifact_without_member_artifacts"`, `"kind_mismatch"` or `"kind_not_declared"`. An M1 record, which has no kind, gives `"kind_not_declared"`. Shared-artifact tasks with member artifacts are handled [below](#shared-artifact-tasks-and-per-member-artifacts).
 4. **Grades each member, in roster order.** A member that never started (state `pending`) gets the outcome **not started**: no value, reason `"not_started"`, and the scorer is not called. It ran nothing, so it is neither a failure nor unavailable. Every other member gets one of three outcomes:
    - **Empty.** No output, or a completion that is empty after stripping whitespace: value `empty_value` (default 0.0), reason `"empty_output"`, and the scorer is not called.
@@ -765,7 +765,7 @@ class SwarmResultRecord(BaseModel):   # adds, with the cost boundary
   - In-loop scoring makes the scorer part of the trajectory, so otherwise a scorer change is an arm of its own ([Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
 - **Scorers that need the sandbox** (an answer evaluator that compiles code, any artifact scorer) cannot be re-scored. `sandbox()` raises `ProcessLookupError` and the error propagates, as it does for the task's own scorer today. `member_scores` neither catches it nor reports a partial result.
 - **Selection evidence is never recomputed.** Verdicts, keys and times come from the record written during the run; re-scoring never calls a verifier.
-- **Old records.** `member_scores` checks `version`. A record with an unknown version is reported as unscored with reason `"unknown_record_version"`, never misread.
+- **Records this inspect_swarm cannot read.** `member_scores` reads the record with `swarm_result(state)`, which raises `ValueError` for a version other than 1, as for a malformed record, a missing event or missing attachments, and as `swarm_ledger()` does for a ledger ([swarm-result-record.md Reading it](swarm-result-record.md#reading-it-swarm_result)). `member_scores` does not catch it, so scoring or re-scoring a record written by a newer inspect_swarm fails that sample's scoring with the error, never misreading it and never reporting it as a scored or unscored value. A new record version comes with a reader for it.
 
 ### How it appears in logs
 
@@ -852,6 +852,7 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
   - per-member values, `best_member` and `mean_member`; empty outputs get `empty_value` and never reach the scorer in answer tasks;
   - an inner scorer returning `None`, `Score.unscored()` and a dict value gives unavailable members with their reasons; mixed and all-unavailable cases; every roster permutation gives the same aggregates;
   - artifact kind without artifacts, kind mismatch and a missing contract (including an M1 record) give NaN with the right reason;
+  - a record of version 2 and a malformed version-1 record (written by hand) make `member_scores` raise `ValueError`, in final scoring and in re-scoring;
   - a plain agent is scored as one member with its key and no verdict;
   - never-started members get the outcome `not_started`, no value and no scorer call, and leave `complete` true; `members_started` counts the others;
   - the copies do not appear in `state.scores`.
