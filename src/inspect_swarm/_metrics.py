@@ -6,7 +6,15 @@ from inspect_ai.scorer._score import _scorers  # pyright: ignore[reportPrivateUs
 from inspect_ai.scorer._scorer import unique_scorer_name
 from pydantic import BaseModel
 
-from ._ledger import EventLog, MemberLedger, SpanPlaces, SwarmLedger
+from ._critical_path import critical_steps_to_answer
+from ._ledger import (
+    Calls,
+    EventLog,
+    MemberLedger,
+    SpanPlaces,
+    SwarmLedger,
+    count_call,
+)
 
 # react()'s default score_value
 _score_value = value_to_float()
@@ -88,12 +96,20 @@ class SwarmMetrics(BaseModel):
     # critical path, the simple definition: a member's steps are the completed model
     # calls in its spans, cache replays included, from its ledger line, so they cover
     # everything it did through its end. Calls a member makes concurrently (parallel
-    # subagent tool calls) count one each, so both numbers bound the sequential depth
-    # from above.
+    # subagent tool calls) count one each, so both numbers bound each member's own
+    # sequential depth from above, not the swarm's: neither sees members' dependencies.
     # the selected member's steps; None when there is no answer
     steps_to_answer: int | None
     # the largest step count of any member
     longest_member_steps: int
+    # critical path, the dependency-linked definition: the longest chain of steps
+    # (completed model calls, cache replays included) ending at the answering member's
+    # end, linked across members where a read or a swarm_wait result showed a write of
+    # the built-in board, or a wait named a member's end. Not a bound on causal depth
+    # either way; see docs/analysis.qmd, "The critical path". None with no answer, when
+    # the answering member has no recorded end, when the evidence is inconsistent (with
+    # a warning), for a resumed sample, and in metrics written before this field.
+    critical_steps_to_answer: int | None = None
 
 
 # When a member ran, in swarm time (seconds from the swarm's start).
@@ -222,6 +238,12 @@ def swarm_metrics(
         if answer is None
         else next(_steps(m) for m in ledger.members if m.name == answer),
         longest_member_steps=max(_steps(m) for m in ledger.members),
+        # a resumed sample records no path
+        critical_steps_to_answer=None
+        if events.path is None
+        else critical_steps_to_answer(
+            events.path, lambda uuid: _completed(events, uuid), places, answer
+        ),
     )
 
 
@@ -284,6 +306,13 @@ def _waits(events: EventLog, members: Sequence[str]) -> dict[str, _Waits]:
 # Completed model calls in the member's spans, cache replays included.
 def _steps(line: MemberLedger) -> int:
     return line.calls.calls + line.calls.cache_replays
+
+
+# Whether a model event is a step, as the ledger counts it.
+def _completed(events: EventLog, uuid: str) -> bool:
+    calls = Calls()
+    count_call(calls, events.calls[uuid])
+    return calls.calls + calls.cache_replays == 1
 
 
 # The nearest agent span enclosing `span`, itself included.

@@ -21,8 +21,9 @@ For the swarm:
 - `never_acted`: members with no completed model call.
 - `steps_to_answer`: completed model calls of the member whose output is the answer, `null` with no answer.
 - `longest_member_steps`: the largest number of completed model calls of any member.
+- `critical_steps_to_answer`: the number of completed model calls on the longest chain of calls the answer depended on, across members ([The critical path](#the-critical-path)).
 
-Step counts include cache replays and exclude failed or cancelled attempts. A member's subagents' calls count as the member's.
+Step counts include cache replays and exclude failed or cancelled attempts. A member's subagents' calls count as the member's. `steps_to_answer` and `longest_member_steps` bound each member's own sequential depth from above, not the swarm's: they do not see that one member waited for or read another's work.
 
 For each member, in roster order:
 
@@ -31,6 +32,27 @@ For each member, in roster order:
 - `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member, whose tool calls leave no tool events.
 - `gate_checks`, `gate_passes`, `first_pass_time`: its in-loop checks ([Scoring](scoring.qmd#checks-during-the-run)).
 - `comm`, `waits`, `waits_by_outcome`, `wait_time`, `idle_time`: below.
+
+### The critical path
+
+`critical_steps_to_answer` is the measure to read latency by: how many model calls the answer took one after another, given that members work in parallel but wait on and build on each other. A member that waits for a peer's file and then answers in three steps has `steps_to_answer` 3, but if the peer took ten steps to write that file, the answer took at least 11.
+
+Each member's calls, its subagents' and background work's included, form one chain in the order they began. Chains link between members in two ways:
+
+- A view of a `shared_memory` file, or a `swarm_wait` result that names a file, follows the writes it showed. A view of a file follows every write in its history; a view of a deleted file follows the delete. Directory listings and the `changes` status line make no link.
+- A `swarm_wait` result that names a member's end follows all of that member's calls.
+
+A wait links files only when `shared_memory` is the only waiting channel it reached. Its links to member ends count either way.
+
+The chain ends when the answering member ends, after its background work has finished, since that work can still change the member's output.
+
+The number over-counts work inside a member. Parallel and background subagents, tool calls of one turn, and any other concurrent work count one after another, and the answering member's background work after its agent returned, its reads included, counts whether or not it changed the answer. That excess reaches peers through the member's later writes.
+
+The number also misses links. Only `shared_memory` and `swarm_wait` make them, so information that members share in other ways adds none: a shared sandbox, a shared volume, a service, a custom channel and its wait results, a shared tool or store key, or a controller that passes one member's result to another. A `swarm_wait` result that reports more than ten files names only the first ten in its evidence, so the rest make no link until the member views them. Missed links can only lower the number.
+
+With both effects it is not a bound on true causal depth in either direction. A nested swarm's board makes no link for the outer swarm; its own metrics count it.
+
+It is `null` when there is no answer, when the answering member has no recorded end, when the board's evidence is inconsistent (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.
 
 ### Communication
 

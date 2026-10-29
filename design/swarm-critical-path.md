@@ -176,27 +176,15 @@ Drained work counts even when it did not change the selected output, its reads i
 # src/inspect_swarm/_metrics.py, SwarmMetrics
     # critical path, the dependency-linked definition: the longest chain of steps
     # (completed model calls, cache replays included) ending at the answering member's
-    # end, after its drain, where its selected output is settled. A member's own steps,
-    # its subagents' and background work's included, form one chain in the order they
-    # began, so concurrent work inside a member (parallel subagents, background work,
-    # tool calls of one turn) counts as sequential and the number over-counts it, as it
-    # does the answering member's drained work, its reads included, whether or not it
-    # changed the selected output; an excess that reaches peers
-    # through the member's later writes. Chains link between members where a
-    # shared-memory read or a swarm_wait result showed a write of the swarm's built-in
-    # board, and where a wait named a member's end (_critical_path.py). It counts only
-    # those links, so it misses information members share in other ways: a shared
-    # sandbox, a shared volume, a service, a custom channel, a shared tool or store key,
-    # or a controller that hands one member's result to another; and on the board, a
-    # wait's files past the tenth, which its evidence does not name. With both effects it
-    # is not a bound on true causal depth either way. None when there is no answer or
-    # the answering member has no recorded end, when the evidence is inconsistent
-    # (with a warning), for a sample resumed from a checkpoint, and in metrics written
-    # before this field.
+    # end, linked across members where a read or a swarm_wait result showed a write of
+    # the built-in board, or a wait named a member's end. Not a bound on causal depth
+    # either way; see docs/analysis.qmd, "The critical path". None with no answer, when
+    # the answering member has no recorded end, when the evidence is inconsistent (with
+    # a warning), for a resumed sample, and in metrics written before this field.
     critical_steps_to_answer: int | None = None
 ```
 
-- **Always computed**, whatever the swarm's configuration, with no list of unobserved sharing (decision: Ransom, 2026-10-28). The field is always present; its value is `None` in exactly the cases the field comment lists: no answer, an answering member with no recorded end ([Where the answer ends](#where-the-answer-ends)), inconsistent evidence, with a warning ([Code](#code)), and a sample resumed from a checkpoint (decision: Ransom, 2026-10-29; [Where it is computed](#where-it-is-computed)). The ways members can share outside the evidence are the experimenter's own configuration, a list could never rule out shared tools, store keys or services, and it would flag nearly every arm. The field comment and the user docs say what the number counts, that it over-counts concurrency inside a member and carries that excess to peers, and that it misses links when any other sharing is possible.
+- **Always computed**, whatever the swarm's configuration, with no list of unobserved sharing (decision: Ransom, 2026-10-28). The field is always present; its value is `None` in exactly the cases the field comment lists: no answer, an answering member with no recorded end ([Where the answer ends](#where-the-answer-ends)), inconsistent evidence, with a warning ([Code](#code)), and a sample resumed from a checkpoint (decision: Ransom, 2026-10-29; [Where it is computed](#where-it-is-computed)). The ways members can share outside the evidence are the experimenter's own configuration, a list could never rule out shared tools, store keys or services, and it would flag nearly every arm. The field comment says what the number counts and points to the user docs, which say that it over-counts concurrency inside a member and carries that excess to peers, and that it misses links when any other sharing is possible.
 - **Unit: steps.** A step is the unit of the existing counts and of Kimi's CriticalSteps, and it is independent of provider latency and of `max_connections`. A chain's span in seconds, from its first step to the answer, is about the answer's own time, which the record already has (`MemberResult.time`); a sum of call durations along it mixes connection waits and retries in, which plan decision 12 ruled out for per-member timing until it can follow Inspect's working-time accounting ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 12).
 - **The existing fields stay** with their meaning, and their comment is corrected: they bound each member's own sequential depth from above, not the swarm's. For an answering member that no link reaches, the new number equals `steps_to_answer`. A link from a peer may raise it, and only when the peer's chain at the link is longer than the answering member's own chain there: after five steps, a read of a one-step or five-step peer's write takes `max(5, 1)` or `max(5, 5)`, and five more steps give 10, the member's `steps_to_answer`; a ten-step peer gives 15. So the two being equal does not mean no dependency was recorded.
 - **Over-approximations**, each of which can only lengthen the chain, for the member and for every peer that later reads its writes: concurrent work inside a member counts as sequential, and a read by one branch, or by one tool call of a turn, feeds the member's later steps and writes in every branch, a sibling tool call's write whose content it never used included; the answering member's drained work counts, its reads included, whether or not it changed the selected output; a partial view links the whole version; a version's history links writes whose text a later edit removed; a read in a member's last turn reaches its end though no later generation saw it.
