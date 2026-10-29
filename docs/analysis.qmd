@@ -84,7 +84,7 @@ The columns:
 - `swarm_cost`: the sample's priced cost in dollars, from its `model_usage`, including scorer calls. Tokens are in `SampleSummary`'s `total_tokens`.
 - `swarm_complete`: no call is known to be missing from `swarm_cost`. The ledger marks the swarm's interval complete, and every model in the sample's `model_usage` is priced. Calls outside the swarm, including scorer calls, are not checked. `False` for a sample with no ledger.
 - `swarm_members`: members in the roster.
-- `swarm_resumed`: the sample resumed from a checkpoint, so the swarm restarted its caps from zero. `False` for a sample with no ledger.
+- `swarm_resumed`: the sample resumed from a checkpoint, so the swarm restarted its caps from zero. Swarms now refuse checkpointing ([Restrictions](restrictions.qmd)), so only logs from earlier versions can have it true. `False` for a sample with no ledger.
 - `swarm_cost_cap`, `swarm_token_cap`, `swarm_time_cap`: the swarm's caps. The time cap is in seconds.
 - `swarm_errored`, `swarm_no_usage`, `swarm_unpriced`: model calls in the swarm that errored or were cancelled (retries included), that completed with no usage, and whose usage has no cost. Each makes the cost a lower bound.
 - `swarm_unpriced_models`: models with tokens and no cost, from the ledger and the sample's `model_usage`, as a JSON list.

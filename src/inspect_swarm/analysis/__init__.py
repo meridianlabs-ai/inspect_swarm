@@ -21,7 +21,7 @@ df.groupby("log")[["score", "swarm_cost"]].mean()
 - `swarm_cost`: realized cost in dollars, the priced cost in the sample's `model_usage`, scorer calls included. Tokens are in `SampleSummary`'s `total_tokens`.
 - `swarm_complete`: no call is known to be missing from `swarm_cost`. The swarm's ledger marks its interval complete, and every model in the sample's `model_usage` is priced. The ledger judges only the swarm's interval; calls outside it, scorer calls included, are not checked for missing usage. `False` for a sample with no ledger, since nothing judged its spend.
 - `swarm_members`: members in the swarm's roster.
-- `swarm_resumed`: the sample resumed from a checkpoint, so its swarm restarted its caps from zero. `False` for a sample with no ledger.
+- `swarm_resumed`: the sample resumed from a checkpoint, so its swarm restarted its caps from zero. Swarms now refuse checkpointing, so only logs from earlier versions can have it true. `False` for a sample with no ledger.
 - `swarm_cost_cap`, `swarm_token_cap`, `swarm_time_cap`: the swarm's caps, derived or explicit; the time cap in seconds.
 - `swarm_errored`, `swarm_no_usage`, `swarm_unpriced`: model calls in the swarm that ended in an error or cancellation (retries included), that completed with no usage, and whose usage has no cost. Each makes the cost a lower bound. The ledger keeps the other reasons.
 - `swarm_unpriced_models`: models with tokens and no cost, the ledger's and any in the sample's `model_usage`, as a JSON list.

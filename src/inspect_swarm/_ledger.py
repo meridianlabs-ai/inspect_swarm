@@ -184,7 +184,7 @@ class SwarmLedger(BaseModel):
     """The final step was cancelled."""
 
     resumed: bool
-    """The sample resumed from a checkpoint, so the swarm restarted its caps from zero."""
+    """The sample resumed from a checkpoint, so the swarm restarted its caps from zero. Swarms now refuse checkpointing, so only logs from earlier versions can have it true."""
 
     total_complete: bool
     """No call is known to be missing from the swarm's usage and cost: no member, member background task or final step was cancelled, the swarm was not interrupted, every call completed with priced usage, every model in `sample_delta` is priced, and no loaded model class compacts natively."""
