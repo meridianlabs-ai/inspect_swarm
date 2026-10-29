@@ -1,7 +1,10 @@
 from typing import Literal
 
+from inspect_ai.model import ModelOutput
 from inspect_ai.util import store
 from pydantic import BaseModel
+
+from ._result import ResultKind, Verdict
 
 MemberState = Literal["pending", "running", "ended"]
 """A member's lifecycle: not started, running, or ended."""
@@ -45,6 +48,18 @@ class MemberResult(BaseModel):
     first_pass_time: float | None = None
     """Swarm time of the member's first passing check; `None` without one. A pass assumes the default `value_to_float()` converter, as for `gate_passes`."""
 
+    output: ModelOutput | None = None
+    """The member's output when it ended, however it ended; `None` until then."""
+
+    answer_key: str | None = None
+    """The answer key of the member's submission, from the result contract's `answer_key`; `None` without a submission, a key function or a comparable answer."""
+
+    verdict: Verdict | None = None
+    """The verifier's verdict on the member's submission; `None` without a submission or a verifier, before the verdict is taken, or when the swarm's stop left it unverified."""
+
+    verdict_time: float | None = None
+    """Swarm time when the verdict was taken; `None` without one."""
+
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
@@ -73,6 +88,12 @@ class SwarmResultRecord(BaseModel):
 
     final: FinalRecord
     """The final answer."""
+
+    kind: ResultKind | None = None
+    """The result contract's kind, from `swarm(result=...)`; `None` without a contract."""
+
+    verifier: str | None = None
+    """A label for the result contract's verifier, for audit: its `name`, else its qualified name; `None` without one."""
 
 
 # Only the runtime writes the record.

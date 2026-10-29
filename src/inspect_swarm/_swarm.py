@@ -33,6 +33,7 @@ from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
 from ._member import Member, is_factory, member, member_names, member_sandbox
 from ._registry import resolve
+from ._result import ResultSpec
 
 
 @agent
@@ -42,6 +43,7 @@ def swarm(
     controller: str | Controller = "leaderless",
     channels: str | Channel | Sequence[str | Channel] = ("filesystem",),
     budget: Budget = Budget(),  # noqa: B008
+    result: ResultSpec | None = None,
 ) -> Agent:
     """A swarm of agents working on one sample.
 
@@ -52,12 +54,13 @@ def swarm(
         controller: How the swarm runs: who starts, when and with what input, and when the swarm is done. A name resolves to a registered controller with its default parameters.
         channels: How members share information. A name resolves to a registered channel with its default parameters. `[]` means none: members get no channel instructions, though a shared sandbox is still shared.
         budget: The swarm-wide cap.
+        result: The task's result contract, from `answer_result()` or `artifact_result()`. With it, the swarm records each submission's answer key and the verifier's verdict on it. It holds the task's callables, so the log records only its type name: rebuild the swarm through its task, or a registered builder, rather than from the log.
 
     Returns:
         The swarm, as an agent.
 
     Raises:
-        TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
+        TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, `result` is the type name a log records for it, or an argument has the wrong type.
         PrerequisiteError: If the returned agent runs in a sample with checkpointing on: checkpoint and resume are not supported for swarms yet.
         ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
     """
@@ -85,6 +88,7 @@ def swarm(
         for name in record_names
     ]
     own_sandboxes = _check_member_sandboxes(runs, resolved_channels)
+    resolved_result = _result(result)
 
     async def execute(state: AgentState) -> AgentState:
         _check_sandbox_names(runs)
@@ -127,6 +131,7 @@ def swarm(
             shares=shares,
             channels=resolved_channels,
             final=resolved_controller.final,
+            result=resolved_result,
         ).run(resolved_controller.run)
         return state
 
@@ -406,4 +411,17 @@ def _budget(budget: object) -> Budget:
         return Budget.model_validate(dict(cast(Mapping[str, object], budget)))
     raise TypeError(
         f"budget= must be a Budget or a dict of its fields, got a {type(budget).__name__}."
+    )
+
+
+def _result(result: object) -> ResultSpec | None:
+    # a log records the contract as its type name, which cannot rebuild its callables
+    if result is None or isinstance(result, ResultSpec):
+        return result
+    if isinstance(result, str):
+        raise TypeError(
+            f"result= is {result!r}, the type name a log records for a result contract, which cannot be rebuilt from a log. Rebuild the swarm through its task, or through a registered @agent builder that passes result=."
+        )
+    raise TypeError(
+        f"result= must be a ResultSpec from answer_result() or artifact_result(), got a {type(result).__name__}."
     )

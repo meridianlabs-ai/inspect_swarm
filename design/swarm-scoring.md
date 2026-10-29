@@ -381,7 +381,7 @@ def artifact_result(*, answer_key=None, verifier=None, member_artifacts=None) ->
 
 - **Inputs.** It gets the answer text and the sample's metadata, and may use `sandbox()`. It is never given the target.
 - **A documented contract.** The swarm cannot stop a verifier from reading the target through private state. A verifier must not call `score()`, which runs the task's scorers with the target.
-- **Errors.** A verifier exception propagates and fails the sample, because silently degrading `verify` to `vote` would change what is measured.
+- **Errors.** A verifier exception propagates and fails the sample, because silently degrading `verify` to `vote` would change what is measured. So does a verifier that returns anything but a `Verdict` (`TypeError`).
 - **When it runs.** Verifiers run only during the solve ([When verdicts are taken](#the-final-answer-chain)). Scoring and re-scoring read the recorded verdicts and never call a verifier.
 
 For audit, the record stores a label for the verifier: its `name` attribute if it has one, else its `__qualname__`, else its class's `__qualname__`. It is a label, not a reconstruction; the verifier's code is the task's.
@@ -471,8 +471,8 @@ class SwarmResultRecord(BaseModel):   # adds
 ```
 
 - **Why `output` comes here.** `member_scores` scores each member's output, and re-scoring rebuilds only the store, so both read outputs from the record. M1 needs neither ([No outputs in M1](#what-the-swarm-records)). Its tests: an output is kept after the member's own limit, and after a hard stop for an agent that updates its state in place.
-- **When they are written.** The runtime adds a member's output when it ends, and its key and verdict when its submission is recorded and verified, and the chain fields when the provisional answer or the final selection changes.
-- **The `verdict` event.** Each verdict also produces an evidence event of kind `verdict`, alongside M1's `member_result` and `final`.
+- **When they are written.** The runtime adds a member's output when it ends, with or without a contract, and its key and verdict when its submission is recorded and verified, and the chain fields when the provisional answer or the final selection changes. The record holds a copy of the output, because validating a `ModelOutput` fills an empty `completion` from its message.
+- **The `verdict` event.** Each verdict also produces an evidence event of kind `verdict`, alongside M1's `member_result` and `final`. It is written in the swarm's span, where the verifier runs, and carries the member, its span id, `passed`, `value` and the verdict's swarm time, never the explanation. A submission left unverified has no `verdict` event.
 - **The cost boundary**, when it is built, adds `solve_usage`, `solve_role_usage` and `solve_exit` ([The cost boundary](#the-cost-boundary-deferred)).
 
 ### The final-answer chain
@@ -531,7 +531,9 @@ So a task with both gets `["verify", "vote", "first"]`, and one with neither get
 **When verdicts are taken.** When the task supplies a verifier, the runtime verifies every submission as it arrives, whether or not `verify` is in the chain, so the analysis always has verdicts.
 
 - It takes the verdict before it queues the member's `MemberEnded`, so a controller's `stop_on_verified` or escalation sees it, as a `VerdictSummary` without the explanation.
-- Verifier calls run one at a time in the runtime, inside the swarm's span. Their usage, if any, is the swarm's, not a member's. The limits deep dive meters them under its runtime lever ([swarm-limits.md](swarm-limits.md#swarm-nodes)).
+- The member has ended when its agent returns: its state, status, time and output are recorded then, and its handle shows them, with `verdict` `None` until the verdict is taken. Until its `MemberEnded` is queued it still counts as running for `events()` and for the stop procedure's wait for quiet members, so neither can miss it.
+- Verifier calls run one at a time in the runtime, inside the swarm's span, in the order the submissions ended. Their usage, if any, is the swarm's, not a member's. The limits deep dive meters them under its runtime lever ([swarm-limits.md](swarm-limits.md#swarm-nodes)), which the runtime enters once for both the controller's task and the verifier's.
+- Verification continues through grace. A verifier call that the stop's closed runtime lever or a reached cap refuses leaves that submission unverified, and the hard stop ends verification: a submission not yet verified then is left unverified, and its `MemberEnded` is queued with no verdict. Finalisation verifies such submissions (below).
 
 **Provisional answer.** M1's rule ([The final answer](#the-final-answer-first)) with the chain in place of `first`. After each submission or verdict, the runtime applies the chain without `synthesize` (which needs a model call) to the submissions so far.
 
@@ -896,17 +898,17 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
 1. **Result contract and record additions.**
    - `src/inspect_swarm/_result.py`: `ResultSpec`, `answer_result`, `artifact_result`, `Verdict`, `Verifier`, `MemberArtifacts`.
    - `swarm(result=)`, with swarm-api.md's `TypeError` for the string a replay passes.
-   - The record's added fields.
+   - The record's added fields that this step writes: `MemberResult`'s `output`, `answer_key`, `verdict` and `verdict_time`, and `SwarmResultRecord`'s `kind` and `verifier`. The final record's `chain`, `votes` and `tie`, and `final_verdict`, come with the chain (step 2), and `synthesize_error` with `synthesize` (step 3), the steps that write them.
    - The runtime verifies submissions, writes `verdict` events, and puts each verdict's `VerdictSummary` on the handle and `MemberEnded` before queuing the event (`_swarm.py`, `_controller/_control.py`, `_evidence.py`).
    - Exports in `src/inspect_swarm/__init__.py`. Tests in `tests/test_result.py`.
 2. **Final-answer chain.**
    - `src/inspect_swarm/_final.py` widens M2's `FinalName` and gains `Synthesize`, `Reporter`, `FinalMode`, `FinalSpec` and `final_chain()`.
    - Validation against the result, called from `swarm()`'s construction checks.
    - `leaderless(stop_on_verified=)`, and `final=` on `leaderless()` and `Controller` widened from M2's single `first` or `last` to `FinalSpec` (`_controller/_controller.py`, `_controller/leaderless.py`); `leaderless()` validates its `final` with the `TypeAdapter`, and settles how M1's `stop_on_submission` combines with a chain other than `first` (M2 already refuses it with `last`). The controller's choice keeps its M2 meaning, ahead of the chain.
-   - The chain in the provisional answer and finalisation, including the artifact `final_verdict`.
+   - The chain in the provisional answer and finalisation, including verifying the submissions left unverified and the artifact `final_verdict`; `FinalRecord`'s `chain`, `votes` and `tie`, and `SwarmResultRecord.final_verdict`.
    - Tests extend `tests/test_final.py` and `tests/test_controller.py`.
 3. **`synthesize`.**
-   - In `_final.py`, with its prompt template in `src/inspect_swarm/_prompts.py` and its failure classes.
+   - In `_final.py`, with its prompt template in `src/inspect_swarm/_prompts.py` and its failure classes; `FinalRecord.synthesize_error`.
    - The fence code in `src/inspect_swarm/_fence.py`, shared with the shared-memory channel's reads (M2-8).
    - Tests extend `tests/test_final.py`; `tests/test_fence.py`.
 4. **Scorers and baselines.**

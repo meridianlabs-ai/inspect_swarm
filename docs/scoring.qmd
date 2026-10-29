@@ -40,6 +40,8 @@ The swarm keeps a record of what it did in the sample store under `inspect_swarm
 - `choose_name` is `true` for a member that chose its own name ([Members](members.qmd#members-that-choose-their-names)). `name` is still the swarm's name for it; the name it chose is in its transcript.
 - `sandbox` is the member's own sandbox, or `null` when it shares the sample's.
 - `gate_checks`, `gate_passes` and `first_pass_time` count the member's in-loop checks ([Checks during the run](#checks-during-the-run)).
+- `output` is the member's `ModelOutput` when it ended, however it ended (left out above).
+- `answer_key`, `verdict` and `verdict_time` come from the result contract, for a submission ([The result contract](#the-result-contract)). The record's `kind` and `verifier` name the contract's kind and its verifier. Without a contract, all of these are `null`.
 - `final.mode` is `first`, `last` or `controller`, and `final.member` names the chosen member. Under `controller`, `final.reason` is the reason the controller gave. With no submission, `mode` and `member` are `null` and `final.reason` is `"no_submissions"`.
 
 The record is updated as members start and end. If a limit or error ends the sample before the swarm finishes, the record keeps the answer so far with `provisional: true`, and that submission is the sample's output: the first submission so far, the latest under `last`, or the controller's choice once it has made one.
@@ -48,7 +50,45 @@ The record is updated as members start and end. If a limit or error ends the sam
 
 Only the swarm writes `inspect_swarm:result`. Task code (tools, member builders, controllers, scorers) must not write it.
 
-Any code can read it. A scorer that reads it after the swarm is how a task finds each member's sandbox ([Per-member sandboxes](#per-member-sandboxes)). But a tool that reads it while the swarm runs gives members a view of each other's state, status and time. That is a channel between members outside the swarm's channels, and the swarm records no evidence of it.
+Any code can read it. A scorer that reads it after the swarm is how a task finds each member's sandbox ([Per-member sandboxes](#per-member-sandboxes)). But a tool that reads it while the swarm runs gives members a view of each other's state, status, time and output, and with a result contract their answer keys and verdicts. That is a channel between members outside the swarm's channels, and the swarm records no evidence of it.
+
+## The result contract
+
+A task can tell the swarm what its result is, with `swarm(result=...)`. Use `answer_result()` for a task scored on its answer, and `artifact_result()` for one scored on what the members leave in the environment, such as a repository they edit together:
+
+```python
+import re
+from typing import Any
+
+from inspect_ai.agent import react
+
+from inspect_swarm import Verdict, answer_result, member, swarm
+
+
+def boxed_number(text: str) -> str | None:
+    match = re.search(r"\\boxed\{([^}]*)\}", text)
+    return match.group(1).strip() if match else None
+
+
+async def check_answer(answer: str, metadata: dict[str, Any]) -> Verdict:
+    passed = boxed_number(answer) is not None
+    return Verdict(passed=passed, explanation=None if passed else "no boxed answer")
+
+
+solver = swarm(
+    members=member(react, name="solver", count=4),
+    result=answer_result(answer_key=boxed_number, verifier=check_answer),
+)
+```
+
+- `answer_key` maps a completion to a comparable answer, or `None` when it has none. The swarm records the key of each submission. It never sees the target.
+- `verifier` is the task's own check: visible tests, a proof checker, a format check, a model judge. The swarm calls it on each submission while the members run, one at a time, with the submission's completion and the sample's metadata. It may use `sandbox()`. It is never given the target, and must not call `score()`, which runs the task's scorers with the target. Its model calls count against the swarm's cap as the swarm's own, not a member's.
+- The record keeps each verdict (`passed`, an optional `value` and an `explanation`). A controller sees `passed` and `value` on the member's handle and its `MemberEnded` event, never the explanation ([Controllers](controllers.qmd#writing-a-controller)).
+- A submission can be left without a verdict when the swarm stops: once the stop has begun the verifier's model calls are refused, and a verifier still running at the hard stop is cancelled.
+- An exception from `answer_key` or the verifier fails the sample.
+- The contract does not change which submission is the answer.
+
+The contract holds the task's functions, so the log records it only as `"ResultSpec"`. Retrying the task rebuilds it. A swarm replayed from its logged arguments (`--solver inspect_swarm/swarm`) cannot rebuild it and raises `TypeError`; to make such a swarm replayable, return it from a registered `@agent` builder.
 
 ## Scoring what members leave
 

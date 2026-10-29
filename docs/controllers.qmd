@@ -85,9 +85,9 @@ def escalate(first: str = "fast") -> Controller:
     return Controller(run, check=check)
 ```
 
-- `swarm.members` are the members in roster order, as `MemberHandle`s: name, role, state (`pending`, `running` or `ended`), status and whether it submitted. A controller never sees what a member wrote.
+- `swarm.members` are the members in roster order, as `MemberHandle`s: name, role, state (`pending`, `running` or `ended`), status, whether it submitted and, with a verifier in the result contract, the verdict on its submission. A controller never sees what a member wrote.
 - `swarm.start(member, input=None)` starts a member and returns at once. `input` replaces the swarm's input for that member; `None` gives it the swarm's input. The member's preamble follows either. A member runs once, and starting one after the stop has begun raises.
-- `swarm.events()` yields each event once, in order from the swarm's start. Its only kind is `MemberEnded`, with the member's name, status and whether it submitted. The iterator ends when no member is running and no event is waiting, so a member started later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
+- `swarm.events()` yields each event once, in order from the swarm's start. Its only kind is `MemberEnded`, with the member's name, status, whether it submitted, and the verdict on its submission (`passed` and `value`) when the swarm's result contract has a verifier ([Scoring](scoring.qmd#the-result-contract)). With a verifier, a submission's event waits for its verdict. The iterator ends when no member is running and no event is waiting, so a member started later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
 - `check`, if given, is called with the roster when `swarm()` is called. Raise `ValueError` for a roster the controller cannot run.
 - `final`, if given, is the rule that chooses the answer: `first` (the default, as here) or `last`.
 - The stop reasons `all_done`, `submitted`, `verified` and `quiescence` are recorded as they are. Any other is recorded as `controller:<reason>`.

@@ -461,7 +461,6 @@ async def test_the_record_is_written_at_start_and_on_each_start_and_end() -> Non
         True,
     )
     assert started.role == "lead"
-    # no member's output: those stay in the members' states
     [after_end_stored] = stored
     assert set(after_end_stored["members"][0]) == {
         "name",
@@ -475,6 +474,10 @@ async def test_the_record_is_written_at_start_and_on_each_start_and_end() -> Non
         "gate_checks",
         "gate_passes",
         "first_pass_time",
+        "output",
+        "answer_key",
+        "verdict",
+        "verdict_time",
     }
     assert started.time is not None and started.time >= 0
     assert after_end.final.member == "started" and after_end.final.provisional

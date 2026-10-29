@@ -7,6 +7,7 @@ from inspect_ai.model import ChatMessage, ModelOutput
 
 from ._evidence import evidence
 from ._record import FinalRecord, MemberResult, SwarmResultRecord, write_record
+from ._result import ResultSpec, verifier_label
 
 FinalName = Literal["first", "last"]
 """How the swarm chooses its answer from the submissions: `first`, the earliest, or `last`, the latest. A tie goes to the member listed first in the roster."""
@@ -69,8 +70,9 @@ def answer(
 
 # Applies answer() to the members' results so far, sets the chosen member's output
 # (from `outputs`, the ended members' outputs by name) as the swarm state's output and
-# writes the record: the provisional answer until finalisation. as_solver() copies the
-# output to the task state however the swarm ends.
+# writes the record, with the result contract's kind and verifier: the provisional
+# answer until finalisation. as_solver() copies the output to the task state however
+# the swarm ends.
 def settle(
     state: AgentState,
     members: Sequence[MemberResult],
@@ -79,10 +81,15 @@ def settle(
     pick: Pick | None,
     *,
     provisional: bool,
+    result: ResultSpec | None = None,
 ) -> SwarmResultRecord:
     record = SwarmResultRecord(
         members=list(members),
         final=answer(members, final, pick, provisional=provisional),
+        kind=result.kind if result is not None else None,
+        verifier=verifier_label(result.verifier)
+        if result is not None and result.verifier is not None
+        else None,
     )
     chosen = record.final.member
     state.output = outputs[chosen] if chosen is not None else ModelOutput()
@@ -102,6 +109,7 @@ def finalise(
     *,
     span_id: str | None,
     stop_reason: str | None,
+    result: ResultSpec | None = None,
 ) -> None:
     # the conversation only now, since the sample's message limit applies to it: an
     # answer it does not fit ends the sample on that limit, with the answer as its
@@ -109,7 +117,9 @@ def finalise(
     state.messages = _conversation(
         input, answer(members, final, pick, provisional=False), outputs
     )
-    chosen = settle(state, members, outputs, final, pick, provisional=False).final
+    chosen = settle(
+        state, members, outputs, final, pick, provisional=False, result=result
+    ).final
     evidence(
         "result",
         "final",

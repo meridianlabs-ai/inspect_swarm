@@ -16,11 +16,22 @@ description: Swarms, members, controllers, channels and the budget view.
 ### SwarmControl
 ### MemberHandle
 ### MemberEnded
+### VerdictSummary
 ### SwarmEvent
 ### MemberInfo
 ### MemberState
 ### StopReason
 ### FinalName
+
+## Results
+
+### answer_result
+### artifact_result
+### ResultSpec
+### ResultKind
+### Verdict
+### Verifier
+### MemberArtifacts
 
 ## Channels
 

@@ -23,6 +23,7 @@ from ._controller._control import (
     MemberState,
     SwarmControl,
     SwarmEvent,
+    VerdictSummary,
 )
 from ._controller._controller import (
     Controller,
@@ -33,6 +34,15 @@ from ._controller._controller import (
 from ._controller.leaderless import leaderless
 from ._final import FinalName
 from ._member import Member, member
+from ._result import (
+    MemberArtifacts,
+    ResultKind,
+    ResultSpec,
+    Verdict,
+    Verifier,
+    answer_result,
+    artifact_result,
+)
 from ._swarm import swarm
 from ._tools import swarm_resources
 
@@ -51,19 +61,27 @@ __all__ = [
     "Controller",
     "FinalName",
     "Member",
+    "MemberArtifacts",
     "MemberEnded",
     "MemberHandle",
     "MemberInfo",
     "MemberState",
     "Record",
+    "ResultKind",
+    "ResultSpec",
     "StopReason",
     "SwarmBudget",
     "SwarmControl",
     "SwarmEvent",
+    "Verdict",
+    "VerdictSummary",
+    "Verifier",
     "WaitNews",
     "WaitSpec",
     "WaitingState",
     "__version__",
+    "answer_result",
+    "artifact_result",
     "filesystem",
     "leaderless",
     "member",
