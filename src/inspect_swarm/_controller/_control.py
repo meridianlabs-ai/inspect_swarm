@@ -733,7 +733,7 @@ def _refuse_checkpointing() -> None:
     active = sample_active()
     if active is not None and not isinstance(active.checkpointer, _NoopCheckpointer):
         raise PrerequisiteError(
-            "Checkpoint and resume are not supported for swarms yet. Turn checkpointing off for this task: leave out `checkpoint` in `Task()` and `eval()`, and the `--checkpoint` option."
+            "Checkpoint and resume are not supported for swarms yet. Set `checkpoint=False` on `Task()` or `eval()`, or remove every checkpoint setting, including `--checkpoint` and `INSPECT_EVAL_CHECKPOINT`."
         )
 
 
