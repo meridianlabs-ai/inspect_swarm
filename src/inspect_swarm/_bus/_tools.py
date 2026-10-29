@@ -28,8 +28,8 @@ class _SwarmTools(ToolSource):
             for tool in state.tools()
         ]
         # swarm_wait, when a channel the loop reaches wakes waits
-        wait = bus.waits.tool()
-        if wait is not None and bus.waits.reaches(own):
+        wait = bus.waits.tool(own)
+        if wait is not None:
             tools.append(wait)
         return tools
 

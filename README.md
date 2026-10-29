@@ -67,7 +67,7 @@ Each sample runs four `react()` members, `react-1` to `react-4`, at the same tim
 
 - Members: agents registered with `@agent`, given as `member()` records with a name, role, count, limits and sandbox. A member builder, an `@agent` function that builds the member's agent, is where it gets the swarm's tools. See [Members](https://meridianlabs-ai.github.io/inspect_swarm/members.html).
 - A controller: which members start and when the swarm stops. The default, `leaderless`, starts every member and stops at the first submission. See [Controllers](https://meridianlabs-ai.github.io/inspect_swarm/controllers.html), which also covers writing one.
-- Channels: how members share information. `filesystem`, the default, describes a shared directory in the sample's sandbox. `shared_memory` is a board of files with `swarm_wait`. See [Channels](https://meridianlabs-ai.github.io/inspect_swarm/channels.html).
+- Channels: how members share information. `filesystem`, the default, describes a shared directory in the sample's sandbox. `shared_memory` is a board of files with `swarm_wait`. `messages` lets members send each other messages. See [Channels](https://meridianlabs-ai.github.io/inspect_swarm/channels.html).
 - A budget: caps on cost, tokens and time, taken from the sample's limits by default, shared or split between members. See [Budgets](https://meridianlabs-ai.github.io/inspect_swarm/budget.html).
 - Sandboxes: members share the sample's sandbox, or each works in its own. See [Sandboxes](https://meridianlabs-ai.github.io/inspect_swarm/sandboxes.html).
 

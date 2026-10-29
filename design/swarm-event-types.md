@@ -271,6 +271,7 @@ Both are written with `transcript()._event(event)`, the private, synchronous cal
 | delivered `record`, `recipients`, `seq` | `record_ids=[record]`, `delivery` (`recipients`, `seq`) |
 | delivered `notify`, `result` | `data` |
 | read `files` | `data["files"]` (each file's id, version, last record, line range and `deleted`); `record_ids` the distinct non-null `record` values of `files`, in order: each file's last write at the version read, whether the read was a listing, a partial or full view, or a tombstone |
+| read `records` (the messages channel) | `record_ids`, the messages the read showed |
 | read `read`, `tool_span_id`, `listing` | `data` |
 | waited `wait`, `channels`, `outcome`, `duration` | `wait` (`id`, `channels`, `outcome`, `duration`) |
 | waited `path`, `file_id`, `timeout`, `started`, `idle`, `woken_by`, `files`, `ended` | `data` |

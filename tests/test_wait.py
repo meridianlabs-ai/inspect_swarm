@@ -24,6 +24,7 @@ from inspect_swarm import (
     Member,
     SwarmControl,
     member,
+    messages,
     shared_memory,
     swarm,
     swarm_tools,
@@ -44,6 +45,7 @@ from .swarm_runtime import (
     scripted_model,
     sleeper,
 )
+from .test_messages import run as messages_run
 from .test_shared_memory import _Member  # pyright: ignore[reportPrivateUsage]
 
 ROOT = "/shared_memory"
@@ -70,7 +72,7 @@ class _Run:
         self.bus.waits.start = anyio.current_time()
         self.state = cast(_SharedMemoryState, self.bus.states["shared_memory"])
         [self._memory] = self.state.tools()
-        wait = self.bus.waits.tool()
+        wait = self.bus.waits.tool(True)
         assert wait is not None
         self._wait = wait
 
@@ -349,6 +351,67 @@ async def test_an_end_wakes_every_other_members_waits_and_is_reported_once_per_l
         assert await r.wait("w-1", "other") == (
             "w-3 ended (member_limit:cost). w-2 ended (submitted)."
         )
+
+
+@pytest.mark.anyio
+async def test_a_waking_message_ends_its_recipients_own_wait_until_it_is_read() -> None:
+    # w-3 is running and not waiting, so nothing releases a wait for all waiting
+    async with messages_run(
+        ("w-1", "w-2", "w-3"), messages(rate=None), shared_memory(rate=None)
+    ) as (r, transcript):
+        unread = "2 unread messages (from w-1). Call read_messages() to read them."
+        results: dict[str, str] = {}
+
+        async def wait(loop: str) -> None:
+            results[loop] = await r.call("w-2", "swarm_wait", loop)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(wait, "top")
+            # a subagent's wait does not watch the member's inbox
+            tg.start_soon(wait, "child")
+            await anyio.wait_all_tasks_blocked()
+            await r.send("w-1", "w-2", "later", wake=False)
+            await anyio.wait_all_tasks_blocked()
+            assert results == {}
+            await r.send("w-1", "w-2", "now")
+            await anyio.wait_all_tasks_blocked()
+            assert results == {"top": unread}
+            # until it reads them, the own loop's waits return at once
+            assert await r.call("w-2", "swarm_wait") == unread
+            assert "now" in await r.read("w-2")
+            tg.start_soon(wait, "top")
+            await anyio.wait_all_tasks_blocked()
+            assert results == {"top": unread}
+            r.bus.close()
+        assert results == {"top": STOPPING, "child": STOPPING}
+        first, second, *_ = waited(transcript)
+        assert (first["outcome"], first["woken_by"], first["files"]) == (
+            "news",
+            [2],
+            [{"record": "m-1", "from": "w-1"}, {"record": "m-2", "from": "w-1"}],
+        )
+        assert (second["outcome"], second["woken_by"]) == ("news", [])
+
+
+@pytest.mark.anyio
+async def test_swarm_wait_is_described_for_the_channels_its_loop_reaches() -> None:
+    async with messages_run(
+        ("w-1", "w-2"), messages(rate=None), shared_memory(rate=None)
+    ) as (r, _):
+        own, nested = r.bus.waits.tool(True), r.bus.waits.tool(False)
+        assert own is not None and nested is not None
+        assert ToolDef(own).description.startswith(
+            "Wait until there is something for you to look at in the swarm: an unread message sent to you, a shared memory file"
+        )
+        assert "message" not in ToolDef(nested).description
+    async with messages_run(("w-1", "w-2")) as (r, _):
+        own = r.bus.waits.tool(True)
+        assert own is not None
+        assert ToolDef(own).description.startswith(
+            "Wait until there is something for you to look at in the swarm: an unread message sent to you, or another member has ended."
+        )
+        assert list(ToolDef(own).parameters.properties) == ["timeout"]
+        assert r.bus.waits.tool(False) is None
 
 
 @pytest.mark.anyio
@@ -714,19 +777,35 @@ def tool_lister(found: dict[str, list[str]]) -> Agent:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "channels,expected",
+    "channels,own,nested",
     [
-        (["shared_memory"], ["shared_memory", "swarm_wait"]),
-        (["filesystem"], []),
-        ([], []),
+        (["shared_memory"], ["shared_memory", "swarm_wait"], None),
+        (
+            ["messages"],
+            ["list_members", "read_messages", "send_message", "swarm_wait"],
+            [],
+        ),
+        (
+            ["shared_memory", "messages"],
+            [
+                "list_members",
+                "read_messages",
+                "send_message",
+                "shared_memory",
+                "swarm_wait",
+            ],
+            ["shared_memory", "swarm_wait"],
+        ),
+        (["filesystem"], [], None),
+        ([], [], None),
     ],
 )
 async def test_swarm_wait_comes_with_a_channel_that_wakes_waits(
-    channels: list[str], expected: list[str]
+    channels: list[str], own: list[str], nested: list[str] | None
 ) -> None:
     found: dict[str, list[str]] = {}
     await run_swarm(swarm(tool_lister(found), channels=channels))
-    assert found == {"own": expected, "nested": expected}
+    assert found == {"own": own, "nested": own if nested is None else nested}
 
 
 def _turn(*calls: tuple[str, dict[str, Any]]) -> ModelOutput:

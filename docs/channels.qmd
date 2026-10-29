@@ -5,10 +5,11 @@ llms-description: "How members share information: the default `filesystem` chann
 
 ## Overview
 
-`channels=` decides how members share information. There are two built-in channels:
+`channels=` decides how members share information. There are three built-in channels:
 
 - `filesystem`, the default: a convention for sharing files in a sandbox, stated in each member's preamble. It adds no tools.
 - `shared_memory`: a board of files that members read and write with a tool, with a record of every write and read. See [Shared Memory](shared-memory.qmd).
+- `messages`: direct messages between members, with a record of every message and read. See [Messages](messages.qmd).
 
 `channels=[]` gives members no channel instructions. Channels change what members are told and what tools they get, not what they can reach: members share the sample's sandbox whatever the channels, unless they have their own ([Sandboxes](sandboxes.qmd)).
 

@@ -1,4 +1,3 @@
-import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -8,6 +7,7 @@ from inspect_ai.tool import Tool, ToolDef, ToolError
 from inspect_ai.util._span import current_agent_span_id, current_span_id
 from pydantic import JsonValue
 
+from .._bus._address import MEMBER_NAME
 from .._bus._record import Draft, FrozenJson, Record, thaw_json
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
@@ -21,6 +21,7 @@ from ._channel import (
     WaitSpec,
     swarm_channel,
 )
+from ._params import check_bound, check_rate
 
 CHANNEL = "shared_memory"
 ROOT = "/shared_memory"
@@ -39,10 +40,6 @@ _MAX_PATH_BYTES = 160
 _PATH_RULE = f"paths are {ROOT} followed by 1 to {_MAX_COMPONENTS} components separated by /, each 1 to 64 of the characters A-Z a-z 0-9 . _ - and not . or .., with at most {_MAX_PATH_BYTES} bytes in all"
 
 _FILE_ID = re.compile(r"f-[1-9][0-9]{0,13}")
-
-# the addressing grammar of member names, which appear in fence attributes and wait
-# results
-_MEMBER_NAME = re.compile(r"[a-z][a-z0-9_-]{0,47}")
 
 # at most this many file ids in a status line that ends a result, or in a wait result
 _LISTED_IDS = 10
@@ -95,7 +92,7 @@ class _SharedMemory(Channel):
 
     def check(self, roster: Sequence[MemberInfo]) -> None:
         for info in roster:
-            if not _MEMBER_NAME.fullmatch(info.name):
+            if not MEMBER_NAME.fullmatch(info.name):
                 raise ValueError(
                     f"shared_memory(): member {info.name!r} has a name the channel cannot use: names must start with a lowercase letter, followed by at most 47 lowercase letters, digits, _ or -. Give the member such a name with member(..., name=...)."
                 )
@@ -140,40 +137,15 @@ def shared_memory(
     Raises:
         ValueError: If a bound is below its minimum, or `rate` is not a positive count and a finite, positive window.
     """
-    _check_bound("max_files", max_files, 1)
-    _check_bound("max_file_bytes", max_file_bytes, 1)
-    _check_bound("max_file_lines", max_file_lines, 1)
-    _check_bound("max_board_bytes", max_board_bytes, max_file_bytes)
-    _check_bound("max_wait", max_wait, 1)
+    check_bound(CHANNEL, "max_files", max_files, 1)
+    check_bound(CHANNEL, "max_file_bytes", max_file_bytes, 1)
+    check_bound(CHANNEL, "max_file_lines", max_file_lines, 1)
+    check_bound(CHANNEL, "max_board_bytes", max_board_bytes, max_file_bytes)
+    check_bound(CHANNEL, "max_wait", max_wait, 1)
     return _SharedMemory(
         _Limits(max_files, max_file_bytes, max_file_lines, max_board_bytes),
-        None if rate is None else _rate(rate),
+        None if rate is None else check_rate(CHANNEL, rate),
         max_wait,
-    )
-
-
-def _check_bound(name: str, value: object, low: int) -> None:
-    if not isinstance(value, int) or isinstance(value, bool) or value < low:
-        raise ValueError(
-            f"shared_memory(): {name} must be a whole number of at least {low:,}, got {value!r}."
-        )
-
-
-def _rate(rate: object) -> tuple[int, float]:
-    # a tuple, or the list a log gives back
-    if isinstance(rate, tuple | list) and len(cast(Sequence[object], rate)) == 2:
-        count, window = cast(Sequence[object], rate)
-        if (
-            isinstance(count, int)
-            and not isinstance(count, bool)
-            and count >= 1
-            and isinstance(window, int | float)
-            and not isinstance(window, bool)
-            and 0 < window < math.inf
-        ):
-            return (count, float(window))
-    raise ValueError(
-        f"shared_memory(): rate must be (count, seconds), a positive whole count and a finite, positive window in seconds, or None; got {rate!r}."
     )
 
 
