@@ -1,4 +1,4 @@
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -6,7 +6,15 @@ from uuid import uuid4
 import anyio
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
-from inspect_ai.agent import Agent, AgentState, agent, react, run
+from inspect_ai.agent import (
+    Agent,
+    AgentState,
+    agent,
+    deepagent,
+    general,
+    react,
+    run,
+)
 from inspect_ai.dataset import Sample
 from inspect_ai.event import (
     InfoEvent,
@@ -18,7 +26,13 @@ from inspect_ai.event import (
 )
 from inspect_ai.log import transcript
 from inspect_ai.log._transcript import Transcript
-from inspect_ai.model import Model, ModelOutput
+from inspect_ai.model import (
+    ChatCompletionChoice,
+    ChatMessage,
+    ChatMessageAssistant,
+    Model,
+    ModelOutput,
+)
 from inspect_ai.model._call_tools import execute_tools
 from inspect_ai.scorer import (
     CORRECT,
@@ -31,20 +45,32 @@ from inspect_ai.scorer import (
     scorer,
 )
 from inspect_ai.solver import TaskState
-from inspect_ai.tool import Tool, tool
-from inspect_ai.util import store
+from inspect_ai.tool import Tool, ToolCall, tool
+from inspect_ai.util import background, store
 from inspect_ai.util._span import AGENT_SPAN_TYPE
+from pydantic import JsonValue
 
 from inspect_swarm import (
+    Channel,
+    ChannelRun,
+    ChannelState,
     Controller,
+    Record,
     SwarmControl,
+    WaitNews,
+    WaitSpec,
     leaderless,
     member,
     shared_memory,
     swarm,
+    swarm_channel,
     swarm_controller,
+    swarm_tools,
 )
-from inspect_swarm._evidence import METRICS_KEY
+from inspect_swarm._budget import current_member
+from inspect_swarm._bus._bus import current_bus
+from inspect_swarm._bus._record import Draft
+from inspect_swarm._evidence import METRICS_KEY, comm_read
 from inspect_swarm._ledger import EventLog, ScoreRecord
 from inspect_swarm._metrics import GateChecks, SwarmMetrics, gate_checks
 from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
@@ -52,7 +78,9 @@ from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
 from .swarm_runtime import (
     TOKENS_PER_CALL,
     Script,
+    after,
     controller,
+    evidence,
     generator,
     output,
     run_swarm,
@@ -913,3 +941,417 @@ async def test_a_swarm_that_offers_no_wait_has_no_wait_metrics(
         None,
         None,
     )
+
+
+# ---------------------------------------------------------------------------
+# the dependency-linked critical path
+
+
+def _answered_by(name: str) -> Controller:
+    # starts every member, lets them all end, then chooses `name`'s submission
+    async def run(control: SwarmControl) -> str:
+        for m in control.members:
+            control.start(m)
+        async for _ in control.events():
+            pass
+        control.choose_answer(name)
+        return "all_done"
+
+    return controller(run, f"answered-by-{name}-{uuid4().hex}")
+
+
+def _all_metrics(transcript: Transcript) -> list[SwarmMetrics]:
+    # every swarm's metrics in a sample, in the order the swarms ended
+    return [
+        SwarmMetrics.model_validate({k: v for k, v in e.data.items() if k != "type"})
+        for e in transcript.events
+        if isinstance(e, InfoEvent)
+        and e.source == "inspect_swarm"
+        and isinstance(e.data, dict)
+        and e.data.get("type") == "metrics"
+    ]
+
+
+def _calls(*calls: tuple[str, dict[str, Any]]) -> Model:
+    return scripted_model(
+        Script([ModelOutput.for_tool_call("mockllm", f, a) for f, a in calls])
+    )
+
+
+_SUBMIT = ("submit", {"answer": "done"})
+
+
+def _eval_metrics(solver: Agent, tmp_path: Path) -> SwarmMetrics:
+    # the swarm's metrics in an eval of one sample, for react() members, which need an
+    # active sample
+    [log] = eval(
+        Task(dataset=[Sample(input="task")], solver=solver),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success" and log.samples is not None, log.error
+    return SwarmMetrics.model_validate(log.samples[0].store[METRICS_KEY])
+
+
+@pytest.mark.usefixtures("eval_backend")
+def test_a_wait_and_a_view_link_the_waiter_to_the_writer(tmp_path: Path) -> None:
+    # a makes three steps that write nothing, then creates the file on its fourth; b
+    # waits on its first step, views the file on its second, and submits on its third
+    a = _calls(
+        *[("shared_memory", {"command": "changes"})] * 3,
+        ("shared_memory", {"command": "create", "path": _p("a.md"), "file_text": "x"}),
+        _SUBMIT,
+    )
+    b = _calls(
+        ("swarm_wait", {}),
+        ("shared_memory", {"command": "view", "path": _p("a.md")}),
+        _SUBMIT,
+    )
+    metrics = _eval_metrics(
+        swarm(
+            [
+                member(react(model=a, tools=[swarm_tools()]), name="a"),
+                member(react(model=b, tools=[swarm_tools()]), name="b"),
+            ],
+            channels=[shared_memory()],
+            controller=_answered_by("b"),
+        ),
+        tmp_path,
+    )
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (3, 6)
+
+
+def _parallel_children() -> Model:
+    # the parent dispatches two general() children in one turn, each child submits at
+    # once, and then the parent submits
+    def respond(input: list[ChatMessage]) -> ModelOutput:
+        if any(m.role == "user" and "child task" in m.text for m in input):
+            return ModelOutput.for_tool_call("mockllm", "submit", {"answer": "x"})
+        if any(m.role == "tool" for m in input):
+            return ModelOutput.for_tool_call("mockllm", "submit", {"answer": "done"})
+        message = ChatMessageAssistant(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id=f"c{i}", function="agent", arguments={"prompt": "child task"}
+                )
+                for i in range(2)
+            ],
+            model="mockllm",
+        )
+        return ModelOutput(
+            model="mockllm",
+            choices=[ChatCompletionChoice(message=message, stop_reason="tool_calls")],
+        )
+
+    return scripted_model(Script(respond=respond))
+
+
+@pytest.mark.usefixtures("eval_backend")
+def test_parallel_children_count_one_after_another(tmp_path: Path) -> None:
+    metrics = _eval_metrics(
+        swarm(
+            member(
+                deepagent,
+                args={
+                    "model": _parallel_children(),
+                    "subagents": [general()],
+                    "todo_write": False,
+                },
+                name="c",
+            ),
+            channels=[],
+        ),
+        tmp_path,
+    )
+    # the parent's two steps and one of each child, where the slower branch alone
+    # would give 3
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (4, 4)
+
+
+@agent
+def draining(model: Model, late: Model) -> Agent:
+    """Make three steps, then return with a fourth call in flight in background work."""
+
+    async def execute(state: AgentState) -> AgentState:
+        for _ in range(3):
+            state.output = await model.generate(state.messages)
+        background(late.generate, "late")
+        # the background call is dispatched before the agent returns
+        await anyio.sleep(0.05)
+        return state
+
+    return execute
+
+
+@agent
+def waits_for_an_end(model: Model) -> Agent:
+    """Make a step, wait for news, then make another step."""
+
+    async def execute(state: AgentState) -> AgentState:
+        wait = (await resolve())["swarm_wait"]
+        await model.generate(state.messages)
+        await wait()
+        state.output = await model.generate(state.messages)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_wait_for_an_end_follows_the_members_drained_work() -> None:
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(
+                    draining(scripted_model(), scripted_model(Script(delay=0.2))),
+                    name="q",
+                ),
+                member(waits_for_an_end(scripted_model()), name="w"),
+            ],
+            channels=[shared_memory()],
+            controller=_answered_by("w"),
+        )
+    )
+    [wait] = evidence(outcome.transcript, "waited")
+    assert wait["ended"] == [{"member": "q", "status": "submitted"}]
+    metrics = _metrics(outcome.transcript)
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 5)
+
+
+@agent
+def deep_writer(model: Model, written: anyio.Event) -> Agent:
+    """Make ten steps, then write the file a peer reads."""
+
+    async def execute(state: AgentState) -> AgentState:
+        memory = (await resolve())["shared_memory"]
+        for _ in range(10):
+            state.output = await model.generate(state.messages)
+        await memory(command="create", path=_p("peer.md"), file_text="peer content")
+        written.set()
+        return state
+
+    return execute
+
+
+@agent
+def reads_in_its_drain(written: anyio.Event, replace: bool) -> Agent:
+    """Return a placeholder with no step; background work views the peer's file in the drain and, if `replace`, answers with it."""
+
+    async def execute(state: AgentState) -> AgentState:
+        memory = (await resolve())["shared_memory"]
+
+        async def fetch() -> None:
+            await written.wait()
+            text = await memory(command="view", path=_p("peer.md"))
+            if replace:
+                state.output = ModelOutput.from_content("mockllm", str(text))
+
+        background(fetch)
+        state.output = ModelOutput.from_content("mockllm", "placeholder")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("replace", [True, False])
+async def test_a_read_in_the_answering_members_drain_counts(replace: bool) -> None:
+    written = anyio.Event()
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(deep_writer(scripted_model(), written), name="p"),
+                member(reads_in_its_drain(written, replace), name="m"),
+            ],
+            channels=[shared_memory()],
+            controller=_answered_by("m"),
+        )
+    )
+    answer = outcome.state.output.completion
+    assert ("peer content" in answer) is replace
+    assert (answer == "placeholder") is not replace
+    metrics = _metrics(outcome.transcript)
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (0, 10)
+
+
+@agent
+def writes_twice_and_views(model: Model) -> Agent:
+    """Make a step, write f-1 of its board twice, and view it."""
+
+    async def execute(state: AgentState) -> AgentState:
+        memory = (await resolve())["shared_memory"]
+        state.output = await model.generate(state.messages)
+        await memory(command="create", path=_p("inner.md"), file_text="x")
+        await memory(command="append", path=_p("inner.md"), append_text="y")
+        await memory(command="view", path=_p("inner.md"))
+        return state
+
+    return execute
+
+
+# A custom waiting channel that takes the built-in board's name, with records and wait
+# entries of its own shape: every record is news to every other member's waits.
+class _ImpostorState:
+    def __init__(self) -> None:
+        self.applied: list[Record] = []
+
+    def tools(self) -> list[Tool]:
+        return []
+
+    def validate(self, record: Record) -> None:
+        return None
+
+    def admit(self, record: Record) -> None:
+        return None
+
+    def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
+        self.applied.append(record)
+        return [], {"size": len(self.applied)}
+
+    def wait_check(self, spec: WaitSpec) -> None:
+        return None
+
+    def wakes(self, spec: WaitSpec, record: Record) -> bool:
+        return record.sender != spec.member
+
+    def news(self, spec: WaitSpec) -> WaitNews | None:
+        if not any(r.sender != spec.member for r in self.applied):
+            return None
+        return WaitNews(
+            ["a note"], [{"foreign_record": "x-1"}, {"file": "f-99", "version": 7}]
+        )
+
+
+class _Impostor(Channel):
+    name = "shared_memory"
+    prefix = "s"
+    max_wait = 5
+
+    def open(self, run: ChannelRun) -> ChannelState | None:
+        return _ImpostorState()
+
+
+@swarm_channel
+def metrics_test_impostor() -> Channel:
+    return _Impostor()
+
+
+@agent
+def notes(model: Model, steps: int) -> Agent:
+    """Make `steps` steps, then post a note and record a read, each of the custom channel's own shape."""
+
+    async def execute(state: AgentState) -> AgentState:
+        for _ in range(steps):
+            state.output = await model.generate(state.messages)
+        bus = current_bus.get()
+        assert bus is not None
+        await bus.deliver(Draft("shared_memory", "note", wake=True))
+        context = current_member.get()
+        assert context is not None
+        comm_read(
+            context.span_id,
+            context.name,
+            "shared_memory",
+            "r-1",
+            None,
+            False,
+            None,
+            [{"file": "f-99", "version": 7, "lines": None, "deleted": False}],
+            False,
+        )
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_custom_channel_named_like_the_board_makes_no_file_edge(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # w waits once p has ended: the wait names the custom channel's entries, f-99
+    # version 7 among them, and p's end, which alone links
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(notes(scripted_model(), 10), name="p"),
+                member(after(["p"], waits_for_an_end(scripted_model())), name="w"),
+            ],
+            channels=["metrics_test_impostor"],
+            controller=_answered_by("w"),
+        )
+    )
+    [wait] = evidence(outcome.transcript, "waited")
+    assert wait["files"] == [
+        {"foreign_record": "x-1"},
+        {"file": "f-99", "version": 7},
+    ]
+    assert wait["ended"] == [{"member": "p", "status": "submitted"}]
+    metrics = _metrics(outcome.transcript)
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 11)
+    assert not caplog.records
+
+
+@agent
+def nests(model: Model, inner: Agent, path: str) -> Agent:
+    """Make a step and write `path` on the outer board, then run a nested swarm."""
+
+    async def execute(state: AgentState) -> AgentState:
+        memory = (await resolve())["shared_memory"]
+        state.output = await model.generate(state.messages)
+        await memory(command="create", path=_p(path), file_text="x")
+        await run(inner, "inner task")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_nested_swarms_channels_make_no_edge_for_the_outer_swarm(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # the inner swarm's board, built in or a custom channel of the same name, numbers
+    # its own files: its f-1 reaches version 2 while the outer board's is at 1, and the
+    # custom channel's results have shapes of their own
+    impostor = swarm(
+        [
+            member(notes(scripted_model(), 1), name="ip"),
+            member(after(["ip"], waits_for_an_end(scripted_model())), name="iw"),
+        ],
+        channels=["metrics_test_impostor"],
+        # iw, which waits for ip's end, answers
+        controller=leaderless(stop_on_submission=False, final="last"),
+    )
+    board = swarm(
+        member(writes_twice_and_views(scripted_model()), name="ib"),
+        channels=[shared_memory()],
+    )
+    outer = swarm(
+        [
+            member(nests(scripted_model(), impostor, "m.md"), name="m"),
+            member(nests(scripted_model(), board, "n.md"), name="n"),
+        ],
+        channels=[shared_memory()],
+        controller=_answered_by("m"),
+    )
+    # three swarms in one sample, so not run_swarm(), which reads one final event
+    async with sample() as transcript:
+        await run(outer, "task")
+    *inner, metrics = _all_metrics(transcript)
+    assert {m.critical_steps_to_answer for m in inner} == {1, 2}
+    # the inner members' steps are the outer member's
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (4, 4)
+    assert not caplog.records
+
+
+@pytest.mark.anyio
+async def test_a_resumed_sample_has_no_critical_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("inspect_swarm._ledger.sample_resumed", lambda: True)
+    outcome = await run_swarm(
+        swarm(member(generator(scripted_model()), name="a"), channels=[])
+    )
+    metrics = _metrics(outcome.transcript)
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (1, None)

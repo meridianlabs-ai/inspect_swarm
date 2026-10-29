@@ -1,7 +1,7 @@
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -24,6 +24,7 @@ from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from ._budget import Budget, CostPair, cost_node, token_node
+from ._critical_path import PathLog
 from ._fence import utf8_bytes
 
 logger = logging.getLogger(__name__)
@@ -269,9 +270,13 @@ class WaitRecord:
 # rather than read back from the history: a bounded transcript serializes an event at
 # its last update, which can come before Inspect prices its usage, and can evict it.
 # Tool, score and communication events are kept in the order they began; waits, which
-# name no one channel, are kept apart from the other communication events.
+# name no one channel, are kept apart from the other communication events. Each report
+# also goes to `path`, with the transcript's event count as its position, when the
+# critical path is recorded.
 class EventLog:
-    def __init__(self) -> None:
+    def __init__(self, path: PathLog | None = None) -> None:
+        self.path = path
+        self._history = transcript().history
         self.parents: dict[str, str | None] = {}
         self.agent_spans: set[str] = set()
         self.calls: dict[str, CallRecord] = {}
@@ -281,6 +286,9 @@ class EventLog:
         self.waits: list[WaitRecord] = []
 
     def __call__(self, event: Event) -> None:
+        if self.path is not None:
+            # the transcript notifies its subscribers before it counts a new event
+            self.path(event, self._history.event_count)
         if isinstance(event, SpanBeginEvent):
             self.parents[event.id] = event.parent_id
             if event.type == AGENT_SPAN_TYPE:
@@ -362,10 +370,15 @@ def _comm_record(data: dict[str, JsonValue]) -> CommRecord:
 
 
 # The ledger's view of the swarm's interval: what it reads when the swarm starts, and
-# the ledger it builds from that and the runtime's state when the swarm ends.
+# the ledger it builds from that and the runtime's state when the swarm ends. `board`
+# is the built-in board's record name, or None, and `roster` the swarm's members, for
+# the critical path; a resumed sample records none, since its transcript receives the
+# earlier attempt's events, counted before they are notified and about a board this run
+# does not have.
 class LedgerInterval:
-    def __init__(self) -> None:
-        self._events = EventLog()
+    def __init__(self, *, board: str | None, roster: Collection[str]) -> None:
+        self._resumed = sample_resumed()
+        self._events = EventLog(None if self._resumed else PathLog(board, roster))
         self._unsubscribe = transcript()._subscribe(  # pyright: ignore[reportPrivateUsage]
             self._events
         )
@@ -382,7 +395,6 @@ class LedgerInterval:
             "working": limits.working.limit,
             "time": limits.time.limit,
         }
-        self._resumed = sample_resumed()
 
     @property
     def events(self) -> EventLog:

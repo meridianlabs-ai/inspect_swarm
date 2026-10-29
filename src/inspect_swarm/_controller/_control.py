@@ -389,10 +389,14 @@ class SwarmRun:
 
     async def run(self, controller: Callable[["SwarmControl"], Awaitable[str]]) -> None:
         from .._bus._bus import current_bus
+        from .._channel.shared_memory import builtin_board
 
         _refuse_checkpointing()
         timelines = MemberTimelines([m.name for m in self._members])
-        interval = self._interval = LedgerInterval()
+        interval = self._interval = LedgerInterval(
+            board=builtin_board(self.bus.states),
+            roster=[m.name for m in self._members],
+        )
         self._scorer = first_scorer()
         self._start = anyio.current_time()
         self.bus.waits.start = self._start
