@@ -583,13 +583,14 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
   - `_get_model_info_direct()`;
   - `sample_active()`;
   - `Transcript._subscribe()`, which the ledger uses to follow model events and spans live, so a call's final usage and price are read even when a bounded transcript has evicted the event;
-  - `_resume_checkpoint` on `sample_active().checkpointer`, which sets the ledger's `resumed`.
+  - `_resume_checkpoint` on `sample_active().checkpointer`, which sets the ledger's `resumed`;
+  - `_NoopCheckpointer`, the checkpointer inspect_ai gives a sample with checkpointing off, which the runtime's checkpoint refusal tests against.
 
   This is allowed (decision: Ransom, 2026-10-07). They are pinned by tests in this repository ([Testing](#testing)), so an inspect_ai change that breaks them fails CI here.
 - **No inspect_ai changes for limits.** M1's two inspect_ai prerequisites, the registry types (AI-1) and the tool-state scope (AI-2), come from swarm-api.md and swarm.md, not from this design ([swarm-implementation-plan.md](swarm-implementation-plan.md#inspect_ai)). The bridge fix in [Alternatives](#alternatives-considered) and the two observability changes in [open question 3](#open-questions) (AI-3 and AI-4) are optional; the ledger's completeness rules relax as they land.
 - **`swarm()` arguments in the log.** `Budget` and a member's limits are logged as their fields, by swarm-api.md's rule, so they are part of the task identifier and are rebuilt on replay ([The budget parameter](#the-budget-parameter)).
 - **Eval logs.** The ledger is an evidence event and a store entry, both versioned; the event type is [swarm-event-types.md](swarm-event-types.md)'s, and limits add none. Swarm nodes write no `SampleLimitEvent`, so the log's sample-limit record and `SampleLimitEvent`s keep meaning a sample limit.
-- **Checkpoint and resume.** inspect_ai restores only the sample's root nodes on resume (`src/inspect_ai/util/_checkpoint/sample_runtime.py:147-225`). Swarm nodes restart from zero, so a resumed swarm would overspend its cap. Resume is out of scope for swarms (swarm.md's [Not this design](swarm.md#not-this-design)); until it is designed, the ledger records `resumed: true` when the sample was resumed, and analysis excludes such samples from matched-cost comparisons.
+- **Checkpoint and resume.** On resume inspect_ai restores each member's history, transcript events and store and the sample's root limit nodes (`src/inspect_ai/util/_checkpoint/sample_runtime.py:147-225`), but not the swarm's bus and board state or its cap nodes. Members would remember a board that no longer exists, and swarm nodes would restart from zero, so a resumed swarm could overspend its cap. Resume is out of scope for swarms (swarm.md's [Not this design](swarm.md#not-this-design)), so a swarm refuses checkpointing: before any member runs, `SwarmRun.run()` raises `PrerequisiteError` if `sample_active().checkpointer` is not inspect_ai's no-op checkpointer, and the message says to turn checkpointing off for the task (decision: Ransom, 2026-10-29). It does not turn checkpointing off itself. The ledger keeps its `resumed` field and analysis its `swarm_resumed` column, so logs from versions before the refusal, which can have it true, read the same; a swarm that runs records `false`.
 
 ## Security
 

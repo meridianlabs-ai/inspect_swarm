@@ -1,19 +1,32 @@
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import anyio
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
+from inspect_ai._util.error import PrerequisiteError
 from inspect_ai.agent import Agent, AgentState, agent, as_solver
 from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent, SpanBeginEvent, StoreEvent
 from inspect_ai.log import EvalSample
+from inspect_ai.log._samples import (
+    _sample_active,  # pyright: ignore[reportPrivateUsage]
+)
 from inspect_ai.model import ChatMessage, Model, ModelOutput, execute_tools
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.tool import Tool, memory, tool
-from inspect_ai.util import store, store_from_events, token_limit, tool_state_instance
+from inspect_ai.util import (
+    Manual,
+    store,
+    store_from_events,
+    token_limit,
+    tool_state_instance,
+)
+from inspect_ai.util._checkpoint.checkpointer_factory import create_checkpointer
+from inspect_ai.util._checkpoint.config import ResolvedCheckpointConfig
 
 from inspect_swarm import (
     Budget,
@@ -465,6 +478,26 @@ async def test_a_foreign_member_error_cancels_the_rest_and_propagates() -> None:
         "sleeper": "cancelled",
         "crasher": "errored",
     }
+
+
+@pytest.mark.anyio
+async def test_a_swarm_refuses_a_checkpointed_sample_before_any_member_runs() -> None:
+    script = Script()
+    # the checkpointer inspect_ai gives a sample with checkpointing on; a sample with it
+    # off gets the no-op checkpointer, as in the tests that run a swarm through eval()
+    checkpointer = create_checkpointer(
+        config=ResolvedCheckpointConfig(trigger=Manual()),
+        log_location="",
+        sample_id=1,
+        epoch=1,
+    )
+    token = _sample_active.set(cast(Any, SimpleNamespace(checkpointer=checkpointer)))
+    try:
+        with pytest.raises(PrerequisiteError, match="not supported for swarms"):
+            await run_swarm(swarm(generator(scripted_model(script)), channels=[]))
+    finally:
+        _sample_active.reset(token)
+    assert script.started == 0
 
 
 @pytest.mark.anyio

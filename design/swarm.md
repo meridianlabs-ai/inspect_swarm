@@ -952,7 +952,7 @@ Adjacent problems noticed and left out, for Ransom to file if wanted:
 - **`span(..., metadata=)`** (inspect_ai). Would let member identity and roles be stamped on spans instead of carried in names.
 - **Sentinels for bridged agents' tool calls** (inspect_sentinel, already a known gap in its workstreams).
 - **Claude Code agent teams in inspect_swe.** No representation of teammates, mailboxes or the shared task list today.
-- **Checkpoint and resume for long swarms.** Multi-day swarm samples will want inspect_ai's sample checkpointing to cover several members.
+- **Checkpoint and resume for long swarms.** Multi-day swarm samples will want inspect_ai's sample checkpointing to cover several members. Until then a swarm refuses a sample with checkpointing on ([swarm-limits.md](swarm-limits.md#compatibility-and-migration)).
 - **A swarm view in the log viewer** (member graph, message timeline).
 - **Cost limits miss calls that trip a token limit** (inspect_ai). A call that raises at the token-limit check never records its cost into active cost-limit nodes (`src/inspect_ai/model/_model.py:3089-3095`), although its `ModelUsage` keeps the cost. The ledger above sidesteps it.
 - **`max_connections` and swarm size.** A swarm's members share a model's connection pool with every other sample; an eval-level policy (e.g. reserve connections per swarm) may be needed for latency experiments.

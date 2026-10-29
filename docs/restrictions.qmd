@@ -7,6 +7,7 @@ llms-description: "What the swarm does not support, the limits of bridged member
 
 - No background work in bridged members. A member cannot combine background work with the agent bridge. `background()` raises in a bridged member, and a member that uses the bridge after starting background work ends `errored`.
 - No channels with tools for bridged members. A bridged member cannot use the [shared-memory channel](shared-memory.qmd) yet, and `swarm()` refuses one beside it.
+- No checkpointing. Inspect's sample checkpointing does not restore the swarm's shared state or its caps, so a swarm raises an error before any member starts in a sample with checkpointing on. Turn checkpointing off for tasks that run a swarm.
 - No ACP agents. ACP agents wait for their caller to drive them, so they are refused.
 - No scorers that read a member's tool state. Each member runs in its own tool-state scope, so built-in tools that keep state in the store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) keep each member's at keys inside its scope, which differ from the default ones. Tool state that a setup solver prepared at the default instance is not carried into the members either; they start with fresh state ([Members](members.qmd#tool-state)).
 

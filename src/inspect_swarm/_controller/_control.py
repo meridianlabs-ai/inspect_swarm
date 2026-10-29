@@ -7,10 +7,14 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import anyio
 from anyio.abc import TaskGroup
+from inspect_ai._util.error import PrerequisiteError
 from inspect_ai.agent import Agent, AgentState
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
 from inspect_ai.util import Limit, current_span_id, sample_limits
+from inspect_ai.util._checkpoint.checkpointer_noop import (
+    _NoopCheckpointer,  # pyright: ignore[reportPrivateUsage]
+)
 from inspect_ai.util._store import suspend_store_events
 
 from .._budget import (
@@ -386,6 +390,7 @@ class SwarmRun:
     async def run(self, controller: Callable[["SwarmControl"], Awaitable[str]]) -> None:
         from .._bus._bus import current_bus
 
+        _refuse_checkpointing()
         timelines = MemberTimelines([m.name for m in self._members])
         interval = self._interval = LedgerInterval()
         self._scorer = first_scorer()
@@ -719,6 +724,17 @@ def _exhaustion(error: BaseException | None) -> str | None:
 # An error without its cancellations, or None when it has nothing else.
 def _errors(error: BaseException) -> BaseException | None:
     return as_group(error).split(anyio.get_cancelled_exc_class())[1]
+
+
+# A resumed sample restores each member's history and store and the sample's limits,
+# but not the bus, the board or the swarm's caps, so a resumed swarm would come back
+# inconsistent. inspect_ai gives a sample without checkpointing the no-op checkpointer.
+def _refuse_checkpointing() -> None:
+    active = sample_active()
+    if active is not None and not isinstance(active.checkpointer, _NoopCheckpointer):
+        raise PrerequisiteError(
+            "Checkpoint and resume are not supported for swarms yet. Turn checkpointing off for this task: leave out `checkpoint` in `Task()` and `eval()`, and the `--checkpoint` option."
+        )
 
 
 # The outside cause the sample shows, or None.
