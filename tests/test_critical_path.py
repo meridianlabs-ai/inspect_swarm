@@ -555,7 +555,7 @@ def test_critical_steps_to_answer(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     assert _value(board, ops, answer) == expected
-    assert not caplog.records
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 @pytest.mark.parametrize(
@@ -587,5 +587,5 @@ def test_inconsistent_evidence_has_no_value(
 ) -> None:
     with caplog.at_level(logging.WARNING):
         assert _value(BOARD, [*ops, steps("m"), end("m")], "m") is None
-    [warning] = caplog.records
+    [warning] = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert problem in warning.getMessage()

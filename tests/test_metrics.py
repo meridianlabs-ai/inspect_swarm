@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -972,6 +973,12 @@ def _all_metrics(transcript: Transcript) -> list[SwarmMetrics]:
     ]
 
 
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    # Inspect's trace records are captured too once an eval in the same process has set
+    # up its logging
+    return [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
 def _calls(*calls: tuple[str, dict[str, Any]]) -> Model:
     return scripted_model(
         Script([ModelOutput.for_tool_call("mockllm", f, a) for f, a in calls])
@@ -1290,31 +1297,26 @@ async def test_a_custom_channel_named_like_the_board_makes_no_file_edge(
     assert wait["ended"] == [{"member": "p", "status": "submitted"}]
     metrics = _metrics(outcome.transcript)
     assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 11)
-    assert not caplog.records
+    assert not _warnings(caplog)
 
 
 @agent
-def nests(model: Model, inner: Agent, path: str) -> Agent:
-    """Make a step and write `path` on the outer board, then run a nested swarm."""
+def nests(model: Model, inner: Agent) -> Agent:
+    """Make a step and create f-1 on the outer board, run a nested swarm, then view f-1."""
 
     async def execute(state: AgentState) -> AgentState:
         memory = (await resolve())["shared_memory"]
         state.output = await model.generate(state.messages)
-        await memory(command="create", path=_p(path), file_text="x")
+        await memory(command="create", path=_p("outer.md"), file_text="x")
         await run(inner, "inner task")
+        await memory(command="view", file_id="f-1")
         return state
 
     return execute
 
 
-@pytest.mark.anyio
-async def test_a_nested_swarms_channels_make_no_edge_for_the_outer_swarm(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # the inner swarm's board, built in or a custom channel of the same name, numbers
-    # its own files: its f-1 reaches version 2 while the outer board's is at 1, and the
-    # custom channel's results have shapes of their own
-    impostor = swarm(
+def _impostor_swarm() -> Agent:
+    return swarm(
         [
             member(notes(scripted_model(), 1), name="ip"),
             member(after(["ip"], waits_for_an_end(scripted_model())), name="iw"),
@@ -1323,26 +1325,47 @@ async def test_a_nested_swarms_channels_make_no_edge_for_the_outer_swarm(
         # iw, which waits for ip's end, answers
         controller=leaderless(stop_on_submission=False, final="last"),
     )
-    board = swarm(
+
+
+def _board_swarm() -> Agent:
+    return swarm(
         member(writes_twice_and_views(scripted_model()), name="ib"),
         channels=[shared_memory()],
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "inner,inner_value,steps",
+    [
+        # its f-1 reaches version 2 while the outer board's f-1 is at version 1
+        pytest.param(_board_swarm, 1, 2, id="built-in-board"),
+        # its results and wait entries have shapes of their own
+        pytest.param(_impostor_swarm, 2, 4, id="custom-channel-named-shared_memory"),
+    ],
+)
+async def test_a_nested_swarms_channels_make_no_edge_for_the_outer_swarm(
+    inner: Callable[[], Agent],
+    inner_value: int,
+    steps: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # the outer member views the outer board's f-1 after the inner swarm ends, so inner
+    # evidence taken as the outer board's would make that view inconsistent
     outer = swarm(
-        [
-            member(nests(scripted_model(), impostor, "m.md"), name="m"),
-            member(nests(scripted_model(), board, "n.md"), name="n"),
-        ],
-        channels=[shared_memory()],
-        controller=_answered_by("m"),
+        member(nests(scripted_model(), inner()), name="m"), channels=[shared_memory()]
     )
-    # three swarms in one sample, so not run_swarm(), which reads one final event
+    # two swarms in one sample, so not run_swarm(), which reads one final event
     async with sample() as transcript:
         await run(outer, "task")
-    *inner, metrics = _all_metrics(transcript)
-    assert {m.critical_steps_to_answer for m in inner} == {1, 2}
+    inner_metrics, metrics = _all_metrics(transcript)
+    assert inner_metrics.critical_steps_to_answer == inner_value
     # the inner members' steps are the outer member's
-    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (4, 4)
-    assert not caplog.records
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (
+        steps,
+        steps,
+    )
+    assert not _warnings(caplog)
 
 
 @pytest.mark.anyio
