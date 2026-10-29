@@ -13,6 +13,7 @@ from pydantic import JsonValue
 
 from .._budget import MemberContext, current_member
 from .._channel._channel import Channel, ChannelRun, ChannelState, WaitingState
+from .._channel.messages import MessagesState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_sent
 from ._address import resolve
@@ -208,6 +209,17 @@ class Bus:
         # whether the caller runs in a loop other than the member's own, such as a
         # subagent's
         return context.loop is not None and current_agent_channel() is not context.loop
+
+    def status(self, context: MemberContext) -> str | None:
+        # the line that ends every swarm tool result in the member's own loop, after the
+        # channel's own: its unread messages, with the messages channel; nested loops
+        # cannot read them, so they are not told
+        if self.nested(context):
+            return None
+        for state in self._states.values():
+            if isinstance(state, MessagesState):
+                return state.unread_line(context.name)
+        return None
 
     def read_id(self) -> str:
         # the id of a read's evidence, numbered across the run's channels

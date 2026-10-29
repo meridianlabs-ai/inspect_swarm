@@ -9,7 +9,7 @@ from .._bus._record import Draft, Record
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
 from .._evidence import comm_read
-from .._fence import fence, utf8_bytes
+from .._fence import fence, utf8_bytes, with_lines
 from ._channel import (
     Channel,
     ChannelRun,
@@ -29,7 +29,7 @@ _MAX_ID = "m-" + "9" * 14
 _INSTRUCTIONS = (
     "You can send messages to the other members of the swarm with `send_message`, read the messages sent to you with `read_messages`, and see who is in the swarm with `list_members`. "
     "Messages are shown between `<peer_message>` tags whose `from` attribute names the sender. "
-    "While you have unread messages, the results of `send_message` and `list_members` end with a line that counts them. "
+    "While you have unread messages, the results of your swarm tools end with a line that counts them. "
     "To wait for a message, call `swarm_wait` rather than polling."
 )
 
@@ -89,7 +89,7 @@ def messages(
 ) -> Channel:
     """Direct messages between the members of the swarm.
 
-    Each member's own loop gets three tools. `send_message` sends a message to a member, to several, or to `"all"`, every other running member, and returns its id, such as `m-3`. `read_messages` returns the member's unread messages, oldest first, each inside a `<peer_message>` fence that names its id, sender and recipients, and marks them read. `list_members` lists the roster with each member's role, state and, once it has ended, its status. While a member has unread messages, the results of `send_message` and `list_members` end with a line that counts them. Nested loops, such as a `deepagent()` member's subagents, get none of these tools, so a member's inbox has one reader.
+    Each member's own loop gets three tools. `send_message` sends a message to a member, to several, or to `"all"`, every other running member, and returns its id, such as `m-3`. `read_messages` returns the member's unread messages, oldest first, each inside a `<peer_message>` fence that names its id, sender and recipients, and marks them read. `list_members` lists the roster with each member's role, state and, once it has ended, its status. While a member has unread messages, every swarm tool result in its own loop (`shared_memory` and `swarm_wait` included) ends with a line that counts them. Nested loops, such as a `deepagent()` member's subagents, get none of these tools, so a member's inbox has one reader.
 
     Every send goes through the swarm's bus as a record from the member that made it. A send is refused when an address is not a running member other than the sender, when the message is empty or longer than `max_bytes`, when a recipient already has `max_unread` unread messages, when the sender is over its `rate`, or, with `dedupe`, when a recipient still has the same text from the same sender unread. A refused send reaches no recipient.
 
@@ -262,8 +262,9 @@ class MessagesState:
                 )
             )
             record = delivery.record
-            return self._with_status(
-                f"Sent {record.id} to {', '.join(record.recipients)}.", name
+            return with_lines(
+                f"Sent {record.id} to {', '.join(record.recipients)}.",
+                self.unread_line(name),
             )
 
         return ToolDef(
@@ -305,7 +306,7 @@ class MessagesState:
                 f"{f' ({m.status})' if m.status is not None else ''}"
                 for m in self._bus.roster
             ]
-            return self._with_status("\n".join(lines), name)
+            return with_lines("\n".join(lines), self.unread_line(name))
 
         return ToolDef(
             execute, name="list_members", description=_LIST, parallel=True
@@ -361,12 +362,10 @@ class MessagesState:
             text += "\n" + _trailer(len(unread))
         return text
 
-    def _with_status(self, result: str, name: str) -> str:
+    def unread_line(self, member: str) -> str | None:
         # the status line: a count, never a payload
-        count = len(self._unread[name])
-        if not count:
-            return result
-        return f"{result}\nYou have {_count(count)}."
+        count = len(self._unread[member])
+        return f"You have {_count(count)}." if count else None
 
 
 def _fenced(record: Record) -> str:

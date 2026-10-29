@@ -9,6 +9,7 @@ from pydantic import JsonValue
 
 from .._budget import MemberContext
 from .._channel._channel import WaitingState, WaitSpec
+from .._channel.messages import MessagesState
 from .._evidence import comm_waited
 from ._record import Record
 
@@ -241,11 +242,15 @@ class Waits:
                 else reason
             )
             lines: list[str] = []
+            # whether the result counts the member's unread messages already
+            counted = False
             for channel in channels:
-                news = self._states[channel].news(spec)
+                state = self._states[channel]
+                news = state.news(spec)
                 if news is not None:
                     lines.extend(news.lines)
                     files.extend(news.files)
+                    counted = counted or isinstance(state, MessagesState)
             reported = self._reported.setdefault(spec.loop, set())
             ends = [
                 (member, status)
@@ -257,6 +262,9 @@ class Waits:
             release = _release_line(outcome, name, effective)
             if release is not None:
                 lines.append(release)
+            unread = None if counted else self._bus.status(context)
+            if unread is not None:
+                lines.append(unread)
             # named, so that this loop's later waits do not report them again
             reported.update(member for member, _ in ends)
             ended = [{"member": member, "status": status} for member, status in ends]
@@ -289,8 +297,6 @@ class Waits:
     def _make_tool(self, channels: Sequence[str]) -> Tool:
         # the messages channel's wait takes no filter; any other waiting channel's is
         # the shared memory's
-        from .._channel.messages import MessagesState
-
         messages = [isinstance(self._states[c], MessagesState) for c in channels]
         timeout = f"Seconds to wait at most (default and maximum: {self.max_wait})."
         if all(messages):

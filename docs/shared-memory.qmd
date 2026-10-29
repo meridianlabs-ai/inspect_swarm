@@ -87,7 +87,7 @@ Two commands need no view:
 
 The swarm adds no messages to a member's conversation. A member learns what other agents changed only through its tools:
 
-- The status line that ends every `shared_memory` result.
+- The status line that ends every `shared_memory` result. With the [messages](messages.qmd) channel, a result in the member's own loop also ends with its count of unread messages.
 - `shared_memory(command="changes")`, which returns the status line alone, naming every changed file, to check for changes without viewing anything.
 - `swarm_wait`, which blocks until a file the member watches changes ([Waiting for other members](#waiting-for-other-members)).
 

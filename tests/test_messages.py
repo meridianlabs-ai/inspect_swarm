@@ -9,7 +9,7 @@ from inspect_ai.log._transcript import Transcript
 from inspect_ai.tool import ToolDef, ToolError
 from inspect_ai.util._span import span
 
-from inspect_swarm import Channel, messages
+from inspect_swarm import Channel, messages, shared_memory
 from inspect_swarm._budget import current_member
 from inspect_swarm._bus._bus import Bus
 from inspect_swarm._channel.messages import MessagesState
@@ -324,3 +324,32 @@ async def test_a_stopping_swarm_refuses_sends_and_still_reads() -> None:
         with pytest.raises(ToolError, match="the swarm is stopping"):
             await r.send("w-1", "w-2", "y")
         assert "x" in await r.read("w-2")
+
+
+@pytest.mark.anyio
+async def test_shared_memory_results_count_unread_messages_in_the_own_loop() -> None:
+    async with run(("w-1", "w-2"), None, shared_memory(rate=None)) as (r, _):
+        await r.send("w-1", "w-2", "private", wake=False)
+        for loop, end in (("top", "\nYou have 1 unread message."), ("child", "")):
+            path = f"/shared_memory/{loop}.md"
+            results = [
+                await r.call(
+                    "w-2",
+                    "shared_memory",
+                    loop,
+                    command="create",
+                    path=path,
+                    file_text=loop,
+                ),
+                await r.call("w-2", "shared_memory", loop, command="view", path=path),
+                await r.call("w-2", "shared_memory", loop, command="changes"),
+            ]
+            for result in results:
+                assert "private" not in result
+                assert result.endswith(end) and result.count("unread message") == bool(
+                    end
+                )
+        assert "private" in await r.read("w-2")
+        assert not (await r.call("w-2", "shared_memory", command="changes")).endswith(
+            "unread message."
+        )

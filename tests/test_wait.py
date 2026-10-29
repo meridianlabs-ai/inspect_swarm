@@ -394,6 +394,23 @@ async def test_a_waking_message_ends_its_recipients_own_wait_until_it_is_read() 
 
 
 @pytest.mark.anyio
+async def test_a_wait_counts_unread_messages_that_do_not_wake_it() -> None:
+    async with messages_run(("w-1", "w-2")) as (r, _):
+        await r.send("w-1", "w-2", "private", wake=False)
+        results: list[str] = []
+
+        async def wait() -> None:
+            results.append(await r.call("w-2", "swarm_wait"))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(wait)
+            await anyio.wait_all_tasks_blocked()
+            assert results == []
+            r.bus.close()
+        assert results == [f"{STOPPING}\nYou have 1 unread message."]
+
+
+@pytest.mark.anyio
 async def test_swarm_wait_is_described_for_the_channels_its_loop_reaches() -> None:
     async with messages_run(
         ("w-1", "w-2"), messages(rate=None), shared_memory(rate=None)
