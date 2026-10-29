@@ -448,21 +448,20 @@ class _SharedMemoryState:
                 append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
                 file_id: Optional for `view`, in place of `path`: the id of a file, such as `f-3`, as status lines name files.
             """
-            with self._bus.counted():
-                return await self._call(
-                    command,
-                    path=path,
-                    file_id=file_id,
-                    file_text=file_text,
-                    old_str=old_str,
-                    new_str=new_str,
-                    insert_line=insert_line,
-                    insert_text=insert_text,
-                    append_text=append_text,
-                    view_range=view_range,
-                    old_path=old_path,
-                    new_path=new_path,
-                )
+            return await self._call(
+                command,
+                path=path,
+                file_id=file_id,
+                file_text=file_text,
+                old_str=old_str,
+                new_str=new_str,
+                insert_line=insert_line,
+                insert_text=insert_text,
+                append_text=append_text,
+                view_range=view_range,
+                old_path=old_path,
+                new_path=new_path,
+            )
 
         return ToolDef(
             execute,
@@ -500,10 +499,9 @@ class _SharedMemoryState:
         if own:
             self._top[member] = loop
         if command == "changes":
-            return with_lines(
+            return (
                 self._status_line(loop, None)
-                or "Shared memory: no files changed since you last viewed them.",
-                self._bus.status(context),
+                or "Shared memory: no files changed since you last viewed them."
             )
         if command == "view":
             result = self._view(
@@ -529,7 +527,7 @@ class _SharedMemoryState:
             )
         else:
             raise ToolError(f"Unknown command: {command}")
-        return with_lines(result, self._status_line(loop), self._bus.status(context))
+        return with_lines(result, self._status_line(loop))
 
     async def _write(
         self,

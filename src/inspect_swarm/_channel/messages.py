@@ -9,7 +9,7 @@ from .._bus._record import Draft, Record
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
 from .._evidence import comm_read
-from .._fence import fence, utf8_bytes, with_lines
+from .._fence import fence, utf8_bytes
 from ._channel import (
     Channel,
     ChannelRun,
@@ -163,11 +163,11 @@ class MessagesState:
             + len("\n")
             + self._trailer_max
         )
-        self._tools: list[Tool] | None = None
+        # read_messages, whose result counts the unread messages it leaves itself
+        self.read_tool = self._read_tool()
+        self._tools = [self._send_tool(), self.read_tool, self._list_tool()]
 
     def tools(self) -> list[Tool]:
-        if self._tools is None:
-            self._tools = [self._send_tool(), self._read_tool(), self._list_tool()]
         return list(self._tools)
 
     def validate(self, record: Record) -> None:
@@ -249,26 +249,21 @@ class MessagesState:
                 reply_to: The id of a message this one answers.
                 wake: Whether the message ends the recipients' swarm_wait.
             """
-            with self._bus.counted():
-                # an ended sender's send reaches the bus, which refuses it with
-                # evidence
-                name = self._caller("send_message", running=False)
-                addresses = (to,) if isinstance(to, str) else tuple(to)
-                delivery = await self._bus.deliver(
-                    Draft(
-                        CHANNEL,
-                        "message",
-                        to=addresses,
-                        payload=message,
-                        wake=wake,
-                        reply_to=reply_to,
-                    )
+            # an ended sender's send reaches the bus, which refuses it with evidence
+            self._caller("send_message", running=False)
+            addresses = (to,) if isinstance(to, str) else tuple(to)
+            delivery = await self._bus.deliver(
+                Draft(
+                    CHANNEL,
+                    "message",
+                    to=addresses,
+                    payload=message,
+                    wake=wake,
+                    reply_to=reply_to,
                 )
-                record = delivery.record
-                return with_lines(
-                    f"Sent {record.id} to {', '.join(record.recipients)}.",
-                    self.unread_line(name),
-                )
+            )
+            record = delivery.record
+            return f"Sent {record.id} to {', '.join(record.recipients)}."
 
         return ToolDef(
             execute,
@@ -286,8 +281,7 @@ class MessagesState:
     def _read_tool(self) -> Tool:
         async def execute() -> str:
             """Read your unread messages."""
-            with self._bus.counted():
-                return self._read(self._caller("read_messages"))
+            return self._read(self._caller("read_messages"))
 
         return ToolDef(
             execute,
@@ -302,15 +296,14 @@ class MessagesState:
     def _list_tool(self) -> Tool:
         async def execute() -> str:
             """List the members of the swarm."""
-            with self._bus.counted():
-                name = self._caller("list_members")
-                lines = [
-                    f"{m.name}{' (you)' if m.name == name else ''}"
-                    f"{f', role {m.role}' if m.role else ''}: {m.state}"
-                    f"{f' ({m.status})' if m.status is not None else ''}"
-                    for m in self._bus.roster
-                ]
-                return with_lines("\n".join(lines), self.unread_line(name))
+            name = self._caller("list_members")
+            lines = [
+                f"{m.name}{' (you)' if m.name == name else ''}"
+                f"{f', role {m.role}' if m.role else ''}: {m.state}"
+                f"{f' ({m.status})' if m.status is not None else ''}"
+                for m in self._bus.roster
+            ]
+            return "\n".join(lines)
 
         return ToolDef(
             execute, name="list_members", description=_LIST, parallel=True

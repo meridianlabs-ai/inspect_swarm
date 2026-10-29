@@ -1,14 +1,14 @@
+import functools
 import json
-from collections.abc import Generator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.agent._channel import current_agent_channel
 from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
-from inspect_ai.tool import ToolError
+from inspect_ai.tool import ContentText, Tool, ToolDef, ToolError, ToolResult
 from inspect_ai.util._span import current_agent_span_id, current_span_id
 from pydantic import JsonValue
 
@@ -63,6 +63,7 @@ class Bus:
         self._storms: dict[str, Storm] = {}
         self._prefixes: dict[str, str] = {}
         self._reach: dict[str, Literal["loop", "member"]] = {}
+        self._counting: dict[int, tuple[Tool, Tool]] = {}
         # the states of the channels that wake waits, and their longest wait
         waiting: dict[str, WaitingState] = {}
         max_wait: int | None = None
@@ -223,19 +224,48 @@ class Bus:
                 return state.unread_line(context.name)
         return None
 
-    @contextmanager
-    def counted(self) -> Generator[None]:
-        # around a swarm tool's call: a ToolError it raises ends with the status line
-        # its result would have, so an error does not hide unread messages; the error
-        # stays a ToolError, and its evidence is already written
-        try:
-            yield
-        except ToolError as ex:
-            context = self.member()
-            unread = None if context is None else self.status(context)
-            if unread is None:
-                raise
-            raise ToolError(with_lines(ex.message, unread)) from ex
+    def counting(self, tool: Tool, results: bool = True) -> Tool:
+        # the tool as a member's loops get it: in the member's own loop, its results
+        # (unless `results` is False, for a tool whose results count unread messages
+        # themselves) and its ToolErrors end with the status line, so no channel's tool
+        # needs to know the messages channel. One wrapper per tool and run.
+        cached = self._counting.get(id(tool))
+        if cached is not None:
+            return cached[1]
+        tool_def = ToolDef(tool)
+        inner = tool_def.tool
+
+        @functools.wraps(inner)
+        async def execute(*args: Any, **kwargs: Any) -> ToolResult:
+            try:
+                result = await inner(*args, **kwargs)
+            except ToolError as ex:
+                unread = self._unread()
+                if unread is None:
+                    raise
+                # still a ToolError; its evidence was written with the reason alone
+                raise ToolError(with_lines(ex.message, unread)) from ex
+            unread = self._unread() if results else None
+            return result if unread is None else _with_line(result, unread)
+
+        wrapped = ToolDef(
+            execute,
+            name=tool_def.name,
+            description=tool_def.description,
+            parameters=tool_def.parameters,
+            parallel=tool_def.parallel,
+            viewer=tool_def.viewer,
+            model_input=tool_def.model_input,
+            max_output=tool_def.max_output,
+            options=tool_def.options,
+        ).as_tool()
+        # the tool is kept with its wrapper, so that its id is not reused
+        self._counting[id(tool)] = (tool, wrapped)
+        return wrapped
+
+    def _unread(self) -> str | None:
+        context = self.member()
+        return None if context is None else self.status(context)
 
     def read_id(self) -> str:
         # the id of a read's evidence, numbered across the run's channels
@@ -275,6 +305,15 @@ class Bus:
                 f"{record.sender} has ended, so its {record.kind} was not delivered.",
             )
         return None
+
+
+def _with_line(result: ToolResult, line: str) -> ToolResult:
+    # a result ended by a status line: text gets a line, content a text item
+    if isinstance(result, str | int | float | bool):
+        return with_lines(str(result), line)
+    if isinstance(result, list):
+        return [*result, ContentText(text=line)]
+    return [result, ContentText(text=line)]
 
 
 def _frozen_op(draft: Draft) -> Mapping[str, FrozenJson]:

@@ -6,18 +6,25 @@ import anyio
 import pytest
 from inspect_ai.agent._channel import agent_channel, current_agent_channel
 from inspect_ai.log._transcript import Transcript
-from inspect_ai.tool import ToolDef, ToolError
+from inspect_ai.tool import Tool, ToolDef, ToolError
 from inspect_ai.util._span import span
 
-from inspect_swarm import Channel, messages, shared_memory
+from inspect_swarm import Channel, messages, shared_memory, swarm_tools
 from inspect_swarm._budget import current_member
-from inspect_swarm._bus._bus import Bus
+from inspect_swarm._bus._bus import Bus, current_bus
+from inspect_swarm._bus._tools import loop_tools
 from inspect_swarm._channel.messages import MessagesState
 from inspect_swarm._fence import utf8_bytes
 from inspect_swarm._ledger import EventLog
 from inspect_swarm._metrics import _comm_metrics  # pyright: ignore[reportPrivateUsage]
 
 from .swarm_runtime import evidence, sample
+from .test_binding import (
+    _Loop,  # pyright: ignore[reportPrivateUsage]
+)
+from .test_binding import (
+    _Member as _MemberReach,  # pyright: ignore[reportPrivateUsage]
+)
 from .test_shared_memory import _Member  # pyright: ignore[reportPrivateUsage]
 
 
@@ -36,8 +43,15 @@ class _Run:
         )
         self.bus.waits.start = anyio.current_time()
         self.state = cast(MessagesState, self.bus.states["messages"])
+        # the tools as swarm_tools() gives them to each loop; a nested loop is also
+        # given the own loop's, as an agent could pass them down
+        own = {ToolDef(t).name: t for t in loop_tools(self.bus, True)}
         self.tools = {
-            ToolDef(t).name: t for s in self.bus.states.values() for t in s.tools()
+            "top": own,
+            "nested": {
+                **own,
+                **{ToolDef(t).name: t for t in loop_tools(self.bus, False)},
+            },
         }
 
     async def send(
@@ -49,20 +63,40 @@ class _Run:
         return await self.call(member, "read_messages", loop)
 
     async def call(self, member: str, name: str, loop: str = "top", **args: Any) -> str:
-        token = current_member.set(self.members[member].context)
+        async with self._as(member, loop, name):
+            tools = self.tools["top" if loop == "top" else "nested"]
+            return str(await tools[name](**args))
+
+    async def resolve(self, member: str, loop: str = "top") -> dict[str, Tool]:
+        # the tools swarm_tools() gives the loop, by name
+        async with self._as(member, loop, None):
+            return {ToolDef(t).name: t for t in await swarm_tools().tools()}
+
+    async def call_resolved(
+        self, member: str, name: str, loop: str = "top", **args: Any
+    ) -> str:
+        # a call of a tool swarm_tools() gives the loop
+        tool = (await self.resolve(member, loop))[name]
+        async with self._as(member, loop, name):
+            return str(await tool(**args))
+
+    @asynccontextmanager
+    async def _as(
+        self, member: str, loop: str, tool: str | None
+    ) -> AsyncGenerator[None]:
+        member_token = current_member.set(self.members[member].context)
+        bus_token = current_bus.set(self.bus)
         try:
             async with span("agent", type="agent", id=f"{member}/{loop}"):
                 async with nullcontext() if loop == "top" else agent_channel():
-                    async with span(name, type="tool", id=f"{member}/{name}"):
-                        tool = (
-                            self.bus.waits.tool(loop == "top")
-                            if name == "swarm_wait"
-                            else self.tools[name]
-                        )
-                        assert tool is not None
-                        return str(await tool(**args))
+                    if tool is None:
+                        yield
+                    else:
+                        async with span(tool, type="tool", id=f"{member}/{tool}"):
+                            yield
         finally:
-            current_member.reset(token)
+            current_bus.reset(bus_token)
+            current_member.reset(member_token)
 
 
 @asynccontextmanager
@@ -433,3 +467,34 @@ async def test_a_send_from_an_ended_sender_is_refused_with_evidence() -> None:
         for name in ("read_messages", "list_members"):
             with pytest.raises(ToolError, match="^w-1 has ended.$"):
                 await r.call("w-1", name)
+
+
+class _Board(_MemberReach):
+    # a custom channel of member reach, beside the messages channel's prefix
+    prefix = "u"
+
+
+@pytest.mark.anyio
+async def test_custom_channel_tools_count_unread_messages_in_the_own_loop() -> None:
+    unread = "\nYou have 1 unread message."
+    async with run(("w-1", "w-2"), None, _Loop(), _Board(rate=(2, 60.0))) as (r, _):
+        await r.send("w-1", "w-2", "private", wake=False)
+        assert sorted(await r.resolve("w-2", "child")) == ["member_write"]
+        assert await r.call_resolved("w-2", "loop_write", text="a") == "l-1" + unread
+        assert await r.call_resolved("w-2", "member_write", text="b") == "u-1" + unread
+        assert await r.call_resolved("w-2", "member_write", "child", text="c") == "u-2"
+        for loop, end in (("top", unread), ("child", "")):
+            with pytest.raises(ToolError) as raised:
+                await r.call_resolved("w-2", "member_write", loop, text="d")
+            assert raised.value.message.startswith("rate limit: retry in")
+            assert raised.value.message.endswith(end) and (
+                "unread" in raised.value.message
+            ) == bool(end)
+        # read_messages counts what it leaves itself, and keeps its own output limit
+        tools = await r.resolve("w-2")
+        assert ToolDef(tools["read_messages"]).max_output == 0
+        assert ToolDef(tools["swarm_wait"]).parallel is False
+        assert await r.call_resolved("w-2", "read_messages") == (
+            '1 message.\n\n<peer_message id="m-1" from="w-1" to="w-2">\nprivate\n</peer_message>'
+        )
+        assert await r.call_resolved("w-2", "loop_write", text="e") == "l-2"

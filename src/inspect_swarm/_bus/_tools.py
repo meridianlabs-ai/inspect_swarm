@@ -3,7 +3,9 @@ from inspect_ai.agent._channel import current_agent_channel
 from inspect_ai.log._samples import sample_active
 from inspect_ai.tool import Tool, ToolSource
 
-from ._bus import current_bus
+from .._channel._channel import ChannelState
+from .._channel.messages import MessagesState
+from ._bus import Bus, current_bus
 
 
 # Holds no state, so one object serves every member, sample and run: the member, its
@@ -20,18 +22,28 @@ class _SwarmTools(ToolSource):
         if context.loop is None:
             context.loop = loop
             context.acp_bound = _acp_bound(loop)
-        own = context.loop is loop
-        tools = [
-            tool
-            for name, state in bus.states.items()
-            if own or bus.reach[name] == "member"
-            for tool in state.tools()
-        ]
-        # swarm_wait, when a channel the loop reaches wakes waits
-        wait = bus.waits.tool(own)
-        if wait is not None:
-            tools.append(wait)
-        return tools
+        return loop_tools(bus, context.loop is loop)
+
+
+# The tools of a loop of a member: the member's own loop gets every channel's, its other
+# loops those of "member"-reach channels; and swarm_wait, when a channel the loop reaches
+# wakes waits. Each counts the member's unread messages, as the bus wraps it.
+def loop_tools(bus: Bus, own: bool) -> list[Tool]:
+    tools = [
+        bus.counting(tool, results=not _counts_itself(state, tool))
+        for name, state in bus.states.items()
+        if own or bus.reach[name] == "member"
+        for tool in state.tools()
+    ]
+    wait = bus.waits.tool(own)
+    if wait is not None:
+        # a wait's result counts unread messages itself
+        tools.append(bus.counting(wait, results=False))
+    return tools
+
+
+def _counts_itself(state: ChannelState, tool: Tool) -> bool:
+    return isinstance(state, MessagesState) and tool is state.read_tool
 
 
 def swarm_tools() -> ToolSource:
