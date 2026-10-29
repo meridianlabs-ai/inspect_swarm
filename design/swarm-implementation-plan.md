@@ -451,7 +451,7 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 - Per-member artifacts in a shared sandbox through `materialize()`.
 - The solve/scoring cost boundary.
 - Per-member working time, matching Inspect's working-time accounting ([Decisions](#decisions), item 12), when an experiment needs it.
-- The dependency-linked critical path (the longest chain of member steps linked by reads of another member's writes), from each write's commit (`delivered`) to the reads that showed it (`read`, whose tool span identifies the reader's step), with the evidence D-1 names ([swarm-memory-channel.md Evidence](swarm-memory-channel.md#evidence)); latency curves are interpreted only from then (decision: Ransom, 2026-10-14).
+- The dependency-linked critical path (the longest chain of member steps linked by reads of another member's writes), from each write's commit (`delivered`) to the reads that showed it (`read`, whose tool span identifies the reader's step), with the evidence D-1 names ([swarm-memory-channel.md Evidence](swarm-memory-channel.md#evidence)); latency curves are interpreted only from then (decision: Ransom, 2026-10-14). Designed in [swarm-critical-path.md](swarm-critical-path.md).
 - Users isolation in one sandbox ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md)), with its inspect_ai, inspect_swe and inspect_swarm pull requests.
 - Further isolation rungs: hidden processes, bubblewrap, per-member cgroups, per-member network rules, Landlock.
 - Bridged swarms: Codex multi-agent v2 and Claude Code agent teams in inspect_swe, with their traffic mapped to swarm evidence.
