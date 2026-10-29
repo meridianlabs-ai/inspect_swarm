@@ -1,5 +1,6 @@
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
@@ -16,6 +17,7 @@ from .._channel._channel import Channel, ChannelRun, ChannelState, WaitingState
 from .._channel.messages import MessagesState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_sent
+from .._fence import with_lines
 from ._address import resolve
 from ._record import Draft, FrozenJson, Record, freeze_json, thaw_json
 from ._storm import Storm
@@ -220,6 +222,20 @@ class Bus:
             if isinstance(state, MessagesState):
                 return state.unread_line(context.name)
         return None
+
+    @contextmanager
+    def counted(self) -> Generator[None]:
+        # around a swarm tool's call: a ToolError it raises ends with the status line
+        # its result would have, so an error does not hide unread messages; the error
+        # stays a ToolError, and its evidence is already written
+        try:
+            yield
+        except ToolError as ex:
+            context = self.member()
+            unread = None if context is None else self.status(context)
+            if unread is None:
+                raise
+            raise ToolError(with_lines(ex.message, unread)) from ex
 
     def read_id(self) -> str:
         # the id of a read's evidence, numbered across the run's channels

@@ -14,6 +14,8 @@ from inspect_swarm._budget import current_member
 from inspect_swarm._bus._bus import Bus
 from inspect_swarm._channel.messages import MessagesState
 from inspect_swarm._fence import utf8_bytes
+from inspect_swarm._ledger import EventLog
+from inspect_swarm._metrics import _comm_metrics  # pyright: ignore[reportPrivateUsage]
 
 from .swarm_runtime import evidence, sample
 from .test_shared_memory import _Member  # pyright: ignore[reportPrivateUsage]
@@ -353,3 +355,81 @@ async def test_shared_memory_results_count_unread_messages_in_the_own_loop() -> 
         assert not (await r.call("w-2", "shared_memory", command="changes")).endswith(
             "unread message."
         )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "loop,tool,args,error",
+    [
+        pytest.param(
+            "top",
+            "shared_memory",
+            {"command": "view", "path": "/shared_memory/none.md"},
+            "The path /shared_memory/none.md does not exist. Please provide a valid path.",
+            id="channel-error",
+        ),
+        pytest.param(
+            "top",
+            "send_message",
+            {"to": "w-1", "message": "x" * 101},
+            "message is 101 bytes; the limit is 100",
+            id="bus-rejection",
+        ),
+        pytest.param(
+            "top",
+            "swarm_wait",
+            {"path": "/elsewhere"},
+            "Invalid path:",
+            id="wait-filter",
+        ),
+        pytest.param(
+            "child",
+            "shared_memory",
+            {"command": "view", "path": "/shared_memory/none.md"},
+            "The path /shared_memory/none.md does not exist. Please provide a valid path.",
+            id="nested",
+        ),
+    ],
+)
+async def test_an_error_in_the_own_loop_counts_unread_messages(
+    loop: str, tool: str, args: dict[str, Any], error: str
+) -> None:
+    channel = messages(rate=None, max_bytes=100)
+    async with run(("w-1", "w-2"), channel, shared_memory(rate=None)) as (
+        r,
+        transcript,
+    ):
+        await r.send("w-1", "w-2", "private", wake=False)
+        with pytest.raises(ToolError) as raised:
+            await r.call("w-2", tool, loop, **args)
+        message = raised.value.message
+        assert message.startswith(error) and "private" not in message
+        assert message.endswith("\nYou have 1 unread message.") == (loop == "top")
+        if tool == "send_message":
+            # the evidence keeps the bus's own reason
+            assert evidence(transcript, "sent")[-1]["rejected"] == {
+                "control": "max_bytes",
+                "reason": error,
+            }
+
+
+@pytest.mark.anyio
+async def test_a_send_from_an_ended_sender_is_refused_with_evidence() -> None:
+    # a task the member left behind still runs in its context after it ends
+    async with run(("w-1", "w-2")) as (r, transcript):
+        events = EventLog()
+        transcript._subscribe(events)  # pyright: ignore[reportPrivateUsage]
+        r.members["w-1"].state, r.members["w-1"].status = "ended", "submitted"
+        with pytest.raises(ToolError) as raised:
+            await r.send("w-1", "w-2", "late")
+        reason = "w-1 has ended, so its message was not delivered."
+        assert raised.value.message == reason
+        [sent] = evidence(transcript, "sent")
+        assert sent["rejected"] == {"control": "liveness", "reason": reason}
+        assert evidence(transcript, "delivered") == []
+        comm = _comm_metrics(events, ["w-1", "w-2"], ["messages"])
+        assert comm["w-1"]["messages"].rejections == {"liveness": 1}
+        # its reads and roster queries are refused as before
+        for name in ("read_messages", "list_members"):
+            with pytest.raises(ToolError, match="^w-1 has ended.$"):
+                await r.call("w-1", name)

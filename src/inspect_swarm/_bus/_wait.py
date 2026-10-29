@@ -307,7 +307,8 @@ class Waits:
                 Args:
                     timeout: Seconds to wait at most.
                 """
-                return await self.wait(None, None, timeout)
+                with self._bus.counted():
+                    return await self.wait(None, None, timeout)
 
             return ToolDef(
                 wait,
@@ -329,7 +330,8 @@ class Waits:
                 timeout: Seconds to wait at most.
                 file_id: A shared memory file id to watch.
             """
-            return await self.wait(path, file_id, timeout)
+            with self._bus.counted():
+                return await self.wait(path, file_id, timeout)
 
         return ToolDef(
             execute,

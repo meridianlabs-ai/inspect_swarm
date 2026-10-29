@@ -249,23 +249,26 @@ class MessagesState:
                 reply_to: The id of a message this one answers.
                 wake: Whether the message ends the recipients' swarm_wait.
             """
-            name = self._caller("send_message")
-            addresses = (to,) if isinstance(to, str) else tuple(to)
-            delivery = await self._bus.deliver(
-                Draft(
-                    CHANNEL,
-                    "message",
-                    to=addresses,
-                    payload=message,
-                    wake=wake,
-                    reply_to=reply_to,
+            with self._bus.counted():
+                # an ended sender's send reaches the bus, which refuses it with
+                # evidence
+                name = self._caller("send_message", running=False)
+                addresses = (to,) if isinstance(to, str) else tuple(to)
+                delivery = await self._bus.deliver(
+                    Draft(
+                        CHANNEL,
+                        "message",
+                        to=addresses,
+                        payload=message,
+                        wake=wake,
+                        reply_to=reply_to,
+                    )
                 )
-            )
-            record = delivery.record
-            return with_lines(
-                f"Sent {record.id} to {', '.join(record.recipients)}.",
-                self.unread_line(name),
-            )
+                record = delivery.record
+                return with_lines(
+                    f"Sent {record.id} to {', '.join(record.recipients)}.",
+                    self.unread_line(name),
+                )
 
         return ToolDef(
             execute,
@@ -283,8 +286,8 @@ class MessagesState:
     def _read_tool(self) -> Tool:
         async def execute() -> str:
             """Read your unread messages."""
-            name = self._caller("read_messages")
-            return self._read(name)
+            with self._bus.counted():
+                return self._read(self._caller("read_messages"))
 
         return ToolDef(
             execute,
@@ -299,20 +302,21 @@ class MessagesState:
     def _list_tool(self) -> Tool:
         async def execute() -> str:
             """List the members of the swarm."""
-            name = self._caller("list_members")
-            lines = [
-                f"{m.name}{' (you)' if m.name == name else ''}"
-                f"{f', role {m.role}' if m.role else ''}: {m.state}"
-                f"{f' ({m.status})' if m.status is not None else ''}"
-                for m in self._bus.roster
-            ]
-            return with_lines("\n".join(lines), self.unread_line(name))
+            with self._bus.counted():
+                name = self._caller("list_members")
+                lines = [
+                    f"{m.name}{' (you)' if m.name == name else ''}"
+                    f"{f', role {m.role}' if m.role else ''}: {m.state}"
+                    f"{f' ({m.status})' if m.status is not None else ''}"
+                    for m in self._bus.roster
+                ]
+                return with_lines("\n".join(lines), self.unread_line(name))
 
         return ToolDef(
             execute, name="list_members", description=_LIST, parallel=True
         ).as_tool()
 
-    def _caller(self, tool: str) -> str:
+    def _caller(self, tool: str, running: bool = True) -> str:
         context = self._bus.member()
         if context is None:
             raise RuntimeError(
@@ -322,7 +326,7 @@ class MessagesState:
             raise ToolError(
                 f"{tool} is for {context.name}'s own loop; a subagent cannot use it."
             )
-        if not self._bus.running(context.name):
+        if running and not self._bus.running(context.name):
             raise ToolError(f"{context.name} has ended.")
         return context.name
 

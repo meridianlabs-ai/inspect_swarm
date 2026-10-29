@@ -448,20 +448,21 @@ class _SharedMemoryState:
                 append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
                 file_id: Optional for `view`, in place of `path`: the id of a file, such as `f-3`, as status lines name files.
             """
-            return await self._call(
-                command,
-                path=path,
-                file_id=file_id,
-                file_text=file_text,
-                old_str=old_str,
-                new_str=new_str,
-                insert_line=insert_line,
-                insert_text=insert_text,
-                append_text=append_text,
-                view_range=view_range,
-                old_path=old_path,
-                new_path=new_path,
-            )
+            with self._bus.counted():
+                return await self._call(
+                    command,
+                    path=path,
+                    file_id=file_id,
+                    file_text=file_text,
+                    old_str=old_str,
+                    new_str=new_str,
+                    insert_line=insert_line,
+                    insert_text=insert_text,
+                    append_text=append_text,
+                    view_range=view_range,
+                    old_path=old_path,
+                    new_path=new_path,
+                )
 
         return ToolDef(
             execute,
