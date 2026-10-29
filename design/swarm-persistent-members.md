@@ -4,7 +4,7 @@
 
 A persistent member stays available after it answers. It is declared on its record, `member(worker, persistent=True)`, and runs inside one `react()` (or `deepagent()`) loop for its whole life: when it submits, or when a `react(submit=False)` member gives a tool-free reply, the swarm records that as one of its *answers* and holds the member *idle* at its next turn boundary instead of letting the loop return. The controller hears `MemberIdle`, and hands the member its next piece of work with `SwarmControl.wake(member, input)`, which appends the input to the member's conversation, so each new activation keeps everything the member has seen and done. While a member is idle, a write it would care about (one that would end a whole-board `swarm_wait` of its own loop) reaches the controller as `MemberNews`, and the controller decides whether to wake it. A swarm whose members are all idle or ended, with no event waiting, is *quiescent*: the controller's `events()` iterator ends, and the controller returns `quiescence`, wakes someone, or starts someone.
 
-The mechanism is the turn seam ([swarm-turn-seam.md](swarm-turn-seam.md)) plus one hook in inspect_ai: a loop that has an answer and would return it first asks its agent channel `after_answer(state)`, and the swarm's gate says "continue" for a persistent member, so the loop goes on to its next turn boundary, where the gate holds it idle. A persistent member's limits span its whole life; its member time limit does not run while it is idle. Every answer is a candidate for the swarm's answer: `first` and `last` choose across all answers, `choose_answer()` takes the member's latest, and the result record keeps the time of each answer and which one was chosen. An idle member that the swarm's stop or `end()` reaches ends `submitted`, its last answer its output. Members that cannot be held this way (bridged members, background dispatch, loops that never ask at their answers) are refused with an error.
+The mechanism is the turn seam ([swarm-turn-seam.md](swarm-turn-seam.md)) plus one private hook in inspect_ai: a `react()` loop that has an answer and would return it first asks the swarm's turn gate, through `after_answer()`, and the gate says "continue" for a persistent member, so the loop goes on to its next turn boundary, where the gate holds it idle. A persistent member's limits span its whole life; its member time limit does not run while it is idle. Every answer is a candidate for the swarm's answer: `first` and `last` choose across all answers, `choose_answer()` takes the member's latest, and the result record keeps the time of each answer and which one was chosen. An idle member that the swarm's stop or `end()` reaches ends `submitted`, its last answer its output. Members that cannot be held this way (bridged members, background dispatch, custom loops, which cannot ask at their answers) are refused with an error.
 
 ## Why
 
@@ -41,7 +41,7 @@ Code references are to inspect_swarm `main` at `33bf17b` and inspect_ai `main` a
 - Both loops also end, without an answer, after three consecutive content-filter refusals (`:292-295`, `:533-536`) and after a context overflow they cannot recover (`:283-284`, `:524-525`); the swarm reads those outputs as `unsubmitted` (`src/inspect_swarm/_member.py:612-621`).
 - Every iteration starts with `before_turn()` (`_react.py:263`, `:504`), which is where the seam's gate runs.
 - **Re-entry duplicates the system prompt.** Calling a `react()` agent again on the state it returned inserts its system message at index 0 a second time (`_react.py:215-216`, `:454-455`). A spike ran one `react(prompt=...)` on mockllm inside a sample, submitting `one`, appended a user message and called it again, submitting `two`: the roles after the first call were `system, user, assistant` (the submit tool's result removed), and after the second `system, system, user, assistant, user, assistant`, two system messages.
-- **Compaction's prefix is fixed at loop start**: react builds its compaction handler once per loop, with the system messages and the input as its always-kept prefix (`_react.py:242`, `_agent_compact` at `:692-713`).
+- **Compaction lives in the loop**: react builds its compaction handler once per loop, with the system messages and the starting input (`partition_messages()`'s `system` and `input`) as its always-kept prefix (`_react.py:242`, `_agent_compact` at `:692-713`). The handler sends only messages whose ids it has not processed (`src/inspect_ai/model/_compaction/_compaction.py:186-188`), so a message appended with an id it has already processed never reaches the model.
 
 ### The member's run
 
@@ -72,12 +72,11 @@ Member shapes in use are `react()` and `deepagent()` members in the examples and
 ### At a glance
 
 ```python
-# inspect_ai: the agent channel (public) and the seam's private gate
-class AgentChannel:
-    async def after_answer(self, state: AgentState) -> bool: ...   # False without a gate
-
-class TurnGate(Protocol):                                           # the seam's, plus:
+# inspect_ai: src/inspect_ai/agent/_channel/gate.py (the seam's private module), plus:
+class TurnGate(Protocol):                  # the seam's, plus:
     async def after_answer(self, channel: AgentChannel, state: AgentState) -> bool: ...
+
+async def after_answer(channel: AgentChannel, state: AgentState) -> bool: ...   # False without a gate
 
 
 # inspect_swarm
@@ -130,14 +129,14 @@ A persistent member counts as one with a callback registered for the seam's neve
 
 ### Continuing past an answer: `after_answer()`
 
-**inspect_ai.** `AgentChannel` gains a public method, `after_answer(state)`, for agent loops: a loop that has an answer and would return it calls it first, and if it returns `True`, continues to its next turn instead of returning. Without a gate it returns `False` at once, so nothing changes for a loop outside a swarm. With a gate it returns `await gate.after_answer(channel, state)`. The seam's private `TurnGate` protocol gains that entry point.
+**inspect_ai.** The seam's private module `_channel/gate.py` gains a function, `after_answer(channel, state)`, and its `TurnGate` protocol the entry point of the same name. A react loop that has an answer and would return it calls the function first with its channel, and if it returns `True`, continues to its next turn instead of returning. Without a gate on the channel (a loop outside a swarm, or the inert channel) it returns `False` at once, so nothing changes. With one it returns `await gate.after_answer(channel, state)`. It stays private, as `before_turn()`'s gate is: no public `AgentChannel` method is added, so inspect_ai's API is unchanged and only its own loops can persist (decision: Ransom, 2026-10-29). A custom loop that a persistent member runs ends `errored` ([Endings](#endings)); the hook can be made public later if a custom-loop member needs it.
 
 Both react loops call it at every end that is an answer, and nowhere else:
 
 - **`react()`**: a submission with its attempts used up (`_react.py:334-337`), and a submission whose check passed (`:340-345`). When it returns `True`, the loop sets `attempt_count` back to 0, so each activation has its configured attempts, and goes to the top of the loop without calling `on_continue`, as a submission that ends the loop today skips it. The submit tool's call and result stay in the conversation, so the model sees that it answered; `keep_in_messages=False` still removes them if the loop ever returns.
 - **`react(submit=False)`**: a tool-free reply with no `on_continue` (`:573-574`), and an `on_continue` that returns `False` after a tool-free reply (`:571-572`). When it returns `True`, the loop goes to the top of the loop.
 
-The ends that are not answers (content-filter refusals, an unrecoverable overflow, a submitting `react()`'s `on_continue` returning `False`) do not call it and end the loop as today. `deepagent()`'s top-level loop is a `react()`, so it gets the same calls; its subagents' loops call `after_answer()` too, and the gate answers them `False` ([The gate](#the-gate)).
+The ends that are not answers (content-filter refusals, an unrecoverable overflow, a submitting `react()`'s `on_continue` returning `False`) do not call it and end the loop as today. `deepagent()`'s top-level loop is a `react()`, so it gets the same calls; its subagents' loops are react loops that ask too, and the gate answers them `False` ([The gate](#the-gate)).
 
 The loop's `state` is the one it would return: for a submitting `react()`, the output with the answer as its completion (`:315-332`).
 
@@ -174,12 +173,14 @@ def wake(self, member: str | MemberHandle, input: str | list[ChatMessage]) -> No
 
     Raises:
         KeyError: If no member has this name.
-        ValueError: If `input` is an empty string, an empty list, a list without a user message, or a list whose messages repeat an id.
+        ValueError: If `input` is an empty string, an empty list, or a list without a user message.
         RuntimeError: If the member is not idle (pending members start with `start()`; a running member has not answered; an ended one has ended), or the swarm is stopping.
     """
 ```
 
-It is synchronous, as `start()` is: it checks, sets the member's state to `running`, counts the activation, stores the input for the gate and releases its wait, settles the record and notifies. Its refusal once the swarm is stopping is `start()`'s `_Stopping`, so a controller that meets it ends with the stop, not with an error (`_control.py:176-186`).
+It is synchronous, as `start()` is: it checks, builds the input's messages, sets the member's state to `running`, counts the activation, stores the input for the gate and releases its wait, settles the record and notifies.
+
+**Every wake message gets a fresh id.** A string becomes a new `ChatMessageUser`, and each message of a list is stored as a deep copy with a new id (`model_copy(update={"id": uuid()}, deep=True)`, with shortuuid's `uuid()`, which inspect_ai's messages use for their own ids); the caller's messages are not changed. A controller may reuse one list for every wake, as `dispatch` below reuses its strings, or pass messages whose ids are already in the member's conversation. Appended with the caller's ids, the second wake's messages would repeat ids the conversation and the member's compaction already hold: the seam's rule that a conversation's ids are unique would break ([swarm-turn-seam.md The callback contract](swarm-turn-seam.md#the-callback-contract)), and compaction, which sends only messages whose ids it has not processed (`src/inspect_ai/model/_compaction/_compaction.py:186-188`), would silently leave that activation's input out of the next generation. Fresh ids rule the collision out for every input, with nothing for the caller to check and no refusal to define; the `changed` event records the new ids. Its refusal once the swarm is stopping is `start()`'s `_Stopping`, so a controller that meets it ends with the stop, not with an error (`_control.py:176-186`).
 
 The input is eval-author text, as `start(input=...)` is: the controller sees no member text, so it can pass only its own ([swarm-api.md](swarm-api.md#controllers), "No member text"). Nothing else is added: the member's preamble was in its first input, and the swarm adds no message of its own ([swarm-communication.md](swarm-communication.md#how-members-learn-of-changes)). A list must hold a user message so the model does not continue from its own answer. Messages are not stamped `source="input"`, which marks the starting input only.
 
@@ -215,7 +216,7 @@ The stop procedure covers idle members: `stop()` closes the levers of running an
 | Its own limit, a swarm cap or the hard stop | as today | those already recorded, eligible |
 | Its agent returns normally after an end request | `stopped` (the seam's rule) | those already recorded, eligible; the final one is not recorded |
 | Its agent returns normally otherwise, with an `unsubmitted` output | `unsubmitted` | those already recorded, eligible |
-| Its agent returns normally otherwise | `errored`, with a `RuntimeError` naming the member and saying that a persistent member's loop must ask `after_answer()` at its answers and returned instead | none: the swarm fails, as for any foreign error |
+| Its agent returns normally otherwise | `errored`, with a `RuntimeError` naming the member and saying that a persistent member must run a `react()` or `deepagent()` loop, which asks the gate at its answers, and its loop returned instead | none: the swarm fails, as for any foreign error |
 
 The last row refuses loops that reach the gate but never ask at their answers (a custom loop that calls `before_turn()` only), and a `react(submit=False)` member whose `on_continue` returns `False` after a tool call. An idle member is ended through the gate as the seam ends a held member, by raising its lever's limit error; the member wrapper reads the idle mark before it classifies the status, and takes the member's output from its last answer.
 
@@ -223,7 +224,7 @@ An idle member reached by the hard stop before its ending is recorded can be `ca
 
 ### The swarm's answer
 
-Every recorded answer is a candidate, whatever the member's later status: an answer was complete when the member gave it, and a later activation is new work. A non-persistent member has one candidate, its output, when it ends `submitted`, at its end time, as today.
+Every recorded answer is a candidate, whatever the member's later status (stopped, a limit, cancelled): an answer was complete when the member gave it, and a later activation is new work, so a worker stopped mid-task keeps its earlier results (decision: Ransom, 2026-10-29). A non-persistent member has one candidate, its output, when it ends `submitted`, at its end time, as today.
 
 - **`first` and `last`** choose across all candidates by swarm time; ties go to roster order, then to the earlier answer. `first` is the earliest answer anyone gave, so a swarm whose workers answer subtasks before the answer that matters needs `last`, `choose_answer()`, or a controller that keeps those workers out of it.
 - **`choose_answer(member, reason)`** takes the member's latest answer at the time of the call, and keeps it if the member answers again. For a persistent member it raises `RuntimeError` if the member has no answer yet, whatever its state; for other members it keeps today's rule.
@@ -312,11 +313,15 @@ The lead ends by submitting; the workers stay idle until the stop and end `submi
 
 ## Alternatives considered
 
-**A `submit=False` member protocol** (swarm.md's first candidate). Members would run `react(submit=False)` with a swarm `report` tool that records an answer, and an `on_continue` that returns the state after a reply so the seam sees an `after == "reply"` boundary. It needs no inspect_ai change beyond the seam. But a standard `react()` worker, with its submit tool and prompt, could not persist: its author would rebuild it with another prompt and stop condition, and wire the swarm's hook, which the removal of notices ended (decision: Ransom, 2026-10-27). Rejected for `after_answer()`, which covers the agents members already are.
+**A `submit=False` member protocol** (swarm.md's first candidate). Members would run `react(submit=False)` with a swarm `report` tool that records an answer, and an `on_continue` that returns the state after a reply so the seam sees an `after == "reply"` boundary. It needs no inspect_ai change beyond the seam. But a standard `react()` worker, with its submit tool and prompt, could not persist: its author would rebuild it with another prompt and stop condition, and wire a swarm-specific hook. Rejected for `after_answer()`, which covers the agents members already are.
 
-**Clean re-entry** (swarm.md's second candidate): the member wrapper calls the agent again on the state it returned, with an inspect_ai change so `react()` does not insert its system prompt twice. It would also cover custom agents that return. But each activation opens a new loop: the seam binds one loop per member and refuses a second when callbacks are registered (decision: Ransom, 2026-10-29), react's compaction would take the whole earlier conversation as its never-compacted prefix (`_react.py:242`, `:692-713`), MCP connections and the agent channel would be reopened, and the bus's loop binding would point at a closed channel. The spike showed the duplicated system message and the submit tool's results removed between activations. Rejected.
+**Clean re-entry** (swarm.md's second candidate): the member wrapper calls the agent again on the state it returned, with an inspect_ai change so `react()` does not insert its system prompt twice. It would also cover custom agents that return. But each activation opens a new loop: the seam binds one loop per member and refuses a second when callbacks are registered (decision: Ransom, 2026-10-29), compaction would be initialized again for each activation (`_react.py:242`), MCP connections and the agent channel would be reopened, and the bus's loop binding would point at a closed channel. The spike showed the duplicated system message and the submit tool's results removed between activations. Rejected.
 
 **Letting the gate wait inside `after_answer()`.** The gate would hold the member and wait for the wake in the answer call itself, and return with the input appended. It saves the step to `before_turn()`, but the hold would happen outside the seam's boundary: no `Boundary` for callbacks to see the woken member before its first generation, and a second place for the stop, time and evidence rules. Rejected for the idle step at the boundary.
+
+**A public `AgentChannel.after_answer()`.** A public method beside `before_turn()` would let a custom loop persist too. No member loop needs it: the shapes in use are `react()` and `deepagent()`, and a custom loop is refused loudly. Rejected for the private hook, which adds no inspect_ai API and can be made public when a custom-loop member turns up (decision: Ransom, 2026-10-29).
+
+**Keeping the caller's ids on wake input**, refusing a list whose ids repeat each other or the conversation's. The refusal would have to see the member's compaction state, which lives in its loop, and a controller reusing a message list would meet an error for an input that is harmless with fresh ids. Rejected for fresh ids.
 
 **A controller-level switch** (`Controller(persistent=True)`, or a `hold()` a controller calls after `MemberEnded`). One switch for a whole roster, but a lead and its workers differ, and a hold after the end comes too late: the loop has returned. Rejected for the member record's field, which is logged with the arm.
 
@@ -330,7 +335,7 @@ The lead ends by submitting; the workers stay idle until the stop and end `submi
 
 ## Compatibility and migration
 
-- **inspect_ai.** `AgentChannel.after_answer()` is a public addition that returns `False` without a gate, and the react loops' behaviour without a gate is unchanged. The private `TurnGate` gains an entry point. inspect_swarm needs an inspect_ai release with it.
+- **inspect_ai.** No public API change: the private gate module gains `after_answer()` and the private `TurnGate` an entry point, and the react loops' behaviour without a gate is unchanged. inspect_swarm needs an inspect_ai release with it.
 - **Member records.** `persistent` defaults to `False` and is serialized only when `True`, so existing members log, rebuild and replay as before.
 - **Controllers.** `ControlEvent` becomes a union, and `MemberState` gains `idle`, but only swarms with a persistent member produce either: a controller with no persistent member in its roster sees only `MemberEnded` and the three old states. The docs already say to test an event's kind before reading its fields. `leaderless` changes only for persistent rosters.
 - **Logs.** The record, final event, metrics and `boundary` event gain fields with defaults, and there is one new `SwarmEvent` kind; logs written before load unchanged. The viewer shows the new kind as it shows any `SwarmEvent` kind, with no change. The record lives in the sample store and has no generated TypeScript type.
@@ -347,11 +352,12 @@ The lead ends by submitting; the workers stay idle until the stop and end `submi
 
 All with mockllm, no network or Docker, on asyncio and trio through `tests/conftest.py`.
 
-- **inspect_ai** (`tests/agent/test_agent_react.py`, `tests/agent/test_channel/test_channel.py`): `after_answer()` returns `False` without a gate and the loop returns as today; with a test gate that returns `True`, a submitting `react()` continues after a submission with attempts used up and after one that passed its check, without calling `on_continue`, with `attempt_count` reset (a second activation gets its full `attempts`, an incorrect answer in it getting the incorrect message), and with the submit tool's call and result kept in the conversation; `react(submit=False)` continues after a tool-free reply with no `on_continue` and after one whose `on_continue` returns `False`; refusal and overflow ends never call it; a gate that returns `False` ends each loop exactly as today.
+- **inspect_ai** (`tests/agent/test_agent_react.py`, `tests/agent/test_channel/test_channel.py`): the gate module's `after_answer()` returns `False` for a channel without a gate and for the inert channel, and the loop returns as today; with a test gate that returns `True`, a submitting `react()` continues after a submission with attempts used up and after one that passed its check, without calling `on_continue`, with `attempt_count` reset (a second activation gets its full `attempts`, an incorrect answer in it getting the incorrect message), and with the submit tool's call and result kept in the conversation; `react(submit=False)` continues after a tool-free reply with no `on_continue` and after one whose `on_continue` returns `False`; refusal and overflow ends never call it; a gate that returns `False` ends each loop exactly as today.
 - **inspect_swarm** (`tests/test_persistent.py`, new):
   - a persistent `react()` member answers, is `idle` and `held`, `MemberIdle` reaches the controller, `wake()` appends the input, and the next generation's input has the first activation's messages, the submit tool's call and result, and the wake input after them, one system message; the same for `react(submit=False)` and `deepagent()` without background;
   - a callback registered with `on_boundary()` sees `after == "wake"` with the input as the last messages and the new `activation`, and its own change applies after the input;
-  - `wake()` refusals: pending, running and ended members, the stopping swarm (the controller ends with the stop), an empty string, a list without a user message, repeated ids; a wake called before the member reaches its idle boundary takes effect there;
+  - `wake()` refusals: pending, running and ended members, the stopping swarm (the controller ends with the stop), an empty string, a list without a user message; a wake called before the member reaches its idle boundary takes effect there;
+  - wake ids: a member with `CompactionTrim` woken twice with the same `[ChatMessageUser(...)]` list gets both inputs in its next generations, each with an id new to the conversation and to the caller's list, which is unchanged; a fresh string input reaches the model the same way; the `changed` events carry the new ids;
   - endings, one test each, for every row of [Endings](#endings): a stop and `end()` while idle give `submitted` with the last answer as output; `end()` during the final submit gives `stopped` with that submission not recorded; an answer in the grace period is recorded and the member ends `submitted`; a stop while woken gives `stopped` and keeps earlier answers eligible; a custom loop that calls `before_turn()` and returns, and a `react(submit=False)` member whose `on_continue` returns `False` after a tool call, end `errored`; a `generator()` member ends `errored` by the never-reached rule;
   - refusals at `swarm()`: a persistent member declared bridged, one in the `inspect_swe/` namespace, and `deepagent(background=True)` and `background=4`;
   - time: a persistent member with `time_limit(0.5)` idle for 1 s between two short activations is not stopped; working time stops while every member is idle (through `eval_async()`, as `tests/test_binding.py` runs a sample);
@@ -364,12 +370,12 @@ All with mockllm, no network or Docker, on asyncio and trio through `tests/conft
 
 ## Implementation plan
 
-1. **inspect_ai: `after_answer()`.** `src/inspect_ai/agent/_channel/channel.py` (`AgentChannel.after_answer()`), `src/inspect_ai/agent/_channel/gate.py` (the `TurnGate` entry point), `src/inspect_ai/agent/_react.py` (the four answer ends, the attempt reset); the inspect_ai tests above. It needs the seam's step 1 (the gate) and can be part of it.
+1. **inspect_ai: `after_answer()`.** `src/inspect_ai/agent/_channel/gate.py` (the `after_answer()` function and the `TurnGate` entry point), `src/inspect_ai/agent/_react.py` (the four answer ends, the attempt reset); the inspect_ai tests above. It needs the seam's step 1 (the gate) and can be part of it.
 2. **inspect_swarm: persistent members.** Needs step 1 in an inspect_ai inspect_swarm can depend on, and the seam's step 2.
    - `src/inspect_swarm/_member.py`: `Member.persistent` and `member(persistent=...)`, serialized when true; the endings (the idle mark, the normal-return rule, the output from the last answer).
    - `src/inspect_swarm/_swarm.py`: the refusals in `_check_persistent()`.
    - `src/inspect_swarm/_seam.py`: `after_answer()`, the idle step, the wake input as the runtime's change, `Boundary.activation` and `after="wake"`.
-   - `src/inspect_swarm/_controller/_control.py`: `MemberRun`'s answers and activations, the `idle` state, `wake()`, `MemberIdle`, the union alias, `choose_answer()` over answers, the outputs of answers for `settle()`, the stop procedure over started members.
+   - `src/inspect_swarm/_controller/_control.py`: `MemberRun`'s answers and activations, the `idle` state, `wake()` with fresh message ids, `MemberIdle`, the union alias, `choose_answer()` over answers, the outputs of answers for `settle()`, the stop procedure over started members.
    - `src/inspect_swarm/_controller/leaderless.py`; `src/inspect_swarm/_final.py` (candidates over answers); `src/inspect_swarm/_record.py`.
    - `src/inspect_swarm/_evidence.py` (`answer`, the `boundary` additions, `final`'s `answer`), `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/_critical_path.py` and `src/inspect_swarm/_ledger.py` (answer positions), `src/inspect_swarm/__init__.py` (`MemberIdle`).
    - Docs: `docs/members.qmd` (persistent members), `docs/controllers.qmd` (idle, `wake()`, quiescence, the `dispatch` example), `docs/analysis.qmd` (the event, record and metrics fields), `docs/reference/inspect_swarm.qmd`.
@@ -378,8 +384,7 @@ All with mockllm, no network or Docker, on asyncio and trio through `tests/conft
 
 ## Open questions
 
-1. **`after_answer()` public on `AgentChannel`, or private.** Public gives custom loops a documented way to support persistence, beside `before_turn()`, at the cost of one more public method for inspect_ai's maintainers to accept. Private (react calls the gate itself) keeps inspect_ai's API unchanged, and a custom loop could not persist. Recommendation: public; it is a no-op without a gate.
-2. **Answers from a member that later ends badly.** This design keeps every recorded answer eligible, however the member ends (stopped, a limit, cancelled), since each answer was complete when given. The stricter rule would make only answers of a member that ends `submitted` eligible, which loses a worker's earlier results when it is stopped mid-task. Recommendation: keep every answer eligible.
+None.
 
 ## Not this design
 
@@ -387,5 +392,6 @@ All with mockllm, no network or Docker, on asyncio and trio through `tests/conft
 - **Idle members in `swarm_wait` results**: telling a waiting lead that a worker went idle, as its result names ends. Today the lead hears of it only through the worker's writes or the all-waiting release.
 - **A `quiescent()` channel hook**, for a channel whose state can keep the swarm going without a delivery, such as a task list with open tasks.
 - **Per-activation limits**, and per-activation answers' scores (swarm-scoring.md Part 2).
+- **A public `after_answer()` hook** for custom member loops, if one turns up.
 - **Persistent bridged members**, through inspect_swe's `--resume`; **persistent members with background work**, which needs holding background work ([swarm-turn-seam.md Not this design](swarm-turn-seam.md#not-this-design)).
 - **Delivery to pending members**, and starting a member on its first message.
