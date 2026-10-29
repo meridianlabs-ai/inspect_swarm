@@ -39,7 +39,7 @@ Non-goals:
 ### What a step is and whose it is
 
 - **A step** is a completed model call in a member's spans, cache replays included and errored or cancelled calls excluded: `calls.calls + calls.cache_replays` of the member's ledger line (`_metrics.py:285-287`), counted by `count_call()` (`src/inspect_swarm/_ledger.py:532-550`). `SpanPlaces` attributes a span to the member whose span tree holds it (`_ledger.py:490-515`), so a member's steps include its subagents', its background work's (deepagent background children and raw `background()` model calls, `tests/test_background_members.py:104-131`) and those of any swarm nested inside it.
-- **A member's span** is an agent span opened by the member wrapper around its agent (`src/inspect_swarm/_member.py:516-520`). It stays open through the member's drain: after the agent returns, `_drain()` closes the member's lever, so its background work starts no new model calls, and waits the grace period for calls and tool calls in flight (`:533`, `:553-566`). Nothing is written to the transcript when the agent returns.
+- **A member's span** is an agent span opened by the member wrapper around its agent (`src/inspect_swarm/_member.py:516-520`). It stays open through the member's drain: after the agent returns, `_drain()` closes the member's lever, so its background work dispatches no new provider calls, and waits the grace period for calls and tool calls in flight (`:533`, `:553-566`). A cache replay is not dispatched and returns before Inspect checks limits (`inspect_ai/model/_model.py:1525-1558`), so background work can still begin and complete cache-replayed steps during the drain. Nothing is written to the transcript when the agent returns.
 - **Concurrency inside a member** is common: deepagent runs `general()` children in parallel and in the background, and wrappers run `run()` children in a task group (`tests/test_metrics.py:855`). The transcript records each child's agent span and the event's span, not which task started a child or where its caller awaited it: a task-group join writes no event.
 
 ### Order
@@ -52,13 +52,14 @@ Each is an `InfoEvent` with source `inspect_swarm` and `type: "comm"`, written i
 
 | Kind | Written | Fields the metric reads |
 |---|---|---|
-| `delivered` | step 4 of `Bus.deliver()` (`src/inspect_swarm/_bus/_bus.py:185-190`) | `member`, `loop`; `result.files`: `[{"file", "path", "base", "version", "deleted"?}]`, the version each file now has |
-| `read` | a `view` returns (`src/inspect_swarm/_channel/shared_memory.py:841-931`) | `member`; `files`: `[{"file", "version", "record", "lines", "deleted"}]`; `listing` |
-| `waited` | a `swarm_wait` ends (`src/inspect_swarm/_bus/_wait.py:250-268`) | `member`, `loop`; `files`: `[{"file", "version", "deleted"}]` and `ended`: `[{"member", "status"}]`, what the result named |
+| `delivered` | step 4 of `Bus.deliver()` (`src/inspect_swarm/_bus/_bus.py:185-190`) | `channel`, `member`, `loop`; `result.files`: `[{"file", "path", "base", "version", "deleted"?}]`, the version each file now has |
+| `read` | a `view` returns (`src/inspect_swarm/_channel/shared_memory.py:841-931`) | `channel`, `member`; `files`: `[{"file", "version", "record", "lines", "deleted"}]`; `listing` |
+| `waited` | a `swarm_wait` ends (`src/inspect_swarm/_bus/_wait.py:250-268`) | `member`, `loop`; `channels`, the waiting channels the loop reaches; `files`: `[{"file", "version", "deleted"}]` and `ended`: `[{"member", "status"}]`, what the result named |
 
 - Versions of a file are consecutive: a file is created at version 1 and every write that touches it, a delete included, adds one ([swarm-memory-channel.md The board's state](swarm-memory-channel.md#the-boards-state)). A file id is never reused within a board, and renames keep it. Each run's board numbers its files from `f-1` (`shared_memory.py:276`, `:712`), so a nested swarm's board reuses ids the outer board has.
 - A `view` marks the version it shows and writes `read` in the same synchronous call, and a write's `apply()` and its `delivered` event run with no `await` between them, so within one board the order of `delivered` and `read` events in the transcript is the order in which the board changed and was read.
 - A wait that finds news already waiting returns at once with `woken_by: []` and the files it named in `files`; a release whose news has gone by the time the waiter resumes keeps its commit in `woken_by` though the result never named it ([swarm-wait.md What a wait returns](swarm-wait.md#what-a-wait-returns)). A cancelled wait records `files: []` and `ended: []` (`_wait.py:246-249`).
+- **A wait's `files` do not say which channel named them.** Every waiting channel the loop reaches adds its `WaitNews.files` to one list (`_wait.py:225-230`), and the public `WaitNews` contract lets a custom waiting channel name entries of its own shape (`src/inspect_swarm/_channel/_channel.py:162-170`); `channels` lists the channels reached, not which supplied each entry (`_evidence.py:135-156`). In this repo only `shared_memory` (`shared_memory.CHANNEL`, `shared_memory.py:25`) is a waiting channel; a channel given twice is refused (`src/inspect_swarm/_swarm.py:261-270`). `delivered` and `read` carry their `channel`.
 - A member's end is a `result` event of kind `member_result` naming it, written in its span when it ends, after its drain (`src/inspect_swarm/_controller/_control.py:586-608`).
 - **Which run an event belongs to.** Member names are unique in a sample, since each names a timeline and a second swarm reusing one is refused (`_evidence.py:208-216`); the communication metrics already rely on this to keep another swarm's events out (`_metrics.py:229-231`). A nested swarm's members run inside an outer member's span (`tests/test_background_members.py:1090-1100`), so their steps are the outer member's, but their evidence names the inner members.
 
@@ -104,7 +105,7 @@ The metric is the longest path in a graph of the members' recorded events.
 | Node | Member | Weight |
 |---|---|---|
 | a step (a completed model call, cache replays included), at the position where its call began | the member whose span tree holds its span (`SpanPlaces`) | 1 |
-| a write (`delivered`), a read (`read`, not a listing), a wait result (`waited`) | its `member`, when that is in the roster | 0 |
+| a write (`delivered`) or a read (`read`, not a listing) of the `shared_memory` channel, a wait result (`waited`) | its `member`, when that is in the roster | 0 |
 | the member's end (`member_result`) | the member it names | 0 |
 
 **Edges.** Every edge goes from a node to a node with a later position:
@@ -118,9 +119,11 @@ The metric is the longest path in a graph of the members' recorded events.
    | `view` of a deleted file's id | the deleting write: the reader is shown that the file was deleted and by whom, not its content |
    | `view` of a directory (listing) | none |
    | the status line, `changes` | none (no evidence, and the step that sees them was not blocked on them) |
-   | `swarm_wait` result | for each version its `files` names, the latest write up to that version by a loop other than the waiter's: the peer write the result reports, since when the waiter's own blind append made the current version, the result names that version but reports the peer write before it (`news()` and `_by_others()`, `shared_memory.py:426`, `:973-982`); nothing from a cancelled wait |
+   | `swarm_wait` result | for each version its `files` names, the latest write up to that version by a loop other than the waiter's: the peer write the result reports, since when the waiter's own blind append made the current version, the result names that version but reports the peer write before it (`news()` and `_by_others()`, `shared_memory.py:426`, `:973-982`); only when `shared_memory` is the only channel in its `channels`, so that every entry is the board's; none from a wait that reached another waiting channel, or a cancelled wait |
 
    An edge from the reader's own member adds nothing, since its chain already passes through that write.
+
+   A wait that reached a custom waiting channel makes no file edges, alone or beside shared memory: its `files` mix entries from every channel it reached with nothing to say which named which, and a custom channel's entry can name an id the board also has, or one the board never had. Treating such entries as board versions would link an unrelated writer or turn a valid wait into inconsistent evidence; ignoring them, with no warning, makes the number a lower bound there, as any custom channel does. Its `ended` entries come from the bus, not from a channel (`_wait.py:231-244`), so they still make member-end edges.
 3. **Member ends to waits.** A wait result follows the end (`member_result`) of each member its `ended` names, and so that member's whole chain, drained work included.
 
 **The metric.** `critical_steps_to_answer` is the largest number of steps on a path into the answering member's chain at `returned_at`: its chain's value after every node before that position.
@@ -149,11 +152,13 @@ The metric is the longest path in a graph of the members' recorded events.
 | A wait after the waiter's own blind append | the wait follows the peer write before the waiter's append | the peer's chain |
 | The answering member's background call in flight at the return, completing in the drain | it began before `returned_at` | counted (over-count) |
 | The answering member's drained tool call viewing a peer's file after the return | the read is after `returned_at` | left out |
+| The answering member's step replayed from the cache before the return, and a background step replayed from the cache during the drain | the second begins after `returned_at` | 1, where `steps_to_answer` is 2; a waiter on the member's end gets 2 |
+| A wait reaching shared memory and a custom waiting channel, whose only entry is the custom channel's, naming an id the board has (`f-1`) or not (`f-99`) | no file edges from that wait; its `ended` entries still link | the waiter's own chain, no warning |
 | A nested swarm's members inside one outer member | their steps are the outer member's; their board's evidence is left out | the outer member's chain |
 
 ### Where the answer ends
 
-The answer's chain ends where the answering member's agent returned: every node before that position counts, its last generation, the subagents and delegated runs that returned to it, a read whose content it returned without another model call (the fifth shape), and its background work's steps that began by then. The drain starts no new model calls, so what the return leaves out is what drained work reads or waits for after it. A background call still in flight at the return is counted, though it completes in the drain and the answer did not use it: one more case of the over-count inside a member.
+The answer's chain ends where the answering member's agent returned: every node before that position counts, its last generation, the subagents and delegated runs that returned to it, a read whose content it returned without another model call (the fifth shape), and its background work's steps that began by then. The return leaves out what drained work does after it: the reads and waits it makes, and the steps that begin then, which the closed lever limits to cache replays (`_model.py:1525-1558`). Those still count in `steps_to_answer` and in the member's end, which a peer's wait follows. A background call still in flight at the return is counted, though it completes in the drain and the answer did not use it: one more case of the over-count inside a member.
 
 The transcript has no event at that point: the member's span stays open through the drain. So the member wrapper records it: right after `_call_agent()` returns, it stores `transcript().history.event_count` on the member's `MemberOutcome` as `returned_at`, the position of the next event. This is runtime state for the metric, not evidence. It is the smallest addition that places the answer, since every existing event of the member either precedes the return or (the member span's end, `member_result`) follows the drain. A member whose agent did not return (cancelled, or ended by a limit or error that `_call_agent()` raises) keeps `returned_at` `None`. The answer always comes from a member that ended with a submission, so it has one; if it had none, the metric would be `None`.
 
@@ -193,9 +198,10 @@ The transcript has no event at that point: the member's span stays open through 
 # event index when the event was first reported). Filled by EventLog.
 class PathLog:
     steps: dict[str, tuple[str | None, int]]  # model event uuid -> (span id, position)
-    writes: list[PathWrite]   # `delivered`: position, member, loop, [(file, version, deleted)]
-    reads: list[PathRead]     # `read` without `listing`: position, member, [(file, version, deleted)]
-    waits: list[PathWait]     # `waited`: position, member, loop, [(file, version)], [ended members]
+    writes: list[PathWrite]   # `shared_memory` `delivered`: position, member, loop, [(file, version, deleted)]
+    reads: list[PathRead]     # `shared_memory` `read` without `listing`: position, member, [(file, version, deleted)]
+    waits: list[PathWait]     # `waited`: position, member, loop, board (`channels` == ["shared_memory"]),
+                              # [(file, version)] when board, else [], [ended members]
     ends: dict[str, int]      # `member_result`: member -> position
 
     def __call__(self, event: Event, position: int) -> None: ...
@@ -210,10 +216,10 @@ def critical_steps_to_answer(
 ) -> int | None: ...
 ```
 
-- **Recording.** `EventLog.__call__` passes each event the first time the transcript reports it (by uuid; an update is not passed again) to its `PathLog` with `transcript().history.event_count` as its position: model events, `comm` events and `member_result` events. The `PathLog` keeps only ids, positions, loop ids, file ids, versions and member names: nothing a member wrote. `CommRecord` and `WaitRecord` are unchanged. `places` is passed as a callable so that `_critical_path.py` imports nothing from `_ledger.py`, which imports it.
+- **Recording.** `EventLog.__call__` passes each event the first time the transcript reports it (by uuid; an update is not passed again) to its `PathLog` with `transcript().history.event_count` as its position: model events, `comm` events and `member_result` events. It keeps `delivered` and `read` events of the `shared_memory` channel only (`shared_memory.CHANNEL`), and a wait's `files` only when its `channels` is exactly that channel. The `PathLog` keeps only ids, positions, loop ids, file ids, versions and member names: nothing a member wrote. `CommRecord` and `WaitRecord` are unchanged. `places` is passed as a callable so that `_critical_path.py` imports nothing from `_ledger.py`, which imports it.
 - **Returning.** `_run_member()` sets `outcome.returned_at = transcript().history.event_count` right after `_call_agent()` returns, for every member, as the wrapper does not know which will answer (`_member.py:520`); `MemberOutcome` gains the field, defaulting to `None`, which it stays when `_call_agent()` raises or is cancelled.
 - **Computing.** `critical_steps_to_answer()` keeps the evidence of roster members only and the steps `completed` accepts, each step's member from `places`, and walks the nodes in position order once with a running value per member: a step adds one; a write records the writer's value for its file version, with its loop; a read or wait result raises the reader's value to the largest of its in-edges; a `member_result` records the member's value as its end. For a file it keeps the largest value among all the writes in its history, which is what a live view of its current version follows, and each version's write with its loop and value, from which a tombstone view takes the deleting write and a wait walks back from the named version to the latest write by another loop. Steps in spans outside every member (the controller's, the final step's) are ignored. It returns the answering member's value after the last node before `answered_at`, or `None` without an answer or `answered_at`.
-- **Inconsistent evidence.** A read whose shown version is not the file's current version at its position, or a named version no roster write produced, would mean the ordering assumption broke. The function then logs a warning naming the file and versions and returns `None`; it never raises, so the metric cannot fail a run that succeeds without it.
+- **Inconsistent evidence.** A read whose shown version is not the file's current version at its position, or a version a shared-memory-only wait named that no roster write produced, would mean the ordering assumption broke. The function then logs a warning naming the file and versions and returns `None`; it never raises, so the metric cannot fail a run that succeeds without it.
 - **Wiring.** `swarm_metrics()` takes `answered_at`, the `returned_at` of the `MemberRun` named by `chosen` in `_control.py`, calls `critical_steps_to_answer()` with the event log's `PathLog`, `completed` built from `EventLog.calls`, `places` and the ledger's member names, and fills the field. Everything stays synchronous, as the rest of the `finally` is.
 
 **Configuration.** None: the metric is always on, as the other metrics are.
@@ -240,7 +246,7 @@ def critical_steps_to_answer(
 - **`SwarmMetrics`** gains one optional field with a `None` default, so metrics written before load unchanged; `version` stays 1, as for the fields added before. The `metrics` `InfoEvent` and the `inspect_swarm:metrics` store entry carry it.
 - **Evidence, the bus, channels, the ledger, the result record:** unchanged. `EventLog`, `CommRecord` and `MemberOutcome` are private.
 - **Public API:** no new names. `SwarmColumns` is unchanged (it reads the ledger, not the metrics).
-- **Docs:** [Analysis, Metrics](https://meridianlabs-ai.github.io/inspect_swarm/analysis.html#metrics) gains `critical_steps_to_answer`: what it counts, that latency is read from it, and, plainly, that it over-counts inside a member (parallel and background subagents, and concurrent work of any kind, count one after another) and is a lower bound across members whenever they can share information outside shared memory and waits (a shared sandbox, a shared volume, a service, a custom channel, shared tools or store keys, a controller passing results between members).
+- **Docs:** [Analysis, Metrics](https://meridianlabs-ai.github.io/inspect_swarm/analysis.html#metrics) gains `critical_steps_to_answer`: what it counts, that latency is read from it, and, plainly, that it over-counts inside a member (parallel and background subagents, and concurrent work of any kind, count one after another) and is a lower bound across members whenever they can share information outside shared memory and waits (a shared sandbox, a shared volume, a service, a custom channel, its wait results included, shared tools or store keys, a controller passing results between members).
 - **Old runs** have no value; recomputing it from their logs is the helper left out below.
 
 ## Security
@@ -252,9 +258,10 @@ No untrusted text reaches the computation. It reads span ids, positions, model e
 All async tests run on asyncio and trio through the `anyio_backend` fixture.
 
 - **`tests/test_critical_path.py`**: table-driven tests of `critical_steps_to_answer()` over hand-built `PathLog`s, one row per shape in [The shapes](#the-shapes), with the length given there, and:
-  - a single member (its steps before `answered_at`), and steps after `answered_at` (left out);
+  - a single member (its steps before `answered_at`), and steps after `answered_at`, such as a cache replay during the drain (left out of the answer, counted at the member's end);
   - a wait that returned at once (`woken_by: []`, edge from `files`); a wait released by a write whose news vanished (no edge); a cancelled wait (no edge); a wait after the waiter's own blind append, between two members and between two loops of one member;
-  - a listing (no edge); a tombstone view (the deleting write only);
+  - a listing (no edge); a tombstone view (the deleting write only); `delivered` and `read` of another channel (no node);
+  - waits that reached a custom waiting channel, alone or beside shared memory, with an entry naming a board id (`f-1`), an id the board never had (`f-99`), or none: no file edge, no warning, not `None`; their `ended` entries still link;
   - evidence naming a member outside the roster, with its own `f-1` (ignored, no warning), and steps in spans outside every member (ignored);
   - an inconsistent read version (`None` and a warning); errored and cache-replayed model events; no answer, and no `answered_at` (`None`).
 - **`tests/test_metrics.py`**: mockllm swarms through `run_swarm()`, asserting the field: two `react()` members, one writing and one waiting and viewing (as B above); a deepagent member with two `general()` children dispatched in one turn (the sum of their steps and its own); a member waiting for a peer's end while that peer's background work drains; a member running a nested swarm with shared memory (as `tests/test_background_members.py:1090`), whose inner board makes no edge.
