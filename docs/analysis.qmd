@@ -44,7 +44,7 @@ Each member's calls, its subagents' and background work's included, form one cha
 
 The chain ends when the answering member ends, after its background work has finished, since that work can still change the member's output.
 
-The number over-counts work inside a member. Parallel and background subagents, tool calls of one turn, and any other concurrent work count one after another, and the answering member's background work after its agent returned counts whether or not it changed the answer. That excess reaches peers through the member's later writes.
+The number over-counts work inside a member. Parallel and background subagents, tool calls of one turn, and any other concurrent work count one after another, and the answering member's background work after its agent returned, its reads included, counts whether or not it changed the answer. That excess reaches peers through the member's later writes.
 
 The number also misses links. Only `shared_memory` and `swarm_wait` make them, so information that members share in other ways adds none: a shared sandbox, a shared volume, a service, a custom channel and its wait results, a shared tool or store key, or a controller that passes one member's result to another. A `swarm_wait` result that reports more than ten files names only the first ten in its evidence, so the rest make no link until the member views them. Missed links can only lower the number.
 

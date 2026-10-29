@@ -104,22 +104,11 @@ class SwarmMetrics(BaseModel):
     longest_member_steps: int
     # critical path, the dependency-linked definition: the longest chain of steps
     # (completed model calls, cache replays included) ending at the answering member's
-    # end, after its drain, where its selected output is settled. A member's own steps,
-    # its subagents' and background work's included, form one chain in the order they
-    # began, so concurrent work inside a member (parallel subagents, background work,
-    # tool calls of one turn) counts as sequential and the number over-counts it, as it
-    # does the answering member's drained work, its reads included, whether or not it
-    # changed the selected output; an excess that reaches peers through the member's
-    # later writes. Chains link between members where a shared-memory read or a
-    # swarm_wait result showed a write of the swarm's built-in board, and where a wait
-    # named a member's end (_critical_path.py). It counts only those links, so it
-    # misses information members share in other ways: a shared sandbox, a shared
-    # volume, a service, a custom channel, a shared tool or store key, or a controller
-    # that hands one member's result to another; and on the board, a wait's files past
-    # the tenth, which its evidence does not name. With both effects it is not a bound
-    # on true causal depth either way. None when there is no answer or the answering
-    # member has no recorded end, when the evidence is inconsistent (with a warning),
-    # for a sample resumed from a checkpoint, and in metrics written before this field.
+    # end, linked across members where a read or a swarm_wait result showed a write of
+    # the built-in board, or a wait named a member's end. Not a bound on causal depth
+    # either way; see docs/analysis.qmd, "The critical path". None with no answer, when
+    # the answering member has no recorded end, when the evidence is inconsistent (with
+    # a warning), for a resumed sample, and in metrics written before this field.
     critical_steps_to_answer: int | None = None
 
 
