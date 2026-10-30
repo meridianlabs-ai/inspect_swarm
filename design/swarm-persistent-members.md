@@ -379,7 +379,7 @@ All with mockllm, no network or Docker, on asyncio and trio through `tests/conft
 1. **inspect_ai: `after_answer()`.** `src/inspect_ai/agent/_channel/gate.py` (the `after_answer()` function and the `TurnGate` entry point), `src/inspect_ai/agent/_react.py` (the four answer ends, the attempt reset); the inspect_ai tests above. It needs the seam's step 1 (the gate) and can be part of it.
 2. **inspect_swarm: persistent members.** Needs step 1 in an inspect_ai inspect_swarm can depend on, and the seam's step 2.
    - `src/inspect_swarm/_member.py`: `Member.persistent` and `member(persistent=...)`, serialized when true; the endings (the idle mark, the normal-return rule, the output from the last answer).
-   - `src/inspect_swarm/_swarm.py`: the refusals in `_check_persistent()`, the registry-name rule first.
+   - `src/inspect_swarm/_swarm.py`: the refusals in `_check_persistent()`, the registry-name and identity rule first.
    - `src/inspect_swarm/_seam.py`: `after_answer()`, the reader rule at boundaries and answers, the idle step, the wake input as the runtime's change, `Boundary.activation` and `after="wake"`.
    - `src/inspect_swarm/_controller/_control.py`: `MemberRun`'s answers and activations, the `idle` state, `wake()` with fresh message ids, `MemberIdle`, the union alias, `choose_answer()` over answers, the outputs of answers for `settle()`, the stop procedure over started members.
    - `src/inspect_swarm/_controller/leaderless.py`; `src/inspect_swarm/_final.py` (candidates over answers); `src/inspect_swarm/_record.py`.
