@@ -449,7 +449,7 @@ def _live_record() -> tuple[bool, bool]:
 
 
 @agent
-def prober(seen: list[tuple[bool, bool]]) -> Agent:
+def looks_for_the_record(seen: list[tuple[bool, bool]]) -> Agent:
     # looks for the record from the member's context, as a member's tool would
     async def execute(state: AgentState) -> AgentState:
         seen.append(_live_record())
@@ -475,7 +475,7 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
 
     agent_swarm = swarm(
         [
-            member(prober(probed), name="started", role="lead"),
+            member(looks_for_the_record(probed), name="started", role="lead"),
             member(generator(scripted_model(), calls=1), name="never"),
         ],
         controller=_controller(run, "final_test_record_once"),

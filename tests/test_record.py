@@ -570,7 +570,7 @@ async def test_the_start_event_precedes_every_member(later: bool) -> None:
 
 
 @agent
-def nesting(inner: Agent, then: Agent) -> Agent:
+def runs_a_nested_swarm(inner: Agent, then: Agent) -> Agent:
     """Run a nested swarm, then `then`."""
 
     async def execute(state: AgentState) -> AgentState:
@@ -592,7 +592,10 @@ def nesting(inner: Agent, then: Agent) -> Agent:
         ),
         pytest.param(
             lambda: swarm(
-                member(nesting(_react_pair("inner-"), _submitter()), name="outer"),
+                member(
+                    runs_a_nested_swarm(_react_pair("inner-"), _submitter()),
+                    name="outer",
+                ),
                 channels=[],
             ),
             3,
