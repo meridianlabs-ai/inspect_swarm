@@ -525,6 +525,7 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "answer_key",
         "verdict",
         "verdict_time",
+        "left_out",
     }
     started, never = record.members
     assert (started.state, started.status, started.submitted, started.role) == (
