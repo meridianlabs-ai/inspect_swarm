@@ -265,7 +265,8 @@ class MessagesState:
             reply_to: str | None = None,
             wake: bool = True,
         ) -> str:
-            # an ended sender's send reaches the bus, which refuses it with evidence
+            # an ended member's send reaches the bus; if it passes the initial checks,
+            # the bus refuses it with liveness evidence
             name = self._caller("send_message", running=False)
             addresses = (to,) if isinstance(to, str) else tuple(to)
             delivery = await self._bus.deliver(
