@@ -1,3 +1,5 @@
+import gc
+import weakref
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from functools import cached_property
@@ -659,3 +661,48 @@ async def test_an_output_limit_smaller_than_the_count_can_cut_it() -> None:
         assert "truncated" in message.text
         assert "You have 1 unread message." not in message.text
         assert r.state.unread_line("w-2") == "You have 1 unread message."
+
+
+@tool(name="echo")
+def _plain() -> Tool:
+    async def execute() -> str:
+        """Return text."""
+        return "echo"
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "given",
+    [
+        _plain,
+        lambda: ToolDef(_echo, name="echo", description="Echo.").as_tool(),
+    ],
+    ids=["tool", "tool-def"],
+)
+async def test_a_channel_tools_wrapper_is_not_kept_once_unused(
+    given: Callable[[], Tool],
+) -> None:
+    async with run(("w-1", "w-2"), None, _Given(given())) as (r, _):
+        wrapper = (await r.resolve("w-1"))["echo"]
+        assert await r.call_resolved("w-1", "echo") == "echo"
+        unused = weakref.ref(wrapper)
+        del wrapper
+        gc.collect()
+        assert unused() is None
+
+
+@pytest.mark.anyio
+async def test_a_run_of_the_messages_channel_is_not_kept_once_it_ends() -> None:
+    async with run(("w-1", "w-2"), messages(rate=None)) as (r, _):
+        tools = await r.resolve("w-1")
+        assert {"send_message", "read_messages", "list_members", "swarm_wait"} <= set(
+            tools
+        )
+        await r.send("w-1", "w-2", "hello")
+        assert "hello" in await r.read("w-2")
+        bus = weakref.ref(r.bus)
+        del tools, r
+    gc.collect()
+    assert bus() is None

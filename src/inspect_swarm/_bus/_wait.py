@@ -51,6 +51,22 @@ _BOTH_DESCRIPTION = (
     "Use it instead of polling with sleep."
 )
 
+
+# the messages-only wait's signature, reflected once for its parameters: each run's
+# tool takes them in full, so that Inspect's reflection cache does not keep the run
+async def _wait_for_messages(timeout: int | None = None) -> str:
+    """Wait for other members.
+
+    Args:
+        timeout: Seconds to wait at most.
+    """
+    ...
+
+
+_MESSAGES_PARAMETERS = ToolDef(
+    _wait_for_messages, description=_MESSAGES_DESCRIPTION
+).parameters
+
 _PATH = "A shared memory file or directory to watch, such as `/shared_memory/results`. Without it or `file_id`, any change to shared memory wakes you."
 
 _FILE_ID = "In place of `path`: the id of a shared memory file to watch, such as `f-3`, as shared memory results name files."
@@ -309,18 +325,15 @@ class Waits:
         if all(messages):
 
             async def wait(timeout: int | None = None) -> str:
-                """Wait for other members.
-
-                Args:
-                    timeout: Seconds to wait at most.
-                """
                 return await self.wait(None, None, timeout)
 
+            parameters = _MESSAGES_PARAMETERS.model_copy(deep=True)
+            parameters.properties["timeout"].description = timeout
             return ToolDef(
                 wait,
                 name="swarm_wait",
                 description=_MESSAGES_DESCRIPTION,
-                parameters={"timeout": timeout},
+                parameters=parameters,
                 parallel=False,
             ).as_tool()
 

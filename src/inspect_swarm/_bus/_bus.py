@@ -232,7 +232,10 @@ class Bus:
         tool_def = ToolDef(tool)
         inner = tool_def.tool
 
-        @functools.wraps(inner)
+        # the tool's signature, for Inspect's argument conversion, but not its registry
+        # attributes: as an unregistered function with a full definition, the wrapper is
+        # not reflected, so Inspect's reflection cache does not keep it
+        @functools.wraps(inner, updated=())
         async def execute(*args: Any, **kwargs: Any) -> ToolResult:
             result = await inner(*args, **kwargs)
             unread = self._unread()

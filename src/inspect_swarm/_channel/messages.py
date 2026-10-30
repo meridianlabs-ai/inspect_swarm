@@ -1,6 +1,6 @@
 from collections.abc import Mapping, Sequence
 
-from inspect_ai.tool import Tool, ToolDef, ToolError
+from inspect_ai.tool import Tool, ToolDef, ToolError, ToolParams
 from inspect_ai.util._span import current_agent_span_id, current_span_id
 from pydantic import JsonValue
 
@@ -43,6 +43,29 @@ _READ = (
 )
 
 _LIST = "List the members of the swarm, in order: each one's name, its role if it has one, its state (pending, running or ended) and, once it has ended, how it ended. Marks which one is you."
+
+
+# send_message's signature, reflected once for its parameters. Each run's tool takes
+# them in full, so it is not reflected: Inspect's reflection cache would keep it, and
+# with it the run.
+async def _send_message(
+    to: str | list[str],
+    message: str,
+    reply_to: str | None = None,
+    wake: bool = True,
+) -> str:
+    """Send a message.
+
+    Args:
+        to: A member name, a list of member names, or "all" for every other running member.
+        message: The text to send.
+        reply_to: The id of a message this one answers, such as m-3. Optional.
+        wake: Whether the message ends a recipient's swarm_wait. Default true.
+    """
+    ...
+
+
+_SEND_PARAMETERS = ToolDef(_send_message, description=_SEND).parameters
 
 
 class _Messages(Channel):
@@ -241,14 +264,6 @@ class MessagesState:
             reply_to: str | None = None,
             wake: bool = True,
         ) -> str:
-            """Send a message.
-
-            Args:
-                to: Recipients.
-                message: The message.
-                reply_to: The id of a message this one answers.
-                wake: Whether the message ends the recipients' swarm_wait.
-            """
             # an ended sender's send reaches the bus, which refuses it with evidence
             self._caller("send_message", running=False)
             addresses = (to,) if isinstance(to, str) else tuple(to)
@@ -269,12 +284,7 @@ class MessagesState:
             execute,
             name="send_message",
             description=_SEND,
-            parameters={
-                "to": 'A member name, a list of member names, or "all" for every other running member.',
-                "message": "The text to send.",
-                "reply_to": "The id of a message this one answers, such as m-3. Optional.",
-                "wake": "Whether the message ends a recipient's swarm_wait. Default true.",
-            },
+            parameters=_SEND_PARAMETERS.model_copy(deep=True),
             parallel=True,
         ).as_tool()
 
@@ -287,6 +297,7 @@ class MessagesState:
             execute,
             name="read_messages",
             description=_READ,
+            parameters=ToolParams(),
             parallel=True,
             # the tool bounds its own result by the read budget, so that no limit cuts
             # through a fence
@@ -306,7 +317,11 @@ class MessagesState:
             return "\n".join(lines)
 
         return ToolDef(
-            execute, name="list_members", description=_LIST, parallel=True
+            execute,
+            name="list_members",
+            description=_LIST,
+            parameters=ToolParams(),
+            parallel=True,
         ).as_tool()
 
     def _caller(self, tool: str, running: bool = True) -> str:
