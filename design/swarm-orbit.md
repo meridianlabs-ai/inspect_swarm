@@ -4,7 +4,7 @@
 
 ORBIT, the Inspect-based framework for multi-agent security experiments, could run its scheduled experiments on inspect_swarm while ORBIT's own code keeps doing almost everything that makes them ORBIT experiments. Its agents become ordinary `react()` members of a swarm, so its fork of `react()` goes. Its scheduler becomes a swarm controller that holds every member at the [turn seam](swarm-turn-seam.md) and lets members run one quantum at a time. At the same boundaries, ORBIT's own callbacks add attack input and let its defences rewrite a member's conversation, and the seam records every change they make. Its reader-and-writer channels become one channel of its own on the swarm's bus. Its exposure observer, input and output filters, notices, answer selection, attacks, defences and scorers stay ORBIT code, unchanged where they can be. The port must behave as ORBIT does today, which ORBIT proves by running its existing scheduler, topology and communication tests on the ported path. ORBIT's state for a run (final conversations, submission order, read cutoffs) stays private to ORBIT, out of the sample's store, which every member's tools share.
 
-inspect_swarm adds only what ORBIT cannot build well on top: the turn seam itself, so that the runtime knows a member is held; a public API for writing a channel on the bus; and a controller's choice of a member's preamble, so that ORBIT's scheduler, which does not run its members at the same time, sends its own wording or none. ORBIT chooses and records the answer it scores from each member's output on the swarm's result record, which the scoring and result-record designs provide. inspect_ai has two prerequisites besides the seam's own turn gate: sentinel generate stages that can rewrite a request, resample an output (charging every draw to the token limits, as ORBIT does now) and return a refusal, which would let ORBIT's model-boundary defences stop wrapping `Model`, and a way for such a stage to ask that its change be logged in detail. Until those exist, ORBIT keeps its model wrappers as they are.
+inspect_swarm adds only what ORBIT cannot build well on top: the turn seam itself, so that the runtime knows a member is held; a public API for writing a channel on the bus; and a controller's choice of a member's preamble, so that ORBIT's scheduler, which does not run its members at the same time, sends its own wording or none. ORBIT chooses and records the answer it scores from each member's output on the swarm's result record, which the scoring and result-record designs provide. inspect_ai needs nothing beyond the seam's own turn gate. ORBIT's model-boundary defences stay `Model` wrappers, as they are today; moving them onto sentinel generate-stage protocols is later work for inspect_sentinel's design, and this document lists what that move would need.
 
 This document says, for each ORBIT component, where its code lives on the swarm and which hook supports it; works through a two-agent ORBIT experiment with an injection, a compromise, a quarantine defence and a tool gate; gives the exact message order before a member's first model call; and lists the behaviour a port changes.
 
@@ -41,7 +41,7 @@ ORBIT pays for running outside a substrate:
 
 ORBIT's users are swarm.md's user group 2, multi-agent safety and security evals. On inspect_swarm, security experiments and capability-scaling experiments would share one runtime, one realized-cost ledger and one evidence model, and ORBIT would stop maintaining a `react()` fork.
 
-Most of a scheduled mode can be ORBIT's own code. What ORBIT cannot build on top is narrower: the runtime's knowledge that a member is held (without it the swarm reads a held member's status, time, waits and stop wrongly, [swarm-turn-seam.md Why](swarm-turn-seam.md#why)); a supported way to write a channel, since the bus's types and the calling member are private; a preamble that says only what the controller makes true, since `start()` always appends one saying the members work at the same time; and, in Inspect, model-boundary hooks that rewrite and log what they rewrote.
+Most of a scheduled mode can be ORBIT's own code. What ORBIT cannot build on top is narrower: the runtime's knowledge that a member is held (without it the swarm reads a held member's status, time, waits and stop wrongly, [swarm-turn-seam.md Why](swarm-turn-seam.md#why)); a supported way to write a channel, since the bus's types and the calling member are private; and a preamble that says only what the controller makes true, since `start()` always appends one saying the members work at the same time.
 
 ## Goals and non-goals
 
@@ -49,18 +49,18 @@ Most of a scheduled mode can be ORBIT's own code. What ORBIT cannot build on top
 
 - For each ORBIT component, say whether it stays ORBIT code and which inspect_ai or inspect_swarm hook supports it.
 - Specify what inspect_swarm adds, each with why ORBIT cannot do it well on top.
-- Specify inspect_ai's prerequisites, what each is and why ORBIT needs it, for each to be designed in inspect_ai.
+- Name inspect_ai's prerequisite, and list what moving ORBIT's model defences onto sentinel protocols would need, as input to that later design.
 - Show ORBIT's scheduler as its own controller over the seam.
 - Require that a port keep ORBIT's behaviour, proved by ORBIT's own tests on the ported path, with ORBIT's run state private to ORBIT.
 - Work one ORBIT experiment through the port: members, channel, schedule, an injection, a compromise, a quarantine defence and a tool gate.
-- Say what ORBIT logs, what the swarm logs, and what inspect_ai must add.
+- Say what ORBIT logs and what the swarm logs.
 - Give an explicit record of the answer actually scored.
 - Give the exact message order before a member's first model call, and an integration test that holds it.
 
 ### Non-goals
 
 - **Writing ORBIT's port**, or deciding whether ORBIT adopts inspect_swarm.
-- **Designing the inspect_ai prerequisites.** This document says what they are and why; each gets its own design in inspect_ai or inspect_sentinel.
+- **Designing inspect_ai changes**, including the move of ORBIT's model defences onto sentinel generate-stage protocols, which inspect_sentinel's design decides ([ORBIT's model defences stay wrappers](#orbits-model-defences-stay-wrappers)).
 - **Changing the turn seam's contract.** ORBIT is one caller of it.
 - **Re-specifying ORBIT's executor.** Eligibility, submission, read cutoffs, attack evaluation and answer selection are ORBIT's code, kept as they are and pinned by ORBIT's tests, not restated here (decision: Ransom, 2026-10-30).
 - **Red-team features in inspect_swarm.** Attacks, defences and their registries stay ORBIT's (decision: Ransom, 2026-10-07).
@@ -178,9 +178,9 @@ This design uses the seam's contract as [swarm-turn-seam.md](swarm-turn-seam.md)
 | Pre-turn defences (`dual_llm`) | ORBIT's `orbit:defense` callback | The seam |
 | Channels, communication edges, capacity, cursors, secret channels, `step_start` visibility | ORBIT's `@swarm_channel`, with read cutoffs in ORBIT's run state | The public bus API ([S2](#s2-a-public-bus-api-for-channels)) |
 | `notify` and `auto` delivery | ORBIT's delivery `Model` wrapper, unchanged | None needed |
-| Exposure observer | ORBIT's observer, unchanged, writing ORBIT's own events | Read evidence from `record_read()` ([S2](#s2-a-public-bus-api-for-channels)); later an `AfterGenerate` stage ([I2](#i2-sentinel-generate-stages-that-rewrite-and-resample)) |
+| Exposure observer | ORBIT's observer, unchanged, writing ORBIT's own events | Read evidence from `record_read()` ([S2](#s2-a-public-bus-api-for-channels)) |
 | Tool gates, `dual_llm`'s tool wrapper | ORBIT's tool wrappers, unchanged, applied by the member builder to its own tools and, through an ORBIT tool source, to the channel tools `swarm_tools()` resolves ([Members](#members)) | None needed |
-| Input filters, output checks and resampling | ORBIT's filter wrappers, unchanged, until I2 and I3 exist; then sentinel protocols | [I2](#i2-sentinel-generate-stages-that-rewrite-and-resample), [I3](#i3-a-detailed-record-of-a-generate-stages-change-on-request) |
+| Input filters, output checks and resampling | ORBIT's filter and output-check wrappers, unchanged | None needed ([ORBIT's model defences stay wrappers](#orbits-model-defences-stay-wrappers)) |
 | Submission order (`last_submitted`) | ORBIT's submit tool behind its defence chain, given to `react()`; the registry in ORBIT's run state | `AgentSubmit(tool=)` |
 | Answer selection (`output_agent`) and history projection | ORBIT's solver wrapper around the swarm | Each member's output on the result record ([swarm-scoring.md step 1](swarm-scoring.md#what-the-record-adds)), read with `swarm_result()` ([swarm-result-record.md](swarm-result-record.md)) |
 | A record of the answer scored | ORBIT's solver wrapper | The same |
@@ -188,7 +188,7 @@ This design uses the seam's contract as [swarm-turn-seam.md](swarm-turn-seam.md)
 | Scenarios, datasets, attack and defence registries, scorers, judges, YAML and CLI | ORBIT, unchanged | None needed |
 | `legacy` and `tool_step` quanta, legacy observation modes, `legacy/v1` | ORBIT's executor | None ([What stays on ORBIT's executor](#what-stays-on-orbits-executor)) |
 
-So a ported run is ORBIT code throughout, on three swarm additions, two parts of other swarm designs (member outputs on the record and `swarm_result()`), and three inspect_ai prerequisites, one of which the seam already needs.
+So a ported run is ORBIT code throughout, on three swarm additions, two parts of other swarm designs (member outputs on the record and `swarm_result()`), and the seam's own inspect_ai prerequisite.
 
 ### What inspect_swarm adds
 
@@ -282,39 +282,18 @@ def start(
 
 ORBIT's controller passes `preamble=False`, so its members start with ORBIT's seed alone, as today; it could pass its own wording instead, such as a statement of the schedule. Its channel's `instructions()` returns `None`, since ORBIT's tools describe themselves.
 
-### inspect_ai prerequisites
+### I1. The inspect_ai prerequisite: the turn gate and the compaction reset
 
-Each is specified here by what it must do and why ORBIT needs it, and designed in inspect_ai or inspect_sentinel.
+The private turn gate in the agent channel and `reset()` on react's compaction handler, as [swarm-turn-seam.md](swarm-turn-seam.md#the-inspect_ai-change-a-turn-gate-and-a-compaction-reset) designs them. The seam needs them; ORBIT needs nothing more of inspect_ai.
 
-#### I1. The turn gate and the compaction reset
+### ORBIT's model defences stay wrappers
 
-The private turn gate in the agent channel and `reset()` on react's compaction handler, as [swarm-turn-seam.md](swarm-turn-seam.md#the-inspect_ai-change-a-turn-gate-and-a-compaction-reset) designs them. S1 needs them; ORBIT needs nothing more of them.
+ORBIT keeps its model wrappers on the port: the delivery wrapper, the output check with its resampling, the input filters and the exposure observer, built as today ([Delivery, exposure and filters](#delivery-exposure-and-filters)). That is this design's end state (decision: Ransom, 2026-10-30). Moving them onto sentinel generate-stage protocols, which would drop the private `_resolve_config` and let filtered members use the response cache, is later work, decided in inspect_sentinel's design of its generate stages' second part (`design/generate-stages.md`, sections c and d). As input to that design, not a contract specified here, the move would need:
 
-#### I2. Sentinel generate stages that rewrite and resample
-
-What: `modify` at `BeforeGenerate`, replacing the request for that call only; `modify` at `AfterGenerate`, replacing the output's message; and a `resample` protocol that draws again and substitutes the best candidate, as inspect_sentinel's generate-stages design proposes for its second part (decisions 9, 11 and 12, section d). ORBIT needs, of that proposal:
-
-- the replaced request is what is sent, what the `ModelEvent` records, and what the cache is keyed on, so a filtered member can use the response cache;
-- the replacement is not written back to the agent's conversation, as ORBIT's filters are per request today;
-- `AfterGenerate` sees the request as sent, after any `BeforeGenerate` modify, and runs on cache hits, so an observer at that stage sees exactly what reached the model;
-- a protocol can tell which member a call belongs to, which `calling_member()` (S2) answers;
-- a protocol can make its outcome a refusal: an output with `stop_reason="content_filter"` and no tool calls, which is what ORBIT's output check returns when it exhausts its resamples (`ORBIT: orbit/defenses/boundaries.py:336-343`). The proposal recomputes a replaced output's stop reason as `tool_calls` or `stop` (inspect_sentinel `design/generate-stages.md`, section d), which would turn the refusal into an ordinary reply, so react's refusal retries and its exit after three refusals in a row (`src/inspect_ai/agent/_react.py:290-297`, `:792-796`) would no longer see it. Until a stage can return a refusal, ORBIT keeps its output-check wrapper;
-- every draw a protocol makes in place of the agent's output is charged to the token limits that enclose the call, the member's and the sample's, as each of ORBIT's resamples is today, since its wrapper calls the model as the agent does (`ORBIT: orbit/defenses/boundaries.py:312-335`). The proposal runs protocols under `suspend_token_limit()` (`src/inspect_ai/_sentinel/_dispatch.py:298-300`), which stops metering at every enclosing token scope, the sample's included (`src/inspect_ai/util/_limit.py:649-674`), and does not charge `resample`'s draws to the agent (inspect_sentinel `design/generate-stages.md`, section d), so a resampling defence would no longer count towards a member's or a sample's token cap. Until a protocol's replacement draws are charged, ORBIT keeps its output-check wrapper.
-
-Why: ORBIT's input filters (memory context, safety prompts, input monitoring with redaction, the compromise prompt filter) and its output checks with resampling are per-call rewrites. Today they need a `ModelAPI` and a `Model` wrapper built through the private `_resolve_config`, and refuse caching for the whole run. With I2 they become sentinel protocols, and ORBIT's observer an `AfterGenerate` stage that sees cache hits too.
-
-#### I3. A detailed record of a generate stage's change, on request
-
-What: sentinel's proposed default for a modify stays as it is, and a protocol that rewrites can ask for more (decision: Ransom, 2026-10-29: the default is not changed without the people who own it):
-
-- **The default**, as inspect_sentinel's generate-stages design proposes it (decision 13): a `BeforeGenerate` modify keeps no copy of the request, since the `ModelEvent` holds the request sent; an `AfterGenerate` modify records the replacement message in `SentinelEvent.modified`, joined to the provider's output in the `ModelEvent` by the generate's step id. Each resampled draw is its own `ModelEvent` in the stage's span, and the event says which draw the agent received.
-- **The opt-in.** A protocol that rewrites a request declares that its changes are recorded in detail. Its `BeforeGenerate` modify's `SentinelEvent` then records the change from the step's input to the request sent, by message id, as the seam's `changed` event does: the ids, positions and hashes of the messages added, removed and replaced, and the original content of each message removed or replaced. Added and replacement content is in the `ModelEvent`'s request. ORBIT's filter protocols opt in, which keeps what the log holds today: its `ModelEvent`s record the request before ORBIT's filters, redacted content included.
-
-It is an opt-in, not a new default, partly because copying is the protocol's choice to make: a redaction protocol may remove content precisely so that it is not kept, and a default that copied removed content would keep it. inspect_sentinel's design of the second part decides the declaration's form; this design states what ORBIT needs of it.
-
-Why: ORBIT's results depend on what its filters removed and what its output checks replaced. Once the filters are protocols, the `ModelEvent` holds the filtered request, and nothing else in the log holds the request before them: the member's conversation is not logged, and its later requests are filtered too. Today that is reconstructed from ORBIT's own `defense_intervention` and `defense_activity` events, while the `ModelEvent` shows a request the model never received. With I2 and the opt-in, the Inspect log itself answers "what did the model see, what did the filters change, and what did the agent get".
-
-Until I2 and I3 exist, ORBIT keeps its wrappers and its events, and logs what they change itself.
+- **A refusal outcome.** A stage can return an output with `stop_reason="content_filter"` and no tool calls, which ORBIT's output check returns when it exhausts its resamples (`ORBIT: orbit/defenses/boundaries.py:336-343`), so react's refusal retries and its exit after three refusals in a row (`src/inspect_ai/agent/_react.py:290-297`, `:792-796`) keep working. The proposal recomputes a replaced output's stop reason as `tool_calls` or `stop` (section d).
+- **Charged draws.** Every draw a protocol makes in place of the agent's output is charged to the member's and the sample's token limits, as ORBIT's wrapper charges each resample today (`boundaries.py:312-335`). Protocols run under `suspend_token_limit()` (`src/inspect_ai/_sentinel/_dispatch.py:298-300`), which stops metering at every enclosing token scope (`src/inspect_ai/util/_limit.py:649-674`), and the proposal does not charge `resample`'s draws to the agent (section d).
+- **Helper calls marked.** ORBIT's auxiliary model calls, such as `dual_llm`'s quarantine model at a boundary (`ORBIT: orbit/defenses/dual_llm.py:370-375`), run in the member's task and span, so Inspect would take them for the member's own turns and run its generate stages on them (`src/inspect_ai/_sentinel/_context.py:68-69`). ORBIT marks them with `model_origin("helper")` (`src/inspect_ai/model/_origin.py:9`), so that member-keyed filters, such as the compromise prompt filter, and the exposure observer skip them.
+- **An opt-in detailed record of a modify.** Sentinel's proposed default stays as it is (decision 13: a `BeforeGenerate` modify keeps no copy of the request), and a protocol that rewrites a request can opt in to recording its change by message id: the ids, positions and hashes of the messages added, removed and replaced, and the original content of each message removed or replaced. ORBIT's filters would opt in, so the log keeps what it holds today, the request before ORBIT's filters (decision: Ransom, 2026-10-29: the default is not changed without the people who own it).
 
 ### ORBIT's code on the swarm
 
@@ -322,7 +301,7 @@ Until I2 and I3 exist, ORBIT keeps its wrappers and its events, and logs what th
 
 This design does not re-specify ORBIT's executor. ORBIT's code keeps doing what it does today, on the hooks above, under two requirements:
 
-- **ORBIT's behaviour, proved by ORBIT's tests.** For every configuration the port moves, a run behaves as it does on ORBIT's executor, except for the changes listed in [Behaviour a port changes](#behaviour-a-port-changes). That covers eligibility under `max_messages`, the quanta, barriers and halt conditions, the attack outcomes of each activation (a member's final turn included), the member's tools, submit tool and submit setting (the scheduling mode's default included), the defence chain on every tool (the submit tool and the channel tools included), `step_start` cutoffs on every path that selects records (explicit reads, notices and `auto` inboxes, with their cursors and exposure), and answer selection and history projection. The proof is ORBIT's existing scheduler, topology and communication tests, run on the ported path as well as on ORBIT's executor ([Testing](#testing)). Where those tests do not yet pin a behaviour, ORBIT adds the test on its executor first, then runs it on both.
+- **ORBIT's behaviour, proved by ORBIT's tests.** For every configuration the port moves, a run behaves as it does on ORBIT's executor, except for the changes listed in [Behaviour a port changes](#behaviour-a-port-changes). That covers eligibility under `max_messages`, the quanta, barriers and halt conditions, the attack outcomes of each activation (a member's final turn included), the member's tools, submit tool and submit setting (the scheduling mode's default included), each quantum's continue prompt (none after a tool-free reply that ends a `model_step` activation, submitting or not; the prompt `turn_react` adds today within a submitting `completion` activation, `turn_react.py:350-372`), the defence chain on every tool (the submit tool and the channel tools included), `step_start` cutoffs on every path that selects records (explicit reads, notices and `auto` inboxes, with their cursors and exposure), and answer selection and history projection. The proof is ORBIT's existing scheduler, topology and communication tests, run on the ported path as well as on ORBIT's executor ([Testing](#testing)). Where those tests do not yet pin a behaviour, ORBIT adds the test on its executor first, then runs it on both.
 - **ORBIT's run state stays private to ORBIT.** The state the port adds for a run lives in one ORBIT object per sample, shared by ORBIT's controller, member wrappers, channel and solver wrapper, and never under a sample-store key. That state is each member's final conversation, the submission order, each member's read cutoff, the schedule state and the halt reason. The solver wrapper creates the object before the swarm, and the others reach it through a context variable it sets, which every task the swarm starts inherits. The sample's store is shared by every member (`src/inspect_swarm/_member.py:221`), and `tool_state_scope()` changes only the default namespace of tools that use it. In the store, a peer's store tool could read a member's conversation, instructions and answer while the swarm runs, or rewrite the submission order and so change the answer scored. ORBIT's channel state, in store models today (`state.py:120-155`), stays where it is: the port moves no existing ORBIT state.
 
 #### Members
@@ -331,7 +310,7 @@ ORBIT's member builder is a registered `@agent` that takes the spec's fields as 
 
 - **Channel tools come through a tool source.** `swarm_tools()` gives a loop its channel tools only when the loop resolves its tools ([Current behaviour](#inspect_swarm)), so a wrapper applied to the list the builder passes to `react()` never sees them. ORBIT passes its own `ToolSource`. It resolves `swarm_tools()` in the same call, and so in the member's context and loop, then returns each tool through the member's chain. The channel tools get the gate and quarantine they get today, and the swarm's binding of the member's loop and its `reach` rules are unchanged.
 - **The submit tool** is ORBIT's registry tool (`ORBIT: orbit/execution/submit_registry.py:115-167`), wrapped by the chain and then given to `react()` as `AgentSubmit(tool=...)`. A denied submit therefore neither records a submission nor ends the member. The registry is in ORBIT's run state. `react()` ends the member on the tool as on its own submit tool, and the swarm records a submission as usual.
-- **A `submit=False` member** gets an `on_continue` that returns its state. Without it, `react(submit=False)` ends at its first tool-free reply, with no boundary after it ([swarm-turn-seam.md Supported members](swarm-turn-seam.md#supported-members)). With it, a tool-free reply reaches a boundary with `after == "reply"`.
+- **Continuation.** Every member's `on_continue` is ORBIT's continuation adapter, which keeps each quantum's continue-prompt behaviour as it is today ([What the port must keep](#what-the-port-must-keep)). Without an adapter, a submitting `react()` appends its continue prompt after every tool-free reply (`src/inspect_ai/agent/_react.py:404-417`), where `turn_react` ends a `model_step` activation with none (`turn_react.py:350-352`); and `react(submit=False)` ends at its first tool-free reply, with no boundary after it ([swarm-turn-seam.md Supported members](swarm-turn-seam.md#supported-members)). With it, a tool-free reply reaches a boundary with `after == "reply"`, carrying only the messages `turn_react` would have added.
 - **The final conversation** is saved in ORBIT's run state by a synchronous `finally` in the member wrapper, inside the agent the swarm awaits. It is therefore saved before the swarm queues `MemberEnded`, however the member ends. The wrapper also enters ORBIT's communication identity for its observer, as `observe_agent` does today.
 
 #### Scheduling: ORBIT's controller over the seam
@@ -381,7 +360,7 @@ ORBIT's model layers stay as the member builder builds them, in today's order: d
 - The observer matches reads as today, by the tool call id captured at read time; the swarm puts no metadata on tool results and ORBIT needs none.
 - Exposure and coverage stay ORBIT's `model_exposure`, `notified` and `delivered` events and `observation_enabled_sessions`.
 
-When I2 and I3 exist, the input filters and output checks become sentinel protocols keyed by `calling_member()`, the observer an `AfterGenerate` stage, and the filter, output-check and observer layers, with `_resolve_config`, go. The delivery wrapper is the last; it can become a `BeforeGenerate` modify that appends the notice, also per request.
+These layers stay wrappers ([ORBIT's model defences stay wrappers](#orbits-model-defences-stay-wrappers)), built through the private `_resolve_config` as today, and a filtered member still refuses the response cache.
 
 #### The answer, and a record of the answer scored
 
@@ -419,8 +398,8 @@ So the answer actually scored is named in one place, with how it was chosen and 
 | The schedule | ORBIT's controller | `orbit_schedule` events, as `ScheduleRuntime` writes them; the swarm's `boundary` events give each hold's duration |
 | Member results, the swarm's answer, ledger, metrics | the swarm | `member_result`, `final`, `ledger`, `metrics` swarm events and the result record |
 | The answer scored | ORBIT's solver wrapper | `orbit:answer` and its `orbit_answer` event |
-| Model calls | inspect_ai | `ModelEvent`s: today the request before ORBIT's filters; with I2, the request sent |
-| What a filter changed, and what the agent received | ORBIT's events today; inspect_ai with I2, in detail for protocols that opt in to I3 | `SentinelEvent`s: an output's replacement by default; for an opted-in protocol, also the request's change by message id, with the content it removed or replaced |
+| Model calls | inspect_ai | `ModelEvent`s, recording the request before ORBIT's filters, as today |
+| What a filter changed, and what the agent received | ORBIT's filters and output check, as today | `defense_intervention`, `defense_resample` and `defense_activity` |
 
 ORBIT stops writing `orbit_agent_started` once per activation: a member is one `react()` invocation in one span, and its activations are ORBIT's schedule events inside it.
 
@@ -499,7 +478,7 @@ Runs on the two runtimes should not be pooled unless these are accepted or contr
 - **A rewrite at a boundary resets compaction**, and drops summaries made from changed history, where compaction is on.
 - **Unsupported members** are refused: background-dispatching `deepagent()` and bridged members.
 
-Unchanged: the first request's messages (ORBIT sends no preamble), the submission order that `last_submitted` reads, the attack evidence of a member's final turn, notices and inboxes (per request, never stored), tool gates and their judges (inside the tool call, charged as now, on channel tools and the submit tool as on the others), filters and caching (refused while any filter wraps a member, until I2), the channel's read format, and exposure.
+Unchanged: the first request's messages (ORBIT sends no preamble), the submission order that `last_submitted` reads, the attack evidence of a member's final turn, notices and inboxes (per request, never stored), tool gates and their judges (inside the tool call, charged as now, on channel tools and the submit tool as on the others), filters and caching (refused while any filter wraps a member), the channel's read format, and exposure.
 
 ### What stays on ORBIT's executor
 
@@ -535,20 +514,19 @@ Unchanged: the first request's messages (ORBIT sends no preamble), the submissio
 
 **Keeping one `run()` per activation on a stored `AgentState`.** Closest to ORBIT today. But it needs clean re-entry of `react()`, loses per-run state (attempts, compaction, MCP connections, the agent channel), and rebinds the member on every activation. Rejected.
 
-**Model wrapping for ever.** It works today. But it needs a private inspect_ai API, refuses caching for the whole run, and logs a request the model never received. Rejected as the end state: I2 and I3.
+**ORBIT's model defences as sentinel protocols, specified here.** It would drop the private `_resolve_config`, let filtered members use the response cache, and log the request the model received. But it depends on generate-stage features inspect_sentinel's design has deferred to its second part, and their shape is that design's to decide. Deferred: this design keeps the wrappers and lists what the move would need ([ORBIT's model defences stay wrappers](#orbits-model-defences-stay-wrappers); decision: Ransom, 2026-10-30).
 
 ## Compatibility and migration
 
 - **inspect_swarm** is experimental throughout. S2 adds public names (`Draft`, `Delivery`, `Caller`, `calling_member`, `Bus`) and types `ChannelRun.bus` as the protocol; `shared_memory` moves onto them, writing the same events, so stored logs, the ledger and the metrics are unchanged. S3 adds a keyword argument to `start()` whose default is today's behaviour. The seam's, the result record's and the member outputs' compatibility is their designs'.
-- **inspect_ai**: I1 as the seam designs it; I2 and I3 are additions to sentinel's generate stages and its event, designed there.
+- **inspect_ai**: I1 as the seam designs it, nothing else.
 - **ORBIT logs.** Logs already written keep their readers. A ported run writes ORBIT's events as today, plus the swarm's communication and swarm events and ORBIT's answer record; ORBIT's store models and its viewer overview are unchanged.
 - **Dependencies.** ORBIT declares its inspect_ai requirement in its packaging configuration (`ORBIT: pyproject.toml:16-19`). A port adds inspect_swarm, and so the inspect_ai inspect_swarm requires.
 - **Python and concurrency.** Both require Python 3.11+. inspect_swarm runs on asyncio and trio, so ORBIT's controller and callbacks use anyio.
 
-**Migration path.** Each step is usable on its own; everything not moved keeps running on ORBIT's executor.
+**Migration path.** Configurations move in one step; everything not moved keeps running on ORBIT's executor.
 
-1. **After the seam (S1, I1), S2, S3, member outputs on the record and `swarm_result()`: scheduled runs.** `model_step` and `completion` plans, round-robin and superstep move, with injections, compromise and pre-turn defences as callbacks, ORBIT's channel on the bus, and its solver wrapper choosing and recording the answer. ORBIT's model layers are unchanged. A configuration that is one concurrent `completion` step moves in the same step, not earlier: the member builder gives a `submit=False` member an `on_continue` that returns its state ([Members](#members)), so without the seam's boundary after a tool-free reply such a member would continue past it (`src/inspect_ai/agent/_react.py:556-574`) until a limit ends it, where ORBIT's executor ends its `completion` there. One member builder serves every ported configuration.
-2. **After I2 and I3: defences as protocols.** Filters and output checks become sentinel protocols that opt in to I3's detailed record, the observer an `AfterGenerate` stage, and the wrappers and `_resolve_config` go; caching works for filtered members.
+- **After the seam (S1, I1), S2, S3, member outputs on the record and `swarm_result()`: scheduled runs.** `model_step` and `completion` plans, round-robin and superstep move, with injections, compromise and pre-turn defences as callbacks, ORBIT's channel on the bus, and its solver wrapper choosing and recording the answer. ORBIT's model layers are unchanged. A configuration that is one concurrent `completion` step moves in the same step, not earlier: the member builder's continuation adapter keeps a `submit=False` member going after a tool-free reply ([Members](#members)), so without the seam's boundary after a tool-free reply such a member would continue past it (`src/inspect_ai/agent/_react.py:556-574`) until a limit ends it, where ORBIT's executor ends its `completion` there. One member builder serves every ported configuration.
 
 ## Security
 
@@ -583,7 +561,7 @@ In inspect_swarm, with mockllm, on asyncio and trio, no network or Docker, with 
 In ORBIT, by its port, with its own test setup (mockllm, no network):
 
 - **Behaviour kept.** ORBIT's scheduler, topology and communication suites run on both executors: `tests/test_agent_scheduler.py`, `test_schedule_plans.py`, `test_scheduler.py`, `test_attack_outcomes.py`, `test_topologies.py`, `test_common_runtime.py`, `test_configured_communication.py`, `test_communication_boundaries.py`, `test_communication_contract.py` and `test_message_ordering.py`, and the scheduled attack and defence runs in `test_dual_llm_scheduled_e2e.py`, `test_compromised_e2e.py` and `test_collusion_mockllm_e2e.py`. Cases of `turn_react` itself, and of the `legacy` and `tool_step` quanta, stay on ORBIT's executor.
-- **Behaviour those suites do not pin yet**, added on ORBIT's executor first, then run on both: the submit setting with the flag omitted under each scheduling mode and set either way; a gate that denies `submit`, leaving the submission order unchanged; `step_start` cutoffs under `poll`, `notify` and `auto`, with cursors and exposure; first-activation eligibility at `max_messages` for a group goal and for a sample input that opens with a system message; attack evaluation of a member's final turn, ended by submission and by its message limit; `last_submitted` after two concurrent submits where the first to submit ends last; an exhausted output check, with `retry_refusals` set and not; and a resampling output check under a member and a sample token limit, charging every draw to both, which the sentinel migration must keep.
+- **Behaviour those suites do not pin yet**, added on ORBIT's executor first, then run on both: the submit setting with the flag omitted under each scheduling mode and set either way; a gate that denies `submit`, leaving the submission order unchanged; `step_start` cutoffs under `poll`, `notify` and `auto`, with cursors and exposure; a submitting member's tool-free reply under `model_step` and within `completion`, with the continue prompt each adds today; first-activation eligibility at `max_messages` for a group goal and for a sample input that opens with a system message; attack evaluation of a member's final turn, ended by submission and by its message limit; `last_submitted` after two concurrent submits where the first to submit ends last; an exhausted output check, with `retry_refusals` set and not; and a resampling output check under a member and a sample token limit, charging every draw to both.
 - **Port only.** A peer's store tool finds no member's final conversation and cannot change the submission order or the answer scored; the message order of [The message order before the first model call](#the-message-order-before-the-first-model-call) with ORBIT's real wrappers and attacks; and the answer record names the output scored after a normal stop, after a sample time or message limit, and after an `all` projection that exceeds the sample's message limit.
 
 ## Implementation plan
@@ -594,7 +572,7 @@ inspect_swarm:
 2. **A controller's preamble (S3).** `src/inspect_swarm/_controller/_control.py` (`SwarmControl.start()` and its docstring, `SwarmRun.start()`); `docs/controllers.qmd` (`start()`'s arguments); `tests/test_controller.py`. Independent of step 1.
 3. **ORBIT-shaped conformance tests.** `tests/test_orbit_shape.py`. Needs the seam ([swarm-turn-seam.md Implementation plan](swarm-turn-seam.md#implementation-plan)) and steps 1 and 2.
 
-inspect_ai and inspect_sentinel: I1 is step 1 of the seam's plan; I2 and I3 are designed and built there. The port itself is ORBIT's work, by the migration path, with ORBIT's tests in [Testing](#testing) on both executors.
+inspect_ai: I1 is step 1 of the seam's plan. The port itself is ORBIT's work, by the migration path, with ORBIT's tests in [Testing](#testing) on both executors.
 
 ## Open questions
 
