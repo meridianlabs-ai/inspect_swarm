@@ -62,7 +62,7 @@ A CLI gives up on an MCP tool call that runs too long, and the model then gets a
 - Claude Code: keep the default. Claude Code stops a call that sends nothing for 300 seconds, and inspect_swe has no setting that raises this for bridged tools; `MCP_TOOL_TIMEOUT` does not.
 - Codex: to wait longer, raise its timeout and `max_wait` together: `codex_cli(config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"}, bridged_tools=[swarm_bridged_tools(channels, max_wait=600)])`.
 
-Results fit the CLIs' default output limits: a `read_messages` result is at most about 9 KB with the channel's defaults, and a `shared_memory` view is cut at Inspect's tool output limit, 16 KiB by default. Claude Code takes up to 25,000 tokens from an MCP tool, and Codex 10,000.
+Inspect limits shared-memory views to 16 KiB by default. The CLIs also apply token limits (25,000 for Claude Code; 10,000 for Codex), so a view can be shortened further by the CLI. A default `read_messages` result is about 9 KB.
 
 ## What the log records
 
