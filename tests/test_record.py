@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import anyio
 import pytest
@@ -244,13 +245,13 @@ def test_a_scorer_reads_the_record_and_so_does_re_scoring(
     assert _rescore(log, log.samples[0]) == read
 
 
-def _chooses_at_length() -> Agent:
+def _chooses(reason: str = LONG_REASON) -> Agent:
     async def run(control: SwarmControl) -> StopReason:
         for m in control.members:
             control.start(m)
         async for _ in control.events():
             pass
-        control.choose_answer("a", reason=LONG_REASON)
+        control.choose_answer("a", reason=reason)
         return "chosen"
 
     return swarm(
@@ -258,29 +259,52 @@ def _chooses_at_length() -> Agent:
             member(generator(scripted_model()), name="a"),
             member(generator(scripted_model()), name="b"),
         ],
-        controller=_controller(run, "record_test_long_reason"),
+        controller=_controller(run, f"record_test_reason_{uuid4().hex}"),
         channels=[],
     )
 
 
-def test_a_logged_record_reads_the_same_with_or_without_resolved_attachments(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "reason,readable",
+    [
+        pytest.param("short", True, id="short"),
+        # condensed into an attachment in the log
+        pytest.param(LONG_REASON, True, id="long"),
+        # Inspect's resolution rewrites tc:// as attachment://
+        pytest.param("tc://artifact", False, id="short-tc"),
+        pytest.param("tc://" + LONG_REASON, False, id="long-tc"),
+        pytest.param("attachment://artifact", False, id="attachment"),
+    ],
+)
+def test_a_record_reads_the_same_live_from_a_log_and_on_re_score(
+    tmp_path: Path, reason: str, readable: bool
 ) -> None:
-    path = _log(tmp_path, _chooses_at_length()).location
+    seen: list[tuple[bool, Read]] = []
+    _eval(tmp_path, _chooses(reason), [probe(seen)])
+    [(_, live)] = seen
+    path = str(next(tmp_path.glob("*.eval")))
     resolved = read_eval_log(path, resolve_attachments=True)
     unresolved = read_eval_log(path)
     assert resolved.samples is not None and unresolved.samples is not None
-    # the reason is an attachment in the log
     [event] = _record_events(unresolved.samples[0].events)
     assert isinstance(event.data, dict) and isinstance(event.data["final"], dict)
-    assert str(event.data["final"]["reason"]).startswith("attachment://")
-    records = [_read(resolved.samples[0]), _read(unresolved.samples[0])]
-    assert records[0] == records[1]
-    assert _record(records[0]).final.reason == LONG_REASON
+    # a long reason is condensed into an attachment, a short one is logged as it is
+    assert (event.data["final"]["reason"] == reason) is (len(reason) <= 100)
+    reads = [
+        live,
+        _read(resolved.samples[0]),
+        _read(unresolved.samples[0]),
+        _rescore(unresolved, unresolved.samples[0]),
+    ]
+    for read in reads:
+        if readable:
+            assert _record(read).final.reason == reason
+        else:
+            _value_error(read, "reads as an attachment reference")
 
 
 def test_a_record_whose_attachments_are_missing_is_refused(tmp_path: Path) -> None:
-    log = _log(tmp_path, _chooses_at_length())
+    log = _log(tmp_path, _chooses())
     without = read_eval_log(log.location, exclude_fields={"attachments"})
     assert without.samples is not None
     [no_attachments] = without.samples
@@ -768,6 +792,40 @@ def test_a_solver_reads_the_record_once_the_swarm_has_returned(
     record = _record(read)
     assert record.final.member == "early"
     assert record.final.provisional is (ending != "normal")
+
+
+@solver
+def survives_a_failed_write(seen: list[Read]) -> Solver:
+    """Run the swarm, catch the error of a write when it ends, then read the record."""
+
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        with pytest.raises(OSError, match="disk full"):
+            await as_solver(_pair())(state, generate)
+        try:
+            seen.append(swarm_result(state))
+        except (RuntimeError, ValueError) as ex:
+            seen.append(ex)
+        return state
+
+    return solve
+
+
+@pytest.mark.parametrize("writer", ["write_record", "write_ledger", "write_metrics"])
+def test_a_failed_write_at_the_end_does_not_leave_the_swarm_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    def fail(*args: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(f"inspect_swarm._controller._control.{writer}", fail)
+    seen: list[Read] = []
+    _eval(tmp_path, survives_a_failed_write(seen), [])
+    [read] = seen
+    if writer == "write_record":
+        # no record, but the swarm's events
+        _value_error(read, LOST_ID)
+    else:
+        assert _names(read) == ["a", "b"]
 
 
 # ---------------------------------------------------------------------------

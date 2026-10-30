@@ -134,7 +134,7 @@ def swarm_result(source: TaskState | EvalSample) -> SwarmResultRecord | None:
 
     Raises:
         RuntimeError: A swarm in the sample is still running, so the record of the swarm being scored does not exist yet; a scorer that the solve can call returns `None` while `state.completed` is `False`.
-        ValueError: The store names a record the transcript or sample does not hold (as for a sample read without its events), the record refers to attachments the sample was read without, it is one this inspect_swarm cannot read, such as a version other than 1, the sample was written by an inspect_swarm that kept the record in the store, or the sample holds a swarm's events but its store names no record (as for a sample recovered from a crashed eval, whose store was not kept).
+        ValueError: The store names a record the transcript or sample does not hold (as for a sample read without its events), the record holds a string that reads as an attachment reference (one the sample was read without, or text beginning with `attachment://` or `tc://`), it is one this inspect_swarm cannot read, such as a version other than 1, the sample was written by an inspect_swarm that kept the record in the store, or the sample holds a swarm's events but its store names no record (as for a sample recovered from a crashed eval, whose store was not kept).
     """
     if isinstance(source, EvalSample):
         return _sample_result(source)
@@ -215,7 +215,7 @@ def _read(
     data = {k: v for k, v in resolved.data.items() if k not in ("type", "id")}
     if _unresolved(data):
         raise ValueError(
-            f"{where}: the swarm's result record refers to attachments the sample was read without; read it, or the log being re-scored, with its attachments (read_eval_log() without exclude_fields={{'attachments'}})."
+            f"{where}: the swarm's result record holds a string that reads as an attachment reference (attachment:// or tc://). Either the sample was read without its attachments, so read it, or the log being re-scored, with them (read_eval_log() without exclude_fields={{'attachments'}}), or the record's own text begins with such a prefix, which Inspect's attachment resolution cannot tell from a reference."
         )
     try:
         return SwarmResultRecord.model_validate(data)
@@ -238,10 +238,16 @@ def _is_swarm_event(event: Event) -> bool:
     return isinstance(event, InfoEvent) and event.source == "inspect_swarm"
 
 
-# Whether any string in the record is an attachment reference that was not resolved.
+# Inspect's attachment resolution reads a string with either prefix as a reference, and
+# rewrites the older `tc://` as `attachment://`, so a record string with either one
+# cannot read the same from a live transcript, a log and a re-scored sample
+_REFERENCE_PREFIXES = (ATTACHMENT_PROTOCOL, "tc://")
+
+
+# Whether any string in the record reads as an attachment reference.
 def _unresolved(value: JsonValue) -> bool:
     if isinstance(value, str):
-        return value.startswith(ATTACHMENT_PROTOCOL)
+        return value.startswith(_REFERENCE_PREFIXES)
     if isinstance(value, dict):
         return any(_unresolved(v) for v in value.values())
     if isinstance(value, list):
