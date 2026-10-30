@@ -1,10 +1,14 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, Literal, TypeGuard
 from uuid import uuid4
 
 from inspect_ai.event import Event, InfoEvent
 from inspect_ai.log import EvalSample, transcript
-from inspect_ai.log._condense import ATTACHMENT_PROTOCOL, resolve_events_attachments
+from inspect_ai.log._condense import (
+    ATTACHMENT_PROTOCOL,
+    condense_event,
+    resolve_events_attachments,
+)
 from inspect_ai.solver import TaskState
 from inspect_ai.util import Store, store
 from pydantic import BaseModel, JsonValue, ValidationError
@@ -89,22 +93,65 @@ class SwarmResultRecord(BaseModel):
 # Only the runtime writes the record: once, when the swarm ends, in the swarm's span,
 # with its id in the store the swarm ran with, which ties the record to that store
 def write_record(record: SwarmResultRecord) -> None:
-    # first, so that a write that fails leaves no id rather than an earlier swarm's
+    # first, so that a write that fails leaves no id rather than an earlier swarm's,
+    # such as one nested in a member
+    forget_record()
+    id = uuid4().hex
+    data: dict[str, JsonValue] = {
+        "type": RECORD_TYPE,
+        "id": id,
+        **record.model_dump(mode="json"),
+    }
+    if _changed_by_logging(InfoEvent(data=data, source="inspect_swarm")):
+        raise ValueError(
+            "The swarm's result record cannot be written: a string in it would read back from the log as other text. Inspect reads a string that begins with attachment:// or tc:// as a reference to an attachment, and removes base64 data: URIs when an eval does not log images. Check the members' names, roles and sandboxes, and the reason given to choose_answer()."
+        )
+    transcript().info(data, source="inspect_swarm")
+    store().set(RESULT_ID_KEY, id)
+
+
+# Removes the store's record id, so that a swarm that leaves no record never leaves an
+# earlier swarm's as its own.
+def forget_record() -> None:
     if RESULT_ID_KEY in store():
         store().delete(RESULT_ID_KEY)
-    data = record.model_dump(mode="json")
-    # a log cannot tell such text from a reference to another attachment of the
-    # sample, so the record is refused here rather than read as other text
-    if _unresolved(data):
-        raise ValueError(
-            "The swarm's result record cannot be written: a string in it begins with attachment:// or tc://, which Inspect reads as a reference to an attachment of the log. Check the members' names, roles and sandboxes, and the reason given to choose_answer()."
-        )
-    id = uuid4().hex
-    transcript().info(
-        {"type": RECORD_TYPE, "id": id, **data},
-        source="inspect_swarm",
-    )
-    store().set(RESULT_ID_KEY, id)
+
+
+# Whether a log would give back other text than `event` holds. Inspect condenses an
+# event's strings when it logs it (long text into attachments, and base64 data: URIs
+# removed under log_images=False), and resolves them when a log is read or re-scored,
+# rewriting tc:// as attachment:// and replacing a reference with the attachment it
+# names. Resolving against the event's own attachments only, where any other reference
+# reads as something else, finds text that would read back as another attachment of
+# the sample or not at all.
+def _changed_by_logging(event: InfoEvent) -> bool:
+    for log_images in (True, False):
+        attachments: dict[str, str] = {}
+        own = _OwnAttachments(attachments)
+        resolved = condense_event(event, attachments, log_images)
+        # twice, as a sample read with its attachments resolved is resolved again by
+        # swarm_result()
+        for _ in range(2):
+            [resolved] = resolve_events_attachments([resolved], own)
+        assert isinstance(resolved, InfoEvent)
+        if resolved.data != event.data:
+            return True
+    return False
+
+
+# An event's own attachments, which give any other hash a value no string holds.
+class _OwnAttachments(Mapping[str, str]):
+    def __init__(self, own: dict[str, str]) -> None:
+        self._own = own
+
+    def __getitem__(self, key: str) -> str:
+        return self._own.get(key, "\0")
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._own)
+
+    def __len__(self) -> int:
+        return len(self._own)
 
 
 # Only the runtime writes it: when a swarm starts, in the swarm's span, before any

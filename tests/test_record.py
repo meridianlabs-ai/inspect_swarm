@@ -16,7 +16,7 @@ from inspect_ai.log._samples import sample_active
 from inspect_ai.model import GenerateConfig, ModelOutput, get_model
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import Generate, Solver, TaskState, fork, solver
-from inspect_ai.util import store, subtask
+from inspect_ai.util import SandboxEnvironmentSpec, store, subtask
 
 from inspect_swarm import (
     Budget,
@@ -32,7 +32,8 @@ from inspect_swarm import (
     swarm_result,
 )
 from inspect_swarm._bus._bus import current_bus
-from inspect_swarm._evidence import METRICS_KEY
+from inspect_swarm._evidence import LEDGER_KEY, METRICS_KEY
+from inspect_swarm._ledger import SwarmLedger
 from inspect_swarm._metrics import SwarmMetrics
 from inspect_swarm._record import (
     RECORD_TYPE,
@@ -44,6 +45,7 @@ from inspect_swarm._record import (
 )
 
 from .swarm_runtime import Script, generator, sample, scripted_model
+from .test_member_sandboxes import StubConfig
 
 # what one call of swarm_result() gave: the record, None, or the error it raised
 Read = SwarmResultRecord | None | BaseException
@@ -141,6 +143,7 @@ def _eval(
     tmp_path: Path,
     solver: Solver | Agent | list[Solver],
     scorers: list[Scorer],
+    log_images: bool = True,
     **kwargs: Any,
 ) -> EvalSample:
     [log] = eval(
@@ -152,6 +155,7 @@ def _eval(
         ),
         model="mockllm/model",
         log_dir=str(tmp_path),
+        log_images=log_images,
         display="none",
     )
     assert log.samples is not None
@@ -308,54 +312,106 @@ def catches_the_end(inner: Agent, match: str | None, seen: list[Read]) -> Solver
 UNWRITABLE = "cannot be written"
 
 
+def _carrying(field: str, value: str) -> Agent:
+    # a swarm whose record holds `value` in `field` of its chosen member, or as the
+    # controller's reason
+    chosen = value if field == "name" else "a"
+
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        async for _ in control.events():
+            pass
+        control.choose_answer(chosen, reason=value if field == "reason" else None)
+        return "chosen"
+
+    return swarm(
+        [
+            member(
+                generator(scripted_model()),
+                name=chosen,
+                role=value if field == "role" else None,
+                sandbox=value if field == "sandbox" else None,
+            ),
+            # every member has its own sandbox, or none does
+            member(
+                generator(scripted_model()),
+                name="b",
+                sandbox="b-box" if field == "sandbox" else None,
+            ),
+        ],
+        controller=_controller(run, f"record_test_carrying_{uuid4().hex}"),
+        channels=[],
+    )
+
+
+def _field(record: SwarmResultRecord, field: str) -> str | None:
+    if field == "reason":
+        return record.final.reason
+    value = getattr(record.members[0], field)
+    assert value is None or isinstance(value, str)
+    return value
+
+
+@pytest.mark.parametrize("field", ["name", "role", "sandbox", "reason"])
 @pytest.mark.parametrize(
-    "reason,readable",
+    "value,readable",
     [
-        pytest.param("short", True, id="short"),
         # condensed into an attachment in the log
         pytest.param(LONG_REASON, True, id="long"),
         # Inspect's resolution rewrites tc:// as attachment://
-        pytest.param("tc://artifact", False, id="short-tc"),
+        pytest.param("tc://artifact", False, id="tc"),
         pytest.param("tc://" + LONG_REASON, False, id="long-tc"),
-        pytest.param("attachment://artifact", False, id="attachment"),
-        # a log would resolve these to OTHER
+        # a log would resolve it to OTHER
         pytest.param(f"attachment://{mm3_hash(OTHER)}", False, id="attachment-hash"),
-        pytest.param(f"tc://{mm3_hash(OTHER)}", False, id="tc-hash"),
+        # removed from a log that does not log images
+        pytest.param("data:;base64,SGVsbG8=", False, id="base64"),
     ],
 )
-def test_a_record_reads_the_same_live_from_a_log_and_on_re_score(
-    tmp_path: Path, reason: str, readable: bool
+def test_a_record_reads_the_same_live_and_from_the_log(
+    tmp_path: Path, field: str, value: str, readable: bool
 ) -> None:
-    after_end: list[Read] = []
-    final: list[tuple[bool, Read]] = []
-    solver = catches_the_end(
-        _chooses(reason), None if readable else UNWRITABLE, after_end
-    )
-    _eval(tmp_path, [logs_other(), solver], [probe(final)])
-    [(_, live)] = final
-    path = str(next(tmp_path.glob("*.eval")))
-    resolved = read_eval_log(path, resolve_attachments=True)
-    unresolved = read_eval_log(path)
-    assert resolved.samples is not None and unresolved.samples is not None
-    reads = [
-        *after_end,
-        live,
-        _read(resolved.samples[0]),
-        _read(unresolved.samples[0]),
-        _rescore(unresolved, unresolved.samples[0]),
-    ]
-    if not readable:
-        # the swarm refuses to write it, so no read gives other text
-        assert not _record_events(unresolved.samples[0].events)
-        for read in reads:
-            _value_error(read, LOST_ID)
+    if field == "name" and "/" in value:
+        # member() refuses such a name before any record holds it
+        with pytest.raises(ValueError, match="must not contain '/'"):
+            _carrying(field, value)
         return
-    [event] = _record_events(unresolved.samples[0].events)
-    assert isinstance(event.data, dict) and isinstance(event.data["final"], dict)
-    # a long reason is condensed into an attachment, a short one is logged as it is
-    assert (event.data["final"]["reason"] == reason) is (len(reason) <= 100)
-    for read in reads:
-        assert _record(read).final.reason == reason
+    # the same outcome whether or not the eval logs images
+    for log_images in (True, False):
+        after_end: list[Read] = []
+        final: list[tuple[bool, Read]] = []
+        solver = catches_the_end(
+            _carrying(field, value), None if readable else UNWRITABLE, after_end
+        )
+        names = ("default", value, "b-box") if field == "sandbox" else ("default",)
+        log_dir = tmp_path / str(log_images)
+        _eval(
+            log_dir,
+            [logs_other(), solver],
+            [probe(final)],
+            log_images=log_images,
+            sandbox=SandboxEnvironmentSpec("swarm_test_stub", StubConfig(names=names)),
+        )
+        [(_, live)] = final
+        path = str(next(log_dir.glob("*.eval")))
+        resolved = read_eval_log(path, resolve_attachments=True)
+        unresolved = read_eval_log(path)
+        assert resolved.samples is not None and unresolved.samples is not None
+        reads = [
+            *after_end,
+            live,
+            _read(resolved.samples[0]),
+            _read(unresolved.samples[0]),
+            _rescore(unresolved, unresolved.samples[0]),
+        ]
+        if readable:
+            for read in reads:
+                assert _field(_record(read), field) == value
+        else:
+            # the swarm refuses to write it, so no read gives other text
+            assert not _record_events(unresolved.samples[0].events)
+            for read in reads:
+                _value_error(read, LOST_ID)
 
 
 def test_a_record_whose_attachments_are_missing_is_refused(tmp_path: Path) -> None:
@@ -867,15 +923,84 @@ def test_a_failed_write_at_the_end_does_not_leave_the_swarm_running(
         assert _names(read) == ["a", "b"]
 
 
-def test_a_record_that_cannot_be_written_leaves_no_earlier_record(
-    tmp_path: Path,
+def _fail_second_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    # the first swarm's start is written, the second one's (or a nested one's) fails
+    calls: list[None] = []
+
+    def fail_second() -> None:
+        calls.append(None)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        write_start()
+
+    monkeypatch.setattr("inspect_swarm._controller._control.write_start", fail_second)
+
+
+@pytest.mark.parametrize("failure", ["start", "record"])
+def test_a_swarm_that_leaves_no_record_leaves_no_earlier_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     # the second swarm's output is the sample's, so the first's record is not its record
     seen: list[Read] = []
-    second = catches_the_end(_chooses("tc://artifact"), UNWRITABLE, seen)
+    if failure == "start":
+        _fail_second_start(monkeypatch)
+        second = catches_the_end(_pair("second-"), "disk full", seen)
+    else:
+        second = catches_the_end(_chooses("tc://artifact"), UNWRITABLE, seen)
     _eval(tmp_path, [as_solver(_pair("first-")), second], [])
     [read] = seen
     _value_error(read, LOST_ID)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["start", "record", "record-after-an-error"])
+async def test_a_swarm_that_fails_at_either_end_keeps_its_accounting(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    async def run_controller(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        async for _ in control.events():
+            pass
+        control.choose_answer("a", reason="tc://artifact")
+        if failure == "record-after-an-error":
+            raise RuntimeError("controller-failure")
+        return "chosen"
+
+    def fail() -> None:
+        raise OSError("disk full")
+
+    if failure == "start":
+        monkeypatch.setattr("inspect_swarm._controller._control.write_start", fail)
+    agent_swarm = swarm(
+        [
+            member(generator(scripted_model()), name="a"),
+            member(generator(scripted_model()), name="b"),
+        ],
+        controller=_controller(run_controller, f"record_test_end_{uuid4().hex}"),
+        channels=[],
+    )
+    error = {
+        "start": "disk full",
+        "record": UNWRITABLE,
+        "record-after-an-error": "controller-failure",
+    }[failure]
+    async with sample() as t:
+        observers = len(t._event_loggers)
+        with pytest.raises((OSError, ValueError, RuntimeError), match=error) as raised:
+            await run(agent_swarm, "task")
+        # the swarm stops observing the transcript however it ends
+        assert len(t._event_loggers) == observers
+        ledger, metrics = store().get(LEDGER_KEY), store().get(METRICS_KEY)
+    if failure == "start":
+        # no member ran, so there is nothing to account for
+        assert (ledger, metrics) == (None, None)
+        return
+    assert [m.name for m in SwarmLedger.model_validate(ledger).members] == ["a", "b"]
+    assert metrics is not None
+    if failure == "record-after-an-error":
+        # the error that ended the swarm, with the record's
+        assert any(UNWRITABLE in note for note in raised.value.__notes__)
 
 
 @agent
@@ -905,17 +1030,7 @@ async def test_a_failed_write_of_a_nested_swarm_restores_the_outer_contexts(
 ) -> None:
     if writer == "write_start":
         # the outer swarm's start is written, the inner one's fails
-        calls: list[None] = []
-
-        def fail_second() -> None:
-            calls.append(None)
-            if len(calls) == 2:
-                raise OSError("disk full")
-            write_start()
-
-        monkeypatch.setattr(
-            "inspect_swarm._controller._control.write_start", fail_second
-        )
+        _fail_second_start(monkeypatch)
         inner = swarm(member(plain(), name="i"), channels=[], budget=Budget(time=50))
     else:
         inner = swarm(

@@ -48,7 +48,7 @@ The event adds `"type": "result_record"` and an `"id"`, which the swarm also put
 
 ### The record belongs to the swarm
 
-Only the swarm writes the record and `inspect_swarm:result_id`. Task code (tools, member builders, controllers, scorers) must not write that key or an event with source `inspect_swarm`. Member names, roles and sandboxes, and a controller's `choose_answer()` reason, must not begin with `attachment://` or `tc://`, which a log reads as a reference to an attachment: the swarm does not write a record that holds such text, and its end raises `ValueError`.
+Only the swarm writes the record and `inspect_swarm:result_id`. Task code (tools, member builders, controllers, scorers) must not write that key or an event with source `inspect_swarm`. Member roles and sandboxes, and a controller's `choose_answer()` reason, must be text that a log keeps as it is: not beginning with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and not a base64 `data:` URI, which a log removes when images are not logged. The swarm does not write a record that holds such text, and its end raises `ValueError`.
 
 There is no record while the swarm runs, so no member can read another's results from it. A scorer that reads it after the swarm is how a task finds each member's sandbox ([Per-member sandboxes](#per-member-sandboxes)). A tool that reads the transcript sees every member's model and tool calls anyway. That is a channel between members outside the swarm's channels, and the swarm records no evidence of it.
 
