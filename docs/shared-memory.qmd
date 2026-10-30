@@ -142,10 +142,10 @@ The swarm logs the members' writes, views and waits as `InfoEvent`s with source 
 
 - `sent`: a write that reached the swarm, with its operation and payload, and why it was refused if it was.
 - `delivered`: a write applied to the board, with its commit sequence number and each file's previous and new version. Replaying the delivered writes in sequence order rebuilds every version of the board.
-- `read`: a view, with each file's version and the record that last wrote it, or a listing.
-- `waited`: a `swarm_wait` call, with what ended it and how long it took.
+- `read`: a view or a listing, with each file's version and the record that last wrote it (`records`), and the records the result depends on (`depends_on`): for a view, every write in the file's history; for a deleted file's id, the delete; for a listing, none.
+- `waited`: a `swarm_wait` call, with what ended it, how long it took, and in `depends_on` the write it reported for each changed file.
 
-Each event names the member and the loop that acted. The [metrics](analysis.qmd#communication) count these events for each member.
+Each event names the member and the loop that acted. `depends_on` names each record once per loop: a record that an earlier result of the same loop depended on is left out. The [metrics](analysis.qmd#communication) count these events for each member.
 
 ## Monitoring with Inspect Sentinel
 
