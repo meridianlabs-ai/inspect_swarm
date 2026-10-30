@@ -53,7 +53,6 @@ from .._record import (
     SwarmResultRecord,
     _swarm_ended,  # pyright: ignore[reportPrivateUsage]
     _swarm_started,  # pyright: ignore[reportPrivateUsage]
-    forget_record,
     write_record,
     write_start,
 )
@@ -402,9 +401,6 @@ class SwarmRun:
         from .._channel.shared_memory import builtin_board
 
         _refuse_checkpointing()
-        # first, before anything this swarm can fail at, so that it never leaves an
-        # earlier swarm's record as its own
-        forget_record()
         timelines = MemberTimelines([m.name for m in self._members])
         interval = self._interval = LedgerInterval(
             board=builtin_board(self.bus.states),

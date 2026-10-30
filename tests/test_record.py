@@ -942,20 +942,31 @@ def _fail_second_start(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("inspect_swarm._controller._control.write_start", fail_second)
 
 
-@pytest.mark.parametrize("failure", ["start", "record"])
+@pytest.mark.parametrize("failure", ["sandbox", "start", "record"])
 def test_a_swarm_that_leaves_no_record_leaves_no_earlier_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     # the second swarm's output is the sample's, so the first's record is not its record
     seen: list[Read] = []
-    if failure == "start":
+    if failure == "sandbox":
+        # refused before its run starts: the sample has no such sandboxes
+        missing = swarm(
+            [
+                member(generator(scripted_model()), name=f"second-{n}", sandbox=n)
+                for n in ("x", "y")
+            ],
+            channels=[],
+        )
+        second = catches_the_end(missing, "sandbox", seen)
+    elif failure == "start":
         _fail_second_start(monkeypatch)
         second = catches_the_end(_pair("second-"), "disk full", seen)
     else:
         second = catches_the_end(_chooses("tc://artifact"), UNWRITABLE, seen)
-    _eval(tmp_path, [as_solver(_pair("first-")), second], [])
+    sample = _eval(tmp_path, [as_solver(_pair("first-")), second], [])
     [read] = seen
     _value_error(read, LOST_ID)
+    _value_error(_read(sample), LOST_ID)
 
 
 @pytest.mark.anyio
