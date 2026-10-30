@@ -44,9 +44,9 @@ def loop_tools(bus: Bus, own: bool) -> list[Tool]:
         return [tool for _, _, tool in reached] + waits
     # read_messages and a wait count unread messages in their own results
     return [
-        bus.counting(_countable(name, tool), results=not _counts_itself(state, tool))
+        tool if _counts_itself(state, tool) else bus.counting(_countable(name, tool))
         for name, state, tool in reached
-    ] + [bus.counting(wait, results=False) for wait in waits]
+    ] + waits
 
 
 def _counts_itself(state: ChannelState, tool: Tool) -> bool:

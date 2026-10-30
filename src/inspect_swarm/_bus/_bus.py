@@ -224,13 +224,12 @@ class Bus:
                 return state.unread_line(context.name)
         return None
 
-    def counting(self, tool: Tool, results: bool = True) -> Tool:
+    def counting(self, tool: Tool) -> Tool:
         # the tool as a member's own loop gets it beside the messages channel: its
-        # results (unless `results` is False, for a tool whose results count unread
-        # messages themselves) and its ToolErrors end with the status line, so no
-        # channel's tool needs to know the messages channel. One wrapper per tool and run.
-        # Inspect's parsing and argument errors come before the tool runs, so they have
-        # no count.
+        # results end with the status line, so no channel's tool needs to know the
+        # messages channel. Its errors pass through unchanged, with no count: the member
+        # sees the count on its next result (decision: Ransom, 2026-10-30). One wrapper
+        # per tool and run.
         cached = self._counting.get(id(tool))
         if cached is not None:
             return cached[1]
@@ -239,15 +238,8 @@ class Bus:
 
         @functools.wraps(inner)
         async def execute(*args: Any, **kwargs: Any) -> ToolResult:
-            try:
-                result = await inner(*args, **kwargs)
-            except ToolError as ex:
-                unread = self._unread()
-                if unread is None:
-                    raise
-                # still a ToolError; its evidence was written with the reason alone
-                raise ToolError(with_lines(ex.message, unread)) from ex
-            unread = self._unread() if results else None
+            result = await inner(*args, **kwargs)
+            unread = self._unread()
             return result if unread is None else _with_line(result, unread)
 
         wrapped = ToolDef(

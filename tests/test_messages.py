@@ -9,7 +9,14 @@ from inspect_ai.agent import Agent, AgentState, agent, handoff
 from inspect_ai.agent._channel import agent_channel, current_agent_channel
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import ModelOutput
-from inspect_ai.tool import Content, Tool, ToolDef, ToolError, tool
+from inspect_ai.tool import (
+    Content,
+    Tool,
+    ToolDef,
+    ToolError,
+    tool,
+)
+from inspect_ai.tool._tool import ToolParsingError
 from inspect_ai.util._span import span
 from pydantic import JsonValue
 
@@ -411,40 +418,30 @@ async def test_shared_memory_results_count_unread_messages_in_the_own_loop() -> 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "loop,tool,args,error",
+    "tool,args,error",
     [
         pytest.param(
-            "top",
             "shared_memory",
             {"command": "view", "path": "/shared_memory/none.md"},
             "The path /shared_memory/none.md does not exist. Please provide a valid path.",
             id="channel-error",
         ),
         pytest.param(
-            "top",
             "send_message",
             {"to": "w-1", "message": "x" * 101},
             "message is 101 bytes; the limit is 100",
             id="bus-rejection",
         ),
         pytest.param(
-            "top",
             "swarm_wait",
             {"path": "/elsewhere"},
             "Invalid path:",
             id="wait-filter",
         ),
-        pytest.param(
-            "child",
-            "shared_memory",
-            {"command": "view", "path": "/shared_memory/none.md"},
-            "The path /shared_memory/none.md does not exist. Please provide a valid path.",
-            id="nested",
-        ),
     ],
 )
-async def test_an_error_in_the_own_loop_counts_unread_messages(
-    loop: str, tool: str, args: dict[str, Any], error: str
+async def test_an_error_in_the_own_loop_has_no_unread_count(
+    tool: str, args: dict[str, Any], error: str
 ) -> None:
     channel = messages(rate=None, max_bytes=100)
     async with run(("w-1", "w-2"), channel, shared_memory(rate=None)) as (
@@ -453,12 +450,11 @@ async def test_an_error_in_the_own_loop_counts_unread_messages(
     ):
         await r.send("w-1", "w-2", "private", wake=False)
         with pytest.raises(ToolError) as raised:
-            await r.call("w-2", tool, loop, **args)
+            await r.call("w-2", tool, **args)
         message = raised.value.message
-        assert message.startswith(error) and "private" not in message
-        assert message.endswith("\nYou have 1 unread message.") == (loop == "top")
+        assert message.startswith(error) and "unread" not in message
         if tool == "send_message":
-            # the evidence keeps the bus's own reason
+            assert message == error
             assert evidence(transcript, "sent")[-1]["rejected"] == {
                 "control": "max_bytes",
                 "reason": error,
@@ -501,13 +497,10 @@ async def test_custom_channel_tools_count_unread_messages_in_the_own_loop() -> N
         assert await r.call_resolved("w-2", "loop_write", text="a") == "l-1" + unread
         assert await r.call_resolved("w-2", "member_write", text="b") == "u-1" + unread
         assert await r.call_resolved("w-2", "member_write", "child", text="c") == "u-2"
-        for loop, end in (("top", unread), ("child", "")):
-            with pytest.raises(ToolError) as raised:
-                await r.call_resolved("w-2", "member_write", loop, text="d")
-            assert raised.value.message.startswith("rate limit: retry in")
-            assert raised.value.message.endswith(end) and (
-                "unread" in raised.value.message
-            ) == bool(end)
+        # its errors have no count
+        with pytest.raises(ToolError, match="^rate limit: retry in") as raised:
+            await r.call_resolved("w-2", "member_write", text="d")
+        assert "unread" not in raised.value.message
         # read_messages counts what it leaves itself, and keeps its own output limit
         tools = await r.resolve("w-2")
         assert ToolDef(tools["read_messages"]).max_output == 0
@@ -592,3 +585,31 @@ async def test_a_channel_tool_the_count_cannot_wrap_is_refused_beside_messages(
         assert list((await r.resolve("w-1", "child")).values()) == [channel.tool]
         with pytest.raises(ValueError, match=f"^The given channel gives {kind}, "):
             await r.resolve("w-1")
+
+
+def _raising(error: BaseException) -> Tool:
+    async def execute() -> str:
+        """Fail."""
+        raise error
+
+    return ToolDef(execute, name="fail").as_tool()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "error",
+    [
+        lambda: ToolParsingError("bad input"),
+        lambda: ExceptionGroup("grouped", [ToolError("failed")]),
+    ],
+    ids=["subclass", "group"],
+)
+async def test_a_tool_error_passes_the_count_unchanged(
+    error: Callable[[], Exception],
+) -> None:
+    raised = error()
+    async with run(("w-1", "w-2"), None, _Given(_raising(raised))) as (r, _):
+        await r.send("w-1", "w-2", "private", wake=False)
+        with pytest.raises(type(raised)) as caught:
+            await r.call_resolved("w-2", "fail")
+        assert caught.value is raised
