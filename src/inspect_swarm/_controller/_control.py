@@ -516,7 +516,16 @@ class SwarmRun:
                     )
                     # the error or cancellation that ended the swarm stays the one
                     # raised, else the first failure here; the others become its notes
-                    first = escaping or error or (failures[0] if failures else None)
+                    # `is not None`, as an exception's truthiness is its own to define
+                    first = (
+                        escaping
+                        if escaping is not None
+                        else error
+                        if error is not None
+                        else failures[0]
+                        if failures
+                        else None
+                    )
                     for failure in failures:
                         if failure is not first and first is not None:
                             first.add_note(

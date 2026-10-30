@@ -1009,9 +1009,18 @@ async def test_a_swarm_that_fails_at_either_end_keeps_its_accounting(
         assert any(UNWRITABLE in note for note in raised.value.__notes__)
 
 
+class _FalsyError(RuntimeError):
+    # an exception may define its own truthiness
+    def __bool__(self) -> bool:
+        return False
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("writer", ["write_ledger", "write_metrics"])
-@pytest.mark.parametrize("ending", ["controller-error", "record-error", "cancelled"])
+@pytest.mark.parametrize(
+    "ending",
+    ["controller-error", "falsy-controller-error", "record-error", "cancelled"],
+)
 async def test_a_failed_accounting_write_keeps_what_ended_the_swarm(
     monkeypatch: pytest.MonkeyPatch, writer: str, ending: str
 ) -> None:
@@ -1030,6 +1039,8 @@ async def test_a_failed_accounting_write_keeps_what_ended_the_swarm(
         )
         if ending == "controller-error":
             raise RuntimeError("controller-failure")
+        if ending == "falsy-controller-error":
+            raise _FalsyError("controller-failure")
         return "chosen"
 
     def fail(*args: Any) -> None:
@@ -1053,7 +1064,7 @@ async def test_a_failed_accounting_write_keeps_what_ended_the_swarm(
                 await started.wait()
                 tg.cancel_scope.cancel()
         else:
-            error = "controller-failure" if ending == "controller-error" else UNWRITABLE
+            error = "controller-failure" if "controller" in ending else UNWRITABLE
             with pytest.raises((RuntimeError, ValueError), match=error) as raised:
                 await run(agent_swarm, "task")
             # the write's error is a note on it
