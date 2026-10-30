@@ -17,7 +17,14 @@ from .._channel.messages import MessagesState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_sent
 from ._address import resolve
-from ._record import Draft, FrozenJson, Record, freeze_json, thaw_json
+from ._record import (
+    Draft,
+    FrozenJson,
+    Record,
+    current_via,
+    freeze_json,
+    thaw_json,
+)
 from ._storm import Storm
 from ._wait import Waits
 
@@ -125,10 +132,16 @@ class Bus:
         self._waits.close()
 
     async def wait(
-        self, path: str | None, file_id: str | None, timeout: int | None
+        self,
+        path: str | None,
+        file_id: str | None,
+        timeout: int | None,
+        channels: Sequence[str] | None = None,
+        cap: int | None = None,
     ) -> str:
-        # the swarm_wait tool's body
-        return await self._waits.wait(path, file_id, timeout)
+        # the swarm_wait tool's body; a bridged member's waits only on `channels`, those
+        # its tools reach, and at most `cap` seconds
+        return await self._waits.wait(path, file_id, timeout, channels, cap)
 
     def member_ended(self, name: str, status: str) -> None:
         # from the runtime, right after it marks the member ended
@@ -169,6 +182,7 @@ class Bus:
             reply_to=draft.reply_to,
             sender_span_id=current_agent_span_id(),
             tool_span_id=current_span_id(),
+            via=current_via.get(),
         )
         state.validate(record)
         # the id is given once the record exists, so that a refusal above skips none
@@ -207,7 +221,8 @@ class Bus:
 
     def nested(self, context: MemberContext) -> bool:
         # whether the caller runs in a loop other than the member's own, such as a
-        # subagent's
+        # subagent's. A bridged member binds no loop, so its CLI is one loop, its own,
+        # whichever of its conversations calls
         return context.loop is not None and current_agent_channel() is not context.loop
 
     def status(self, context: MemberContext) -> str | None:

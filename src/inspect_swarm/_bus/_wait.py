@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -11,7 +11,7 @@ from .._budget import MemberContext
 from .._channel._channel import WaitingState, WaitSpec
 from .._channel.messages import MessagesState
 from .._evidence import comm_waited
-from ._record import Record
+from ._record import Record, current_via
 
 if TYPE_CHECKING:
     from ._bus import Bus
@@ -52,6 +52,20 @@ _BOTH_DESCRIPTION = (
 )
 
 
+# a bridged member's: it never counts as waiting, so no all-waiting release ends its
+# waits, and its CLI is one loop, so its subagents' writes are not news to it
+_BRIDGED_RELEASES = (
+    "It also returns when the swarm is stopping, or after `timeout` seconds. "
+)
+
+
+def _bridged(description: str) -> str:
+    return description.replace(_RELEASES, _BRIDGED_RELEASES).replace(
+        "another agent's write, including your own subagents'",
+        "another member's write",
+    )
+
+
 # the messages-only wait's signature, reflected once for its parameters: each run's
 # tool takes them in full, so that Inspect's reflection cache does not keep the run
 async def _wait_for_messages(timeout: int | None = None) -> str:
@@ -89,6 +103,9 @@ class _Waiter:
     spec: WaitSpec
     # the waiting channels the loop reaches
     channels: list[str]
+    # a bridged member's wait, which never makes its member waiting: the host cannot
+    # tell whether one blocked call is all its CLI is doing
+    bridged: bool = False
     event: anyio.Event = field(default_factory=anyio.Event)
     reason: Outcome | None = None
     woken_by: list[int] = field(default_factory=list[int])
@@ -187,7 +204,12 @@ class Waits:
     # the wait
 
     async def wait(
-        self, path: str | None, file_id: str | None, timeout: int | None
+        self,
+        path: str | None,
+        file_id: str | None,
+        timeout: int | None,
+        only: Sequence[str] | None = None,
+        cap: int | None = None,
     ) -> str:
         assert self.max_wait is not None
         context = self._bus.member()
@@ -199,7 +221,10 @@ class Waits:
         if not self._bus.running(name):
             raise ToolError(f"{name} has ended.")
         own = not self._bus.nested(context)
-        if own and name in self._own_waits:
+        bridged = current_via.get() == "bridge"
+        # a bridged member's waits are per call: each of its CLI's conversations may wait
+        counted = own and not bridged
+        if counted and name in self._own_waits:
             # the idle clock counts one wait of the own loop at a time. Checked against
             # every wait in progress, not just the registered ones: a wait that found
             # news has not registered, and goes to sleep if the news is gone when it
@@ -207,10 +232,10 @@ class Waits:
             raise ToolError(
                 f"{name} is already waiting: its own loop has a swarm_wait in progress."
             )
-        channels = self._reachable(own)
-        effective = (
-            self.max_wait if timeout is None else min(max(timeout, 1), self.max_wait)
-        )
+        channels = [c for c in self._reachable(own) if only is None or c in only]
+        # a bridged member's waits are also capped by its tools' own maximum
+        longest = self.max_wait if cap is None else min(self.max_wait, cap)
+        effective = longest if timeout is None else min(max(timeout, 1), longest)
         spec = WaitSpec(
             id=f"x-{self._count + 1}",
             member=name,
@@ -224,10 +249,10 @@ class Waits:
         # the id is given once the wait is accepted, so that a refusal skips none
         self._count += 1
 
-        if own:
+        if counted:
             self._own_waits.add(name)
         started = anyio.current_time()
-        waiter = _Waiter(spec, channels)
+        waiter = _Waiter(spec, channels, bridged)
         outcome: Outcome | None = None
         files: list[JsonValue] = []
         ended: list[JsonValue] = []
@@ -299,7 +324,7 @@ class Waits:
         finally:
             # synchronous, so that it runs under cancellation too
             self._unregister(waiter)
-            if own:
+            if counted:
                 self._own_waits.discard(name)
             if outcome is not None:
                 comm_waited(
@@ -318,51 +343,13 @@ class Waits:
                 )
 
     def _make_tool(self, channels: Sequence[str]) -> Tool:
-        # the messages channel's wait takes no filter; any other waiting channel's is
-        # the shared memory's
         messages = [isinstance(self._states[c], MessagesState) for c in channels]
-        timeout = f"Seconds to wait at most (default and maximum: {self.max_wait})."
-        if all(messages):
-
-            async def wait(timeout: int | None = None) -> str:
-                return await self.wait(None, None, timeout)
-
-            parameters = _MESSAGES_PARAMETERS.model_copy(deep=True)
-            parameters.properties["timeout"].description = timeout
-            return ToolDef(
-                wait,
-                name="swarm_wait",
-                description=_MESSAGES_DESCRIPTION,
-                parameters=parameters,
-                parallel=False,
-            ).as_tool()
-
-        async def execute(
-            path: str | None = None,
-            timeout: int | None = None,
-            file_id: str | None = None,
-        ) -> str:
-            """Wait for other members.
-
-            Args:
-                path: A shared memory file or directory to watch.
-                timeout: Seconds to wait at most.
-                file_id: A shared memory file id to watch.
-            """
-            return await self.wait(path, file_id, timeout)
-
-        return ToolDef(
-            execute,
-            name="swarm_wait",
-            description=_BOTH_DESCRIPTION if any(messages) else _DESCRIPTION,
-            parameters={
-                "path": _PATH,
-                "timeout": timeout,
-                "file_id": _FILE_ID,
-            },
-            # alone in its loop's turn, so a loop in a wait is doing nothing else
-            parallel=False,
-        ).as_tool()
+        return wait_tool(
+            self.wait,
+            messages=any(messages),
+            board=not all(messages),
+            timeout=f"Seconds to wait at most (default and maximum: {self.max_wait}).",
+        )
 
     # the registry
 
@@ -410,9 +397,11 @@ class Waits:
 
     def _idle(self, waiter: _Waiter) -> bool:
         # whether this waiter makes its member waiting: registered in the member's own
-        # loop, not released, and none of the member's background work running
+        # loop, not a bridged member's, not released, and none of the member's
+        # background work running
         return (
             waiter.spec.own
+            and not waiter.bridged
             and self._waiters.get(waiter.spec.id) is waiter
             and waiter.reason is None
             and self._contexts[waiter.spec.member].background_running == 0
@@ -433,6 +422,64 @@ class Waits:
         elif waiter.idle_since is not None:
             waiter.idle += now - waiter.idle_since
             waiter.idle_since = None
+
+
+# swarm_wait, described for the channels it waits on: the messages channel's wait takes
+# no filter, the shared memory's (`board`) a path or file id. `wait` is its body, called
+# with the path, the file id and the timeout; a bridged member's is described for how
+# its waits end.
+def wait_tool(
+    wait: Callable[[str | None, str | None, int | None], Awaitable[str]],
+    *,
+    messages: bool,
+    board: bool,
+    timeout: str,
+    bridged: bool = False,
+) -> Tool:
+    def describe(description: str) -> str:
+        return _bridged(description) if bridged else description
+
+    if not board:
+
+        async def messages_wait(timeout: int | None = None) -> str:
+            return await wait(None, None, timeout)
+
+        parameters = _MESSAGES_PARAMETERS.model_copy(deep=True)
+        parameters.properties["timeout"].description = timeout
+        return ToolDef(
+            messages_wait,
+            name="swarm_wait",
+            description=describe(_MESSAGES_DESCRIPTION),
+            parameters=parameters,
+            parallel=False,
+        ).as_tool()
+
+    async def execute(
+        path: str | None = None,
+        timeout: int | None = None,
+        file_id: str | None = None,
+    ) -> str:
+        """Wait for other members.
+
+        Args:
+            path: A shared memory file or directory to watch.
+            timeout: Seconds to wait at most.
+            file_id: A shared memory file id to watch.
+        """
+        return await wait(path, file_id, timeout)
+
+    return ToolDef(
+        execute,
+        name="swarm_wait",
+        description=describe(_BOTH_DESCRIPTION if messages else _DESCRIPTION),
+        parameters={
+            "path": _PATH,
+            "timeout": timeout,
+            "file_id": _FILE_ID,
+        },
+        # alone in its loop's turn, so a loop in a wait is doing nothing else
+        parallel=False,
+    ).as_tool()
 
 
 def _ends_line(ends: Sequence[tuple[str, str]]) -> str:

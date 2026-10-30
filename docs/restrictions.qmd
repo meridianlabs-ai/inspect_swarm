@@ -6,7 +6,6 @@ llms-description: "What the swarm does not support, the limits of bridged member
 ## What the swarm does not support
 
 - No background work in bridged members. A member cannot combine background work with the agent bridge. `background()` raises in a bridged member, and a member that uses the bridge after starting background work ends `errored`.
-- No channels with tools for bridged members. A bridged member cannot use the [shared-memory channel](shared-memory.qmd) yet, and `swarm()` refuses one beside it.
 - No checkpointing. Inspect's sample checkpointing does not restore the swarm's shared state or its caps, so a swarm raises an error before any member starts in a sample with checkpointing on. Turn checkpointing off for tasks that run a swarm: set `checkpoint=False` on `Task()` or `eval()`, or remove every checkpoint setting, including `--checkpoint` and `INSPECT_EVAL_CHECKPOINT`.
 - No ACP agents. ACP agents wait for their caller to drive them, so they are refused.
 - No scorers that read a member's tool state. Each member runs in its own tool-state scope, so built-in tools that keep state in the store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) keep each member's at keys inside its scope, which differ from the default ones. Tool state that a setup solver prepared at the default instance is not carried into the members either; they start with fresh state ([Members](members.qmd#tool-state)).
@@ -16,6 +15,54 @@ llms-description: "What the swarm does not support, the limits of bridged member
 A bridged member runs a CLI agent in the sandbox through Inspect's agent bridge. `inspect_swe` agents count as bridged by default; pass `member(..., bridged=True)` for other agents that use the bridge. The swarm stops a bridged member by cancelling it.
 
 The CLI's own tool calls do not emit Inspect `ToolEvent`s, so the tool-event evidence described here does not cover them, Inspect Sentinel does not see them, and `longest_identical_tool_run` is `null` for bridged members.
+
+### Channels for bridged members
+
+A bridged agent's tools are fixed when it is built, so it does not take `swarm_tools()`. Give it `swarm_bridged_tools()` in its bridged tools, naming the channels it uses:
+
+```python
+from inspect_ai.agent import Agent, agent, react
+from inspect_ai.tool import bash
+from inspect_swe import claude_code
+
+from inspect_swarm import (
+    member,
+    messages,
+    shared_memory,
+    swarm,
+    swarm_bridged_tools,
+    swarm_tools,
+)
+
+
+@agent
+def worker() -> Agent:
+    return react(tools=[bash(), swarm_tools()])
+
+
+@agent
+def cc_worker(channels: list[str] = ["messages", "shared_memory"]) -> Agent:
+    return claude_code(bridged_tools=[swarm_bridged_tools(channels)])
+
+
+solver = swarm(
+    members=[member(worker, count=2), member(cc_worker, name="cc")],
+    channels=[messages(), shared_memory()],
+)
+```
+
+- `"messages"` gives `send_message`, `read_messages` and `list_members`, and `"shared_memory"` gives `shared_memory`. Both give `swarm_wait`. The CLI sees them as the MCP server `swarm`.
+- A tool whose channel the swarm does not have returns an error that says so. A member whose own loop uses `swarm_tools()` cannot also use these tools.
+- The CLI is one agent to the swarm, whichever of its conversations calls, its subagents included. They share the member's inbox, so a message any of them reads is read for all. They share what the member has viewed in the shared memory, so a view by a subagent lets the top-level session overwrite or delete that file. Sends and writes from any of them are the member's.
+- A bridged member never counts as waiting, since one call in `swarm_wait` does not show that its CLI is idle. Its waits end on news, a member's end, the swarm's stop or their timeout, never because every member is waiting. A native member waiting beside a running bridged member is released by its own timeout at worst.
+- The log records these calls as `ToolEvent`s, and their `comm` events have `via` set to `"bridge"`. Inspect Sentinel does not see them; the bridge's `approval=` policies do.
+
+A CLI gives up on an MCP tool call that runs too long, and the model then gets an error in place of the result. Claude Code and Codex both stop one after 300 seconds by default (Claude Code 2.1.308, Codex 0.166.0), while `shared_memory()` waits up to 600. So a bridged member's `swarm_wait` lasts at most `swarm_bridged_tools(channels, max_wait=280)` seconds, or the swarm's longest wait if that is shorter. Native members' waits are unchanged.
+
+- Claude Code: keep the default. Claude Code stops a call that sends nothing for 300 seconds, and inspect_swe has no setting that raises this for bridged tools; `MCP_TOOL_TIMEOUT` does not.
+- Codex: to wait longer, raise its timeout and `max_wait` together: `codex_cli(config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"}, bridged_tools=[swarm_bridged_tools(channels, max_wait=600)])`.
+
+Inspect limits shared-memory views to 16 KiB by default. The CLIs also apply token limits (25,000 for Claude Code; 10,000 for Codex), so a view can be shortened further by the CLI. A default `read_messages` result is about 9 KB.
 
 ## What the log records
 

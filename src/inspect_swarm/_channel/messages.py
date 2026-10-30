@@ -14,6 +14,7 @@ from ._channel import (
     Channel,
     ChannelRun,
     ChannelState,
+    ToolDeclaration,
     WaitNews,
     WaitSpec,
     swarm_channel,
@@ -71,6 +72,15 @@ async def _send_message(
 _SEND_PARAMETERS = ToolDef(_send_message, description=_SEND).parameters
 
 
+# the tools as each run builds them, for a bridged member's tools
+def declarations() -> list[ToolDeclaration]:
+    return [
+        ToolDeclaration("send_message", _SEND, _SEND_PARAMETERS.model_copy(deep=True)),
+        ToolDeclaration("read_messages", _READ, ToolParams(), max_output=0),
+        ToolDeclaration("list_members", _LIST, ToolParams()),
+    ]
+
+
 class _Messages(Channel):
     name = CHANNEL
     prefix = "m"
@@ -125,7 +135,7 @@ def messages(
 
     The member's own loop also gets `swarm_wait`, which returns while it has unread messages sent with `wake=True` (the default), and otherwise blocks as `shared_memory()`'s does, up to `max_wait` seconds. A wait is wall-clock time inside a tool call: it counts towards the member's time limit, the swarm's time cap, and the sample's time and working limits.
 
-    The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`, other than `all` and `swarm`. Bridged members cannot use it yet.
+    The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`, other than `all` and `swarm`. Bridged members get its tools from `swarm_bridged_tools()`; all of a bridged member's conversations share its inbox.
 
     Args:
         max_bytes: The most UTF-8 bytes in one message, at least 1.

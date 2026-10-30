@@ -10,7 +10,7 @@ from typing import (
     overload,
 )
 
-from inspect_ai.tool import Tool
+from inspect_ai.tool import Tool, ToolParams
 from pydantic import JsonValue
 
 from .._bus._record import Record
@@ -134,6 +134,16 @@ class ChannelState(Protocol):
             The members whose own loop the record is news to, given as `notify` in the record's `delivered` evidence, and a JSON mapping for that evidence, or `None`.
         """
         ...
+
+
+# A channel tool as a run declares it, without the run: what swarm_bridged_tools()
+# declares for it, since a bridged member's tools are fixed when its agent is built.
+@dataclass(frozen=True)
+class ToolDeclaration:
+    name: str
+    description: str
+    parameters: ToolParams
+    max_output: int | None = None
 
 
 @dataclass(frozen=True)

@@ -876,15 +876,11 @@ def bus_test_native() -> Agent:
         ),
     ],
 )
-def test_a_bridged_member_is_refused_beside_a_channel_with_records(
+def test_a_bridged_member_is_accepted_beside_a_channel_with_records(
     bridged: Callable[[], Any],
 ) -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"member 'cli' is bridged, and bridged members cannot use bus channels such as bus_test_board yet",
-    ):
-        swarm([bridged(), bus_test_native()], channels=["filesystem", bus_test_board()])
-    for channels in (["filesystem"], []):
+    # it reaches the channel's tools through swarm_bridged_tools()
+    for channels in (["filesystem", bus_test_board()], ["filesystem"], []):
         swarm([bridged(), bus_test_native()], channels=channels)
 
 

@@ -7,7 +7,7 @@ from inspect_ai.log import transcript
 from inspect_ai.util import store
 from pydantic import JsonValue
 
-from ._bus._record import Record, thaw_json
+from ._bus._record import Record, current_via, thaw_json
 from ._ledger import SpanPlaces, SwarmLedger
 from ._metrics import SwarmMetrics
 
@@ -48,7 +48,9 @@ def evidence(
 # (`read`) and for each wait (`waited`), written in the span the channel's tool runs
 # in. Its `member` and `span_id` are the acting member and its member span, even from a
 # member's descendant; `loop` is the agent span of the loop that acted, and `nested`
-# whether that loop is not the member's own.
+# whether that loop is not the member's own. A read or wait's `via`, and a sent record's,
+# is "bridge" for a bridged member's call through swarm_bridged_tools(), whose CLI is
+# one loop.
 
 
 def comm_sent(
@@ -129,6 +131,7 @@ def comm_read(
         tool_span_id=tool_span_id,
         **shown,
         listing=listing,
+        via=current_via.get(),
     )
 
 
@@ -169,6 +172,7 @@ def comm_waited(
         woken_by=list(woken_by),
         files=files,
         ended=ended,
+        via=current_via.get(),
     )
 
 
@@ -187,6 +191,7 @@ def _record(record: Record) -> dict[str, JsonValue]:
         "reply_to": record.reply_to,
         "sender_span_id": record.sender_span_id,
         "tool_span_id": record.tool_span_id,
+        "via": record.via,
     }
 
 

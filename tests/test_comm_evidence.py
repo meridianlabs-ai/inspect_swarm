@@ -225,6 +225,7 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
             "woken_by": [1],
             "files": [{"file": "f-1", "version": 1, "deleted": False}],
             "ended": [],
+            "via": "tool",
         }
         assert timing["started"] >= 0
         assert timing["duration"] >= 0.04

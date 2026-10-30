@@ -23,7 +23,6 @@ from ._budget import (
     SwarmTokenNode,
     check_cost_data,
     derive_caps,
-    is_bridged,
     share_nodes,
     split_sentence,
 )
@@ -60,7 +59,7 @@ def swarm(
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
         PrerequisiteError: If the returned agent runs in a sample with checkpointing on: checkpoint and resume are not supported for swarms yet.
-        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records (bridged members cannot use them yet), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
+        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
     """
     records = _members(members)
     names = member_names(records)
@@ -76,7 +75,7 @@ def swarm(
     resolved_controller = resolve("swarm_controller", controller)
     if resolved_controller.check is not None:
         resolved_controller.check(roster)
-    _check_bus_channels(resolved_channels, records, names, roster)
+    _check_bus_channels(resolved_channels, roster)
     _check_chosen_names(resolved_channels, roster)
     choosers = any(info.choose_name for info in roster)
     resolved_budget = _budget(budget)
@@ -293,13 +292,9 @@ def _channels(channels: str | Channel | Sequence[str | Channel]) -> list[Channel
 
 
 def _check_bus_channels(
-    channels: Sequence[Channel],
-    records: Sequence[Member],
-    names: Sequence[list[str]],
-    roster: Sequence[MemberInfo],
+    channels: Sequence[Channel], roster: Sequence[MemberInfo]
 ) -> None:
-    # channels with records must not collide, and bridged members have no way to their
-    # tools yet
+    # channels with records must not collide
     for channel in channels:
         if (channel.name is None) != (channel.prefix is None):
             raise ValueError(
@@ -318,15 +313,6 @@ def _check_bus_channels(
                 )
     for channel in channels:
         channel.check(roster)
-    bus_channels = [c for c in channels if c.name is not None]
-    if not bus_channels:
-        return
-    for record, record_names in zip(records, names, strict=True):
-        agent = record.agent if record.agent is not None else record.factory
-        if is_bridged(cast(Agent, agent), record.bridged):
-            raise ValueError(
-                f"swarm(): member {record_names[0]!r} is bridged, and bridged members cannot use bus channels such as {registry_info(bus_channels[0]).name} yet. Leave the channel out, or the member."
-            )
 
 
 # A member that chooses its own name is never told the swarm's names, which channels
