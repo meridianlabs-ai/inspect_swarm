@@ -85,7 +85,7 @@ These are the only kinds the code writes. The logs above also have `notified` (1
 | | inspect_ai | ts-mono | inspect_swarm |
 |---|---|---|---|
 | `CommunicationEvent` | the event and its send, delivery and wait models; union, schema, condensing, `inspect ctl` | one-line renderer; outline and filter | `sent`, `delivered`, `read`, `waited`; the ledger reads it |
-| `SwarmEvent` | the event; union, schema, condensing, `inspect ctl` | header over collapsed data; outline and filter | `member_result`, `final`, `result_record`, `ledger`, `metrics` |
+| `SwarmEvent` | the event; union, schema, condensing, `inspect ctl` | header over collapsed data; outline and filter | `swarm_start`, `member_result`, `final`, `result_record`, `ledger`, `metrics` |
 
 ### `CommunicationEvent`
 
@@ -239,7 +239,7 @@ class SwarmEvent(BaseEvent):
     event: Literal["swarm"] = Field(default="swarm")
 
     kind: str
-    """What the event records (`"member_result"`, `"final"`, `"result_record"`, `"ledger"`, `"metrics"`)."""
+    """What the event records (`"swarm_start"`, `"member_result"`, `"final"`, `"result_record"`, `"ledger"`, `"metrics"`)."""
 
     member: str | None = Field(default=None)
     """The member the event concerns, if any."""
@@ -283,6 +283,7 @@ Both are written with `transcript()._event(event)`, the private, synchronous cal
 | `version: 1` | `data["version"] = 1` |
 | the rest (`span_id`, `status`, `time`, `sandbox`; `span_id`, `mode`, `reason`, `stop_reason`) | `data` |
 | `type: "ledger"` or `"metrics"`, then the model's fields | `kind="ledger"` or `"metrics"`, `member=None`, `data` the model's dump exactly as stored, its own `version` included |
+| `type: "swarm_start"`, `version: 1` ([swarm-result-record.md](swarm-result-record.md#the-start-event)) | `kind="swarm_start"`, `member=None`, `data={"version": 1}` |
 | `type: "result_record"`, then the record's fields ([swarm-result-record.md](swarm-result-record.md#the-event)) | `kind="result_record"`, `member=None`, `data` the `SwarmResultRecord` dump, its own `version` included, and the record's `id` |
 
 So `data` for the ledger and metrics is the store entry itself, and `SwarmLedger.model_validate(event.data)` reads it. The versions stay 1: the event type tells the new format apart from the `InfoEvent`s, and the rule that the evidence `version` tracks the payload's shape, not the tools' texts (decision: Ransom, 2026-10-23), applies to `data`. The swarm writes no `InfoEvent` after the switch.
@@ -296,7 +297,7 @@ The private helpers become two: `_comm(kind, *, agent, agent_span_id, loop, nest
 - `CommRecord`: `kind`, `member=event.agent`, `channel`, `record=event.record_ids[0]` for `sent` and `delivered` (else `None`), `rejected=event.send.rejected.control` if rejected, `payload_bytes` from `utf8_bytes(event.send.record.content)` for an accepted `sent` (a rejected payload is still not measured, since it can hold text no UTF-8 encoder takes), and `listing=event.data.get("listing") is True`.
 - `WaitRecord`: `member=event.agent`, `outcome=event.wait.outcome`, `duration=event.wait.duration`, `idle=event.data["idle"]`.
 
-`_comm_metrics` and `_waits` read these records and do not change. Matching on `source` keeps other producers' communication (a later bridged member's, or another library's) out of the swarm's metrics, as the source check does today. `swarm_ledger()` and the analysis columns read the store and do not change. `swarm_result()` matches the `SwarmEvent` of kind `result_record` and keeps matching the `InfoEvent` form, so a log written before the switch still gives its record ([swarm-result-record.md Reading it](swarm-result-record.md#reading-it-swarm_result)).
+`_comm_metrics` and `_waits` read these records and do not change. Matching on `source` keeps other producers' communication (a later bridged member's, or another library's) out of the swarm's metrics, as the source check does today. `swarm_ledger()` and the analysis columns read the store and do not change. `swarm_result()` matches the `SwarmEvent` of kind `result_record` and keeps matching the `InfoEvent` form, so a log written before the switch still gives its record ([swarm-result-record.md Reading it](swarm-result-record.md#reading-it-swarm_result)); its check for a swarm's events in a sample whose store lost the record's id accepts any `SwarmEvent`, the start event included ([Samples whose store lost the id](swarm-result-record.md#samples-whose-store-lost-the-id)).
 
 ### Viewer: types, filter and renderers
 
