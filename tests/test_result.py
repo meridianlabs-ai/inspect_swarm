@@ -13,6 +13,7 @@ from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.agent import run as run_agent
 from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent
+from inspect_ai.log import read_eval_log
 from inspect_ai.model import Model, ModelOutput
 from inspect_ai.util import store, token_limit
 
@@ -28,10 +29,11 @@ from inspect_swarm import (
     artifact_result,
     member,
     swarm,
+    swarm_result,
 )
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import SwarmLedger
-from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
+from inspect_swarm._record import SwarmResultRecord, _is_record, _transcript_result
 from inspect_swarm._result import verifier_label
 
 from .swarm_runtime import (
@@ -279,7 +281,7 @@ async def test_submissions_are_keyed_and_verified_before_their_events() -> None:
         ("right", True, 1.0),
         ("wrong", False, 0.0),
     ]
-    # written in the swarm's span; the explanation stays in the record
+    # written in the swarm's span
     swarm_events = [
         e
         for e in stop.transcript.events
@@ -287,7 +289,10 @@ async def test_submissions_are_keyed_and_verified_before_their_events() -> None:
     ]
     [swarm_span] = {e.span_id for e in swarm_events if _kind(e) == "final"}
     assert {e.span_id for e in swarm_events if _kind(e) == "verdict"} == {swarm_span}
-    assert "EXPLANATION" not in repr([e.data for e in swarm_events])
+    # the explanation is in the record alone, written when the swarm ends
+    assert "EXPLANATION" not in repr(
+        [e.data for e in swarm_events if not _is_record(e)]
+    )
     assert "EXPLANATION" not in repr(seen)
 
 
@@ -299,21 +304,28 @@ def test_the_verifier_gets_the_answer_and_the_samples_metadata(
     tmp_path: Path,
 ) -> None:
     checker = Checker()
+    long = "x" * 300
     task = Task(
         dataset=[Sample(input="task", target="TARGET-1729", metadata={"level": 3})],
         solver=swarm(
-            answers("42"),
+            [member(answers("42"), name="short"), member(answers(long), name="long")],
             channels=[],
             result=answer_result(verifier=checker),
         ),
     )
     [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
     assert log.status == "success"
-    assert checker.calls == [("42", {"level": 3})]
-    assert log.samples is not None
-    [sample] = log.samples
-    record = SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
-    assert record.members[0].verdict == Verdict(True, 1.0, "EXPLANATION-42")
+    assert sorted(checker.calls) == [("42", {"level": 3}), (long, {"level": 3})]
+    # from the log, with the long output and explanation left as attachments
+    samples = read_eval_log(log.location).samples
+    assert samples is not None
+    [sample] = samples
+    record = swarm_result(sample)
+    assert record is not None
+    short_result, long_result = record.members
+    assert short_result.verdict == Verdict(True, 1.0, "EXPLANATION-42")
+    assert long_result.verdict == Verdict(False, 0.0, f"EXPLANATION-{long}")
+    assert long_result.output is not None and long_result.output.completion == long
 
 
 @pytest.mark.anyio
@@ -348,8 +360,9 @@ async def test_the_stop_leaves_a_submission_unverified_when_it_refuses_its_check
             ),
             "task",
         )
-        record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+        record = _transcript_result(store())
         ledger = SwarmLedger.model_validate(store().get(LEDGER_KEY))
+    assert record is not None
     assert [m.status for m in record.members] == ["submitted", "submitted"]
     # the closed runtime lever refused the late check's model call
     assert [answer for answer, _ in checker.calls] == ["42", "42"]
@@ -472,3 +485,10 @@ async def test_the_record_keeps_each_members_output_however_it_ended() -> None:
     # no contract: no kind, keys or verdicts
     assert (stop.record.kind, stop.record.verifier) == (None, None)
     assert all(m.answer_key is None and m.verdict is None for m in stop.record.members)
+
+
+@pytest.mark.anyio
+async def test_an_output_a_log_would_change_fails_the_sample() -> None:
+    # a log would read this output back as a reference to an attachment
+    with pytest.raises(ValueError, match="the members' outputs"):
+        await run_swarm(swarm(answers("attachment://0123"), channels=[]))

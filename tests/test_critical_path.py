@@ -16,6 +16,7 @@ from inspect_swarm._ledger import EventLog
 from inspect_swarm._metrics import _completed  # pyright: ignore[reportPrivateUsage]
 
 BOARD = "shared_memory"
+MESSAGES = "messages"
 ROSTER = ("a", "b", "c", "m", "p", "q", "w")
 
 # a member's own span, and the spans of a nested swarm inside member a; any other span
@@ -213,7 +214,7 @@ def _value(board: str | None, ops: list[Op], answer: str | None) -> int | None:
     transcript = Transcript()
     token = _transcript.set(transcript)
     try:
-        events = EventLog(PathLog(board, ROSTER))
+        events = EventLog(PathLog(board, MESSAGES, ROSTER))
         transcript._subscribe(events)  # pyright: ignore[reportPrivateUsage]
         run = _Run(transcript, events)
         for op in ops:
@@ -499,6 +500,23 @@ _DEEP_WRITER = [steps("p", 10), write("p", ("f-1", 1))]
         pytest.param(
             BOARD,
             [
+                *_DEEP_WRITER,
+                wait(
+                    "m",
+                    {"record": "m-1", "from": "q"},
+                    ("f-1", 1),
+                    channels=(MESSAGES, BOARD),
+                ),
+                steps("m"),
+                end("m"),
+            ],
+            "m",
+            11,
+            id="wait-reaching-messages-links-board-files",
+        ),
+        pytest.param(
+            BOARD,
+            [
                 steps("q", 20),
                 write("q", ("f-1", 1)),
                 steps("p", 2),
@@ -507,6 +525,7 @@ _DEEP_WRITER = [steps("p", 10), write("p", ("f-1", 1))]
                 wait("m", ("f-1", 1), channels=(BOARD, "notes")),
                 wait("m", ("f-99", 1), channels=(BOARD, "notes")),
                 wait("m", {"note": "n-1"}, channels=(BOARD, "notes")),
+                wait("m", ("f-1", 1), channels=(BOARD, MESSAGES, "notes")),
                 steps("m"),
                 end("m"),
             ],

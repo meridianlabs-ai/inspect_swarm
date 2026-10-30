@@ -1,6 +1,6 @@
 ---
 reference: inspect_swarm
-description: Swarms, members, controllers, channels and the budget view.
+description: Swarms, members, controllers, channels, results and the budget view.
 ---
 
 ## Swarms and members
@@ -23,20 +23,11 @@ description: Swarms, members, controllers, channels and the budget view.
 ### StopReason
 ### FinalName
 
-## Results
-
-### answer_result
-### artifact_result
-### ResultSpec
-### ResultKind
-### Verdict
-### Verifier
-### MemberArtifacts
-
 ## Channels
 
 ### filesystem
 ### shared_memory
+### messages
 ### swarm_tools
 ### swarm_channel
 ### Channel
@@ -46,6 +37,20 @@ description: Swarms, members, controllers, channels and the budget view.
 ### WaitSpec
 ### WaitNews
 ### Record
+
+## Results
+
+### swarm_result
+### SwarmResultRecord
+### MemberResult
+### FinalRecord
+### answer_result
+### artifact_result
+### ResultSpec
+### ResultKind
+### Verdict
+### Verifier
+### MemberArtifacts
 
 ## Budget view
 

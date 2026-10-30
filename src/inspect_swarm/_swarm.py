@@ -32,6 +32,7 @@ from ._channel.filesystem import FilesystemChannel
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
 from ._member import Member, is_factory, member, member_names, member_sandbox
+from ._record import forget_record
 from ._registry import resolve
 from ._result import ResultSpec
 
@@ -91,6 +92,9 @@ def swarm(
     resolved_result = _result(result)
 
     async def execute(state: AgentState) -> AgentState:
+        # first, before anything this run can fail at, so that it never leaves an
+        # earlier swarm's record as its own
+        forget_record()
         _check_sandbox_names(runs)
         caps = derive_caps(resolved_budget, len(roster))
         if caps.cost is not None:

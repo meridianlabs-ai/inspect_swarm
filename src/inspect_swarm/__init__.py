@@ -16,6 +16,7 @@ from ._channel._channel import (
     swarm_channel,
 )
 from ._channel.filesystem import filesystem
+from ._channel.messages import messages
 from ._channel.shared_memory import shared_memory
 from ._controller._control import (
     MemberEnded,
@@ -34,6 +35,7 @@ from ._controller._controller import (
 from ._controller.leaderless import leaderless
 from ._final import FinalName
 from ._member import Member, member
+from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
 from ._result import (
     MemberArtifacts,
     ResultKind,
@@ -60,11 +62,13 @@ __all__ = [
     "ChannelState",
     "Controller",
     "FinalName",
+    "FinalRecord",
     "Member",
     "MemberArtifacts",
     "MemberEnded",
     "MemberHandle",
     "MemberInfo",
+    "MemberResult",
     "MemberState",
     "Record",
     "ResultKind",
@@ -73,6 +77,7 @@ __all__ = [
     "SwarmBudget",
     "SwarmControl",
     "SwarmEvent",
+    "SwarmResultRecord",
     "Verdict",
     "VerdictSummary",
     "Verifier",
@@ -85,11 +90,13 @@ __all__ = [
     "filesystem",
     "leaderless",
     "member",
+    "messages",
     "shared_memory",
     "swarm",
     "swarm_budget",
     "swarm_channel",
     "swarm_controller",
     "swarm_resources",
+    "swarm_result",
     "swarm_tools",
 ]
