@@ -17,6 +17,7 @@ from ._channel import (
     Channel,
     ChannelRun,
     ChannelState,
+    ToolDeclaration,
     WaitNews,
     WaitSpec,
     swarm_channel,
@@ -68,6 +69,53 @@ _DESCRIPTION = (
     "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view takes as its file_id. "
     "The changes command returns that list alone: use it to check what other agents changed without viewing anything."
 )
+
+
+# the tool's signature, reflected once for its parameters, which each run's tool and a
+# bridged member's take
+async def _shared_memory(
+    command: Command,
+    path: str | None = None,
+    file_text: str | None = None,
+    old_str: str | None = None,
+    new_str: str | None = None,
+    insert_line: int | None = None,
+    insert_text: str | None = None,
+    view_range: list[int] | None = None,
+    old_path: str | None = None,
+    new_path: str | None = None,
+    append_text: str | None = None,
+    file_id: str | None = None,
+) -> str:
+    """Shared memory.
+
+    Args:
+        command: Command to execute (view, create, str_replace, insert, append, delete, rename, changes).
+        path: Required for `create`, `str_replace`, `insert`, `append` and `delete`, and for `view` without `file_id`. Path to a file or directory under /shared_memory, e.g. `/shared_memory/notes.md` or `/shared_memory/notes`.
+        file_text: Required for `create`: the content of the file. It replaces the file if it exists.
+        old_str: Required for `str_replace`: the text in `path` to replace, which must occur there exactly once.
+        new_str: Optional for `str_replace`: the new text (if not given, `old_str` is deleted).
+        insert_line: Required for `insert`: `insert_text` is inserted AFTER line `insert_line` of `path`; 0 inserts at the start.
+        insert_text: Required for `insert`: the text to insert.
+        view_range: Optional for `view` of a file: the lines to show, e.g. [11, 12] shows lines 11 and 12. Indexing starts at 1. `[start_line, -1]` shows from `start_line` to the end of the file.
+        old_path: Required for `rename`: the current path of a file or directory.
+        new_path: Required for `rename`: the new path, which must not exist.
+        append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
+        file_id: Optional for `view`, in place of `path`: the id of a file, such as `f-3`, as status lines name files.
+    """
+    ...
+
+
+_PARAMETERS = ToolDef(_shared_memory, description=_DESCRIPTION).parameters
+
+
+# the tool as each run builds it, for a bridged member's tools
+def declarations() -> list[ToolDeclaration]:
+    return [
+        ToolDeclaration(
+            "shared_memory", _DESCRIPTION, _PARAMETERS.model_copy(deep=True)
+        )
+    ]
 
 
 @dataclass(frozen=True)
@@ -432,22 +480,6 @@ class _SharedMemoryState:
             append_text: str | None = None,
             file_id: str | None = None,
         ) -> str:
-            """Shared memory.
-
-            Args:
-                command: Command to execute (view, create, str_replace, insert, append, delete, rename, changes).
-                path: Required for `create`, `str_replace`, `insert`, `append` and `delete`, and for `view` without `file_id`. Path to a file or directory under /shared_memory, e.g. `/shared_memory/notes.md` or `/shared_memory/notes`.
-                file_text: Required for `create`: the content of the file. It replaces the file if it exists.
-                old_str: Required for `str_replace`: the text in `path` to replace, which must occur there exactly once.
-                new_str: Optional for `str_replace`: the new text (if not given, `old_str` is deleted).
-                insert_line: Required for `insert`: `insert_text` is inserted AFTER line `insert_line` of `path`; 0 inserts at the start.
-                insert_text: Required for `insert`: the text to insert.
-                view_range: Optional for `view` of a file: the lines to show, e.g. [11, 12] shows lines 11 and 12. Indexing starts at 1. `[start_line, -1]` shows from `start_line` to the end of the file.
-                old_path: Required for `rename`: the current path of a file or directory.
-                new_path: Required for `rename`: the new path, which must not exist.
-                append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
-                file_id: Optional for `view`, in place of `path`: the id of a file, such as `f-3`, as status lines name files.
-            """
             return await self._call(
                 command,
                 path=path,
@@ -467,6 +499,7 @@ class _SharedMemoryState:
             execute,
             name="shared_memory",
             description=_DESCRIPTION,
+            parameters=_PARAMETERS.model_copy(deep=True),
             parallel=True,
         ).as_tool()
 

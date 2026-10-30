@@ -90,8 +90,10 @@ class SwarmMetrics(BaseModel):
     # order
     never_acted: list[str]
     # harness validity, in roster order: in a swarm with channels that have tools,
-    # members with a completed model call whose loops never resolved swarm_tools().
-    # The default loads metrics written before this field.
+    # native members with a completed model call whose loops never resolved
+    # swarm_tools(); a bridged member reaches the bus through swarm_bridged_tools(),
+    # fixed when its agent is built, so it is not checked. The default loads metrics
+    # written before this field.
     tools_unwired: list[str] = []
     # critical path, the simple definition: a member's steps are the completed model
     # calls in its spans, cache replays included, from its ledger line, so they cover
@@ -232,7 +234,7 @@ def swarm_metrics(
         tools_unwired=[
             m.name
             for m, w in zip(ledger.members, wiring, strict=True)
-            if channels and not w.tools and _steps(m) >= 1
+            if channels and not w.tools and not m.bridged and _steps(m) >= 1
         ],
         steps_to_answer=None
         if answer is None

@@ -28,6 +28,7 @@ description: Swarms, members, controllers, channels and the budget view.
 ### shared_memory
 ### messages
 ### swarm_tools
+### swarm_bridged_tools
 ### swarm_channel
 ### Channel
 ### ChannelRun

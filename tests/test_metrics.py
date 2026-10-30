@@ -260,6 +260,8 @@ async def test_members_that_acted_without_resolving_swarm_tools_are_unwired(
                 member(wired(scripted_model()), name="wired"),
                 member(generator(scripted_model()), name="unwired"),
                 member(sleeper(0), name="idle"),
+                # reaches the bus through swarm_bridged_tools(), so it is not checked
+                member(generator(scripted_model()), name="cli", bridged=True),
             ],
             channels=channels,
             controller=leaderless(stop_on_submission=False),

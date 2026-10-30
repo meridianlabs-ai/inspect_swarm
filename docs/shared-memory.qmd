@@ -51,7 +51,7 @@ solver = swarm(
 - Any agent that takes a `ToolSource` in its tools can take `swarm_tools()`. It gives no tools when the swarm has no channel with tools, or outside a swarm, so one member definition serves every arm of an experiment.
 - This swarm keeps the `filesystem` channel beside the board. `channels=[shared_memory()]`, or `channels=["shared_memory"]`, replaces it: members still share the sample's sandbox, but their preamble no longer mentions `/shared`. Members with their own sandboxes can use the board with no shared volume.
 - The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`.
-- Bridged members cannot use the channel yet, and `swarm()` refuses a bridged member beside it.
+- A bridged member gets the tool from `swarm_bridged_tools(["shared_memory"])`. Its CLI is one agent to the board: a file any of its conversations viewed counts as viewed by all of them ([Bridged members](restrictions.qmd#bridged-members)).
 
 ## The tool
 

@@ -32,7 +32,6 @@ Goals:
 
 Non-goals:
 
-- Bridged members. A swarm with a bus channel refuses them in M2 (M2-6); nothing here designs their access.
 - The `messages` channel, notes, task lists or boards with posts; push delivery (reminders, injection, urgent messages). They stay as [swarm-communication.md](swarm-communication.md) describes them.
 - Changing inspect_ai's `memory()`. Its private-memory framing and its own quirks are listed under [Not this design](#not-this-design).
 - The dependency-linked critical path metric itself (future work in the plan); only the evidence it needs.
@@ -123,7 +122,7 @@ def shared_memory(
 - **Validation** when `shared_memory()` is called raises `ValueError` below: `max_files`, `max_file_bytes`, `max_file_lines` and `max_wait` 1; `max_board_bytes` `max_file_bytes`; `rate` a positive count and a positive window. No bound has a maximum.
 - **`check(roster)`** at `swarm()` construction raises `ValueError` for a member name outside `^[a-z][a-z0-9_-]{0,47}$`, the grammar of [swarm-communication.md Addressing](swarm-communication.md#addressing), because writer names appear in fence attributes and status lines. A name defaulted from a factory is reported with the fix, `member(..., name=...)`.
 - **`instructions(member)`** is a fixed template: the board is shared by every member of the swarm and their subagents, it is reached with the `shared_memory` tool under `/shared_memory`, files are shown between `<peer_file>` tags whose `last_writer` attribute names the agent that last wrote them, the status line and the `changes` command name changed files by ids such as `f-3`, which `view` takes as its `file_id`, `changes` checks what other agents changed without viewing anything, a file must be viewed in its current version before it is overwritten, edited by line, renamed or deleted, and a member waiting for another member's work calls `swarm_wait` rather than polling. It names no member other than the reader and nothing a member wrote ([swarm-api.md Security](swarm-api.md#security)).
-- **Bridged members** are refused at construction by M2-6's rule, since this channel has a non-`None` `name`.
+- **Bridged members** get the tool from `swarm_bridged_tools(["shared_memory"])`, and their CLI is one loop ([Bridged members](#bridged-members)).
 
 **Why the tool is not called `memory`.** It keeps memory()'s commands and parameter names, which models know, but a tool named `memory` with exactly those parameters is sent to Claude 4+ models as Anthropic's native memory tool, so our description, which says the board is shared and fenced, would never reach the model; compaction's memory integration would treat board writes as the member's private notes; and a deepagent member would also get its own private `memory()` under the same name, since deepagent cannot see a tool behind a tool source ([Current behaviour](#the-name-memory-is-special-in-inspect_ai)). A distinct name and root keep the private memory and the board apart, which also lets a member keep private notes in deepagent's `memory()`.
 
@@ -264,7 +263,7 @@ The swarm adds no message to a member's conversation; a loop learns of changes f
 - **Attribution.** The member is the record's `sender`, bound from the ContextVar the children inherit *(spike)*. The loop is the agent span the call runs in (`sender_span_id` on writes, `span_id` on reads), plus `nested: true` when it is not the bound loop. A descendant does not need to resolve the tool source itself for this, because attribution reads the span at call time.
 - **Rate and limits are the member's.** A member's 64 children share its `rate`, so descendants cannot multiply one member's write volume.
 - **Background children and the drain.** While its member drains, the member is still `running`, so the views and writes of a background child finishing a tool call are accepted, as part of the work the drain lets complete; once a swarm stop has begun, writes are refused as for every loop. None follows the member's end, because the member's owner has ended its children by then ([swarm-background-members.md The shared-memory channel](swarm-background-members.md#the-shared-memory-channel)).
-- **Supported shapes.** Members whose top loop is `react()` or `deepagent()`, and their `general()` children (deepagent's only nested loops that inherit tools), are the shapes this is designed and tested for. A custom agent that runs nested work outside agent spans makes all its calls look like one loop; its writes are still attributed to the member, and the shared `seen` only makes the rule more permissive for it. Bridged members are refused (M2-6).
+- **Supported shapes.** Members whose top loop is `react()` or `deepagent()`, and their `general()` children (deepagent's only nested loops that inherit tools), are the shapes this is designed and tested for. A custom agent that runs nested work outside agent spans makes all its calls look like one loop; its writes are still attributed to the member, and the shared `seen` only makes the rule more permissive for it. A bridged member's CLI is one loop by design ([Bridged members](#bridged-members)).
 
 **With several readers per member, `read` means:**
 
@@ -272,6 +271,15 @@ The swarm adds no message to a member's conversation; a loop learns of changes f
 - **The member has read** a write when any of its loops has. A child's read does not put the content in its parent's context; it reaches the parent only through the child's result, which analysis follows through the child's span. The `nested` flag lets an analysis count top-loop reads alone where that is the question.
 
 **Checked against the member contract and the tool-state scope.** The factory-form member design builds each member's agent from its factory in the member's task, once per member per sample ([swarm-api.md The member contract](swarm-api.md#the-member-contract)); `swarm_tools()` holds no state and its tools come from the run's `SharedMemoryState` at resolution, so a factory-built agent, a built agent shared by samples, and a `swarm_tools()` object passed in `args` all reach the right run and member. The board lives on the bus, not in the sample store, so the tool-state scope does not apply to it, and a member's `memory()` at the default instance stays private to it under the scope as decided ([swarm.md Members](swarm.md#members)); the scope, too, is a ContextVar entered in the member's task, which children inherit as the spike shows for the member's.
+
+### Bridged members
+
+A bridged member (Claude Code or Codex through inspect_swe) gets the `shared_memory` tool from `swarm_bridged_tools(["shared_memory"])` ([swarm-communication.md Bridged members](swarm-communication.md#bridged-members)). **Its CLI is one loop to the board, with one `seen` shared by all its conversations** (decision: Ransom, 2026-10-30). The host does not learn which of the CLI's conversations proposed a call, and every bridged call runs in the agent span the bridge was started in, so the board cannot tell the CLI's subagents from its top-level session. This is the board's form of the messages channel's shared inbox:
+
+- A view by any conversation marks the version seen for the CLI, so it satisfies the seen rule for the others (create over an existing file, insert, delete, rename) and takes the file out of their status lines and waits.
+- A write from any conversation is the member's, from that one loop, so it is never news to another conversation of the CLI.
+- The seen rule therefore guards the member against stale writes, not each conversation: a CLI subagent's view lets its parent overwrite a file the parent never viewed. No stricter rule could be enforced, since the conversations cannot be told apart.
+- Evidence is as below, with `via: "bridge"` and `nested: false`; `loop` is that agent span, and the tool span is the one inspect_ai opens for the host call.
 
 ### Evidence
 

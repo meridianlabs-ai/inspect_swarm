@@ -37,7 +37,6 @@ Goals:
 Non-goals:
 
 - Persistent members, coordinator wake-from-idle and push delivery. They stay future work; [Room for later work](#room-for-later-work) says how they fit. The messages channel plugs in as [With the messages channel](#with-the-messages-channel) describes.
-- Bridged members' waits: a swarm with a bus channel refuses bridged members in M2 (M2-6).
 - Watching files in a sandbox. The filesystem channel stays observed ([swarm-communication.md The filesystem channel](swarm-communication.md#the-filesystem-channel)).
 - Changing the status line. The wait reads D-1's `seen` and marks nothing; status lines keep D-1's behaviour.
 
@@ -315,9 +314,16 @@ The messages channel contributes its `max_wait` (default 120) to the effective m
 - **What it returns.** `news()` gives `3 unread messages (from worker-2, worker-4). Call read_messages() to read them.`, counting every unread message and naming their senders, and the `waited` evidence's `files` names each unread message as `{"record": "m-3", "from": "worker-2"}`. A result of the own loop's wait with that line and other news (board news, an end) also ends with the messages channel's status line, so that truncating its middle at a small output limit keeps a count. A result without that line (a timeout, the stop, an end, board news) ends with the status line, `You have 2 unread messages.`, when only `wake=False` messages are unread, so they are counted on every swarm tool result as [swarm-communication.md](swarm-communication.md#how-members-learn-of-changes) requires.
 - **The tool.** `swarm_tools()` builds `swarm_wait` for the channels the calling loop reaches. A loop that reaches only the messages channel gets `swarm_wait(timeout)`, with no `path` or `file_id`, described as waiting for an unread message or a member's end. A loop that reaches both channels gets the shared memory's parameters and a description that names both; a nested loop beside them gets the shared memory's tool as above. `path` and `file_id` filter only the board: a waking message ends a wait whatever its filter.
 
+### Bridged members
+
+`swarm_bridged_tools()` gives a bridged member `swarm_wait`, which waits on the channels it names that the swarm has; its description and parameters are chosen from those names as `swarm_tools()` chooses them from the loop's reach, and its timeout's description does not name the run's maximum, which is not known when the agent is built ([swarm-communication.md Bridged members](swarm-communication.md#bridged-members)).
+
+- **Never waiting.** A bridged member never counts as waiting for the all-waiting release, because the host cannot tell whether one blocked call is all its CLI is doing; a running bridged member counts as active. Its waits end by news, ends, the stop, the drain or the timeout, and they never run its idle clock.
+- **Per call.** The CLI is one loop, the member's own, but each of its conversations may wait, so the one-wait-at-a-time rule of the own loop does not apply to it. Its waits share the loop's record of the ends already named, so an end is named once for the CLI.
+- **The CLI's MCP timeout** must exceed the bus's effective maximum wait ([swarm-communication.md Bridged members](swarm-communication.md#bridged-members)).
+
 ### Room for later work
 
-- **Bridged members' bus tools** (later) give them `swarm_wait` through `swarm_bridged_tools()`. A bridged member never counts as waiting, because the host cannot tell whether one blocked call is all its CLI is doing, as swarm-communication.md already says; its waits end by news, ends, the stop or timeout. Its CLI's MCP timeout must exceed the bus's effective maximum wait.
 - **Persistent members and wake from idle.** An idle member (submitted, held between activations) is not in a tool call, so it is not a waiter. The all-waiting check generalises to quiescence: no member active, idle members counting as not active, and every channel's `quiescent()`. Waking an idle member stays the controller's decision on a `SwarmEvent` ([swarm-communication.md Wake later](swarm-communication.md#wake-and-turn-boundaries)).
 - **Push delivery.** An urgent message to a member in `swarm_wait` ends the wait (outcome `waiting` in the urgent-message table), as it ended a `read_messages` wait.
 

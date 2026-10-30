@@ -34,7 +34,7 @@ solver = swarm(
 - Only the member's own loop gets the tools. Its subagents, such as a deepagent member's `general()`, do not, so each inbox has one reader.
 - The channel can be combined with `shared_memory()`. Then the member's own loop gets both channels' tools and one `swarm_wait` for both.
 - The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`. `all` and `swarm` are reserved.
-- Bridged members cannot use the channel yet, and `swarm()` refuses a bridged member beside it.
+- A bridged member gets the tools from `swarm_bridged_tools(["messages"])`. All of its CLI's conversations, subagents included, share its inbox: a message any of them reads is read ([Bridged members](restrictions.qmd#bridged-members)).
 
 ## The tools
 

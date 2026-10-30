@@ -174,11 +174,6 @@ def test_member_names_outside_the_grammar_are_refused(name: str) -> None:
         swarm(member(react(), name=name), channels=["shared_memory"])
 
 
-def test_a_bridged_member_is_refused() -> None:
-    with pytest.raises(ValueError, match="bridged members cannot use bus channels"):
-        swarm(member(react(), bridged=True), channels=["shared_memory"])
-
-
 @pytest.mark.parametrize(
     "members,channels",
     [
