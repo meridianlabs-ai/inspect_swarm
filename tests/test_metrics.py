@@ -62,6 +62,7 @@ from inspect_swarm import (
     WaitSpec,
     leaderless,
     member,
+    messages,
     shared_memory,
     swarm,
     swarm_channel,
@@ -1181,6 +1182,59 @@ async def test_a_read_in_the_answering_members_drain_counts(replace: bool) -> No
     assert (answer == "placeholder") is not replace
     metrics = _metrics(outcome.transcript)
     assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (0, 10)
+
+
+@agent
+def writes_and_holds(model: Model, waited: anyio.Event) -> Agent:
+    """Make ten steps, write the file a peer waits for, and end only once the peer's wait has returned."""
+
+    async def execute(state: AgentState) -> AgentState:
+        memory = (await resolve())["shared_memory"]
+        for _ in range(10):
+            state.output = await model.generate(state.messages)
+        await memory(command="create", path=_p("peer.md"), file_text="peer content")
+        await waited.wait()
+        return state
+
+    return execute
+
+
+@agent
+def waits_for_news(model: Model, waited: anyio.Event) -> Agent:
+    """Make a step, wait for news, then make another step."""
+
+    async def execute(state: AgentState) -> AgentState:
+        wait = (await resolve())["swarm_wait"]
+        await model.generate(state.messages)
+        await wait()
+        waited.set()
+        state.output = await model.generate(state.messages)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_wait_that_also_reaches_messages_links_the_files_it_names() -> None:
+    # w's own loop waits on both channels and no message is sent: the wait names p's
+    # file, before p ends
+    waited = anyio.Event()
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(writes_and_holds(scripted_model(), waited), name="p"),
+                member(waits_for_news(scripted_model(), waited), name="w"),
+            ],
+            channels=[shared_memory(), messages()],
+            controller=_answered_by("w"),
+        )
+    )
+    [wait] = evidence(outcome.transcript, "waited")
+    assert sorted(wait["channels"]) == ["messages", "shared_memory"]
+    assert [f["version"] for f in wait["files"]] == [1]
+    assert wait["ended"] == []
+    metrics = _metrics(outcome.transcript)
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 11)
 
 
 @agent

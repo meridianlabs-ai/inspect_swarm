@@ -388,6 +388,15 @@ class MessagesState:
         return f"You have {_count(count)}." if count else None
 
 
+# The record name of the built-in messages channel among a run's open channel states, by
+# its state's type rather than its name, which a custom channel may take; None without
+# one.
+def builtin_messages(states: Mapping[str, ChannelState]) -> str | None:
+    return next(
+        (name for name, s in states.items() if isinstance(s, MessagesState)), None
+    )
+
+
 def _fenced(record: Record) -> str:
     attributes = [
         ("id", record.id),
