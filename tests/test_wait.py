@@ -410,6 +410,9 @@ async def test_a_wait_counts_unread_messages_that_do_not_wake_it() -> None:
         assert results == [f"{STOPPING}\nYou have 1 unread message."]
 
 
+_NOT_WAKING = "Messages sent with wake=False do not wake this wait; they are counted when it returns for another reason."
+
+
 @pytest.mark.anyio
 async def test_swarm_wait_is_described_for_the_channels_its_loop_reaches() -> None:
     async with messages_run(
@@ -418,15 +421,17 @@ async def test_swarm_wait_is_described_for_the_channels_its_loop_reaches() -> No
         own, nested = r.bus.waits.tool(True), r.bus.waits.tool(False)
         assert own is not None and nested is not None
         assert ToolDef(own).description.startswith(
-            "Wait until there is something for you to look at in the swarm: an unread message sent to you, a shared memory file"
+            "Wait until there is something for you to look at in the swarm: an unread message sent to you with wake=True, a shared memory file"
         )
+        assert _NOT_WAKING in ToolDef(own).description
         assert "message" not in ToolDef(nested).description
     async with messages_run(("w-1", "w-2")) as (r, _):
         own = r.bus.waits.tool(True)
         assert own is not None
         assert ToolDef(own).description.startswith(
-            "Wait until there is something for you to look at in the swarm: an unread message sent to you, or another member has ended."
+            "Wait until there is something for you to look at in the swarm: an unread message sent to you with wake=True, or another member has ended."
         )
+        assert _NOT_WAKING in ToolDef(own).description
         assert list(ToolDef(own).parameters.properties) == ["timeout"]
         assert r.bus.waits.tool(False) is None
 

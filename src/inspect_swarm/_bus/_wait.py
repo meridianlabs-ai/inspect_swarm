@@ -20,6 +20,8 @@ Outcome = Literal[
     "news", "all_waiting", "stopping", "member_ending", "timeout", "cancelled"
 ]
 
+_NOT_WAKING = "Messages sent with wake=False do not wake this wait; they are counted when it returns for another reason. "
+
 _RELEASES = "It also returns when every member is waiting, has ended or has not started, when the swarm is stopping, or after `timeout` seconds. "
 
 _DESCRIPTION = (
@@ -32,16 +34,18 @@ _DESCRIPTION = (
 
 # with the messages channel, which only the member's own loop reaches
 _MESSAGES_DESCRIPTION = (
-    "Wait until there is something for you to look at in the swarm: an unread message sent to you, or another member has ended. "
+    "Wait until there is something for you to look at in the swarm: an unread message sent to you with wake=True, or another member has ended. "
     "Returns at once if that is already so, and keeps returning while such a message stays unread, so read it with read_messages. "
+    + _NOT_WAKING
     + _RELEASES
     + "It returns counts and member names, never message content. "
     "Use it instead of polling with sleep."
 )
 
 _BOTH_DESCRIPTION = (
-    "Wait until there is something for you to look at in the swarm: an unread message sent to you, a shared memory file where you watch has a change you have not viewed (another agent's write, including your own subagents'), or another member has ended. "
+    "Wait until there is something for you to look at in the swarm: an unread message sent to you with wake=True, a shared memory file where you watch has a change you have not viewed (another agent's write, including your own subagents'), or another member has ended. "
     "Returns at once if that is already so, and keeps returning while such a message stays unread or a changed file there stays unviewed, so read your messages with read_messages and view the files it names, or narrow `path`, or watch one file with `file_id`. "
+    + _NOT_WAKING
     + _RELEASES
     + "It returns counts, file ids and member names, never message or file content. "
     "Use it instead of polling with sleep."
