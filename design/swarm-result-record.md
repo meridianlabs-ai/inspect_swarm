@@ -4,7 +4,7 @@
 
 The swarm's result record (each member's state, status and time, and which member's output is the answer) moves out of the sample store and into the transcript. The runtime writes it once, when the swarm ends, as one evidence event in the swarm's span, from the synchronous `finally` that already writes the ledger and the metrics, so a limit, error or cancellation that ends the swarm still leaves it, marked `provisional`. In the same `finally` it puts the record's id, and nothing else of it, in the store under `inspect_swarm:result_id`, so the record stays tied to the store the swarm ran with, as it is today when a fork or a subtask gives a branch its own store. While the swarm runs neither exists, so no member's tool can read its peers' results.
 
-A public helper reads it. `swarm_result(state)` takes a scorer's or a solver's `TaskState` and returns the record its store names, from the transcript of the sample being run or scored, both during the eval and when a log is re-scored. `swarm_result(sample)` does the same for a sample read from a log, for analysis. Each returns `None` when no swarm ended with that store. The ledger and the metrics, which the swarm writes only after every member has ended and which hold no member text, stay in the store.
+A public helper reads it. `swarm_result(state)` takes a scorer's or a solver's `TaskState` and returns the record its store names, from the transcript of the sample being run or scored, both during the eval and when a log is re-scored. `swarm_result(sample)` does the same for a sample read from a log, for analysis. Each returns `None` when no swarm ended with that store. A read that cannot give the record of the swarm being scored raises instead of returning `None` or another swarm's record: any read of a running sample while a swarm in it is still running, such as a task scorer that a member's `react(attempts=...)` or live control scoring calls during the solve, and any read of a log written while the record was in the store. A solver wrapper's read right after the swarm returns still works, and a scorer that the solve can call skips the record while `state.completed` is `False`. The ledger and the metrics, which the swarm writes only after every member has ended and which hold no member text, stay in the store.
 
 The scoring plan after M2 (the result contract, `member_scores`, the analysis helpers) builds on this home: members' outputs, answer keys and verdicts enter the record at the swarm's end, and every reader uses `swarm_result()`.
 
@@ -23,6 +23,7 @@ Goals:
 - The result record lives in the transcript, not the store, with the same fields and format version.
 - One public reader for scorers, solver wrappers, re-scoring and analysis, correct under bounded transcripts and with condensed logs, that returns the record of the state or sample it is given, as the store does today under forks and subtasks.
 - No record exists while its swarm runs.
+- A read that cannot give the record of the swarm being scored fails loudly, never returning `None` or another swarm's record: a read while a swarm in the sample is still running, and a read of a log that holds the old store record (decision: Ransom, 2026-10-30).
 - The scoring plan after M2 (swarm-scoring.md steps 1 to 7) builds on the new home, and the other designs that name the store key say where the record is.
 
 Non-goals:
@@ -31,11 +32,12 @@ Non-goals:
 - The `SwarmEvent` type itself ([swarm-event-types.md](swarm-event-types.md)); this design adds one kind to its mapping.
 - Stopping a tool from reading the transcript. It is Python code in the sample, as it is today.
 - Records of several swarms that share one store beyond "the last to end", as the store gives today ([Not this design](#not-this-design)).
-- A compatibility reader for logs written while the record was in the store.
+- A compatibility reader for logs written while the record was in the store; they are refused ([Logs from before this change](#logs-from-before-this-change)).
+- A record a scorer can read while its swarm runs ([Reading during a run](#reading-during-a-run)).
 
 ## Current behaviour
 
-inspect_swarm references are to `main` at `33bf17b`; inspect_ai references are to `main` at `2f78dcb29`. Paths are relative to each repository's root.
+inspect_swarm references are to `main` at `33bf17b`; inspect_ai references are to `main` at `2f78dcb29`; inspect_swe references are to `main` at `661d6bf`. Paths are relative to each repository's root.
 
 ### Where the record is written
 
@@ -56,7 +58,16 @@ Searched in this repository and in every checkout beside it (`~/git/*`, excludin
 - **Tests.** `tests/swarm_runtime.py` reads the live record in `after()` (`:134-143`), a test agent that polls it until named members have ended, and after a run in `run_swarm()` (`:212`). The record's write timing is `tests/test_final.py:423-484`; other reads are in `test_final.py`, `test_background_members.py`, `test_member_sandboxes.py` (a scorer, `:443-454`), `test_metrics.py`, `test_examples.py`, `test_swarm_limits.py` and `test_controller.py`.
 - **Designs.** [swarm-scoring.md](swarm-scoring.md) Part 2: `member_scores` reads members (and from Part 2 their outputs) from the record during final scoring and re-scoring, and `attempt_rows` reads it from logs. [swarm-orbit.md P1](swarm-orbit.md#orbits-solver-wrapper) has ORBIT's solver wrapper read it in its own synchronous `finally`, after the swarm has exited, possibly by raising.
 
-So every reader runs after the swarm has exited: a scorer, a solver wrapper around the swarm, re-scoring or analysis. Only tests read the record while the swarm runs: the helper `after()` and `tests/test_final.py`'s `after_choice()` (`:822-830`) poll it as scheduling devices, and `tests/test_final.py` asserts the live record at `:264`, `:429-434`, `:776`, `:845` and `:847`.
+Every reader that needs the record means to read it after its swarm has exited: a scorer in final scoring, a solver wrapper around the swarm (whose state still has `completed=False` then), re-scoring or analysis. Only tests read the record on purpose while the swarm runs: the helper `after()` and `tests/test_final.py`'s `after_choice()` (`:822-830`) poll it as scheduling devices, and `tests/test_final.py` asserts the live record at `:264`, `:429-434`, `:776`, `:845` and `:847`.
+
+But a task's scorers also run during the solve, on the sample's state as it is then, with `completed=False`:
+
+- **`score(state)`** copies the sample's `TaskState`, keeping its store object, and runs every task scorer (`src/inspect_ai/scorer/_score.py:47`, `:65`). It is called by `react(attempts=...)` after each submission (`src/inspect_ai/agent/_react.py:340`), `deepagent(attempts=...)` through its `react` (`src/inspect_ai/agent/_deepagent/deepagent.py:235`), `basic_agent` (`src/inspect_ai/solver/_basic_agent.py:234`), the human agent's `/score` (`src/inspect_ai/agent/_human/commands/score.py:58`, `:60`) and the attempt loops of six inspect_swe agents (`src/inspect_swe/_claude_code/claude_code.py:627`, `_codex_cli/codex_cli.py:793`, `_mini_swe_agent/mini_swe_agent.py:256`, `_opencode/opencode.py:368`, `_gemini_cli/gemini_cli.py:307`, `_kimi_code/kimi_code.py:402`). A swarm's members are such callers whenever a member is one of these agents with attempts, as the docs describe (`docs/scoring.qmd:93-97`) and `tests/test_scoring_loop.py` runs.
+- **Live control scoring** runs the task's scorers over a held sample's live state, binding the sample's transcript and its live store (`src/inspect_ai/_control/scoring.py:1154`, `:1183-1190`).
+
+Today such a call of a record-dependent scorer, such as the docs' sandbox example, which has no guard, reads the live provisional record of whichever swarm last wrote the store. With the record written only at the exit, the same call would read no record during the first swarm in a sample, and the previous swarm's record during a later or a nested one. Part 2's `member_scores` returns `None` while `state.completed` is `False`, before it reads anything ([swarm-scoring.md step 1](swarm-scoring.md#answer-scored-tasks-per-member-scores)).
+
+A spike ran a swarm of two `react(attempts=2)` members inside a solver wrapper. Each member's in-loop scorer call and the final scorer saw the transcript object and the store object the swarm started with, `completed` `False` in the loop and `True` in final scoring; the wrapper's `finally`, after the swarm returned, saw the same transcript and store with `completed=False`.
 
 ### What a transcript reader gets from Inspect
 
@@ -115,7 +126,7 @@ def write_record(record: SwarmResultRecord) -> None:
     store().set(RESULT_ID_KEY, id)
 ```
 
-The payload has the shape of the ledger's and the metrics' events: `type`, then the model's fields, its own `version` included, with one more key, `id`, a fresh random id from `uuid4().hex`. The models do not change, so `version` stays 1: the fields and their meanings are the same, and only where the record is kept and when it is written change. `RECORD_KEY` is removed.
+The payload has the shape of the ledger's and the metrics' events: `type`, then the model's fields, its own `version` included, with one more key, `id`, a fresh random id from `uuid4().hex`. The models do not change, so `version` stays 1: the fields and their meanings are the same, and only where the record is kept and when it is written change. `RECORD_KEY` is removed; its value stays only as the private `_LEGACY_RECORD_KEY` that the reader refuses ([Logs from before this change](#logs-from-before-this-change)).
 
 **Why an id in the store.** The store is what ties a record to the state it belongs to: a forked branch and a subtask each have their own ([Stores, forks and subtasks](#stores-forks-and-subtasks)). Keeping the id there keeps that association exactly, with nothing a member could learn from it: the key exists only after the swarm has ended, as the ledger and the metrics do, and an id names an event but says nothing about any member. A swarm that ends after another with the same store replaces the id, as it replaces the record today.
 
@@ -139,7 +150,7 @@ write_metrics(swarm_metrics(..., record.final.member))
 - **`settle()` stops writing.** It keeps applying the answer rule and setting the chosen member's output on the swarm's `AgentState` at every change, which `as_solver()` copies to the task state however the swarm ends ([swarm-scoring.md The final answer](swarm-scoring.md#the-final-answer-first)), and returns the `FinalRecord`; it no longer builds or writes a record. `finalise()` keeps writing the `final` event. The metrics take the chosen member from the record instead of a second `answer()` call.
 - **`provisional`** keeps its field and meaning: `True` when the swarm ended without finalising its answer (a limit, error or cancellation ended it first, or the answer did not fit the sample's message limit), `False` after finalisation. The record a finalised swarm wrote before is the record it writes now; the record an interrupted swarm leaves is the one its last provisional write left, since every change to the members or the choice wrote it.
 - **States at the end.** A member the controller never started is `pending`. A started member's wrapper calls `end()` in its own `finally` (`src/inspect_swarm/_member.py:472-474`), so the member is `ended` with its status once its task has run; `running` stays a valid `MemberState` in the format.
-- **Nothing needs the live record.** Every reader runs after the swarm has exited ([Who reads it](#who-reads-it)). Controllers have handles and events for live state, and the per-member `member_result` events mark each end in the transcript as it happens. The test helper `after()` waits on those events instead ([Testing](#testing)).
+- **Nothing needs the live record.** Every reader that needs it means to read it after the swarm has exited ([Who reads it](#who-reads-it)), and a scorer called during the solve is refused ([Reading during a run](#reading-during-a-run)). Controllers have handles and events for live state, and the per-member `member_result` events mark each end in the transcript as it happens. The test helper `after()` waits on those events instead ([Testing](#testing)).
 - **Under cancellation.** `transcript().info()` and `store().set()` are synchronous, so both writes run in the `finally` under cancellation, as the ledger's do. A sample whose process dies leaves no record, as it leaves no logged store today.
 - **Log size.** The record is in the log once, in its event: no longer in the swarm's span's `StoreEvent`, the enclosing spans' or `sample.store`, which hold only its id. Long strings in it (from Part 2, members' outputs) are condensed into attachments, shared with identical text elsewhere in the sample.
 
@@ -153,17 +164,19 @@ def swarm_result(source: TaskState | EvalSample) -> SwarmResultRecord | None:
     The swarm writes its record to the transcript once, when it ends, however it ends, and its id to the store it ran with. This returns the record the store of `source` names: the last swarm to end with that store, which is the outermost of nested swarms. A forked branch or a subtask has its own store, and so its own record.
 
     Args:
-        source: The `TaskState` of the sample being run or scored, as a scorer or a solver after the swarm has it, during the eval and when a log is re-scored; or a sample read from a log, with its events and attachments.
+        source: The `TaskState` of the sample being run or scored, as a scorer has it in final scoring and when a log is re-scored, or as a solver has it after the swarm has returned; or a sample read from a log, with its events and attachments.
 
     Returns:
-        The record, or `None` when no swarm has ended with this store. A swarm that is still running has no record.
+        The record, or `None` when no swarm has ended with this store.
 
     Raises:
-        ValueError: The store names a record the transcript or sample does not hold (as for a sample read without its events), the record refers to attachments the sample was read without, or it is one this inspect_swarm cannot read, such as a version other than 1.
+        RuntimeError: A swarm in the sample is still running, so the record of the swarm being scored does not exist yet; a scorer that the solve can call returns `None` while `state.completed` is `False`.
+        ValueError: The store names a record the transcript or sample does not hold (as for a sample read without its events), the record refers to attachments the sample was read without, it is one this inspect_swarm cannot read, such as a version other than 1, or the sample was written by an inspect_swarm that kept the record in the store.
     """
 ```
 
-- **The id.** `source.store.get(RESULT_ID_KEY)`; `None` when it is absent, with no search. A plain agent's sample therefore costs one store lookup.
+- **Running swarms.** For a `TaskState`, the reader first raises `RuntimeError` when a swarm in the sample is still running ([Reading during a run](#reading-during-a-run)), before it looks at the store, so the first swarm in a sample gives the error, not `None`. A sample read from a log has finished, and is not checked.
+- **The id.** `source.store.get(RESULT_ID_KEY)`. When it is absent, the reader checks for the old store record ([Logs from before this change](#logs-from-before-this-change)) and otherwise returns `None`, with no search. A plain agent's sample therefore costs two store lookups.
 - **From a `TaskState`**: the private `_transcript_result(state.store)`, which runs `transcript().history.find_last(lambda e: _is_record(e) and e.data["id"] == id)`, which reads back evicted events in a bounded transcript ([Bounded transcripts](#bounded-transcripts)). The live and the re-scoring transcripts hold events with attachments resolved, so nothing more is needed. A scorer's `state` is the state the solver returned, so a fork's chosen branch reads its own record.
 - **From a sample**: the newest event in `sample.events` with that id, then `resolve_events_attachments([event], sample.attachments)`, so a log read with or without `resolve_attachments` gives the same record. Only that one event is resolved, not the whole sample. `sample.store` is the final state's store, so the record is the chosen branch's, as in scoring.
 - **Not found.** An id with no matching event is `ValueError`, naming the sample (or "the transcript"): for a sample, that it was read without its events (`exclude_fields={"events"}`); otherwise a state from another sample. Never `None`, which would read as "no swarm".
@@ -174,10 +187,14 @@ def swarm_result(source: TaskState | EvalSample) -> SwarmResultRecord | None:
 - **Shapes.** `TaskState` and `EvalSample` are the shapes every reader has ([Who reads it](#who-reads-it)); the annotation refuses others. An `AgentState` has no store, and no caller reads a record from one.
 - **Exports.** `swarm_result`, `SwarmResultRecord`, `MemberResult` and `FinalRecord` are exported from `inspect_swarm` (scorers import from there; `MemberState` already is) and listed in a "Results" section of `docs/reference/inspect_swarm.qmd`. Analysis code imports the same function; `inspect_swarm.analysis` does not re-export it.
 
-A scorer that read the store now calls the helper:
+A scorer that read the store now calls the helper, after the solve:
 
 ```python
-async def score(state: TaskState, target: Target) -> Score:
+async def score(state: TaskState, target: Target) -> Score | None:
+    # the record exists once the swarm has ended; a member's react(attempts=...)
+    # or live control scoring calls this scorer during the solve
+    if not state.completed:
+        return None
     record = swarm_result(state)
     assert record is not None, "the task's solver is a swarm"
     passed = [
@@ -187,6 +204,52 @@ async def score(state: TaskState, target: Target) -> Score:
     ]
     ...
 ```
+
+### Reading during a run
+
+A read of a running sample's state while any swarm in that sample is still running raises `RuntimeError` (decision: Ransom, 2026-10-30). The record of the swarm being scored does not exist yet, so the only answers the store could give are `None`, which reads as "no swarm", or an earlier or inner swarm's record, which reads as this one's.
+
+```python
+# src/inspect_swarm/_record.py
+# swarms running in each sample, by the id of the sample's transcript, which the
+# running swarm's context keeps alive, so the id is not reused while counted
+_running: dict[int, int] = {}
+
+
+def _swarm_started() -> int:
+    key = id(transcript())
+    _running[key] = _running.get(key, 0) + 1
+    return key
+
+
+def _swarm_ended(key: int) -> None:
+    if _running[key] == 1:
+        del _running[key]
+    else:
+        _running[key] -= 1
+```
+
+- **Where the count changes.** `SwarmRun.run()` calls `key = _swarm_started()` immediately before its `try` (`src/inspect_swarm/_controller/_control.py:422`), so a swarm counts as running from before its first member starts. Its `finally`'s body is wrapped in `try: ... finally: _swarm_ended(key)`, so the count drops after the record, its id, the ledger and the metrics are written and the context variables are reset, and also when one of those writes raises; both calls are synchronous, so it drops under cancellation too.
+- **The check.** `swarm_result(state)` raises when `_running.get(id(transcript()), 0)` is not zero, with the message: "swarm_result() was called while a swarm in this sample is running; a swarm's result record is written when it ends. A scorer that the solve can call (react(attempts=...), basic_agent, the human agent's /score, live control scoring) returns None while state.completed is False."
+- **What it refuses.** Every case in which the store could not name the record of the swarm being scored:
+  - an in-loop scorer during the first swarm in a sample, which would otherwise get `None`;
+  - an in-loop scorer during a second swarm that shares the store with an earlier one, which would otherwise get the earlier swarm's record;
+  - a scorer called from a member of a swarm nested in a member, or from a member of the outer swarm after the inner swarm has ended, which would otherwise get no record or the inner swarm's: the outer swarm is still running;
+  - live control scoring of a held sample while a swarm in it runs, since it binds the sample's own transcript (`init_transcript(active.transcript)`, `src/inspect_ai/_control/scoring.py:1189`).
+- **What it allows.** A solver wrapper's read after `as_solver(swarm(...))` has returned, as ORBIT's is, although its state has `completed=False`: the swarm has left the count. Final scoring, which runs after the solver has returned. Re-scoring, whose transcript is a fresh one in which nothing runs. `swarm_result(sample)`, which reads a finished sample.
+- **Why not `state.completed`.** The wrapper's state and an in-loop scorer's both have `completed=False` (the spike in [Who reads it](#who-reads-it)), so completion cannot tell the read that must work from the reads that must fail. A scorer can still use it to decide whether to read at all, as below.
+- **Why the sample's transcript, not the state's store.** `score()` copies the sample's top-level `TaskState` (`sample_state()`, `src/inspect_ai/scorer/_score.py:42-47`), not the state of a branch the swarm may run in, so under `fork()` or `subtask()` a scorer called from a member holds a store in which no swarm runs and would read `None` or an earlier record. Every in-sample caller shares the sample's transcript object: the run creates one per sample and installs it (`src/inspect_ai/_eval/task/run.py:2497-2503`), hands the same object to live control scoring (`:2602`), and `subtask()` changes only the store (`src/inspect_ai/util/_subtask.py:122`). Keyed so, the check refuses those compositions too. Its cost: when two swarms run concurrently in one sample (forked branches), a read after one has returned while the other still runs is refused. No caller composes swarms so ([Stores, forks and subtasks](#stores-forks-and-subtasks)), and the refusal is loud.
+- **Process.** The count is a module-level dictionary in the eval's process, where every in-sample caller runs; nothing about a running swarm enters the store, the transcript or the log.
+- **A scorer the solve can call.** A record-dependent scorer of a task whose members may score in their loop returns `None` while `state.completed` is `False`, as `member_scores` does ([swarm-scoring.md step 1](swarm-scoring.md#answer-scored-tasks-per-member-scores)) and the example above does. `score()` drops `None` results, so in-loop callers see only the other scorers' feedback. `react(attempts=...)` and `basic_agent` check the first score `score()` returns (`src/inspect_ai/agent/_react.py:342`, `src/inspect_ai/solver/_basic_agent.py:235`), so such a task lists first a scorer that can score during the solve and the record-dependent one after it, as `member_scores`' ordering rule already requires ([swarm-scoring.md Ordering](swarm-scoring.md#answer-scored-tasks-per-member-scores)). Without the guard, the scorer's in-loop call raises the error above, which the agent's attempt loop propagates and which ends the sample with that message.
+
+### Logs from before this change
+
+Logs written while the record was in the store hold it under `inspect_swarm:result` in `sample.store` and have no `inspect_swarm:result_id`. The reader refuses them rather than reading them as a sample with no swarm, which would have Part 2's `member_scores` score a multi-member run as a one-member plain agent (decision: Ransom, 2026-10-30):
+
+- **The check.** When the store has no `RESULT_ID_KEY`, the reader looks for `_LEGACY_RECORD_KEY = "inspect_swarm:result"` (private, kept in `_record.py` only for this) and, when it is present, raises `ValueError` naming the sample (or "the transcript"): "this sample was written by an inspect_swarm that kept the swarm's result record in the sample store under inspect_swarm:result; swarm_result() does not read it: read sample.store['inspect_swarm:result'] by hand, or score the log with that inspect_swarm."
+- **Both shapes.** `swarm_result(sample)` checks `sample.store`; re-scoring such a log rebuilds the `TaskState` with that store (`src/inspect_ai/_eval/score.py:495`), so `swarm_result(state)` refuses it there too, and a record-dependent scorer's re-scoring of the sample fails with the error.
+- **What it does not catch.** A genuine plain agent's sample has neither key and gives `None`. A new store carries no `inspect_swarm:result` unless task code writes that key, which the docs forbid.
+- **No reader.** The old store record is not parsed or validated; the error tells the reader where it is.
 
 ### Bounded transcripts
 
@@ -211,7 +274,7 @@ They stay in the store, and as events, unchanged (decision: Ransom, 2026-10-29: 
 
 The user docs state the result:
 
-- `docs/scoring.qmd`, "The result record": the record is an evidence event the swarm writes when it ends; read it with `swarm_result(state)` in a scorer and `swarm_result(sample)` from a log, which needs the sample's events and attachments; the JSON shown is the record (the event adds `"type"` and `"id"`); `provisional: true` when a limit, error or cancellation ended the swarm before it finalised. "The record belongs to the swarm" becomes: only the swarm writes it; there is no record while the swarm runs; a tool that reads the transcript sees every member's events anyway, a channel between members the swarm records no evidence of. The per-member sandbox example uses `swarm_result(state)`.
+- `docs/scoring.qmd`, "The result record": the record is an evidence event the swarm writes when it ends; read it with `swarm_result(state)` in a scorer and `swarm_result(sample)` from a log, which needs the sample's events and attachments; the JSON shown is the record (the event adds `"type"` and `"id"`); `provisional: true` when a limit, error or cancellation ended the swarm before it finalised. "The record belongs to the swarm" becomes: only the swarm writes it; there is no record while the swarm runs; a tool that reads the transcript sees every member's events anyway, a channel between members the swarm records no evidence of. The per-member sandbox example uses `swarm_result(state)` and returns `None` while `state.completed` is `False`, as [Reading it](#reading-it-swarm_result) shows. "Checks during the run" adds that a scorer the solve can call, under `react(attempts=...)` and the other attempt loops or live control scoring, cannot read the record then: `swarm_result()` raises while a swarm in the sample runs, so such a scorer returns `None` until `state.completed` is `True` and follows, in the scorer list, a scorer that checks submissions during the solve.
 - `docs/restrictions.qmd`: "The store keys" lists `inspect_swarm:result_id`, `inspect_swarm:ledger` and `inspect_swarm:metrics`, written when the swarm ends, which task code must not write; the "What the log records" bullet drops "the result record read while the swarm runs" and names a tool that reads the transcript instead.
 - `docs/channels.qmd:47`: the bullet becomes a tool that reads the transcript, which sees the other members' model and tool calls.
 - `docs/index.qmd` and `README.md`: the result record in the transcript, read with `swarm_result()`, and the ledger and metrics in the store.
@@ -225,13 +288,14 @@ Made in this design's pull request:
 - **[swarm-scoring.md](swarm-scoring.md).** Part 1's [What the swarm records](swarm-scoring.md#what-the-swarm-records) describes the event, the single write and `swarm_result()`, and drops "Why the store" (its premise, that re-scoring rebuilds only the store, no longer holds) and the readable-by-member-code bullet. Its testing and plan say the same. Part 2 builds on the event: [What the record adds](swarm-scoring.md#what-the-record-adds) has the added fields enter the record at the swarm's end; `member_scores`, re-scoring, `attempt_rows`, the logs table, Compatibility and Security read and describe the event; and the plan after M2 depends on this design's pull request.
 - **[swarm-orbit.md](swarm-orbit.md).** The ORBIT wrapper reads the record with `swarm_result(state)` in its synchronous `finally`.
 - **[swarm-chosen-names.md](swarm-chosen-names.md)**, **[swarm-implementation-plan.md](swarm-implementation-plan.md)** and **[swarm-lean-open-problems.md](swarm-lean-open-problems.md)**: the store key becomes the record, with a link here, the plan's documentation steps state this design's rule, and swarm-chosen-names.md's record test names the test that replaces the one it extended.
+- **[swarm-api.md](swarm-api.md)**, **[swarm-background-members.md](swarm-background-members.md)** and **[swarm.md](swarm.md)**: `member_scores` reads the record with `swarm_result(state)`, and in the loop never reads it; a member's end sets its run record's state, status and time, writes its `member_result` event and updates the provisional answer, and the result record is written only when the swarm ends; the store-events test expects the record's id in the swarm span's net change, not the record.
 - **[swarm-event-types.md](swarm-event-types.md).** The `SwarmEvent` kinds and the mapping table gain `result_record`, with its `id`, and the reader keeps both forms ([Reading it](#reading-it-swarm_result)).
 
 ## Alternatives considered
 
 **Keep the record in the store, written only at the end.** Removes the live view, but a swarm nested in a member, or one that ran earlier in the sample, would still leave records with outputs that the outer or later swarm's members read through ordinary store tools. The transcript holds the same facts at no new exposure. Rejected.
 
-**Keep writing the record as an event at every change**, so a reader during the run sees the provisional state. Nothing reads it live ([Who reads it](#who-reads-it)), each write would copy every member's output into the log once Part 2 adds them, and a live record is exactly the view this design removes. Rejected.
+**Keep writing the record as an event at every change**, so a reader during the run sees the provisional state. No reader needs it live ([Who reads it](#who-reads-it)); a scorer called during the solve is refused instead ([Reading during a run](#reading-during-a-run)). Each write would copy every member's output into the log once Part 2 adds them, and a live record is exactly the view this design removes. Rejected.
 
 **Rebuild the record from the `member_result` and `final` events** instead of writing it. One fewer event, but those events lack fields the record has (role, `choose_name`, gate counts, and from Part 2 outputs, keys and verdicts), and adding them would put member text in per-member events written during the run. Rejected.
 
@@ -245,13 +309,23 @@ Made in this design's pull request:
 
 **Move the ledger and the metrics too.** One rule, "the swarm keeps nothing in the store", but they are written after every member has exited and hold no member text, and their readers use the store. Rejected (decision: Ransom, 2026-10-29).
 
-**Read old logs' store records in `swarm_result(sample)`.** A fallback to `sample.store["inspect_swarm:result"]` for logs written before this change. No analysis code reads the record from logs yet, and the format is experimental ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6). Not included; such logs are read from `sample.store` by hand.
+**Read old logs' store records in `swarm_result(sample)`.** A fallback to `sample.store["inspect_swarm:result"]` for logs written before this change. No analysis code reads the record from logs yet, and the format is experimental ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 6). Not included; such logs are refused and read from `sample.store` by hand (decision: Ransom, 2026-10-30).
+
+**Return `None` for old logs.** No check, and no old key kept. But `None` means "no swarm", and Part 2's `member_scores` would then score the run's selected output as a one-member plain agent, reporting `best_member` and `mean_member` for a multi-member run whose members' outputs the log does not hold. Rejected.
+
+**Return `None` during a run**, or the record the store names, as a store read would. `None` reads as "no swarm" and an earlier or inner swarm's record reads as this one's, so a record-dependent scorer would grade the wrong roster or none. Rejected (decision: Ransom, 2026-10-30).
+
+**Refuse when `state.completed` is `False`.** One field, no count. But a solver wrapper's state after the swarm has returned is not completed either, and that read must work. Rejected.
+
+**Count running swarms by the state's store.** Ties the check to the state a scorer holds, and lets one forked branch read its record while another branch's swarm still runs. But `score()` gives a member's scorer the sample's top-level state, so under `fork()` or `subtask()` it would read `None` or an earlier record with no swarm counted in its store. The sample's transcript is shared by every caller in the sample, and the concurrent-fork read it refuses has no caller. Rejected.
+
+**Mark a running swarm in the store or the transcript**, so the check reads the sample's own data. A store marker is one more key members' tools can see, and the log keeps it if the process dies; a transcript check (a swarm span begun and not ended) scans the history on every read, through the provider when the begin has been evicted. The count is synchronous, process-local and leaves nothing in the log. Rejected.
 
 ## Compatibility and migration
 
-- **Eval logs.** New logs have no `inspect_swarm:result` store entry; they have one `InfoEvent` with `type: "result_record"` per swarm, whose payload is the record's format, `version: 1`, unchanged, plus `type` and `id`, and the last such id in `inspect_swarm:result_id`. The viewer shows it as an info event in the swarm's span. Old logs keep their store entry; `swarm_result()` returns `None` for them ([Alternatives](#alternatives-considered)).
+- **Eval logs.** New logs have no `inspect_swarm:result` store entry; they have one `InfoEvent` with `type: "result_record"` per swarm, whose payload is the record's format, `version: 1`, unchanged, plus `type` and `id`, and the last such id in `inspect_swarm:result_id`. The viewer shows it as an info event in the swarm's span. Old logs keep their store entry; `swarm_result()` raises `ValueError` for them, from a log and when they are re-scored, so a record-dependent scorer fails on them rather than scoring them as plain agents ([Logs from before this change](#logs-from-before-this-change)).
 - **Public API.** Code that reads `state.store["inspect_swarm:result"]` or `sample.store[...]` finds nothing and must call `swarm_result()`. The only such code is this repository's docs, example and tests. New exports: `swarm_result`, `SwarmResultRecord`, `MemberResult`, `FinalRecord`. A new store key, `inspect_swarm:result_id`. The pull request is a breaking change (`feat!:`), so the release notes name it.
-- **Timing.** A reader that polled the store during the run (only the tests) has no record until the swarm ends.
+- **Timing.** A reader that polled the store during the run (only the tests) has no record until the swarm ends. A task scorer that reads the record and is called during the solve (an attempt loop, the human agent's `/score`, live control scoring) read the provisional record before; it now gets `RuntimeError` unless it returns `None` while `state.completed` is `False` ([Reading during a run](#reading-during-a-run)). The only such scorer in this repository is the docs' example, which gains the guard.
 - **Store events.** The swarm's span's net `StoreEvent` includes the id, not the record.
 - **`SwarmEvent` switch.** When it lands, the record is written as a `SwarmEvent` and the reader accepts both forms, so logs from before and after it read the same.
 - **The ledger and the metrics**, their store entries, `swarm_ledger()` and `SwarmColumns`: unchanged.
@@ -260,7 +334,7 @@ Made in this design's pull request:
 ## Security
 
 - **What reaches the record.** Member names (the eval author's), statuses, times, sandbox names, the controller's `choose_answer()` reason (controller code), and from Part 2 members' outputs (model output), answer keys and verdict explanations (task code over model output). It is JSON data in an `InfoEvent`, never Markdown, and no prompt the harness composes contains it.
-- **Who can read it, when.** Nobody during the swarm's run, since neither it nor its id exists. After the swarm ends, any code in the sample, through `transcript()`. A member of a later swarm in the sample, or of an outer swarm after a nested one ends, can read the earlier swarm's record with a tool that reads the transcript; such a tool sees that swarm's members' model calls anyway, so the record adds nothing to what it could read.
+- **Who can read it, when.** Nobody during the swarm's run, since neither it nor its id exists, and `swarm_result(state)` refuses every read while a swarm in the sample runs, so not even an earlier swarm's record reaches a scorer called from a member's loop. The running count holds transcript ids and counts, nothing from a member. After the swarm ends, any code in the sample, through `transcript()`. A member of a later swarm in the sample, or of an outer swarm after a nested one ends, can read the earlier swarm's record with a tool that reads the transcript; such a tool sees that swarm's members' model calls anyway, so the record adds nothing to what it could read.
 - **What the store still exposes.** The record's id, the ledger and the metrics, after their swarm ends: no member text ([The ledger and the metrics](#the-ledger-and-the-metrics)).
 - **Forged records.** Task code that writes a `result_record` `InfoEvent` and points `inspect_swarm:result_id` at it after the swarm would be read as the record, as task code writing the store key would be today. The docs forbid it; models cannot write events or the store.
 - **Reading logs.** `swarm_result(sample)` resolves only `attachment://` references found in the record's own event against the sample's own attachments, refuses any it cannot resolve, and validates the result with the pydantic model, so a malformed or partly loaded record raises `ValueError` rather than being used.
@@ -284,11 +358,19 @@ Mockllm, no network or Docker unless marked, asyncio and trio for async tests.
   - re-scoring a written log with `inspect_ai.score()` and a scorer that calls `swarm_result(state)` gives the same record;
   - `swarm_result(sample)` on `read_eval_log()` with and without `resolve_attachments`, for a record whose `final.reason` is longer than 100 characters (a controller's reason), gives the same record with the full reason;
   - the same sample read with `exclude_fields={"attachments"}` (an empty mapping), and with its `attachments` replaced by a mapping that lacks the reason's hash, raises `ValueError` naming the sample;
-  - a sample read with `exclude_fields={"events"}` raises `ValueError` naming it; a record with `version: 2` and a malformed version-1 record, written by hand, raise `ValueError` naming the sample from `swarm_result(sample)`, and from `swarm_result(state)` in a scorer, live and on re-score, so the sample's scoring fails with that error; a sample and a state whose solver is a plain agent give `None`;
+  - a sample read with `exclude_fields={"events"}` raises `ValueError` naming it; a record with `version: 2` and a malformed version-1 record, written by hand, raise `ValueError` naming the sample from `swarm_result(sample)`, and from `swarm_result(state)` in a scorer, in final scoring and on re-score, so the sample's scoring fails with that error; a sample and a state whose solver is a plain agent give `None`;
+  - **a log from before this change**: a sample whose store holds a two-member version-1 record under `inspect_swarm:result` and no `inspect_swarm:result_id` (a solver that writes that key by hand stands in for the old runtime): `swarm_result(state)` in final scoring, `swarm_result(state)` when the written log is re-scored with `inspect_ai.score()`, and `swarm_result(sample)` each raise `ValueError` naming the sample and the old key; the plain-agent cases above still give `None`;
+  - **reads during a run**, with a probe scorer that records what each call of `swarm_result(state)` gives (the record, `None`, or the exception) and returns a score, listed after a scorer that always passes, and members that are `react(attempts=2)` agents, each of which scores its first submission in its loop:
+    - the first swarm in a sample: every in-loop call raises `RuntimeError`; final scoring reads the record;
+    - two swarms in sequence sharing the store: the second swarm's in-loop calls raise, never returning the first swarm's record; final scoring reads the second's;
+    - a swarm nested in a member of an outer swarm: calls from the inner swarm's members raise, and so do calls from an outer member after the inner swarm has ended; final scoring reads the outer swarm's record;
+    - the docs' guarded scorer in the probe's place returns `None` in the loop, so the attempt loop sees only the first scorer's result, and its score in final scoring;
+    - live control scoring: a controller that waits until a member has started drives inspect_ai's live scoring of the held sample (the private `_score_live_sample()` over the sample's `ActiveSample`, as inspect_ai's `tests/_control/test_score.py` does, under the same backend restriction those tests use), and the probe's call raises `RuntimeError`;
+    - the count drops however a swarm ends: after a swarm that ends normally, one ended by an outer sample limit and one cancelled by a solver that cancels its task group, a later `swarm_result(state)` in the same sample returns that swarm's record rather than raising;
   - **forks**: a solver that runs `fork(state, [swarm_a, swarm_b])` with B ending last and returns A's state: the scorer's `swarm_result(state)` and the log's `swarm_result(sample)` are A's record, and B's state reads B's;
   - **subtasks**: a swarm run inside `subtask()` gives the parent's state `None`, and the subtask's store reads the child's record;
   - two swarms in sequence with one store, and a swarm nested in a member: the record returned is the last to end (the outer one);
-  - in a solver wrapper's `finally` around `as_solver(swarm(...))`, after an outer sample limit ends the swarm, `swarm_result(state)` returns the provisional record (the shape ORBIT's wrapper relies on).
+  - in a solver wrapper's `finally` around `as_solver(swarm(...))`, after the swarm returns normally and after an outer sample limit ends it, `swarm_result(state)` returns the record (provisional after the limit), with `state.completed` still `False` (the shape ORBIT's wrapper relies on).
 - **`tests/test_controller.py`**: the store-events test asserts that the swarm span's net change includes the members' writes and `inspect_swarm:result_id`, and no `inspect_swarm:result`.
 - **`tests/swarm_runtime.py`**: `run_swarm()`, whose test sample has a store and a transcript but no `TaskState`, reads the record with `_transcript_result(store())`; `after()` waits until the named members' `member_result` events are in `transcript()`.
 - **Every other test that read `RECORD_KEY`** (`test_background_members.py`, `test_member_sandboxes.py`, `test_metrics.py`, `test_examples.py`, `test_swarm_limits.py`) reads `swarm_result(state)`, `swarm_result(sample)` or `run_swarm()`'s record after the swarm has exited; the member-sandboxes scorer and `examples/proof_swarm.py` (whose slow Docker test, `tests/test_examples.py`, CI skips as today) use the helper.
@@ -297,9 +379,9 @@ Mockllm, no network or Docker unless marked, asyncio and trio for async tests.
 
 One pull request, `feat!: the swarm's result record moves from the sample store to the transcript`:
 
-- `src/inspect_swarm/_record.py`: `RECORD_TYPE`, `RESULT_ID_KEY`, `write_record()` writing the event and the id, `swarm_result()`, `_transcript_result()` and `_is_record()`; `RECORD_KEY` removed; `FinalRecord.provisional`'s and `SwarmResultRecord`'s docstrings.
+- `src/inspect_swarm/_record.py`: `RECORD_TYPE`, `RESULT_ID_KEY`, `write_record()` writing the event and the id, `swarm_result()`, `_transcript_result()` and `_is_record()`; the running count, `_swarm_started()` and `_swarm_ended()`; `RECORD_KEY` removed and `_LEGACY_RECORD_KEY` refused; `FinalRecord.provisional`'s and `SwarmResultRecord`'s docstrings.
 - `src/inspect_swarm/_final.py`: `settle()` no longer builds or writes a record and returns the `FinalRecord`; `finalise()` unchanged otherwise.
-- `src/inspect_swarm/_controller/_control.py`: the record built and written first in `run()`'s `finally`, with `provisional=not ended`; the metrics take its chosen member; the comments at `:469-470` and `:505`.
+- `src/inspect_swarm/_controller/_control.py`: `_swarm_started()` before `run()`'s `try` and `_swarm_ended()` in a `finally` around its `finally`'s body; the record built and written first in `run()`'s `finally`, with `provisional=not ended`; the metrics take its chosen member; the comments at `:469-470` and `:505`.
 - `src/inspect_swarm/__init__.py`: the four exports; `docs/reference/inspect_swarm.qmd`: a "Results" section.
 - Docs: `docs/scoring.qmd`, `docs/restrictions.qmd`, `docs/channels.qmd`, `docs/index.qmd`, `docs/analysis.qmd`, `README.md`; `examples/proof_swarm.py`.
 - Tests as in [Testing](#testing).
