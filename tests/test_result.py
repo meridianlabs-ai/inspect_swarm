@@ -545,6 +545,77 @@ def test_model_text_a_log_would_change_is_left_out_of_its_member(
         assert odd.verdict.explanation == f"EXPLANATION-{text}"
 
 
+@agent
+def returns(output: ModelOutput) -> Agent:
+    """Return `output` as the member's output, making no model call."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state.output = output
+        return state
+
+    return execute
+
+
+def _tool_call_output(arguments: dict[str, Any]) -> ModelOutput:
+    return ModelOutput.for_tool_call("mockllm", "submit", arguments)
+
+
+def _with_metadata(metadata: dict[str, Any], *, on_message: bool) -> ModelOutput:
+    output = ModelOutput.from_content("mockllm", "41")
+    if on_message:
+        output.message.metadata = metadata
+    else:
+        output.metadata = metadata
+    return output
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "odd",
+    [
+        # a value the record's JSON cannot represent
+        pytest.param(
+            lambda: _with_metadata({"diagnostic": object()}, on_message=False),
+            id="object-in-metadata",
+        ),
+        pytest.param(
+            lambda: _tool_call_output({"answer": object()}),
+            id="object-in-tool-arguments",
+        ),
+        # text that is not valid UTF-8 in a dict's key, which JSON would replace
+        pytest.param(
+            lambda: _tool_call_output({"bad \ud800 key": "value"}),
+            id="surrogate-in-tool-argument-key",
+        ),
+        pytest.param(
+            lambda: _with_metadata({"bad \ud800 key": "value"}, on_message=True),
+            id="surrogate-in-message-metadata-key",
+        ),
+    ],
+)
+async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> None:
+    async def run(control: SwarmControl) -> StopReason:
+        # the plain member's submission first, so that it is the answer
+        for name in ("plain", "odd"):
+            control.start(name)
+            async for _ in control.events():
+                pass
+        return "all_done"
+
+    stop = await run_swarm(
+        swarm(
+            [member(answers("42"), name="plain"), member(returns(odd()), name="odd")],
+            controller=controller(run, "result_test_left_out"),
+            channels=[],
+        )
+    )
+    plain, left = stop.record.members
+    assert stop.record.final.member == "plain"
+    assert plain.left_out == [] and plain.output is not None
+    assert plain.output.completion == "42"
+    assert (left.status, left.output, left.left_out) == ("submitted", None, ["output"])
+
+
 @pytest.mark.anyio
 async def test_a_verdict_of_nan_is_recorded_whole() -> None:
     async def nan_check(answer: str, metadata: dict[str, Any]) -> Verdict:

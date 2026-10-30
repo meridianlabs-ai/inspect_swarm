@@ -1,7 +1,7 @@
 import json
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
-from typing import Any, Literal, TypeGuard
+from typing import Any, Literal, TypeGuard, cast
 from uuid import uuid4
 
 from inspect_ai._util.json import to_json_safe
@@ -16,6 +16,7 @@ from inspect_ai.model import ModelOutput
 from inspect_ai.solver import TaskState
 from inspect_ai.util import Store, store
 from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic_core import PydanticSerializationError
 
 from ._result import ResultKind, Verdict
 
@@ -82,7 +83,7 @@ class MemberResult(BaseModel):
     """Swarm time when the verdict was taken; `None` without one."""
 
     left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8. Empty when nothing was left out."""
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8, and an output with a value the record cannot hold as JSON, such as an object in its metadata. Empty when nothing was left out."""
 
 
 class FinalRecord(BaseModel):
@@ -153,7 +154,7 @@ def _logged_members(record: SwarmResultRecord) -> SwarmResultRecord:
 def _logged_member(m: MemberResult) -> MemberResult:
     update: dict[str, Any] = {}
     left_out = list(m.left_out)
-    if m.output is not None and _changed_by_logging(m.output.model_dump(mode="json")):
+    if m.output is not None and not _logged_output(m.output):
         update["output"] = None
         left_out.append("output")
     if m.answer_key is not None and _changed_by_logging(m.answer_key):
@@ -169,6 +170,37 @@ def _logged_member(m: MemberResult) -> MemberResult:
     if not update:
         return m
     return m.model_copy(update={**update, "left_out": left_out})
+
+
+# Whether an output reads back from the log as it is. Its JSON form cannot hold a value
+# pydantic cannot represent, such as an object in its metadata, and replaces text that
+# is not valid UTF-8 in a dict's keys, so its own strings are checked first.
+def _logged_output(output: ModelOutput) -> bool:
+    if not _valid_text(output.model_dump()):
+        return False
+    try:
+        data = output.model_dump(mode="json")
+    except PydanticSerializationError:
+        return False
+    return not _changed_by_logging(data)
+
+
+# Whether every string in `value`, dict keys included, is valid UTF-8.
+def _valid_text(value: object) -> bool:
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
+    if isinstance(value, dict):
+        return all(
+            _valid_text(k) and _valid_text(v)
+            for k, v in cast(dict[object, object], value).items()
+        )
+    if isinstance(value, list | tuple):
+        return all(_valid_text(v) for v in cast(Sequence[object], value))
+    return True
 
 
 # Removes the store's record id, so that a swarm that leaves no record never leaves an
