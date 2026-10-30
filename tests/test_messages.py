@@ -1,5 +1,3 @@
-import gc
-import weakref
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from functools import cached_property
@@ -22,6 +20,7 @@ from inspect_ai.tool import (
     ToolDef,
     ToolError,
     tool,
+    tool_with,
 )
 from inspect_ai.tool._tool import ToolParsingError
 from inspect_ai.util._span import span
@@ -622,18 +621,27 @@ async def test_a_tool_error_passes_the_count_unchanged(
         assert caught.value is raised
 
 
+async def _echo() -> str:
+    return "echo"
+
+
 @pytest.mark.anyio
-async def test_the_bus_keeps_a_wrapper_only_while_a_loop_holds_it() -> None:
-    async with run(("w-1", "w-2"), None, _Loop()) as (r, _):
-        # the channel gives fresh tools at each resolution; their old wrappers go
-        old = weakref.ref((await r.resolve("w-1"))["loop_write"])
-        for _ in range(3):
-            await r.resolve("w-1")
-        gc.collect()
-        assert old() is None
-        # the messages channel's tools are the same each time, and so are their wrappers
-        held = (await r.resolve("w-1"))["send_message"]
-        assert (await r.resolve("w-1"))["send_message"] is held
+async def test_a_channel_tool_is_wrapped_from_its_current_definition() -> None:
+    given = ToolDef(_echo, name="before", description="Before.").as_tool()
+    async with run(("w-1", "w-2"), None, _Given(given)) as (r, _):
+        await r.send("w-1", "w-2", "private", wake=False)
+        # a loop still holds the wrapper made before the channel changes its tool
+        held = (await r.resolve("w-2"))["before"]
+        tool_with(given, name="after", description="After.", parallel=False)
+        tools = await r.resolve("w-2")
+        assert "before" not in tools
+        after = ToolDef(tools["after"])
+        assert (after.description, after.parallel) == ("After.", False)
+        # both still count unread messages
+        unread = "echo\nYou have 1 unread message."
+        assert await r.call_resolved("w-2", "after") == unread
+        async with r._as("w-2", "top", "before"):
+            assert await held() == unread
 
 
 @pytest.mark.anyio
