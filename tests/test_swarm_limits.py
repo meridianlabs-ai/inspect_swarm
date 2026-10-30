@@ -1086,7 +1086,7 @@ async def test_the_ledger_is_written_after_the_final_step() -> None:
     # so that the final meter it reports covers the final step
     stop = await run_swarm(swarm(generator(scripted_model()), channels=[]))
     kinds = [
-        e.data.get("kind", e.data.get("type"))
+        e.data.get("kind") if e.data.get("type") == "result" else e.data.get("type")
         for e in stop.transcript.events
         if isinstance(e, InfoEvent)
         and e.source == "inspect_swarm"

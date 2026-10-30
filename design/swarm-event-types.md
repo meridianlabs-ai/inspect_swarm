@@ -46,10 +46,10 @@ All evidence goes through `transcript().info(data, source="inspect_swarm")` in `
   - `comm_delivered` (`:77`), from `Bus.deliver()` (`_bus.py:189`): `channel`, `record` (the id), `recipients`, `seq` (the run's commit sequence number), `notify` and `result` (what the channel's `apply()` returned; for the shared memory, the applied `files`).
   - `comm_read` (`:102`), from the shared memory's views (`src/inspect_swarm/_channel/shared_memory.py:922`): `channel`, `read` (the read id), `tool_span_id`, `files` (each file read, its version, the record that last wrote it at that version, the line range and whether it is a tombstone) and `listing`.
   - `comm_waited` (`:130`), from `swarm_wait` (`src/inspect_swarm/_bus/_wait.py:256`): `wait`, `channels`, `path`, `file_id`, `timeout`, `started`, `duration`, `idle`, `outcome`, `woken_by`, `files` and `ended`.
-- **Results, `type: "result"`.** `member_result` (`src/inspect_swarm/_controller/_control.py:599`), in the member's span: `status`, `time`, `sandbox`. `final` (`src/inspect_swarm/_final.py:113`), in the swarm's span: `member` (the chosen one, or `null`), `mode`, `reason`, `stop_reason`.
+- **Results, `type: "result"`.** `member_result` (`src/inspect_swarm/_controller/_control.py:599`), in the member's span: `status`, `time`, `sandbox`. `final` (`src/inspect_swarm/_final.py:113`), in the swarm's span: `member` (the chosen one, or `null`), `mode`, `reason`, `stop_reason`. `verdict` (`SwarmRun._take_verdict()` in `_controller/_control.py`, later than `aa9ec88`), in the swarm's span, one per verdict the result contract's verifier gives on a submission: `span_id` (the member's), `passed`, `value`, `time`; never the verdict's explanation.
 - **The ledger and the metrics.** `write_ledger` and `write_metrics` (`_evidence.py:188`, `:195`) write `{"type": "ledger", **SwarmLedger.model_dump()}` and `{"type": "metrics", **SwarmMetrics.model_dump()}` with no `kind`, and set the same dictionaries in the store as `inspect_swarm:ledger` and `inspect_swarm:metrics`. Each model carries its own `version` field.
 
-These are the only kinds the code writes. The logs above also have `notified` (11 to 16 per sample), which the code no longer writes, since members receive no notices; nothing in this design handles it. The `stopped` kind that [swarm-implementation-plan.md M1-5](swarm-implementation-plan.md#m1-pull-requests) mentions is not written either: `final` takes its place. Other designs describe evidence not built yet: `verdict` ([swarm-scoring.md](swarm-scoring.md#what-the-record-adds)), the `schedule` and `orbit` types ([swarm-orbit.md](swarm-orbit.md)), the users-isolation census ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#what-the-topology-makes-measurable)), and push delivery's `steered` and nested notices ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)).
+These are the only kinds the code writes. The logs above also have `notified` (11 to 16 per sample), which the code no longer writes, since members receive no notices; nothing in this design handles it. The `stopped` kind that [swarm-implementation-plan.md M1-5](swarm-implementation-plan.md#m1-pull-requests) mentions is not written either: `final` takes its place. Other designs describe evidence not built yet: the `schedule` and `orbit` types ([swarm-orbit.md](swarm-orbit.md)), the users-isolation census ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#what-the-topology-makes-measurable)), and push delivery's `steered` and nested notices ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)).
 
 `transcript().info()` is synchronous, and the swarm relies on that: the ledger, the metrics and `waited` are written in synchronous `finally` blocks that also run under cancellation.
 
@@ -85,7 +85,7 @@ These are the only kinds the code writes. The logs above also have `notified` (1
 | | inspect_ai | ts-mono | inspect_swarm |
 |---|---|---|---|
 | `CommunicationEvent` | the event and its send, delivery and wait models; union, schema, condensing, `inspect ctl` | one-line renderer; outline and filter | `sent`, `delivered`, `read`, `waited`; the ledger reads it |
-| `SwarmEvent` | the event; union, schema, condensing, `inspect ctl` | header over collapsed data; outline and filter | `swarm_start`, `member_result`, `final`, `result_record`, `ledger`, `metrics` |
+| `SwarmEvent` | the event; union, schema, condensing, `inspect ctl` | header over collapsed data; outline and filter | `swarm_start`, `member_result`, `final`, `verdict`, `result_record`, `ledger`, `metrics` |
 
 ### `CommunicationEvent`
 
@@ -239,7 +239,7 @@ class SwarmEvent(BaseEvent):
     event: Literal["swarm"] = Field(default="swarm")
 
     kind: str
-    """What the event records (`"swarm_start"`, `"member_result"`, `"final"`, `"result_record"`, `"ledger"`, `"metrics"`)."""
+    """What the event records (`"swarm_start"`, `"member_result"`, `"final"`, `"verdict"`, `"result_record"`, `"ledger"`, `"metrics"`)."""
 
     member: str | None = Field(default=None)
     """The member the event concerns, if any."""
@@ -279,17 +279,17 @@ Both are written with `transcript()._event(event)`, the private, synchronous cal
 
 | Today (`InfoEvent.data`) | `SwarmEvent` |
 |---|---|
-| `type: "result"`, `kind: "member_result"` or `"final"` | `kind` |
+| `type: "result"`, `kind: "member_result"`, `"final"` or `"verdict"` | `kind` |
 | `member` | `member` |
 | `version: 1` | `data["version"] = 1` |
-| the rest (`span_id`, `status`, `time`, `sandbox`; `span_id`, `mode`, `reason`, `stop_reason`) | `data` |
+| the rest (`span_id`, `status`, `time`, `sandbox`; `span_id`, `mode`, `reason`, `stop_reason`; `span_id`, `passed`, `value`, `time`) | `data` |
 | `type: "ledger"` or `"metrics"`, then the model's fields | `kind="ledger"` or `"metrics"`, `member=None`, `data` the model's dump exactly as stored, its own `version` included |
 | `type: "swarm_start"`, `version: 1` ([swarm-result-record.md](swarm-result-record.md#the-start-event)) | `kind="swarm_start"`, `member=None`, `data={"version": 1}` |
 | `type: "result_record"`, then the record's fields ([swarm-result-record.md](swarm-result-record.md#the-event)) | `kind="result_record"`, `member=None`, `data` the `SwarmResultRecord` dump, its own `version` included, and the record's `id` |
 
 So `data` for the ledger and metrics is the store entry itself, and `SwarmLedger.model_validate(event.data)` reads it. The versions stay 1: the event type tells the new format apart from the `InfoEvent`s, and the rule that the evidence `version` tracks the payload's shape, not the tools' texts (decision: Ransom, 2026-10-23), applies to `data`. The swarm writes no `InfoEvent` after the switch.
 
-The private helpers become two: `_comm(kind, *, agent, agent_span_id, loop, nested, channel, data, **typed)` (`typed` being `record_ids` and the kind's `send`, `delivery` or `wait`) builds and writes a `CommunicationEvent`, and `swarm_event(kind, *, member, version=1, **data)`, which writes `version` into `data`, replaces `evidence()` for `_control.py:599` and `_final.py:113`. A typed field the validator refuses raises at the writer, which a test of each kind catches.
+The private helpers become two: `_comm(kind, *, agent, agent_span_id, loop, nested, channel, data, **typed)` (`typed` being `record_ids` and the kind's `send`, `delivery` or `wait`) builds and writes a `CommunicationEvent`, and `swarm_event(kind, *, member, version=1, **data)`, which writes `version` into `data`, replaces `evidence()` for `_control.py:599`, `_final.py:113` and the `verdict` writer. A typed field the validator refuses raises at the writer, which a test of each kind catches.
 
 ### How inspect_swarm reads them
 

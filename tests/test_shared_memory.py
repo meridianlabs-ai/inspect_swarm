@@ -12,7 +12,14 @@ from inspect_ai.tool._tools._memory import MemoryStore
 from inspect_ai.util import store_as
 from inspect_ai.util._span import span
 
-from inspect_swarm import Channel, MemberInfo, MemberState, WaitSpec, shared_memory
+from inspect_swarm import (
+    Channel,
+    MemberInfo,
+    MemberState,
+    VerdictSummary,
+    WaitSpec,
+    shared_memory,
+)
 from inspect_swarm._budget import MemberContext, current_member
 from inspect_swarm._bus._bus import Bus
 from inspect_swarm._channel.shared_memory import (
@@ -33,6 +40,7 @@ class _Member:
     status: str | None = None
     role: str | None = None
     choose_name: bool = False
+    verdict: VerdictSummary | None = None
     context: MemberContext = field(init=False)
 
     def __post_init__(self) -> None:

@@ -1,6 +1,7 @@
 import json
-from collections.abc import Callable, Iterator, Mapping
-from typing import Any, Literal, TypeGuard
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import replace
+from typing import Any, Literal, TypeGuard, cast
 from uuid import uuid4
 
 from inspect_ai._util.json import to_json_safe
@@ -11,12 +12,19 @@ from inspect_ai.log._condense import (
     condense_event,
     resolve_events_attachments,
 )
+from inspect_ai.model import ModelOutput
 from inspect_ai.solver import TaskState
 from inspect_ai.util import Store, store
 from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic_core import PydanticSerializationError
+
+from ._result import ResultKind, Verdict
 
 MemberState = Literal["pending", "running", "ended"]
 """A member's lifecycle: not started, running, or ended."""
+
+LeftOut = Literal["output", "answer_key", "explanation"]
+"""A member's value that the record leaves out, because a log would give it back changed: its output, its answer key, or its verdict's explanation."""
 
 RECORD_TYPE = "result_record"
 RESULT_ID_KEY = "inspect_swarm:result_id"
@@ -62,6 +70,21 @@ class MemberResult(BaseModel):
     first_pass_time: float | None = None
     """Swarm time of the member's first passing check; `None` without one. A pass assumes the default `value_to_float()` converter, as for `gate_passes`."""
 
+    output: ModelOutput | None = None
+    """The member's output when it ended, however it ended; `None` until then."""
+
+    answer_key: str | None = None
+    """The answer key of the member's submission, from the result contract's `answer_key`; `None` without a submission, a key function or a comparable answer."""
+
+    verdict: Verdict | None = None
+    """The verifier's verdict on the member's submission; `None` without a submission or a verifier, before the verdict is taken, or when the swarm's stop left it unverified."""
+
+    verdict_time: float | None = None
+    """Swarm time when the verdict was taken; `None` without one."""
+
+    left_out: list[LeftOut] = []
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8, and an output with a value the record cannot hold as JSON, such as an object in its metadata. Empty when nothing was left out."""
+
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
@@ -91,6 +114,12 @@ class SwarmResultRecord(BaseModel):
     final: FinalRecord
     """The final answer."""
 
+    kind: ResultKind | None = None
+    """The result contract's kind, from `swarm(result=...)`; `None` without a contract."""
+
+    verifier: str | None = None
+    """A label for the result contract's verifier, for audit: its `name`, else its qualified name; `None` without one."""
+
 
 # Only the runtime writes the record: once, when the swarm ends, in the swarm's span,
 # with its id in the store the swarm ran with, which ties the record to that store
@@ -102,14 +131,76 @@ def write_record(record: SwarmResultRecord) -> None:
     data: dict[str, JsonValue] = {
         "type": RECORD_TYPE,
         "id": id,
-        **record.model_dump(mode="json"),
+        **_logged_members(record).model_dump(mode="json"),
     }
-    if _changed_by_logging(InfoEvent(data=data, source="inspect_swarm")):
+    if _changed_by_logging(data):
         raise ValueError(
             "The swarm's result record cannot be written: a string in it would read back from the log as other text. Inspect reads a string that begins with attachment:// or tc:// as a reference to an attachment, removes base64 data: URIs when an eval does not log images, and escapes text that is not valid UTF-8, such as a lone surrogate. Check the members' names, roles and sandboxes, and the reason given to choose_answer()."
         )
     transcript().info(data, source="inspect_swarm")
     store().set(RESULT_ID_KEY, id)
+
+
+# Model text, the members' outputs, answer keys and verdict explanations, that a log
+# would give back changed is left out of its member and named in its left_out, so that
+# one member's output never costs the sample its record; text from the task's author is
+# refused instead.
+def _logged_members(record: SwarmResultRecord) -> SwarmResultRecord:
+    return record.model_copy(
+        update={"members": [_logged_member(m) for m in record.members]}
+    )
+
+
+def _logged_member(m: MemberResult) -> MemberResult:
+    update: dict[str, Any] = {}
+    left_out = list(m.left_out)
+    if m.output is not None and not _logged_output(m.output):
+        update["output"] = None
+        left_out.append("output")
+    if m.answer_key is not None and _changed_by_logging(m.answer_key):
+        update["answer_key"] = None
+        left_out.append("answer_key")
+    if (
+        m.verdict is not None
+        and m.verdict.explanation is not None
+        and _changed_by_logging(m.verdict.explanation)
+    ):
+        update["verdict"] = replace(m.verdict, explanation=None)
+        left_out.append("explanation")
+    if not update:
+        return m
+    return m.model_copy(update={**update, "left_out": left_out})
+
+
+# Whether an output reads back from the log as it is. Its JSON form cannot hold a value
+# pydantic cannot represent, such as an object in its metadata, and replaces text that
+# is not valid UTF-8 in a dict's keys, so its own strings are checked first.
+def _logged_output(output: ModelOutput) -> bool:
+    if not _valid_text(output.model_dump()):
+        return False
+    try:
+        data = output.model_dump(mode="json")
+    except PydanticSerializationError:
+        return False
+    return not _changed_by_logging(data)
+
+
+# Whether every string in `value`, dict keys included, is valid UTF-8.
+def _valid_text(value: object) -> bool:
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
+    if isinstance(value, dict):
+        return all(
+            _valid_text(k) and _valid_text(v)
+            for k, v in cast(dict[object, object], value).items()
+        )
+    if isinstance(value, list | tuple):
+        return all(_valid_text(v) for v in cast(Sequence[object], value))
+    return True
 
 
 # Removes the store's record id, so that a swarm that leaves no record never leaves an
@@ -119,7 +210,7 @@ def forget_record() -> None:
         store().delete(RESULT_ID_KEY)
 
 
-# Whether a log would give back other text than `event` holds. Inspect condenses an
+# Whether a log would give back other text than `data` holds, as an event's data. Inspect condenses an
 # event's strings when it logs it (long text into attachments, and base64 data: URIs
 # removed under log_images=False), writes the event and its attachments as JSON (which
 # escapes text that is not valid UTF-8, such as a lone surrogate), and resolves them
@@ -127,8 +218,10 @@ def forget_record() -> None:
 # rewriting tc:// as attachment:// and replacing a reference with the attachment it
 # names. Resolving against the event's own attachments only, where any other reference
 # reads as something else, finds text that would read back as another attachment of
-# the sample or not at all.
-def _changed_by_logging(event: InfoEvent) -> bool:
+# the sample or not at all. Compared as JSON text, so that NaN, which the log keeps,
+# matches itself.
+def _changed_by_logging(data: JsonValue) -> bool:
+    event = InfoEvent(data=data, source="inspect_swarm")
     for log_images in (True, False):
         attachments: dict[str, str] = {}
         condensed = condense_event(event, attachments, log_images)
@@ -140,9 +233,13 @@ def _changed_by_logging(event: InfoEvent) -> bool:
         for _ in range(2):
             [resolved] = resolve_events_attachments([resolved], own)
         assert isinstance(resolved, InfoEvent)
-        if resolved.data != event.data:
+        if _json(resolved.data) != _json(event.data):
             return True
     return False
+
+
+def _json(value: JsonValue) -> str:
+    return json.dumps(value, sort_keys=True)
 
 
 # An event's own attachments, which give any other hash a value no string holds.

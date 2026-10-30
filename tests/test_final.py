@@ -496,7 +496,7 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         and isinstance(e.data, dict)
     ]
     kinds = [
-        e.data.get("kind", e.data.get("type"))
+        e.data.get("kind") if e.data.get("type") == "result" else e.data.get("type")
         for e in infos
         if isinstance(e.data, dict)
     ]
@@ -507,7 +507,6 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
     assert event.span_id == final_payload["span_id"]
     assert isinstance(event.data, dict)
     assert event.data["id"] == record_id
-    # no member's output: those stay in the members' states
     members = event.data["members"]
     assert isinstance(members, list) and isinstance(members[0], dict)
     assert set(members[0]) == {
@@ -522,6 +521,11 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "gate_checks",
         "gate_passes",
         "first_pass_time",
+        "output",
+        "answer_key",
+        "verdict",
+        "verdict_time",
+        "left_out",
     }
     started, never = record.members
     assert (started.state, started.status, started.submitted, started.role) == (

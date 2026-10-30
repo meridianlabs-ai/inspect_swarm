@@ -28,6 +28,7 @@ from inspect_swarm import (
     Record,
     StopReason,
     SwarmControl,
+    VerdictSummary,
     WaitNews,
     WaitSpec,
     member,
@@ -150,6 +151,7 @@ class _Member:
     status: str | None = None
     role: str | None = None
     choose_name: bool = False
+    verdict: VerdictSummary | None = None
     context: MemberContext = field(init=False)
 
     def __post_init__(self) -> None:
