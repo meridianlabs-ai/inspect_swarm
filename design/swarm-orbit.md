@@ -2,9 +2,9 @@
 
 ## Overview
 
-ORBIT, the Inspect-based framework for multi-agent security experiments, could run its scheduled experiments on inspect_swarm while ORBIT's own code keeps doing almost everything that makes them ORBIT experiments. Its agents become ordinary `react()` members of a swarm, so its fork of `react()` goes. Its scheduler becomes a swarm controller that holds every member at the [turn seam](swarm-turn-seam.md) and lets members run one quantum at a time. At the same boundaries, ORBIT's own callbacks add attack input and let its defences rewrite a member's conversation, and the seam records every change they make. Its reader-and-writer channels become one channel of its own on the swarm's bus. Its exposure observer, input and output filters, notices, answer selection, attacks, defences and scorers stay ORBIT code, unchanged where they can be.
+ORBIT, the Inspect-based framework for multi-agent security experiments, could run its scheduled experiments on inspect_swarm while ORBIT's own code keeps doing almost everything that makes them ORBIT experiments. Its agents become ordinary `react()` members of a swarm, so its fork of `react()` goes. Its scheduler becomes a swarm controller that holds every member at the [turn seam](swarm-turn-seam.md) and lets members run one quantum at a time. At the same boundaries, ORBIT's own callbacks add attack input and let its defences rewrite a member's conversation, and the seam records every change they make. Its reader-and-writer channels become one channel of its own on the swarm's bus. Its exposure observer, input and output filters, notices, answer selection, attacks, defences and scorers stay ORBIT code, unchanged where they can be. The port must behave as ORBIT does today, which ORBIT proves by running its existing scheduler, topology and communication tests on the ported path. ORBIT's state for a run (final conversations, submission order, read cutoffs) stays private to ORBIT, out of the sample's store, which every member's tools share.
 
-inspect_swarm adds only what ORBIT cannot build well on top: the turn seam itself, so that the runtime knows a member is held; a public API for writing a channel on the bus; and a controller's choice of a member's preamble, so that ORBIT's scheduler, which does not run its members at the same time, sends its own wording or none. ORBIT chooses and records the answer it scores from each member's output on the swarm's result record, which the scoring and result-record designs provide. inspect_ai has two prerequisites besides the seam's own turn gate: sentinel generate stages that can rewrite a request and resample an output, which would let ORBIT's model-boundary defences stop wrapping `Model`, and a way for such a stage to ask that its change be logged in detail. Until those exist, ORBIT keeps its model wrappers as they are.
+inspect_swarm adds only what ORBIT cannot build well on top: the turn seam itself, so that the runtime knows a member is held; a public API for writing a channel on the bus; and a controller's choice of a member's preamble, so that ORBIT's scheduler, which does not run its members at the same time, sends its own wording or none. ORBIT chooses and records the answer it scores from each member's output on the swarm's result record, which the scoring and result-record designs provide. inspect_ai has two prerequisites besides the seam's own turn gate: sentinel generate stages that can rewrite a request, resample an output and return a refusal, which would let ORBIT's model-boundary defences stop wrapping `Model`, and a way for such a stage to ask that its change be logged in detail. Until those exist, ORBIT keeps its model wrappers as they are.
 
 This document says, for each ORBIT component, where its code lives on the swarm and which hook supports it; works through a two-agent ORBIT experiment with an injection, a compromise, a quarantine defence and a tool gate; gives the exact message order before a member's first model call; and lists the behaviour a port changes.
 
@@ -51,6 +51,7 @@ Most of a scheduled mode can be ORBIT's own code. What ORBIT cannot build on top
 - Specify what inspect_swarm adds, each with why ORBIT cannot do it well on top.
 - Specify inspect_ai's prerequisites, what each is and why ORBIT needs it, for each to be designed in inspect_ai.
 - Show ORBIT's scheduler as its own controller over the seam.
+- Require that a port keep ORBIT's behaviour, proved by ORBIT's own tests on the ported path, with ORBIT's run state private to ORBIT.
 - Work one ORBIT experiment through the port: members, channel, schedule, an injection, a compromise, a quarantine defence and a tool gate.
 - Say what ORBIT logs, what the swarm logs, and what inspect_ai must add.
 - Give an explicit record of the answer actually scored.
@@ -61,6 +62,7 @@ Most of a scheduled mode can be ORBIT's own code. What ORBIT cannot build on top
 - **Writing ORBIT's port**, or deciding whether ORBIT adopts inspect_swarm.
 - **Designing the inspect_ai prerequisites.** This document says what they are and why; each gets its own design in inspect_ai or inspect_sentinel.
 - **Changing the turn seam's contract.** ORBIT is one caller of it.
+- **Re-specifying ORBIT's executor.** Eligibility, submission, read cutoffs, attack evaluation and answer selection are ORBIT's code, kept as they are and pinned by ORBIT's tests, not restated here (decision: Ransom, 2026-10-30).
 - **Red-team features in inspect_swarm.** Attacks, defences and their registries stay ORBIT's (decision: Ransom, 2026-10-07).
 - **ORBIT configurations that do not fit a held `react()` loop**: the `legacy` and `tool_step` quanta, the legacy observation modes and the `legacy/v1` profile ([What stays on ORBIT's executor](#what-stays-on-orbits-executor)).
 
@@ -171,15 +173,15 @@ This design uses the seam's contract as [swarm-turn-seam.md](swarm-turn-seam.md)
 | Group goals, sample input | ORBIT's controller | `start(member, input=[...])` |
 | The preamble (ORBIT sends none) | ORBIT's controller | `start(member, preamble=False)` ([S3](#s3-a-controllers-preamble)) |
 | Scheduler: modes, plans, quanta, barriers, `after_activation`, `max_messages`, halt conditions | ORBIT's `@swarm_controller` ([below](#scheduling-orbits-controller-over-the-seam)) | `on_boundary()`, `start()`, `events()`, stop reasons ([S1](#s1-the-turn-seam)) |
-| Snapshots for eligibility and attack outcomes | ORBIT's controller | `Boundary.messages` and `Boundary.output` |
+| Snapshots for eligibility and attack outcomes | ORBIT's controller, with final conversations in ORBIT's run state ([What the port must keep](#what-the-port-must-keep)) | `Boundary.messages` |
 | Pending injections, `inject_prompt` compromise, runtime attack messages | ORBIT's `orbit:attack` callback | The seam; each change a `changed` event ([S1](#s1-the-turn-seam)) |
 | Pre-turn defences (`dual_llm`) | ORBIT's `orbit:defense` callback | The seam |
-| Channels, communication edges, capacity, cursors, secret channels, `step_start` visibility | ORBIT's `@swarm_channel` | The public bus API ([S2](#s2-a-public-bus-api-for-channels)) |
+| Channels, communication edges, capacity, cursors, secret channels, `step_start` visibility | ORBIT's `@swarm_channel`, with read cutoffs in ORBIT's run state | The public bus API ([S2](#s2-a-public-bus-api-for-channels)) |
 | `notify` and `auto` delivery | ORBIT's delivery `Model` wrapper, unchanged | None needed |
 | Exposure observer | ORBIT's observer, unchanged, writing ORBIT's own events | Read evidence from `record_read()` ([S2](#s2-a-public-bus-api-for-channels)); later an `AfterGenerate` stage ([I2](#i2-sentinel-generate-stages-that-rewrite-and-resample)) |
 | Tool gates, `dual_llm`'s tool wrapper | ORBIT's tool wrappers, unchanged, applied by the member builder to its own tools and, through an ORBIT tool source, to the channel tools `swarm_tools()` resolves ([Members](#members)) | None needed |
 | Input filters, output checks and resampling | ORBIT's filter wrappers, unchanged, until I2 and I3 exist; then sentinel protocols | [I2](#i2-sentinel-generate-stages-that-rewrite-and-resample), [I3](#i3-a-detailed-record-of-a-generate-stages-change-on-request) |
-| Submission order (`last_submitted`) | ORBIT's submit tool, given to `react()` | `AgentSubmit(tool=)` |
+| Submission order (`last_submitted`) | ORBIT's submit tool behind its defence chain, given to `react()`; the registry in ORBIT's run state | `AgentSubmit(tool=)` |
 | Answer selection (`output_agent`) and history projection | ORBIT's solver wrapper around the swarm | Each member's output on the result record ([swarm-scoring.md step 1](swarm-scoring.md#what-the-record-adds)), read with `swarm_result()` ([swarm-result-record.md](swarm-result-record.md)) |
 | A record of the answer scored | ORBIT's solver wrapper | The same |
 | `CommunicationState`, the collusion scorer, the viewer overview | ORBIT, unchanged: its channel keeps writing its own state and events | None needed |
@@ -295,7 +297,8 @@ What: `modify` at `BeforeGenerate`, replacing the request for that call only; `m
 - the replaced request is what is sent, what the `ModelEvent` records, and what the cache is keyed on, so a filtered member can use the response cache;
 - the replacement is not written back to the agent's conversation, as ORBIT's filters are per request today;
 - `AfterGenerate` sees the request as sent, after any `BeforeGenerate` modify, and runs on cache hits, so an observer at that stage sees exactly what reached the model;
-- a protocol can tell which member a call belongs to, which `calling_member()` (S2) answers.
+- a protocol can tell which member a call belongs to, which `calling_member()` (S2) answers;
+- a protocol can make its outcome a refusal: an output with `stop_reason="content_filter"` and no tool calls, which is what ORBIT's output check returns when it exhausts its resamples (`ORBIT: orbit/defenses/boundaries.py:336-343`). The proposal recomputes a replaced output's stop reason as `tool_calls` or `stop` (inspect_sentinel `design/generate-stages.md`, section d), which would turn the refusal into an ordinary reply, so react's refusal retries and its exit after three refusals in a row (`src/inspect_ai/agent/_react.py:290-297`, `:792-796`) would no longer see it. Until a stage can return a refusal, ORBIT keeps its output-check wrapper.
 
 Why: ORBIT's input filters (memory context, safety prompts, input monitoring with redaction, the compromise prompt filter) and its output checks with resampling are per-call rewrites. Today they need a `ModelAPI` and a `Model` wrapper built through the private `_resolve_config`, and refuse caching for the whole run. With I2 they become sentinel protocols, and ORBIT's observer an `AfterGenerate` stage that sees cache hits too.
 
@@ -314,108 +317,35 @@ Until I2 and I3 exist, ORBIT keeps its wrappers and its events, and logs what th
 
 ### ORBIT's code on the swarm
 
+#### What the port must keep
+
+This design does not re-specify ORBIT's executor. ORBIT's code keeps doing what it does today, on the hooks above, under two requirements:
+
+- **ORBIT's behaviour, proved by ORBIT's tests.** For every configuration the port moves, a run behaves as it does on ORBIT's executor, except for the changes listed in [Behaviour a port changes](#behaviour-a-port-changes). That covers eligibility under `max_messages`, the quanta, barriers and halt conditions, the attack outcomes of each activation (a member's final turn included), the member's tools, submit tool and submit setting (the scheduling mode's default included), the defence chain on every tool (the submit tool and the channel tools included), `step_start` cutoffs on every path that selects records (explicit reads, notices and `auto` inboxes, with their cursors and exposure), and answer selection and history projection. The proof is ORBIT's existing scheduler, topology and communication tests, run on the ported path as well as on ORBIT's executor ([Testing](#testing)). Where those tests do not yet pin a behaviour, ORBIT adds the test on its executor first, then runs it on both.
+- **ORBIT's run state stays private to ORBIT.** The state the port adds for a run lives in one ORBIT object per sample, shared by ORBIT's controller, member wrappers, channel and solver wrapper, and never under a sample-store key. That state is each member's final conversation, the submission order, each member's read cutoff, the schedule state and the halt reason. The solver wrapper creates the object before the swarm, and the others reach it through a context variable it sets, which every task the swarm starts inherits. The sample's store is shared by every member (`src/inspect_swarm/_member.py:221`), and `tool_state_scope()` changes only the default namespace of tools that use it. In the store, a peer's store tool could read a member's conversation, instructions and answer while the swarm runs, or rewrite the submission order and so change the answer scored. ORBIT's channel state, in store models today (`state.py:120-155`), stays where it is: the port moves no existing ORBIT state.
+
 #### Members
 
-ORBIT's member builder is a registered `@agent` taking the spec's fields as arguments, so the plan logs them. It builds:
+ORBIT's member builder is a registered `@agent` that takes the spec's fields as arguments, so the plan logs them. It builds `react()` from what ORBIT's builder gives `turn_react` today (`ORBIT: orbit/agents/topologies.py:443-531`). That is the agent's prompt with ORBIT's assistant prompt, so the system message is unchanged; its tools and its submit tool, all behind the member's defence chain; its model layers; and its submit setting, the scheduling mode's default included. The swarm changes four things:
 
-```python
-react(
-    name=spec.name,
-    prompt=AgentPrompt(instructions=spec.system_prompt, assistant_prompt=ORBIT_ASSISTANT_PROMPT),
-    tools=[*(wrap(t) for t in spec_tools), OrbitTools(swarm_tools(), wrap)],
-    model=wrapped_model,                        # ORBIT's delivery, output-check, filter and observer layers
-    submit=AgentSubmit(tool=orbit_submit(spec.name)) if spec.submit else False,
-    on_continue=keep_going if not spec.submit else None,
-)
-```
-
-- `ORBIT_ASSISTANT_PROMPT` is `turn_react`'s assistant prompt, so the system message stays as it is.
-- **`wrap`** is the member's tool-wrapper chain as ORBIT builds it today (`orchestrator.py:182-211`): the defences' tool-result wrappers, such as `dual_llm`'s quarantine, applied first, and the `DefenseBoundary` gate last, outermost, so a denied call runs neither the tool nor a quarantine model.
-- **`OrbitTools`** is ORBIT's own `ToolSource`, because the channel tools exist only when `swarm_tools()` is resolved ([Current behaviour](#inspect_swarm)). Its `tools()` awaits `swarm_tools().tools()`, in the same call and so in the member's context and loop, and returns each tool through `wrap`. `react()` resolves it as it resolves any source, so the swarm's binding of the member's own loop and its `reach` rules are unchanged, and `channel_post`, `channel_read` and `channel_list` get the same gate and quarantine as ORBIT applies to them today. Outside a swarm it gives no tools, as `swarm_tools()` does.
-- **`orbit_submit(name)`** is ORBIT's submit tool, `make_submit_tool_with_registry`'s (`ORBIT: orbit/execution/submit_registry.py:115-167`) on ORBIT's store: when it runs, it appends the member to ORBIT's submission order under an ORBIT store key, unless `calling_member()` is `nested` (a delegate's submit, which ORBIT does not count today, `submit_registry.py:76-89`), and returns the answer. `react()` ends the member on it as on its own submit tool, so the swarm records a submission as usual. The order is the order in which submit calls ran, which is ORBIT's `last_submitted`; a member's end time is not, since a member whose submit ran first can end after another while a second tool of its batch still runs.
-- A `submit=False` member needs `on_continue` to return its own state: `react(submit=False)` otherwise ends at its first tool-free reply, with no boundary after it ([swarm-turn-seam.md Supported members](swarm-turn-seam.md#supported-members)). With it, a tool-free reply reaches a boundary with `after == "reply"`, where ORBIT's controller ends the activation and the member stays available.
-- The builder wraps the agent so that a synchronous `finally` saves the final conversation under an ORBIT store key, for history projection and for the attack evaluation of a member that ended during a step ([below](#scheduling-orbits-controller-over-the-seam)), and enters ORBIT's communication identity for its observer, as `observe_agent` does today. The `finally` runs inside the agent the swarm awaits, so the conversation is saved before the swarm ends the member and queues `MemberEnded`, however the member ends: a submission, its own limit, an end at a boundary, the stop or a cancellation.
+- **Channel tools come through a tool source.** `swarm_tools()` gives a loop its channel tools only when the loop resolves its tools ([Current behaviour](#inspect_swarm)), so a wrapper applied to the list the builder passes to `react()` never sees them. ORBIT passes its own `ToolSource`. It resolves `swarm_tools()` in the same call, and so in the member's context and loop, then returns each tool through the member's chain. The channel tools get the gate and quarantine they get today, and the swarm's binding of the member's loop and its `reach` rules are unchanged.
+- **The submit tool** is ORBIT's registry tool (`ORBIT: orbit/execution/submit_registry.py:115-167`), wrapped by the chain and then given to `react()` as `AgentSubmit(tool=...)`. A denied submit therefore neither records a submission nor ends the member. The registry is in ORBIT's run state. `react()` ends the member on the tool as on its own submit tool, and the swarm records a submission as usual.
+- **A `submit=False` member** gets an `on_continue` that returns its state. Without it, `react(submit=False)` ends at its first tool-free reply, with no boundary after it ([swarm-turn-seam.md Supported members](swarm-turn-seam.md#supported-members)). With it, a tool-free reply reaches a boundary with `after == "reply"`.
+- **The final conversation** is saved in ORBIT's run state by a synchronous `finally` in the member wrapper, inside the agent the swarm awaits. It is therefore saved before the swarm queues `MemberEnded`, however the member ends. The wrapper also enters ORBIT's communication identity for its observer, as `observe_agent` does today.
 
 #### Scheduling: ORBIT's controller over the seam
 
-ORBIT's scheduler is a `@swarm_controller` of its own. It registers three callbacks on every member, in this order, then starts every member; each parks at boundary 0 until its first activation:
+ORBIT's scheduler becomes a `@swarm_controller` of its own: ORBIT's outer loop and `ScheduleRuntime`, over the seam. It registers three callbacks on every member, in this order: `orbit:schedule`, `orbit:attack` and `orbit:defense`. It then starts each member with its seed and `preamble=False` ([S3](#s3-a-controllers-preamble)), and each member parks at boundary 0.
 
-```python
-# ORBIT code, not inspect_swarm
-
-class Slot:                                   # one per member
-    def __init__(self) -> None:
-        self.boundary: Boundary | None = None # the latest snapshot
-        self.parked = anyio.Event()
-        self.go = anyio.Event()
-        self.ended = anyio.Event()            # set from MemberEnded
-        self.quantum: Literal["model_step", "completion"] = "model_step"
-        self.active = False
-        self.starting = False                 # this boundary begins an activation
-        self.before: set[str] = set()         # message ids when the activation began, after ORBIT's callbacks
-
-    async def at_boundary(self, b: Boundary) -> None:      # origin "orbit:schedule"
-        self.starting = False
-        if self.active and self.quantum == "completion" and b.after != "reply":
-            return None                       # completion runs on to a tool-free reply
-        self.active = False
-        self.boundary = b
-        self.parked.set()
-        with suspend_working_limit():         # held time is waiting time
-            await self.go.wait()
-        self.go = anyio.Event()
-        self.active = self.starting = True
-        return None
-
-    async def activate(self, quantum: Literal["model_step", "completion"]) -> None:
-        await first_of(self.parked, self.ended)
-        if self.ended.is_set():
-            return
-        self.parked = anyio.Event()
-        self.quantum = quantum
-        self.go.set()
-        await first_of(self.parked, self.ended)   # its next boundary, or its end
-
-
-@swarm_controller
-def orbit_scheduler(experiment: dict[str, JsonValue]) -> Controller:
-    async def run(control: SwarmControl) -> str:
-        config = ExperimentConfig.model_validate(experiment)
-        slots = {m.name: Slot() for m in control.members}
-        attacks, defenses = OrbitAttacks(config, slots), OrbitDefenses(config, slots)
-        for m in control.members:
-            m.on_boundary(slots[m.name].at_boundary, origin="orbit:schedule")
-            m.on_boundary(attacks.callback(m.name), origin="orbit:attack")
-            m.on_boundary(defenses.callback(m.name), origin="orbit:defense")
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(mark_ended, control, slots)     # MemberEnded -> slot.ended
-            for m in control.members:
-                control.start(m, input=seed_for(config, m.name), preamble=False)
-            reason = await run_turns(config, slots, attacks)
-            tg.cancel_scope.cancel()
-        return reason                                     # recorded as controller:<reason>
-
-    return Controller(run)
-```
-
-- **Turns.** `run_turns` is ORBIT's outer loop and `ScheduleRuntime`, unchanged in substance: for each turn it checks the halt conditions, begins the turn's attacks, and runs the plan step. A sequential step awaits `slots[name].activate(quantum)` in order; a concurrent step starts them in an anyio task group, whose exit is the barrier, under an anyio capacity limiter for `max_concurrency`. `after_activation` amendments run between activations, as today. ORBIT's `orbit_schedule` events are written by the controller, as `ScheduleRuntime` writes them now.
-- **Quanta.** `model_step` is one boundary. `completion` keeps a submitting member going until it submits and ends, and a `submit=False` member until a boundary with `after == "reply"`. A recovered context overflow reaches a boundary like any turn, so under `model_step` the activation ends there, as `turn_react`'s does (`turn_react.py:254-262`).
-- **Eligibility.** Before activating a member the controller counts its conversation as ORBIT's executor counts it before invoking the agent (`agent_scheduler.py:290-296`, `:539-551`), so `max_messages` is checked as now:
-  - the base is `slots[name].boundary.messages`. At the first activation (`boundary.index == 0`) it leaves out react's system message at index 0, which `react()` inserts when the loop starts but `turn_react` inserts only after the check (`turn_react.py:469-490`); every message of the seed, its system messages included, still counts. At later activations the whole conversation counts, as ORBIT's agent prompt is in its stored state by then;
-  - to the base it adds the messages ORBIT's `orbit:attack` callback will add at this activation (pending injections for the member, collusion and compromise prompts due, runtime-attack messages), since today the turn's pre-turn steps add them before the check.
-- **Attack outcomes.** After each step the controller gives `_evaluate_attack_outcomes` the messages each activation of the step added, in the step's order, as ORBIT's `messages_before` slices do today (`orchestrator.py:996-1008`):
-  - the conversation at the activation's end is `slot.boundary.messages` when the member parked again, and, when `slot.ended` is set instead, the conversation the member wrapper saved ([Members](#members)), which holds the final turn, since a submission or a member limit ends `react()` without another boundary;
-  - the messages it added are those of that conversation whose ids are not in `slot.before`, in order. The `orbit:defense` callback, ORBIT's last, sets `slot.before` to the ids of the conversation as it leaves it at a boundary that begins an activation, so pending injections and rewrites made there are not counted as the activation's own, as today they are applied before `messages_before` is taken. Ids, not a length, so that a compaction or a rewrite of earlier messages cannot shift the slice;
-  - a member the swarm's stop ends after the controller has returned is not evaluated, as ORBIT evaluates nothing after it halts.
-- **Halts.** The controller returns ORBIT's halt reason: `controller:max_turns`, `controller:schedule_exhausted`, `controller:all_agents_submitted`, `controller:attack_success` and so on.
-- **Ending.** Returning requests the swarm's stop, which ends every held member at once, `stopped` ([swarm-turn-seam.md Stopping](swarm-turn-seam.md#stopping)). A submitting member that submits ends `submitted` on its own, and is never activated again.
-- **Concurrency.** Everything is anyio. A member's error propagates as the swarm's foreign error and cancels the siblings and the controller, as ORBIT's "concurrent failure cancels and joins siblings, then propagates the original failure".
-- **Read cutoffs.** Before activating a member under `step_start` visibility, the controller writes the channel's counter at the start of the step to an ORBIT store key, per member; the channel's read tool reads it for `calling_member()`. Controller and channel share the sample's store, as ORBIT's state already does.
-- **Messages never activate a member.** Only the controller sets `go`.
+- **Holding.** `orbit:schedule` parks a member at each boundary that ends an activation and waits for the scheduler's go inside `suspend_working_limit()`, as [swarm-turn-seam.md](swarm-turn-seam.md#the-callback-contract) sketches ORBIT's activation. Inside a `completion` activation it lets the member run on: a submitting member to its submission, a `submit=False` member to a boundary with `after == "reply"`. Activating a member sets its go and waits for its next park or its end (`MemberEnded` from `events()`).
+- **Snapshots.** Eligibility checks and attack evaluation read `Boundary.messages` at a park, and the saved final conversation for a member that ended during an activation. They are ORBIT's code, as are `after_activation` amendments and the `orbit_schedule` events. Where a snapshot differs from what ORBIT's executor reads, ORBIT's code absorbs the difference. One example: at boundary 0 a snapshot already holds react's system message, which `turn_react` inserts only after the eligibility check (`turn_react.py:469-490`). ORBIT's tests on the ported path catch any difference it misses.
+- **Plan steps** use anyio. A sequential step activates its members in order. A concurrent step activates them in a task group whose exit is the barrier. A member's error propagates as the swarm's foreign error and cancels its siblings and the controller.
+- **Halting.** The controller returns ORBIT's halt reason (`controller:schedule_exhausted`, `controller:all_agents_submitted` and so on). Returning requests the swarm's stop, which ends every held member as `stopped` ([swarm-turn-seam.md Stopping](swarm-turn-seam.md#stopping)).
+- **Messages never activate a member.** Only the controller's go does.
 
 #### Interventions at a boundary
 
-The `orbit:attack` and `orbit:defense` callbacks act only at a boundary that begins an activation (`slots[name].starting`), and return `None` at every other one, including those inside a `completion` activation. Each receives the conversation as the callbacks before it left it, and returns a new list; the seam applies it, and records one `changed` event per callback.
+The `orbit:attack` and `orbit:defense` callbacks act only at a boundary that begins an activation, which ORBIT's run state records, and return `None` at every other one, including those inside a `completion` activation. Each receives the conversation as the callbacks before it left it, and returns a new list; the seam applies it, and records one `changed` event per callback.
 
 - **Pending injections** (`orbit:attack`). The callback takes this member's unapplied `AttackLog.pending_injections` entries, and those with no target, and appends the same message ORBIT builds today, then marks them applied and writes ORBIT's info line:
 
@@ -438,7 +368,7 @@ Because attack input comes before defences in registration order, a defence sees
 ORBIT's `channel_post`, `channel_read` and `channel_list` become the tools of one ORBIT `@swarm_channel`, say `orbit`, with `reach="loop"`, whose state keeps ORBIT's store-backed registry, messages, receipts and cursors, attack-registered secret channels included.
 
 - **Post.** The tool finds the caller with `calling_member()`, checks that it is a writer, and computes the recipients from readers and edges; it refuses a non-writer or an empty recipient set with a `ToolError`, as now. It then delivers `Draft("orbit", "post", payload=text, op={"channel": id, "recipients": [...]})`, unaddressed. `validate()` checks the post alone; `admit()` checks capacity, against state that `apply()` changes with no `await` in between, so two concurrent posts cannot both take the last place; `apply()` increments ORBIT's counter, stores the message with it and the bus's record id, and returns the recipients as `notify` and in its `result`.
-- **Read.** The tool checks read permission, pages from the caller's cursor, hides messages above the caller's read cutoff, renders ORBIT's NDJSON, and calls `record_read("orbit", records=[...])` with the bus record ids of the messages it rendered before it returns, keeping the rendered fragments under the read id and the tool call id ORBIT's provenance captures, as `record_read` does today (`ORBIT: orbit/communication/runtime.py:300-327`).
+- **Read.** The tool checks read permission, pages from the caller's cursor, hides messages above the caller's read cutoff (from ORBIT's run state, applied by the same selection that notices and `auto` inboxes use), renders ORBIT's NDJSON, and calls `record_read("orbit", records=[...])` with the bus record ids of the messages it rendered before it returns, keeping the rendered fragments under the read id and the tool call id ORBIT's provenance captures, as `record_read` does today (`ORBIT: orbit/communication/runtime.py:300-327`).
 - **Evidence.** The bus writes the swarm's `sent`, `delivered` and `read` events for ORBIT's records, which the swarm's ledger and communication metrics count; ORBIT keeps writing its own `orbit.communication` events and `CommunicationState`, each carrying the swarm's record id, so the two join. The collusion scorer and the viewer overview read ORBIT's state as now.
 - **Waking.** `wake=False`: no ORBIT record wakes a wait or activates a member.
 
@@ -446,7 +376,7 @@ ORBIT's `channel_post`, `channel_read` and `channel_list` become the tools of on
 
 ORBIT's model layers stay as the member builder builds them, in today's order: delivery outermost, the output check, the filter wrapper (which records the `ModelEvent`), the observer below the filters, then the provider. Nothing in the swarm changes them:
 
-- `notify` and `auto` are computed per request from ORBIT's channel state, for the member the builder was built for.
+- `notify` and `auto` are computed per request from ORBIT's channel state, for the member the builder was built for, under that member's `step_start` cutoff as an explicit read is. Today the cutoff is a context variable set around each step's execution (`runtime.py:36-48`). A member's task now lives across steps, and a value the controller sets does not reach it, so the selection reads the cutoff from ORBIT's run state instead.
 - The observer matches reads as today, by the tool call id captured at read time; the swarm puts no metadata on tool results and ORBIT needs none.
 - Exposure and coverage stay ORBIT's `model_exposure`, `notified` and `delivered` events and `observation_enabled_sessions`.
 
@@ -454,29 +384,26 @@ When I2 and I3 exist, the input filters and output checks become sentinel protoc
 
 #### The answer, and a record of the answer scored
 
-ORBIT's task wraps the swarm in a solver of its own. Before the swarm it copies `TaskState.output`, the output ORBIT's solver leaves unchanged today when it selects no nonempty completion. It then awaits `as_solver(swarm(...))` inside `try`. Its `finally` is synchronous, so it runs under cancellation, and runs after `as_solver()`'s own `finally` has copied the swarm's answer into the `TaskState` (`src/inspect_ai/agent/_as_solver.py:65-80`). It:
+ORBIT's task wraps the swarm in a solver of its own. After the swarm, in a synchronous `finally`, it selects the answer by ORBIT's rule and projects history as `sync_to_task_state` does today. It reads each member's output from the swarm's result record with `swarm_result()` ([swarm-result-record.md](swarm-result-record.md#reading-it-swarm_result)), and each member's conversation and the submission order from ORBIT's run state. The wrapper differs from today in three ways:
 
-1. reads the swarm's result record with `swarm_result()` ([swarm-result-record.md](swarm-result-record.md#reading-it-swarm_result)), which the swarm writes however it ends, and ORBIT's own schedule state;
-2. selects the answer member by ORBIT's rule: `output_agent`, else the last member in ORBIT's submission order ([Members](#members)), else the member of the last step with results;
-3. sets `TaskState.output` explicitly, never leaving the swarm's copy in place: to the selected member's `output` from the record when its completion is not empty, and otherwise (no member selected, no record, or an empty completion) back to the copy taken before the swarm, as ORBIT's output is today;
-4. writes ORBIT's answer record, below, from the output step 3 set, before anything that can raise a limit;
-5. sets `TaskState.messages` from the conversations the member wrappers saved, by `history_projection`, last. Assigning `TaskState.messages` enforces the sample's message limit (`src/inspect_ai/solver/_task_state.py:273-275`), so an `all` projection of several conversations can exceed it; the output and the answer record are then already set;
-6. lets the original exception, if any, propagate unchanged. A failure in steps 1 to 5 is recorded as ORBIT records cleanup errors and never replaces it; when there was no original exception, a limit raised by step 5 propagates, ending the sample at its limit with the output and answer record of steps 3 and 4, and any other failure in steps 1 to 5 propagates as ORBIT's cleanup failures do. Each step runs whether or not an earlier one failed, except that step 4 records what step 3 set.
+- When ORBIT's rule selects no nonempty completion, it keeps the output the task had before the swarm, as ORBIT does today, and not the swarm's answer, which `as_solver()` has copied into the `TaskState` by then (`src/inspect_ai/agent/_as_solver.py:65-80`).
+- It writes ORBIT's answer record (below) before it sets `TaskState.messages`, because that assignment enforces the sample's message limit (`src/inspect_ai/solver/_task_state.py:273-275`).
+- An exception that ended the swarm propagates unchanged; when there was none, a limit that the projection raises propagates, after the output and the answer record are set.
 
-**The answer record.** ORBIT writes it to the store under `orbit:answer`, so a re-scored log keeps it, and as an ORBIT `InfoEvent` (`{"orbit_answer": ...}`) in the solver's span:
+**The answer record.** ORBIT writes it to the store under `orbit:answer`, so a re-scored log keeps it, once every member has ended, so no member's tool reads or changes it, and as an ORBIT `InfoEvent` (`{"orbit_answer": ...}`) in the solver's span:
 
 | Field | Meaning |
 |---|---|
 | `schema_version` | `1` |
 | `selected` | the member ORBIT's rule selected; `None` when none was |
 | `rule` | the rule that selected it: `output_agent`, `last_submitted` or `last_result`; `None` when none did |
-| `member` | the member whose output is `TaskState.output`: `selected` when its output was used, `None` when step 3 restored the earlier output |
+| `member` | the member whose output is `TaskState.output`: `selected` when its output was used, `None` when the output the task had before the swarm was kept |
 | `status`, `submitted` | `member`'s status and submission, from the swarm's record; `None` without a member |
 | `message_id` | the id of `TaskState.output`'s message when `member` is set; `None` otherwise |
 | `swarm_final` | the swarm's own `final`: its mode, member and reason |
 | `agrees` | whether `member` is the swarm's `final.member` |
 | `provisional` | whether the swarm's record was provisional (a limit, error or cancellation ended the swarm before it finalised) |
-| `halt_reason` | ORBIT's halt reason, as its controller saved it in ORBIT's schedule state; `None` when the swarm ended before the controller returned |
+| `halt_reason` | ORBIT's halt reason, from ORBIT's run state; `None` when the swarm ended before the controller returned |
 
 So the answer actually scored is named in one place, with how it was chosen and whether it was a submission, and every field describes the output that was scored. Before it returns, ORBIT's controller computes the same selection; when the selected member ended `submitted`, it calls `choose_answer(member, reason=rule)`, so the swarm's own `final` names that member and `agrees` is true. When the selected member did not submit, the swarm's `final` follows the controller's `final` rule over the other members' submissions: another member's submission when one submitted, `no_submissions` when none did; `agrees` is false and only ORBIT's record names what was scored. The swarm's rule and record are unchanged.
 
@@ -542,7 +469,7 @@ swarm(
 )
 ```
 
-wrapped in ORBIT's solver. Each member's model has the delivery layer, the filter layer (the compromise prompt filter, because a compromise attack exists) and the observer; the writer also has the tool gate on its tools, channel tools included through `OrbitTools`, and the reader `dual_llm`'s quarantine wrapper on its tools, channel tools included, and the output check.
+wrapped in ORBIT's solver. Each member's model has the delivery layer, the filter layer (the compromise prompt filter, because a compromise attack exists) and the observer; the writer also has the tool gate on its tools, channel tools included through ORBIT's tool source, and the reader `dual_llm`'s quarantine wrapper on its tools, channel tools included, and the output check.
 
 **Run.**
 
@@ -555,7 +482,7 @@ wrapped in ORBIT's solver. Each member's model has the delivery layer, the filte
 5. The plan is exhausted; the controller returns `schedule_exhausted`. The stop ends both held members, `stopped`. Neither submitted, so the swarm's `final` is `no_submissions`.
 6. ORBIT's solver wrapper sets `TaskState.output` to the reader's output from the record, the messages to the reader's saved conversation, and writes `orbit:answer` with `selected` and `member` both `"reader"`, `rule="output_agent"`, `submitted=false`, `swarm_final` with reason `no_submissions`, and `agrees=false`. The controller made no `choose_answer()` call, since the reader did not submit. The `match` scorer scores the reader's reply.
 
-Had the writer called `channel_list`, the tool gate `OrbitTools` put on it would have refused it with `ToolError("Blocked by defense '<name>': Tool 'channel_list' is blocked")`, recorded as a `defense_intervention`, and the writer's turn would have gone on to its boundary as any tool error does.
+Had the writer called `channel_list`, the tool gate ORBIT's tool source put on it would have refused it with `ToolError("Blocked by defense '<name>': Tool 'channel_list' is blocked")`, recorded as a `defense_intervention`, and the writer's turn would have gone on to its boundary as any tool error does.
 
 ### Behaviour a port changes
 
@@ -567,10 +494,11 @@ Runs on the two runtimes should not be pooled unless these are accepted or contr
 - **Conversational members end `stopped`** at the swarm's stop, and the swarm's own answer is a submission only. ORBIT's answer record names what was scored.
 - **Member time limits exclude held time** ([swarm-turn-seam.md Time](swarm-turn-seam.md#time)).
 - **One span per member**, with `react()`'s own features (compaction, refusal retries, the agent channel) available; ORBIT's activations are its schedule events inside the span.
+- **Three refusals in a row end a member's loop.** `react()` stops after three consecutive outputs with `stop_reason="content_filter"` (`src/inspect_ai/agent/_react.py:290-297`), which ORBIT's output check returns each time it exhausts its resamples; `turn_react` has no such exit.
 - **A rewrite at a boundary resets compaction**, and drops summaries made from changed history, where compaction is on.
 - **Unsupported members** are refused: background-dispatching `deepagent()` and bridged members.
 
-Unchanged: the first request's messages (ORBIT sends no preamble), the submission order that `last_submitted` reads, the attack evidence of a member's final turn, notices and inboxes (per request, never stored), tool gates and their judges (inside the tool call, charged as now, on channel tools as on the others), filters and caching (refused while any filter wraps a member, until I2), the channel's read format, and exposure.
+Unchanged: the first request's messages (ORBIT sends no preamble), the submission order that `last_submitted` reads, the attack evidence of a member's final turn, notices and inboxes (per request, never stored), tool gates and their judges (inside the tool call, charged as now, on channel tools and the submit tool as on the others), filters and caching (refused while any filter wraps a member, until I2), the channel's read format, and exposure.
 
 ### What stays on ORBIT's executor
 
@@ -630,12 +558,12 @@ Unchanged: the first request's messages (ORBIT sends no preamble), the submissio
 - **Read evidence.** `record_read()` refuses a caller outside the run and a key that would overwrite one of the event's own fields, and writes only ids and the channel's fields; it carries no model text unless the channel puts some in `fields`, which ORBIT's does not.
 - **The preamble** a controller passes is controller code's text, as `input` is; nothing a member wrote reaches it through the swarm. `start()` checks only its type and that it is not blank.
 - **Members' outputs on the result record** are read by ORBIT's solver wrapper after the swarm; who can read the record, and when, is [swarm-result-record.md Security](swarm-result-record.md#security)'s.
-- **ORBIT's submission order** is written by ORBIT's submit tool from the member's identity in `calling_member()`, never from the tool's arguments.
+- **ORBIT's run state** (final conversations, the submission order, read cutoffs) is never in the sample's store, so no member's tool, such as a store tool a model drives, can read a peer's private conversation or reorder submissions to change the answer scored. The submit tool records the member it was built for, never a name from its arguments, and runs behind the member's defence chain.
 - **Untrusted input in ORBIT's code** (tool arguments to gates, channel payloads, model output to filters) is handled by ORBIT as today; the port moves none of it into the swarm.
 
 ## Testing
 
-All in inspect_swarm, with mockllm, on asyncio and trio, no network or Docker, with no ORBIT dependency.
+In inspect_swarm, with mockllm, on asyncio and trio, no network or Docker, with no ORBIT dependency:
 
 - **The public bus API** (`tests/test_bus.py`):
   - a user channel written only with public names delivers a record, and its `sent` and `delivered` events match a built-in channel's;
@@ -647,15 +575,16 @@ All in inspect_swarm, with mockllm, on asyncio and trio, no network or Docker, w
 - **The preamble** (`tests/test_controller.py`): `start()` with no `preamble` gives today's input and preamble; a string replaces the preamble with that text, for a member with `choose_name=True` too; `False` adds none; an empty or blank string and `False` with an input that has no user message raise `ValueError`, and `True` or a list `TypeError`, each leaving the member pending.
 - **ORBIT-shaped conformance** (`tests/test_orbit_shape.py`), on the seam:
   - **message order**: a `react(prompt=...)` member whose model is a test `Model` wrapper that appends a system notice, over a `ModelAPI` wrapper that prepends a safety system message and records what it passes on, started with `preamble=False`, with three callbacks at boundary 0 that insert a tagged system message after all the leading system messages, append a tagged user injection, and replace the injection under its id. Started with a goal, the first `ModelEvent` input is exactly `[system prompt, compromise, goal, rewritten injection, notice]`; started with a sample input `[system, user, assistant, user]`, it is exactly `[system prompt, the input's system message, compromise, user, assistant, user, rewritten injection, notice]`; in both the mock provider receives `[safety prompt, ...those]`. Started with a preamble string instead, the string is a user message after the input and nothing else changes. Each callback writes its own `changed` event;
-  - a controller of `Slot`s alternates two members by `model_step`, one generation each, with no continue prompt added; a concurrent step waits at its barrier; a `completion` activation of a `submit=False` member with `on_continue` returning its state runs to a tool-free reply and stops there, and one of a submitting member runs to submission;
-  - eligibility: at its first activation a member whose seed is a group goal, and one whose seed is a sample input that opens with a system message, are activated at a `max_messages` one above the seed's length and skipped at the seed's length, as ORBIT's executor does, with react's system message not counted; a pending injection due at that activation counts; at later activations the whole conversation counts and a member at its cap is skipped;
-  - **channel tools behind ORBIT's wrappers**: a member whose tools are a test `OrbitTools` over `swarm_tools()`, with a gate that denies the channel's list tool and a result wrapper on its read tool: the list call returns the gate's `ToolError` and the channel's tool does not run, and the read call returns the wrapper's result in place of the channel's;
-  - **attack evidence of a final turn**: a member whose only marker text is in the submission that ends it, under a `completion` activation and under `model_step`, and a member ended by its own message limit: the messages the controller hands its evaluator after the step hold that final turn, from the conversation the member wrapper saved, and none of the messages its callbacks added at the activation's start;
+  - a test controller that holds members in a boundary callback, as ORBIT's will, alternates two members by `model_step`, one generation each, with no continue prompt added; a concurrent step waits at its barrier; a `completion` activation of a `submit=False` member with `on_continue` returning its state runs to a tool-free reply and stops there, and one of a submitting member runs to submission;
+  - **tools behind ORBIT's wrappers**: a member whose tools are a test `ToolSource` that wraps what `swarm_tools()` resolves, and whose submit tool, given as `AgentSubmit(tool=)`, is wrapped too, with a gate that denies the channel's list tool and the submit tool and a result wrapper on the channel's read tool: the list call returns the gate's `ToolError` and the channel's tool does not run, the denied submit leaves the member running and records no submission, and the read call returns the wrapper's result in place of the channel's;
   - a reader-and-writer test channel on the public API: messages do not activate members, a post reaches a reader still held at boundary 0, a step-start cutoff hides a post committed during the step, and capacity checked in `admit()` lets exactly one of two concurrent posts take the last place;
   - a member error cancels its sibling and the controller and propagates;
-  - **the answer**, with a solver wrapper shaped like ORBIT's and an ORBIT-shaped submit tool: two concurrent members where A's submit runs first but A ends after B, because a second tool of A's batch is still running, select B as `last_submitted`, score B's output and name B in the answer record, as ORBIT's submit registry does; a selected member with an empty completion leaves the output the task had before the swarm, not the swarm's copy of another member's submission, and the answer record has `member` `None`; a run where the selected member did not submit and another did has the swarm's `final` naming the other and `agrees` false; a never-submitted member's output is scored and named after a normal stop, after an outer message limit, and after a sample time limit, with the original error still ending the sample in the last two. An `all` projection of two members' conversations that exceeds the sample's message limit leaves the selected output scored and the answer record naming it, with the limit ending the sample when there was no earlier error, and with an earlier sample time limit propagating unchanged when there was one.
 
-ORBIT's own port tests the same order with its real wrappers and attacks, in ORBIT.
+In ORBIT, by its port, with its own test setup (mockllm, no network):
+
+- **Behaviour kept.** ORBIT's scheduler, topology and communication suites run on both executors: `tests/test_agent_scheduler.py`, `test_schedule_plans.py`, `test_scheduler.py`, `test_attack_outcomes.py`, `test_topologies.py`, `test_common_runtime.py`, `test_configured_communication.py`, `test_communication_boundaries.py`, `test_communication_contract.py` and `test_message_ordering.py`, and the scheduled attack and defence runs in `test_dual_llm_scheduled_e2e.py`, `test_compromised_e2e.py` and `test_collusion_mockllm_e2e.py`. Cases of `turn_react` itself, and of the `legacy` and `tool_step` quanta, stay on ORBIT's executor.
+- **Behaviour those suites do not pin yet**, added on ORBIT's executor first, then run on both: the submit setting with the flag omitted under each scheduling mode and set either way; a gate that denies `submit`, leaving the submission order unchanged; `step_start` cutoffs under `poll`, `notify` and `auto`, with cursors and exposure; first-activation eligibility at `max_messages` for a group goal and for a sample input that opens with a system message; attack evaluation of a member's final turn, ended by submission and by its message limit; `last_submitted` after two concurrent submits where the first to submit ends last; and an exhausted output check, with `retry_refusals` set and not.
+- **Port only.** A peer's store tool finds no member's final conversation and cannot change the submission order or the answer scored; the message order of [The message order before the first model call](#the-message-order-before-the-first-model-call) with ORBIT's real wrappers and attacks; and the answer record names the output scored after a normal stop, after a sample time or message limit, and after an `all` projection that exceeds the sample's message limit.
 
 ## Implementation plan
 
@@ -663,9 +592,9 @@ inspect_swarm:
 
 1. **The public bus API (S2).** `src/inspect_swarm/_bus/_record.py` and `_bus/_bus.py` (`Draft`, `Delivery`, `Caller`, `calling_member()`, `record_read()`, the `Bus` protocol), `src/inspect_swarm/_channel/_channel.py` (`ChannelRun.bus`), `src/inspect_swarm/_evidence.py` (`comm_read()` taking the channel's fields and `records`, behind `record_read()`), `src/inspect_swarm/_channel/shared_memory.py` (the public names), `src/inspect_swarm/__init__.py`; `docs/channels.qmd` (writing a channel with records); `tests/test_bus.py`.
 2. **A controller's preamble (S3).** `src/inspect_swarm/_controller/_control.py` (`SwarmControl.start()` and its docstring, `SwarmRun.start()`); `docs/controllers.qmd` (`start()`'s arguments); `tests/test_controller.py`. Independent of step 1.
-3. **ORBIT-shaped conformance tests.** `tests/test_orbit_shape.py`. Needs the seam ([swarm-turn-seam.md Implementation plan](swarm-turn-seam.md#implementation-plan)), steps 1 and 2, member outputs on the record ([swarm-scoring.md Implementation plan after M2](swarm-scoring.md#implementation-plan-after-m2), step 1) and `swarm_result()` ([swarm-result-record.md Implementation plan](swarm-result-record.md#implementation-plan)).
+3. **ORBIT-shaped conformance tests.** `tests/test_orbit_shape.py`. Needs the seam ([swarm-turn-seam.md Implementation plan](swarm-turn-seam.md#implementation-plan)) and steps 1 and 2.
 
-inspect_ai and inspect_sentinel: I1 is step 1 of the seam's plan; I2 and I3 are designed and built there. The port itself is ORBIT's work, by the migration path.
+inspect_ai and inspect_sentinel: I1 is step 1 of the seam's plan; I2 and I3 are designed and built there. The port itself is ORBIT's work, by the migration path, with ORBIT's tests in [Testing](#testing) on both executors.
 
 ## Open questions
 
