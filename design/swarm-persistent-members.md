@@ -4,7 +4,7 @@
 
 A persistent member stays available after it answers. It is declared on its record, `member(worker, persistent=True)`, and runs inside one `react()` (or `deepagent()`) loop for its whole life: when it submits, or when a `react(submit=False)` member gives a tool-free reply, the swarm records that as one of its *answers* and holds the member *idle* at its next turn boundary instead of letting the loop return. The controller hears `MemberIdle`, and hands the member its next piece of work with `SwarmControl.wake(member, input)`, which appends the input to the member's conversation, so each new activation keeps everything the member has seen and done. While a member is idle, a write it would care about (one that would end a whole-board `swarm_wait` of its own loop) reaches the controller as `MemberNews`, and the controller decides whether to wake it. A swarm whose members are all idle or ended, with no event waiting, is *quiescent*: the controller's `events()` iterator ends, and the controller returns `quiescence`, wakes someone, or starts someone.
 
-The mechanism is the turn seam ([swarm-turn-seam.md](swarm-turn-seam.md)) plus one private hook in inspect_ai: a `react()` loop that has an answer and would return it first asks the swarm's turn gate, through `after_answer()`, and the gate says "continue" for a persistent member, so the loop goes on to its next turn boundary, where the gate holds it idle. An answer is an output the swarm would read as a submission if the member returned it, so a content-filtered output, or one cut off by the context window, ends the member as it does today. A persistent member's limits span its whole life; its member time limit does not run while it is idle. Every answer is a candidate for the swarm's answer: `first` and `last` choose across all answers, `choose_answer()` takes the member's latest, and the result record keeps the time of each answer and which one was chosen. An idle member that the swarm's stop or `end()` reaches ends `submitted`, its last answer its output. Only a member whose agent is itself a `react()`, `react(submit=False)` or `deepagent()` loop can persist; a builder that returns one qualifies, and any other agent (a bridged CLI, a custom loop, a wrapper that checks its inner loop's result after it returns) is refused before it runs, as are `deepagent()` members with background dispatch and members whose shared memory only a subagent reads.
+The mechanism is the turn seam ([swarm-turn-seam.md](swarm-turn-seam.md)) plus one private hook in inspect_ai: a `react()` loop that has an answer and would return it first asks the swarm's turn gate, through `after_answer()`, and the gate says "continue" for a persistent member, so the loop goes on to its next turn boundary, where the gate holds it idle. An answer is an output the swarm would read as a submission if the member returned it, so a content-filtered output, or one cut off by the context window, ends the member as it does today. A persistent member's limits span its whole life; its member time limit does not run while it is idle. Every answer is a candidate for the swarm's answer: `first` and `last` choose across all answers, `choose_answer()` takes the member's latest, and the result record keeps the time of each answer and which one was chosen. An idle member that the swarm's stop or `end()` reaches ends `submitted`, its last answer its output. Only a member whose agent is itself a `react()`, `react(submit=False)` or `deepagent()` loop can persist, given directly or returned by a builder. Agents without a supported loop mark (a bridged CLI, a custom loop, a wrapper that checks its inner loop's result after it returns) and loops with background dispatch are refused before they run. With a waiting channel, subagent-only board readers are detected at their next boundary or answer and fail the swarm.
 
 ## Why
 
@@ -176,14 +176,15 @@ One table decides when a persistent member is available, when it is live for the
 | `idle` | `ending` | `end()` or a stop, synchronously, in the call |
 | `running` | `ending` | the boundary after an answer refuses the hold (a failed admission: a stop or end request, background work, the reader rule, or a time limit already reached), synchronously, before the gate ends the member |
 | `running`, `ending` | `ended` | `_end()` publishes `MemberEnded` (`_control.py:603-627`) |
+| `idle` | `ended` | a cancellation from outside the swarm (the sample's limits or interrupt) reaches the idle wait; `_end()` publishes `MemberEnded` with the wrapper's default `cancelled` (`_member.py:451`, `:472-474`) |
 
-A member is never `idle` before its hold is admitted, so a failed admission goes from `running`, and an admitted member that is then ended goes from `idle`. A persistent member that ends in any other way (a limit or an error mid-turn, a normal return) goes from `running` to `ended` at `_end()`, as every member does today. From the table:
+A member is never `idle` before its hold is admitted, so a failed admission goes from `running`, and an admitted member that is then ended goes from `idle`. An outside cancellation needs no `ending` step: it cancels the whole sample, the controller with it, so no iterator is left to wait for the event. A persistent member that ends in any other way (a limit or an error mid-turn, a normal return) goes from `running` to `ended` at `_end()`, as every member does today. From the table:
 
 - **Liveness.** `events()` counts a member as live while it is `running` or `ending` ([Quiescence](#quiescence-and-the-controllers-iterator)), so a member whose ending has begun keeps the iterator open until its `MemberEnded` is queued, however the ending began.
 - **Availability.** `wake()` accepts only an `idle` member ([Waking](#waking-swarmcontrolwake)). A member between its answer and its admission is `running`, and one whose admission failed or that is ending is `ending`: both refuse new work.
 - **`MemberIdle`** is published only at the `running` to `idle` step: it reports an admitted hold at publication. The member may have changed state before the controller reads the event (an earlier event's handling may have woken or ended it), so a controller checks the member's current state before it wakes, as for news ([News](#news-for-idle-members-membernews)).
 
-**Answers are not availability.** The table says nothing about answers. An answer is recorded when `after_answer()` accepts it ([The gate](#the-gate)), before the boundary, and stays eligible however the member ends (decision: Ransom, 2026-10-29), a failed admission included. Separately, `after_answer()` sets the member's *answered* mark, which says that its current activation ended with an answer; `wake()` clears it. The member wrapper reads that mark, not the state, when it classifies a stop or an end: a member ended by a stop or `end()` (or by the stop or end check of the boundary after its answer) while the mark is set ends `submitted`, with its last answer as its output, whether it was `idle` or not yet admitted. Every other ending classifies as today: a time limit already reached at that boundary ends the member `member_limit:time`, its recorded answer still eligible.
+**Answers are not availability.** The table says nothing about answers. An answer is recorded when `after_answer()` accepts it ([The gate](#the-gate)), before the boundary, and stays eligible however the member ends (decision: Ransom, 2026-10-29), a failed admission included. Separately, `after_answer()` sets the member's *answered* mark, which says that its current activation ended with an answer; `wake()` clears it. The member wrapper reads that mark, not the state, when it classifies a stop or an end: a member ended by a stop or `end()` (or by the stop or end check of the boundary after its answer) while the mark is set ends `submitted`, with its last answer as its output, whether it was `idle` or not yet admitted. Every other ending classifies as today: a time limit already reached at that boundary ends the member `member_limit:time`, and an outside cancellation of an idle member ends it `cancelled`, not `submitted`; their recorded answers stay recorded.
 
 ### The gate
 
@@ -243,7 +244,7 @@ A member that is idle is not in a tool call, so nothing tells it of channel chan
 
 Events can be stale when the controller reads them: two writes give two `MemberNews`, and the first wake makes the member `running`. A controller checks `swarm.member(name).state == "idle"` before it wakes on news or on a `MemberIdle` it may have made stale; `wake()` on a member that is not idle raises.
 
-The shared memory's `apply()` counts only running members in `notify`, the evidence's list of members a record is news to (`shared_memory.py:394-403`); it counts idle members too, since their own loop sees the record when woken. Nothing else in the bus changes: `Bus.running()` stays "state is `running`", so an idle member can neither send nor call a channel tool (it runs none), receives addressed records (only pending and ended recipients are refused), and is not active for the all-waiting check.
+The shared memory's `apply()` counts only running members in `notify`, the evidence's list of members a record is news to (`shared_memory.py:394-403`); it counts idle members too, since their own loop sees the record when woken. One more bus change follows from the states: `_resolve()` (`src/inspect_swarm/_bus/_bus.py:234-251`) refuses an addressed record to an `ending` member with `ToolError` ("<name> is ending."), before the record is applied, as it refuses pending and ended recipients; the member stays live for the iterator until its `MemberEnded` is published, but it can no longer be woken to read the record. Nothing else in the bus changes: `Bus.running()` stays "state is `running`", so an idle member can neither send nor call a channel tool (it runs none), receives addressed records (only pending, ending and ended recipients are refused), and is not active for the all-waiting check.
 
 ### Quiescence and the controller's iterator
 
@@ -265,6 +266,8 @@ The stop procedure covers idle members: `stop()` closes the levers of running an
 | Its agent returns normally after an end request | `stopped` (the seam's rule) | those already recorded, eligible; the final one is not recorded |
 | Its agent returns normally otherwise, with an `unsubmitted` output | `unsubmitted` | those already recorded, eligible |
 | Its board read only by a subagent (the bus bound to a loop other than its turn loop) in a swarm with a waiting channel | `errored`, with the gate's `RuntimeError` ([Declaring a persistent member](#declaring-a-persistent-member)) | earlier answers remain recorded provisionally; the `RuntimeError` fails the swarm, so there is no finalized answer |
+| A cancellation from outside the swarm (the sample's limits or interrupt) while idle | `cancelled` | those already recorded; the swarm is cancelled, so its final step does not run |
+| Background work running at the boundary after an answer or at the idle boundary | `errored`, with the seam's `RuntimeError` ([swarm-turn-seam.md Supported members](swarm-turn-seam.md#supported-members)) | earlier answers remain recorded provisionally; the `RuntimeError` fails the swarm, so there is no finalized answer |
 | Its agent returns normally otherwise | `errored`, with a `RuntimeError` naming the member and saying that a persistent member's loop returned without an answer it could hold | earlier answers remain recorded provisionally; the `RuntimeError` fails the swarm, so there is no finalized answer |
 
 The last row covers the react exits that are neither answers nor `unsubmitted` outputs, such as a `react(submit=False)` member whose `on_continue` returns `False` after a tool call, or a submitting `react()` whose `on_continue` returns `False`; custom loops never get here, being refused before they run. An idle member is ended through the gate as the seam ends a held member, by raising its lever's limit error; the member wrapper reads the answered mark before it classifies a stop or an end, and takes the member's output from its last answer.
@@ -296,12 +299,13 @@ Every recorded answer is a candidate, whatever the member's later status (stoppe
 
 New `SwarmEvent` kind ([swarm-event-types.md](swarm-event-types.md#swarmevent)), with `member` set, written in the member's span:
 
-- **`answer`**, once per recorded answer of a persistent member: `answer` (index), `activation`, `time` (swarm time), `stop_reason` (the output's). No text: the answer's message is in the member's conversation and its `ModelEvent`s.
+- **`answer`**, once per recorded answer of a persistent member, with only `answer` (its index). It marks the answer's place in the member's evidence for the critical path; the answer's time and activation are in the record (`answer_times`, `activations`), and its text is in the member's conversation and its `ModelEvent`s. Nothing reads the answer's stop reason: an accepted answer may be an empty output (a turn that calls submit and a handoff whose child returns without generating leaves the handoff's empty output with the answer as its completion), which `output_status()` classifies `submitted` from `empty` before it reads any stop reason, and whose `stop_reason` property would raise (`src/inspect_ai/model/_model_output.py:318-320`).
 
-At the idle boundary, the seam's events, with additions:
+At an admitted idle hold, the seam's events, with no new fields:
 
-- **`boundary`** is written at every idle boundary, callbacks or not, and gains `activation` (the activation the member continues into; absent when it ended there) and `idle_for` (seconds from the answer to the wake or the end). Its outcome is `continue` on a wake, and `stop` or `end` when the member ended idle.
+- **`boundary`** is written at every admitted idle hold, callbacks or not, as at any hold. Its outcome is the seam's: `continue` on a wake, `stop` or `end` when the member ended idle, `cancelled` for a cancellation from outside the swarm; `held_for` is the time the member was idle.
 - **`changed`** with origin `swarm` records the wake's input, as `added` ids, hashes and indices, before the callbacks' own events; `applied` follows the boundary's outcome as for any change.
+- A failed admission writes no `boundary` event: the member was not held and no callback ran. Its answer is in its `answer` event and its ending in `member_result`, as for any ending.
 - The `final` event gains `answer`, as the record does.
 
 ### Examples
@@ -328,31 +332,7 @@ def dispatch(tasks: list[str], worker: str = "worker") -> Controller:
 swarm(members=[member(worker_agent, name="worker", persistent=True)], controller=dispatch(tasks))
 ```
 
-A lead that posts work on the shared memory for persistent workers, woken when the lead writes:
-
-```python
-WAKE = "There may be new work for you in the shared memory."
-
-
-@swarm_controller
-def lead_and_workers(lead: str = "lead") -> Controller:
-    async def run(swarm: SwarmControl) -> StopReason:
-        for m in swarm.members:
-            swarm.start(m)
-        async with aclosing(swarm.events()) as events:
-            async for event in events:
-                if isinstance(event, MemberEnded) and event.member == lead:
-                    return "lead_done"   # recorded as controller:lead_done
-                woken_by_lead = isinstance(event, MemberNews) and event.sender == lead
-                idle_with_news = isinstance(event, MemberIdle) and event.news
-                if (woken_by_lead or idle_with_news) and swarm.member(event.member).state == "idle":
-                    swarm.wake(event.member, input=WAKE)
-        return "quiescence"
-
-    return Controller(run, final="last")
-```
-
-The lead ends by submitting; the workers stay idle until the stop and end `submitted`. With `final="last"` the lead's submission, the latest answer, is the swarm's answer when it ends last; a controller that must name it calls `choose_answer(lead)`.
+A lead that posts work on the shared memory for persistent workers is the other use: the controller wakes a worker on the lead's writes (`MemberNews` with the lead as `sender`) and returns when the lead ends. Its worker protocol (what a worker reads before it answers, so that a peer's unread result does not leave `MemberIdle.news` true after every activation, and what it does on a wake with no task) is the implementation's to define, with that worked example and its test.
 
 ### Relation to other designs
 
@@ -393,7 +373,7 @@ The lead ends by submitting; the workers stay idle until the stop and end `submi
 ## Security
 
 - **Wake input is eval-author text** in the user role, as `start()`'s input is. No member text reaches a controller: `MemberIdle` and `MemberNews` carry roster names, indices, bus record ids, channel names and a flag. `MemberNews.sender` is the writer's roster name, which a controller can already see on `MemberEnded`; in a swarm where members choose names there are no record channels, so no news.
-- **Model output in the evidence.** The `answer` event carries indices, a time and a stop reason; the wake's `changed` event carries ids and hashes. A stop reason comes from the provider, not the model's text.
+- **Model output in the evidence.** The `answer` event carries an index; the wake's `changed` event carries ids and hashes. No model text reaches either.
 - **A member cannot wake itself or flood the controller unchecked.** `wakes()` excludes the waiting loop's own writes; every write that can raise `MemberNews` passes the channel's storm controls and limits first; each event is a few small fields. A member can try to induce its peers' wakes by writing, which is the controller's policy to filter, by `sender` or otherwise.
 - **The answers are model output**, kept as `ModelOutput` copies in the runtime and scored as submissions are today; nothing parses them.
 
@@ -415,8 +395,11 @@ All with mockllm, no network or Docker, on asyncio and trio through `tests/conft
   - news: a lead's shared-memory write while a worker is idle gives one `MemberNews` with the lead as sender; the worker's own writes, `wake=False` records and records that are not news to its loop give none; a worker that answers with an unviewed write from its activation gives `MemberIdle.news` true, and one that viewed it gives false; a worker that never resolved `swarm_tools()` gets no news; a worker whose top-level loop views the write after a wake and answers gives `MemberIdle.news` false and no further `MemberNews` for that write, across three activations, while a research child's view of the same write clears only the child's own view, as for any loop; `notify` in the `delivered` evidence includes the idle worker;
   - quiescence: with every member idle and nothing queued, `events()` ends; a controller that receives the only member's `MemberIdle`, calls `end()` and asks the same iterator for its next event at once receives `MemberEnded(member, "submitted", True)` before the iterator ends, the member reading `ending` and refusing `wake()` until then, and the model gets no further generation; the same with the member's unwinding held after the cancellation (an `anyio.Event` awaited in its cleanup, `_drain()`, which the test sets once the iterator is waiting), the iterator still waiting until the event is set; a controller then wakes one and a new `events()` call reports its next event; `leaderless` returns `quiescence` with a persistent roster and `stop_on_submission=False`, and stops at the first `MemberIdle` with it set;
   - answers: `first` and `last` across two persistent members' several answers, ties by roster and index; `choose_answer()` takes the latest answer and keeps it after a later one, and raises before any answer; the record's `answer_times`, `FinalRecord.answer`, the `final` event's `answer`, and the sample's final message being the chosen answer's;
-  - evidence and metrics: one `answer` event per answer; a `boundary` event at each idle boundary with no callback, with `activation` and `idle_for`; the wake's `changed` event with origin `swarm` and the input's ids and hashes matching the next `ModelEvent`'s input; `activations`, `answers` and `awaiting_work_time`; `steps_to_answer` and `critical_steps_to_answer` ending at the chosen answer's `answer` event;
-  - the two examples above as end-to-end tests: `dispatch` with three tasks gives three answers and the third as the swarm's; `lead_and_workers` with a lead that writes two tasks gives each worker its wakes and ends `lead_done`.
+  - evidence and metrics: one `answer` event per answer, with only its index; a `boundary` event at each admitted idle hold with no callback, with the seam's fields only, and none at a failed admission; the wake's `changed` event with origin `swarm` and the input's ids and hashes matching the next `ModelEvent`'s input; `activations`, `answers` and `awaiting_work_time`; `steps_to_answer` and `critical_steps_to_answer` ending at the chosen answer's `answer` event;
+  - `dispatch` above as an end-to-end test: three tasks give three answers and the third as the swarm's;
+  - an empty answer: a persistent `react()` member whose turn calls submit and a handoff whose child returns without generating records an answer (its output empty, its completion the submission), reaches its idle hold with `MemberIdle`, writes its `answer` event, and the swarm does not fail;
+  - an ending recipient: with a persistent member `ending` and its cleanup held on an `anyio.Event`, another member's addressed record to it is refused with `ToolError` ("is ending") and nothing is applied; the same record to an `idle` member is applied;
+  - an outside cancellation: a sample time limit reached while a persistent member is idle ends it `cancelled`, not `submitted`, with its answers still in `answer_times`;
 
 ## Implementation plan
 
@@ -425,12 +408,12 @@ All with mockllm, no network or Docker, on asyncio and trio through `tests/conft
    - `src/inspect_swarm/_member.py`: `Member.persistent` and `member(persistent=...)`, serialized when true; `output_status()`, the output rule `_returned()` and the gate share; the endings (the answered mark, the normal-return rule, the output from the last answer).
    - `src/inspect_swarm/_swarm.py`: the refusals in `_check_persistent()` for built agents (the loop's mark first, then `bridged=True`); `src/inspect_swarm/_member.py`: the same mark check on a factory member's agent after `build_member()`.
    - `src/inspect_swarm/_seam.py`: `after_answer()` with `output_status()` before it records, the admission at the boundary after an answer (`ending` on a refusal, `idle` and `MemberIdle` together once admitted), the reader rule at boundaries and answers, the idle step, the wake input as the runtime's change, `Boundary.activation` and `after="wake"`.
-   - `src/inspect_swarm/_controller/_control.py`: `MemberRun`'s answers, activations and answered mark, the `idle` and `ending` states and their transitions ([A persistent member's states](#a-persistent-members-states)), `wake()` with fresh message ids, the iterator's live predicate (`running` or `ending`), `MemberIdle`, the union alias, `choose_answer()` over answers, the outputs of answers for `settle()`, the stop procedure over started members.
+   - `src/inspect_swarm/_controller/_control.py`: `MemberRun`'s answers, activations and answered mark, the `idle` and `ending` states and their transitions ([A persistent member's states](#a-persistent-members-states)), `wake()` with fresh message ids, the iterator's live predicate (`running` or `ending`), `MemberIdle`, the union alias, `choose_answer()` over answers, the outputs of answers for `settle()`, the stop procedure over started members; `src/inspect_swarm/_bus/_bus.py` (`_resolve()` refusing `ending` recipients).
    - `src/inspect_swarm/_controller/leaderless.py`; `src/inspect_swarm/_final.py` (candidates over answers); `src/inspect_swarm/_record.py`.
-   - `src/inspect_swarm/_evidence.py` (`answer`, the `boundary` additions, `final`'s `answer`), `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/_critical_path.py` and `src/inspect_swarm/_ledger.py` (answer positions), `src/inspect_swarm/__init__.py` (`MemberIdle`).
+   - `src/inspect_swarm/_evidence.py` (`answer` with its index, `boundary` at admitted idle holds, `final`'s `answer`), `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/_critical_path.py` and `src/inspect_swarm/_ledger.py` (answer positions), `src/inspect_swarm/__init__.py` (`MemberIdle`).
    - Docs: `docs/members.qmd` (persistent members), `docs/controllers.qmd` (idle, `wake()`, quiescence, the `dispatch` example), `docs/analysis.qmd` (the event, record and metrics fields), `docs/reference/inspect_swarm.qmd`.
    - Tests: `tests/test_persistent.py` without the news cases.
-3. **inspect_swarm: news for idle members.** `src/inspect_swarm/_budget.py` (`MemberContext.loop_span`), `src/inspect_swarm/_bus/_tools.py` (record it at binding), `src/inspect_swarm/_bus/_bus.py` (the idle check at step 4 and the runtime's callback), `src/inspect_swarm/_channel/shared_memory.py` (`notify` with idle members), `src/inspect_swarm/_controller/_control.py` (`MemberNews`, `MemberIdle.news`), `src/inspect_swarm/__init__.py`; `docs/controllers.qmd` (the lead-and-workers example); the news and example tests. Until it lands, `MemberIdle.news` is `False`.
+3. **inspect_swarm: news for idle members.** `src/inspect_swarm/_budget.py` (`MemberContext.loop_span`), `src/inspect_swarm/_bus/_tools.py` (record it at binding), `src/inspect_swarm/_bus/_bus.py` (the idle check at step 4 and the runtime's callback), `src/inspect_swarm/_channel/shared_memory.py` (`notify` with idle members), `src/inspect_swarm/_controller/_control.py` (`MemberNews`, `MemberIdle.news`), `src/inspect_swarm/__init__.py`; the news tests. The lead-and-workers example, its worker protocol and its test come with the implementation. Until it lands, `MemberIdle.news` is `False`.
 
 ## Open questions
 
