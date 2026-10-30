@@ -1,7 +1,8 @@
 from inspect_ai.agent import AgentChannel
 from inspect_ai.agent._channel import current_agent_channel
+from inspect_ai.agent._handoff import AgentTool
 from inspect_ai.log._samples import sample_active
-from inspect_ai.tool import Tool, ToolSource
+from inspect_ai.tool import Tool, ToolDef, ToolSource
 
 from .._channel._channel import ChannelState
 from .._channel.messages import MessagesState
@@ -27,23 +28,44 @@ class _SwarmTools(ToolSource):
 
 # The tools of a loop of a member: the member's own loop gets every channel's, its other
 # loops those of "member"-reach channels; and swarm_wait, when a channel the loop reaches
-# wakes waits. Each counts the member's unread messages, as the bus wraps it.
+# wakes waits. With the messages channel, the bus wraps the own loop's tools so that each
+# counts the member's unread messages; every other loop's tools, and those of a swarm
+# without the channel, are the channels' own.
 def loop_tools(bus: Bus, own: bool) -> list[Tool]:
-    tools = [
-        bus.counting(tool, results=not _counts_itself(state, tool))
+    reached = [
+        (name, state, tool)
         for name, state in bus.states.items()
         if own or bus.reach[name] == "member"
         for tool in state.tools()
     ]
     wait = bus.waits.tool(own)
-    if wait is not None:
-        # a wait's result counts unread messages itself
-        tools.append(bus.counting(wait, results=False))
-    return tools
+    waits = [] if wait is None else [wait]
+    if not own or not any(isinstance(s, MessagesState) for s in bus.states.values()):
+        return [tool for _, _, tool in reached] + waits
+    # read_messages and a wait count unread messages in their own results
+    return [
+        bus.counting(_countable(name, tool), results=not _counts_itself(state, tool))
+        for name, state, tool in reached
+    ] + [bus.counting(wait, results=False) for wait in waits]
 
 
 def _counts_itself(state: ChannelState, tool: Tool) -> bool:
     return isinstance(state, MessagesState) and tool is state.read_tool
+
+
+# The counting wrapper is an ordinary function tool, so it cannot keep a handoff's
+# execution or a custom model_input. No channel gives such a tool, so one is refused
+# rather than changed (decision: Ransom, 2026-10-30).
+def _countable(channel: str, tool: Tool) -> Tool:
+    if isinstance(tool, AgentTool):
+        kind = "a handoff"
+    elif ToolDef(tool).model_input is not None:
+        kind = "a tool with a custom model_input"
+    else:
+        return tool
+    raise ValueError(
+        f"The {channel} channel gives {kind}, {ToolDef(tool).name}, which cannot be used beside the messages channel: the swarm ends each tool result in a member's own loop with its count of unread messages, and cannot do that for {kind}. Give the member such a tool in its own tools instead."
+    )
 
 
 def swarm_tools() -> ToolSource:

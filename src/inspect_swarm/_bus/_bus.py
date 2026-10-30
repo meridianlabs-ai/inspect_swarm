@@ -225,10 +225,12 @@ class Bus:
         return None
 
     def counting(self, tool: Tool, results: bool = True) -> Tool:
-        # the tool as a member's loops get it: in the member's own loop, its results
-        # (unless `results` is False, for a tool whose results count unread messages
-        # themselves) and its ToolErrors end with the status line, so no channel's tool
-        # needs to know the messages channel. One wrapper per tool and run.
+        # the tool as a member's own loop gets it beside the messages channel: its
+        # results (unless `results` is False, for a tool whose results count unread
+        # messages themselves) and its ToolErrors end with the status line, so no
+        # channel's tool needs to know the messages channel. One wrapper per tool and run.
+        # Inspect's parsing and argument errors come before the tool runs, so they have
+        # no count.
         cached = self._counting.get(id(tool))
         if cached is not None:
             return cached[1]
@@ -255,7 +257,6 @@ class Bus:
             parameters=tool_def.parameters,
             parallel=tool_def.parallel,
             viewer=tool_def.viewer,
-            model_input=tool_def.model_input,
             max_output=tool_def.max_output,
             options=tool_def.options,
         ).as_tool()

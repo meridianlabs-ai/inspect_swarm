@@ -1,15 +1,27 @@
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
+from functools import cached_property
 from typing import Any, cast
 
 import anyio
 import pytest
+from inspect_ai.agent import Agent, AgentState, agent, handoff
 from inspect_ai.agent._channel import agent_channel, current_agent_channel
 from inspect_ai.log._transcript import Transcript
-from inspect_ai.tool import Tool, ToolDef, ToolError
+from inspect_ai.model import ModelOutput
+from inspect_ai.tool import Content, Tool, ToolDef, ToolError, tool
 from inspect_ai.util._span import span
+from pydantic import JsonValue
 
-from inspect_swarm import Channel, messages, shared_memory, swarm_tools
+from inspect_swarm import (
+    Channel,
+    ChannelRun,
+    ChannelState,
+    Record,
+    messages,
+    shared_memory,
+    swarm_tools,
+)
 from inspect_swarm._budget import current_member
 from inspect_swarm._bus._bus import Bus, current_bus
 from inspect_swarm._bus._tools import loop_tools
@@ -42,11 +54,17 @@ class _Run:
             channels,
         )
         self.bus.waits.start = anyio.current_time()
-        self.state = cast(MessagesState, self.bus.states["messages"])
+
+    @property
+    def state(self) -> MessagesState:
+        return cast(MessagesState, self.bus.states["messages"])
+
+    @cached_property
+    def tools(self) -> dict[str, dict[str, Tool]]:
         # the tools as swarm_tools() gives them to each loop; a nested loop is also
         # given the own loop's, as an agent could pass them down
         own = {ToolDef(t).name: t for t in loop_tools(self.bus, True)}
-        self.tools = {
+        return {
             "top": own,
             "nested": {
                 **own,
@@ -498,3 +516,79 @@ async def test_custom_channel_tools_count_unread_messages_in_the_own_loop() -> N
             '1 message.\n\n<peer_message id="m-1" from="w-1" to="w-2">\nprivate\n</peer_message>'
         )
         assert await r.call_resolved("w-2", "loop_write", text="e") == "l-2"
+
+
+# A channel of member reach whose one tool is given, and that delivers nothing.
+class _Given(Channel):
+    name = "given"
+    prefix = "g"
+    reach = "member"
+
+    def __init__(self, tool: Tool) -> None:
+        self.tool = tool
+
+    def open(self, run: ChannelRun) -> ChannelState | None:
+        return _GivenState(self.tool)
+
+
+class _GivenState:
+    def __init__(self, tool: Tool) -> None:
+        self.tool = tool
+
+    def tools(self) -> list[Tool]:
+        return [self.tool]
+
+    def validate(self, record: Record) -> None:
+        pass
+
+    def admit(self, record: Record) -> None:
+        pass
+
+    def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
+        return [], None
+
+
+def _summarized(
+    index: int, total: int, content: str | list[Content], hints: Any
+) -> str:
+    return "summarized"
+
+
+@tool(model_input=_summarized)
+def _played() -> Tool:
+    async def execute() -> str:
+        """Return raw text."""
+        return "raw"
+
+    return execute
+
+
+@agent
+def _relayed() -> Agent:
+    async def execute(state: AgentState) -> AgentState:
+        state.output = ModelOutput.from_content("mockllm", "done")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "kind,given",
+    [
+        ("a tool with a custom model_input", _played),
+        ("a handoff", lambda: handoff(_relayed(), "Relay.", tool_name="relay")),
+    ],
+)
+async def test_a_channel_tool_the_count_cannot_wrap_is_refused_beside_messages(
+    kind: str, given: Callable[[], Tool]
+) -> None:
+    channel = _Given(given())
+    async with sample():
+        # without the messages channel, and in a nested loop, it is the channel's own
+        alone = _Run(("w-1",), [channel])
+        assert list((await alone.resolve("w-1")).values()) == [channel.tool]
+        r = _Run(("w-1",), [messages(rate=None), channel])
+        assert list((await r.resolve("w-1", "child")).values()) == [channel.tool]
+        with pytest.raises(ValueError, match=f"^The given channel gives {kind}, "):
+            await r.resolve("w-1")
