@@ -28,7 +28,9 @@ def swarm_bridged_tools(channels: Sequence[str]) -> BridgedToolsSpec:
 
     Each tool acts as the member whose agent calls it, and finds the swarm's channel when it is called; a tool whose channel the swarm does not have returns an error saying so. The CLI is one loop of the member, whichever of its conversations calls: its subagents read the member's messages, and a message any of them reads is read for all; they share what the member has viewed in the shared memory; and their sends and writes are the member's. The member's evidence records these calls with `via` set to `"bridge"`.
 
-    A bridged member never counts as waiting, since one call in `swarm_wait` does not show that its CLI is idle: its waits end on news, a member's end, the swarm's stop or their timeout, never because every member is waiting. The CLI's MCP tool timeout must be longer than the longest wait of the swarm's channels (`max_wait`). Codex's default is 60 seconds, so give a Codex member `codex_cli(config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"})` or another value above it.
+    A bridged member never counts as waiting, since one call in `swarm_wait` does not show that its CLI is idle: its waits end on news, a member's end, the swarm's stop or their timeout, never because every member is waiting. The CLI's MCP tool timeout must be longer than the longest wait of the swarm's channels (`max_wait`, 600 seconds for `shared_memory()` by default). Claude Code and Codex stop a tool call after 300 seconds by default. With a Claude Code member, lower the wait, as with `shared_memory(max_wait=280)`; for Codex, either lower it or raise Codex's timeout with `codex_cli(config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"})`.
+
+    A member whose own loop uses `swarm_tools()` cannot also use these tools: a bridged subagent of it would be a second reader of its inbox.
 
     Args:
         channels: The channels whose tools to give: `"messages"`, `"shared_memory"` or both.

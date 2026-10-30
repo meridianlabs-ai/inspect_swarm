@@ -36,8 +36,8 @@ WORDS = {"cc": "AMBER-7", "codex": "COBALT-3"}
 
 TASK = "Work with the other members of the swarm."
 
-# longer than Codex's default MCP tool timeout (60 s), so the CLI's swarm_wait outlasts
-# it only with the documented setting
+# the CLI's swarm_wait lasts longer than the 60 s Codex documents as its default MCP
+# tool timeout; both CLIs actually allow 300 s
 DELAY = 75
 
 PROMPT = """You are in a swarm with a member named w-1. Use the swarm's MCP tools.
@@ -89,7 +89,7 @@ def _cli(name: str) -> Agent:
         model="openai/gpt-5",
         system_prompt=PROMPT.format(reply=CODEX_REPLY),
         bridged_tools=tools,
-        config_overrides={"mcp_servers.swarm.tool_timeout_sec": "300"},
+        config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"},
     )
 
 
