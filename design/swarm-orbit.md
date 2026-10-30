@@ -263,7 +263,7 @@ Each is an `InfoEvent` with source `orbit.communication` (`runtime.py:190-227`).
   - Approval calls are kept out of token and turn nodes, but they count against cost nodes ([Interactions](swarm-limits.md#interactions)).
 - **Answers** ([swarm-scoring.md](swarm-scoring.md#the-final-answer-first)).
   - Only submissions are answers ("nothing is invented"). M1's answer is `first`. M2 adds `last` and a controller's choice, `SwarmControl.choose_answer(member)`, which also takes only a submission ([swarm-scoring.md](swarm-scoring.md#last-and-the-controllers-choice-m2)). `reporter(member)` comes later with the final-answer chain.
-  - The record `inspect_swarm:result` keeps every member's status, and from Part 2 its output.
+  - The result record, written to the transcript when the swarm ends and read with `swarm_result(state)`, keeps every member's status, and from Part 2 its output ([swarm-result-record.md](swarm-result-record.md)).
   - The returned state carries the sample's input and the answer, not the members' conversations.
 - **Sandboxes.** Members share the sample's sandbox by default. Per-member sandboxes are an M2 opt-in (`member(sandbox=, visible_sandboxes=)`). Users isolation in one sandbox is later work ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md)).
 - **Plan** ([swarm-implementation-plan.md](swarm-implementation-plan.md#future-work)). "A scheduled execution mode" and "ORBIT on inspect_swarm" are future work.
@@ -338,9 +338,9 @@ ORBIT's selection and projection must survive an exceptional exit, as they do to
 So ORBIT's task uses one solver of its own that awaits the swarm's solver (`as_solver(swarm(...))`) inside `try`, with a `finally` that:
 
 1. runs after `as_solver()`'s own `finally` has copied the swarm's messages and provisional or final answer into the `TaskState` (`src/inspect_ai/agent/_as_solver.py:65-80`), and after every member wrapper's `finally`, which run as member tasks unwind inside the swarm;
-2. reads the `inspect_swarm:result` record, which the runtime keeps accurate as members end, with `provisional: true` after an outer limit ([swarm-scoring.md](swarm-scoring.md#what-the-swarm-records)), and sets `TaskState.output` to the output member's `output` (a field Part 2 adds to the record), if the member has one;
+2. reads the result record with `swarm_result(state)`, which the runtime writes in its own synchronous `finally` however the swarm exits, with `provisional: true` after an outer limit ([swarm-result-record.md](swarm-result-record.md#when-it-is-written)), and sets `TaskState.output` to the output member's `output` (a field Part 2 adds to the record), if the member has one;
 3. sets `TaskState.messages` from the conversations the member wrappers saved, by ORBIT's `history_projection`;
-4. is synchronous, with no `await`, because an `await` in a `finally` that runs under cancellation is cancelled itself. Store reads and `TaskState` writes are synchronous;
+4. is synchronous, with no `await`, because an `await` in a `finally` that runs under cancellation is cancelled itself. `swarm_result(state)`, store reads and `TaskState` writes are synchronous;
 5. lets the original exception, if there is one, propagate unchanged. A failure in the projection itself is recorded, as ORBIT records cleanup errors today, and never replaces the original exception.
 
 The swarm's own answer rule, and its record's `final`, are unaffected.
