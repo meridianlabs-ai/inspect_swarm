@@ -16,6 +16,7 @@ from inspect_ai.log._condense import condense_sample
 from inspect_ai.log._recorders.eval import _parse_sample_data
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.tool import Tool, ToolError
+from inspect_ai.util._span import span
 from pydantic import JsonValue
 
 from inspect_swarm import (
@@ -849,6 +850,157 @@ async def test_a_channel_with_max_wait_needs_a_waiting_state(
 async def test_an_instructions_only_channel_needs_no_waiting_state() -> None:
     bus, _ = _bus(channels=[_Locks(), _Waking()])
     assert bus.waits.max_wait == 5
+
+
+# Reads and wait news: a channel reports what its results depend on
+
+
+async def _report(
+    bus: _TestBus,
+    records: Sequence[str],
+    *,
+    member: str = "w-2",
+    loop: str = "top",
+    channel: str = "board",
+    depends_on: Sequence[str] | None = None,
+) -> None:
+    # as a channel's tool reports a result, in a tool span of the member's loop
+    with _as(bus.stand_ins[member].context):
+        async with span("agent", type="agent", id=f"{member}/{loop}"):
+            async with span("tool", type="tool", id=f"{member}/{loop}/tool"):
+                bus.read(channel, records, depends_on=depends_on)
+
+
+@pytest.mark.anyio
+async def test_a_read_names_its_records_and_writes_each_dependency_once_per_loop() -> (
+    None
+):
+    bus, _ = _bus()
+    async with sample() as transcript:
+        await _send(bus)
+        await _send(bus)
+        await _report(bus, ["b-1", "b-2"])
+        # the same loop again: the records stay whole, the dependencies are written
+        await _report(bus, ["b-2", "b-1"])
+        # another loop of the same member, and a result that depends on other records
+        # than it concerns
+        await _report(bus, ["b-1"], loop="child")
+        await _report(bus, ["b-1"], member="w-3", depends_on=["b-2", "b-2"])
+    reads = [c for c in _comm(transcript) if c["kind"] == "read"]
+    assert {k: v for k, v in reads[0].items() if k != "span_id"} == {
+        "version": 1,
+        "type": "comm",
+        "kind": "read",
+        "member": "w-2",
+        "loop": "w-2/top",
+        "nested": False,
+        "channel": "board",
+        "read": "r-1",
+        "tool_span_id": "w-2/top/tool",
+        "records": ["b-1", "b-2"],
+        "depends_on": ["b-1", "b-2"],
+        "listing": False,
+    }
+    assert [(r["member"], r["loop"], r["records"], r["depends_on"]) for r in reads] == [
+        ("w-2", "w-2/top", ["b-1", "b-2"], ["b-1", "b-2"]),
+        ("w-2", "w-2/top", ["b-2", "b-1"], []),
+        ("w-2", "w-2/child", ["b-1"], ["b-1"]),
+        ("w-3", "w-3/top", ["b-1"], ["b-2"]),
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "report,error",
+    [
+        pytest.param({"records": ["b-9"]}, "names b-9", id="never-committed"),
+        pytest.param({"records": ["n-1"]}, "names n-1", id="another-channel"),
+        pytest.param({"records": ["b-2"]}, "names b-2", id="refused"),
+        pytest.param(
+            {"records": ["b-1"], "depends_on": ["n-1"]},
+            "names n-1",
+            id="dependency",
+        ),
+        pytest.param(
+            {"records": [], "channel": "nowhere"},
+            "No channel named 'nowhere'",
+            id="no-channel",
+        ),
+    ],
+)
+async def test_a_read_naming_a_record_its_channel_did_not_commit_is_refused(
+    report: dict[str, Any], error: str
+) -> None:
+    bus, _ = _bus(channels=[_Board(capacity=1), _Notes()])
+    async with sample() as transcript:
+        await _send(bus)
+        # refused at admission, after its id was given
+        with pytest.raises(ToolError):
+            await _send(bus)
+        await _send(bus, channel="notes")
+        with pytest.raises(ValueError, match=error):
+            await _report(bus, **report)
+        # a refusal marks nothing written for the loop
+        await _report(bus, ["b-1"])
+    [read] = [c for c in _comm(transcript) if c["kind"] == "read"]
+    assert (read["records"], read["depends_on"]) == (["b-1"], ["b-1"])
+
+
+@pytest.mark.anyio
+async def test_a_read_outside_a_member_is_refused() -> None:
+    bus, _ = _bus()
+    await _send(bus)
+    with pytest.raises(RuntimeError, match="outside a member"):
+        bus.read("board", ["b-1"])
+
+
+class _ReportingState(_WakingState):
+    # news that depends on the records it reports, and on `extra`
+    def __init__(self, extra: list[str]) -> None:
+        super().__init__(None)
+        self.extra = extra
+
+    def news(self, spec: WaitSpec) -> WaitNews | None:
+        news = super().news(spec)
+        if news is None:
+            return None
+        ids = [r.id for r in self.applied if r.payload == spec.member]
+        return WaitNews(news.lines, news.files, depends_on=ids + self.extra)
+
+
+class _Reporting(_Waking):
+    def __init__(self, extra: Sequence[str] = ()) -> None:
+        super().__init__()
+        self.extra = list(extra)
+
+    def open(self, run: ChannelRun) -> ChannelState | None:
+        return _ReportingState(self.extra)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("extra", [[], ["k-9"]], ids=["committed", "not-committed"])
+async def test_a_waits_news_writes_each_dependency_once_per_loop(
+    extra: list[str],
+) -> None:
+    bus, members = _bus(channels=[_Reporting(extra)])
+
+    async def wait() -> str:
+        with _as(members["w-2"].context):
+            return await bus.wait(None, None, None)
+
+    async with sample() as transcript:
+        with _as(members["w-1"].context):
+            await bus.deliver(Draft("waking", "note", payload="w-2", wake=True))
+        if extra:
+            with pytest.raises(ValueError, match="names k-9"):
+                await wait()
+        else:
+            # both find the news at once; the second depends on nothing new
+            assert await wait() == await wait() == "a note for w-2"
+    waits = [c for c in _comm(transcript) if c["kind"] == "waited"]
+    assert [(w["outcome"], w["depends_on"]) for w in waits] == (
+        [("news", [])] if extra else [("news", ["k-1"]), ("news", [])]
+    )
 
 
 @agent(name="inspect_swe/bus_test_cli")

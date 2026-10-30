@@ -145,6 +145,9 @@ def read(
             _loop(member),
             False,
             None,
+            ["w-1"] if files else [],
+            [],
+            listing,
             [
                 {
                     "file": f[0],
@@ -155,7 +158,6 @@ def read(
                 }
                 for f in files
             ],
-            listing,
         )
 
     return op
@@ -189,6 +191,7 @@ def wait(
                 else {"file": f[0], "version": f[1], "deleted": len(f) == 3 and f[2]}
                 for f in files
             ],
+            depends_on=[],
             ended=[{"member": m, "status": "submitted"} for m in ended],
         )
 

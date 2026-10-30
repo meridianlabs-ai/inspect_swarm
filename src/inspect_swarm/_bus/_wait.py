@@ -230,6 +230,7 @@ class Waits:
         waiter = _Waiter(spec, channels)
         outcome: Outcome | None = None
         files: list[JsonValue] = []
+        depends_on: list[str] = []
         ended: list[JsonValue] = []
         try:
             deadline = started + effective
@@ -268,6 +269,11 @@ class Waits:
                 state = self._states[channel]
                 news = state.news(spec)
                 if news is not None:
+                    # first, so that news naming a record its channel did not commit
+                    # adds nothing to the evidence
+                    depends_on.extend(
+                        self._bus.depends(channel, spec.loop, news.depends_on)
+                    )
                     lines.extend(news.lines)
                     files.extend(news.files)
                     if isinstance(state, MessagesState):
@@ -294,7 +300,7 @@ class Waits:
             return "\n".join(lines)
         except anyio.get_cancelled_exc_class():
             outcome = "cancelled"
-            files, ended = [], []
+            files, depends_on, ended = [], [], []
             raise
         finally:
             # synchronous, so that it runs under cancellation too
@@ -314,6 +320,7 @@ class Waits:
                     outcome=outcome,
                     woken_by=list(waiter.woken_by),
                     files=files,
+                    depends_on=depends_on,
                     ended=ended,
                 )
 

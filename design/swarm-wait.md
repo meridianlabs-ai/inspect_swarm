@@ -205,7 +205,8 @@ One `waited` communication event per wait, written when it ends (in the synchron
 - the idle time: the seconds of the wait during which its member counted as waiting ([The idle clock](#metrics)); 0 for a nested loop's wait;
 - the outcome: `news`, `all_waiting`, `stopping`, `member_ending`, `timeout` or `cancelled`;
 - the commit sequence numbers of the commits that released it for news, in order, including any whose news was gone at resume (none when none did);
-- the files the result named, with their versions and whether deleted, and the members the result named as ended, with their statuses.
+- the files the result named, with their versions and whether deleted, and the members the result named as ended, with their statuses;
+- the records whose news the result reported (`depends_on`), from each reached channel's `WaitNews.depends_on`, each written once per loop: for the board, the write it reported for every changed file, not only the ten it names; for the messages channel, every unread message its news counts ([swarm-critical-path-records.md](swarm-critical-path-records.md#evidence)).
 
 `delivered` is unchanged. A wait's waking commits join it to the `delivered` events that ended it by their commit sequence numbers; with the files it named (ids and versions), the later dependency-linked critical path can tell that a member's idle time ended at a peer's commit, which the `read` that usually follows then links by content.
 
@@ -249,6 +250,7 @@ class WaitSpec:
 class WaitNews:
     lines: list[str]                      # the channel's lines for the result
     files: list[dict[str, JsonValue]]     # what `lines` name, for `waited.files`
+    depends_on: list[str] = field(default_factory=list[str])  # the records `lines` report, for `waited.depends_on`
 
 class WaitingState(ChannelState, Protocol):
     def wait_check(self, spec: WaitSpec) -> None: ...                # validate the filter; raise ToolError
