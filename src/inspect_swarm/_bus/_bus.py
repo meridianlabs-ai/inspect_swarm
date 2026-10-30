@@ -1,14 +1,13 @@
-import functools
 import json
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.agent._channel import current_agent_channel
 from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
-from inspect_ai.tool import ContentText, Tool, ToolDef, ToolError, ToolResult
+from inspect_ai.tool import ToolError
 from inspect_ai.util._span import current_agent_span_id, current_span_id
 from pydantic import JsonValue
 
@@ -17,7 +16,6 @@ from .._channel._channel import Channel, ChannelRun, ChannelState, WaitingState
 from .._channel.messages import MessagesState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_sent
-from .._fence import with_lines
 from ._address import resolve
 from ._record import Draft, FrozenJson, Record, freeze_json, thaw_json
 from ._storm import Storm
@@ -213,49 +211,16 @@ class Bus:
         return context.loop is not None and current_agent_channel() is not context.loop
 
     def status(self, context: MemberContext) -> str | None:
-        # the line that ends every swarm tool result in the member's own loop, after the
-        # channel's own: its unread messages, with the messages channel; nested loops
-        # cannot read them, so they are not told
+        # the line that ends the results of the swarm's own tools in the member's own
+        # loop, after the channel's own: its unread messages, with the messages channel;
+        # nested loops cannot read them, so they are not told. Other channels' tools
+        # carry no count (decision: Ransom, 2026-10-30).
         if self.nested(context):
             return None
         for state in self._states.values():
             if isinstance(state, MessagesState):
                 return state.unread_line(context.name)
         return None
-
-    def counting(self, tool: Tool) -> Tool:
-        # the tool as a member's own loop gets it beside the messages channel: its
-        # results end with the status line, so no channel's tool needs to know the
-        # messages channel. Its errors pass through unchanged, with no count: the member
-        # sees the count on its next result (decision: Ransom, 2026-10-30). Wrapped at
-        # each resolution, from the tool's current definition.
-        tool_def = ToolDef(tool)
-        inner = tool_def.tool
-
-        # the tool's signature, for Inspect's argument conversion, but not its registry
-        # attributes: as an unregistered function with a full definition, the wrapper is
-        # not reflected, so Inspect's reflection cache does not keep it
-        @functools.wraps(inner, updated=())
-        async def execute(*args: Any, **kwargs: Any) -> ToolResult:
-            result = await inner(*args, **kwargs)
-            unread = self._unread()
-            return result if unread is None else _with_line(result, unread)
-
-        wrapped = ToolDef(
-            execute,
-            name=tool_def.name,
-            description=tool_def.description,
-            parameters=tool_def.parameters,
-            parallel=tool_def.parallel,
-            viewer=tool_def.viewer,
-            max_output=tool_def.max_output,
-            options=tool_def.options,
-        ).as_tool()
-        return wrapped
-
-    def _unread(self) -> str | None:
-        context = self.member()
-        return None if context is None else self.status(context)
 
     def read_id(self) -> str:
         # the id of a read's evidence, numbered across the run's channels
@@ -295,15 +260,6 @@ class Bus:
                 f"{record.sender} has ended, so its {record.kind} was not delivered.",
             )
         return None
-
-
-def _with_line(result: ToolResult, line: str) -> ToolResult:
-    # a result ended by a status line: text gets a line, content a text item
-    if isinstance(result, str | int | float | bool):
-        return with_lines(str(result), line)
-    if isinstance(result, list):
-        return [*result, ContentText(text=line)]
-    return [result, ContentText(text=line)]
 
 
 def _frozen_op(draft: Draft) -> Mapping[str, FrozenJson]:

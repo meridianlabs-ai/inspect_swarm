@@ -9,7 +9,7 @@ from .._bus._record import Draft, Record
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
 from .._evidence import comm_read
-from .._fence import fence, utf8_bytes
+from .._fence import fence, utf8_bytes, with_lines
 from ._channel import (
     Channel,
     ChannelRun,
@@ -29,7 +29,7 @@ _MAX_ID = "m-" + "9" * 14
 _INSTRUCTIONS = (
     "You can send messages to the other members of the swarm with `send_message`, read the messages sent to you with `read_messages`, and see who is in the swarm with `list_members`. "
     "Messages are shown between `<peer_message>` tags whose `from` attribute names the sender. "
-    "While you have unread messages, the results of your swarm tools end with a line that counts them. "
+    "While you have unread messages, the results of `send_message`, `swarm_wait` and the swarm's other built-in tools end with a line that counts them, and `list_members` always says how many you have. "
     "To wait for a message, call `swarm_wait` rather than polling."
 )
 
@@ -42,7 +42,10 @@ _READ = (
     "It never waits: to wait for a message, call swarm_wait."
 )
 
-_LIST = "List the members of the swarm, in order: each one's name, its role if it has one, its state (pending, running or ended) and, once it has ended, how it ended. Marks which one is you."
+_LIST = (
+    "List the members of the swarm, in order: each one's name, its role if it has one, its state (pending, running or ended) and, once it has ended, how it ended. Marks which one is you. "
+    "Also says how many unread messages you have, so call it to check for messages."
+)
 
 
 # send_message's signature, reflected once for its parameters. Each run's tool takes
@@ -112,7 +115,7 @@ def messages(
 ) -> Channel:
     """Direct messages between the members of the swarm.
 
-    Each member's own loop gets three tools. `send_message` sends a message to a member, to several, or to `"all"`, every other running member, and returns its id, such as `m-3`. `read_messages` returns the member's unread messages, oldest first, each inside a `<peer_message>` fence that names its id, sender and recipients, and marks them read. `list_members` lists the roster with each member's role, state and, once it has ended, its status. While a member has unread messages, every swarm tool result in its own loop (`shared_memory` and `swarm_wait` included) ends with a line that counts them. Nested loops, such as a `deepagent()` member's subagents, get none of these tools, so a member's inbox has one reader.
+    Each member's own loop gets three tools. `send_message` sends a message to a member, to several, or to `"all"`, every other running member, and returns its id, such as `m-3`. `read_messages` returns the member's unread messages, oldest first, each inside a `<peer_message>` fence that names its id, sender and recipients, and marks them read. `list_members` lists the roster with each member's role, state and, once it has ended, its status. While a member has unread messages, the results of `send_message`, `list_members`, `shared_memory` and `swarm_wait` in its own loop end with a line that counts them; `list_members` also says when there are none. The tools of other channels carry no count. Nested loops, such as a `deepagent()` member's subagents, get none of these tools, so a member's inbox has one reader.
 
     Every send goes through the swarm's bus as a record from the member that made it. A send is refused when an address is not a running member other than the sender, when the message is empty or longer than `max_bytes`, when a recipient already has `max_unread` unread messages, when the sender is over its `rate`, or, with `dedupe`, when a recipient still has the same text from the same sender unread. A refused send reaches no recipient.
 
@@ -186,9 +189,7 @@ class MessagesState:
             + len("\n")
             + self._trailer_max
         )
-        # read_messages, whose result counts the unread messages it leaves itself
-        self.read_tool = self._read_tool()
-        self._tools = [self._send_tool(), self.read_tool, self._list_tool()]
+        self._tools = [self._send_tool(), self._read_tool(), self._list_tool()]
 
     def tools(self) -> list[Tool]:
         return list(self._tools)
@@ -265,7 +266,7 @@ class MessagesState:
             wake: bool = True,
         ) -> str:
             # an ended sender's send reaches the bus, which refuses it with evidence
-            self._caller("send_message", running=False)
+            name = self._caller("send_message", running=False)
             addresses = (to,) if isinstance(to, str) else tuple(to)
             delivery = await self._bus.deliver(
                 Draft(
@@ -278,7 +279,10 @@ class MessagesState:
                 )
             )
             record = delivery.record
-            return f"Sent {record.id} to {', '.join(record.recipients)}."
+            return with_lines(
+                f"Sent {record.id} to {', '.join(record.recipients)}.",
+                self.unread_line(name),
+            )
 
         return ToolDef(
             execute,
@@ -314,7 +318,10 @@ class MessagesState:
                 f"{f' ({m.status})' if m.status is not None else ''}"
                 for m in self._bus.roster
             ]
-            return "\n".join(lines)
+            return with_lines(
+                "\n".join(lines),
+                self.unread_line(name) or "You have no unread messages.",
+            )
 
         return ToolDef(
             execute,

@@ -1,13 +1,12 @@
 import gc
 import weakref
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from functools import cached_property
 from typing import Any, cast
 
 import anyio
 import pytest
-from inspect_ai.agent import Agent, AgentState, agent, handoff
 from inspect_ai.agent._channel import agent_channel, current_agent_channel
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import (
@@ -16,15 +15,7 @@ from inspect_ai.model import (
     ModelOutput,
     execute_tools,
 )
-from inspect_ai.tool import (
-    Content,
-    Tool,
-    ToolDef,
-    ToolError,
-    tool,
-    tool_with,
-)
-from inspect_ai.tool._tool import ToolParsingError
+from inspect_ai.tool import Tool, ToolDef, ToolError
 from inspect_ai.util._span import span
 from pydantic import JsonValue
 
@@ -46,12 +37,6 @@ from inspect_swarm._ledger import EventLog
 from inspect_swarm._metrics import _comm_metrics  # pyright: ignore[reportPrivateUsage]
 
 from .swarm_runtime import evidence, sample
-from .test_binding import (
-    _Loop,  # pyright: ignore[reportPrivateUsage]
-)
-from .test_binding import (
-    _Member as _MemberReach,  # pyright: ignore[reportPrivateUsage]
-)
 from .test_shared_memory import _Member  # pyright: ignore[reportPrivateUsage]
 
 
@@ -367,6 +352,10 @@ async def test_list_members_shows_each_state_and_status_and_the_caller() -> None
             "w-3: ended (submitted)\n"
             "You have 1 unread message."
         )
+        await r.read("w-2")
+        assert (await r.call("w-2", "list_members")).endswith(
+            "\nYou have no unread messages."
+        )
 
 
 @pytest.mark.anyio
@@ -491,34 +480,6 @@ async def test_a_send_from_an_ended_sender_is_refused_with_evidence() -> None:
                 await r.call("w-1", name)
 
 
-class _Board(_MemberReach):
-    # a custom channel of member reach, beside the messages channel's prefix
-    prefix = "u"
-
-
-@pytest.mark.anyio
-async def test_custom_channel_tools_count_unread_messages_in_the_own_loop() -> None:
-    unread = "\nYou have 1 unread message."
-    async with run(("w-1", "w-2"), None, _Loop(), _Board(rate=(2, 60.0))) as (r, _):
-        await r.send("w-1", "w-2", "private", wake=False)
-        assert sorted(await r.resolve("w-2", "child")) == ["member_write"]
-        assert await r.call_resolved("w-2", "loop_write", text="a") == "l-1" + unread
-        assert await r.call_resolved("w-2", "member_write", text="b") == "u-1" + unread
-        assert await r.call_resolved("w-2", "member_write", "child", text="c") == "u-2"
-        # its errors have no count
-        with pytest.raises(ToolError, match="^rate limit: retry in") as raised:
-            await r.call_resolved("w-2", "member_write", text="d")
-        assert "unread" not in raised.value.message
-        # read_messages counts what it leaves itself, and keeps its own output limit
-        tools = await r.resolve("w-2")
-        assert ToolDef(tools["read_messages"]).max_output == 0
-        assert ToolDef(tools["swarm_wait"]).parallel is False
-        assert await r.call_resolved("w-2", "read_messages") == (
-            '1 message.\n\n<peer_message id="m-1" from="w-1" to="w-2">\nprivate\n</peer_message>'
-        )
-        assert await r.call_resolved("w-2", "loop_write", text="e") == "l-2"
-
-
 # A channel of member reach whose one tool is given, and that delivers nothing.
 class _Given(Channel):
     name = "given"
@@ -549,101 +510,21 @@ class _GivenState:
         return [], None
 
 
-def _summarized(
-    index: int, total: int, content: str | list[Content], hints: Any
-) -> str:
-    return "summarized"
-
-
-@tool(model_input=_summarized)
-def _played() -> Tool:
-    async def execute() -> str:
-        """Return raw text."""
-        return "raw"
-
-    return execute
-
-
-@agent
-def _relayed() -> Agent:
-    async def execute(state: AgentState) -> AgentState:
-        state.output = ModelOutput.from_content("mockllm", "done")
-        return state
-
-    return execute
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    "kind,given",
-    [
-        ("a tool with a custom model_input", _played),
-        ("a handoff", lambda: handoff(_relayed(), "Relay.", tool_name="relay")),
-    ],
-)
-async def test_a_channel_tool_the_count_cannot_wrap_is_refused_beside_messages(
-    kind: str, given: Callable[[], Tool]
-) -> None:
-    channel = _Given(given())
-    async with sample():
-        # without the messages channel, and in a nested loop, it is the channel's own
-        alone = _Run(("w-1",), [channel])
-        assert list((await alone.resolve("w-1")).values()) == [channel.tool]
-        r = _Run(("w-1",), [messages(rate=None), channel])
-        assert list((await r.resolve("w-1", "child")).values()) == [channel.tool]
-        with pytest.raises(ValueError, match=f"^The given channel gives {kind}, "):
-            await r.resolve("w-1")
-
-
-def _raising(error: BaseException) -> Tool:
-    async def execute() -> str:
-        """Fail."""
-        raise error
-
-    return ToolDef(execute, name="fail").as_tool()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    "error",
-    [
-        lambda: ToolParsingError("bad input"),
-        lambda: ExceptionGroup("grouped", [ToolError("failed")]),
-    ],
-    ids=["subclass", "group"],
-)
-async def test_a_tool_error_passes_the_count_unchanged(
-    error: Callable[[], Exception],
-) -> None:
-    raised = error()
-    async with run(("w-1", "w-2"), None, _Given(_raising(raised))) as (r, _):
-        await r.send("w-1", "w-2", "private", wake=False)
-        with pytest.raises(type(raised)) as caught:
-            await r.call_resolved("w-2", "fail")
-        assert caught.value is raised
-
-
 async def _echo() -> str:
     return "echo"
 
 
 @pytest.mark.anyio
-async def test_a_channel_tool_is_wrapped_from_its_current_definition() -> None:
-    given = ToolDef(_echo, name="before", description="Before.").as_tool()
+async def test_other_channels_tools_pass_through_with_no_count() -> None:
+    given = ToolDef(_echo, name="echo", description="Echo.").as_tool()
     async with run(("w-1", "w-2"), None, _Given(given)) as (r, _):
         await r.send("w-1", "w-2", "private", wake=False)
-        # a loop still holds the wrapper made before the channel changes its tool
-        held = (await r.resolve("w-2"))["before"]
-        tool_with(given, name="after", description="After.", parallel=False)
         tools = await r.resolve("w-2")
-        assert "before" not in tools
-        after = ToolDef(tools["after"])
-        assert (after.description, after.parallel) == ("After.", False)
-        # both still count unread messages
-        unread = "echo\nYou have 1 unread message."
-        assert await r.call_resolved("w-2", "after") == unread
-        async with r._as("w-2", "top", "before"):
-            assert await held() == unread
+        assert tools["echo"] is given
+        assert await r.call_resolved("w-2", "echo") == "echo"
+        assert (await r.call_resolved("w-2", "list_members")).endswith(
+            "\nYou have 1 unread message."
+        )
 
 
 @pytest.mark.anyio
@@ -661,36 +542,6 @@ async def test_an_output_limit_smaller_than_the_count_can_cut_it() -> None:
         assert "truncated" in message.text
         assert "You have 1 unread message." not in message.text
         assert r.state.unread_line("w-2") == "You have 1 unread message."
-
-
-@tool(name="echo")
-def _plain() -> Tool:
-    async def execute() -> str:
-        """Return text."""
-        return "echo"
-
-    return execute
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    "given",
-    [
-        _plain,
-        lambda: ToolDef(_echo, name="echo", description="Echo.").as_tool(),
-    ],
-    ids=["tool", "tool-def"],
-)
-async def test_a_channel_tools_wrapper_is_not_kept_once_unused(
-    given: Callable[[], Tool],
-) -> None:
-    async with run(("w-1", "w-2"), None, _Given(given())) as (r, _):
-        wrapper = (await r.resolve("w-1"))["echo"]
-        assert await r.call_resolved("w-1", "echo") == "echo"
-        unused = weakref.ref(wrapper)
-        del wrapper
-        gc.collect()
-        assert unused() is None
 
 
 @pytest.mark.anyio

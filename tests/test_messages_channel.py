@@ -172,7 +172,9 @@ async def test_react_members_message_each_other(tmp_path: Path) -> None:
     assert _results(sample, "read_messages") == [
         f'1 message.\n\n<peer_message id="m-1" from="w" to="p">\n{text}\n</peer_message>'
     ]
-    assert _results(sample, "list_members") == ["p: running\nw (you): running"]
+    assert _results(sample, "list_members") == [
+        "p: running\nw (you): running\nYou have no unread messages."
+    ]
     assert [d["recipients"] for d in _comm(sample, "delivered")] == [["p"]]
     assert any("`send_message`" in text for text in _preambles(sample))
 

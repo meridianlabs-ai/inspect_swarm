@@ -62,7 +62,7 @@ A send is refused, and reaches no one, when an address is not a running member o
 
 One read returns as many whole messages as fit in a bound set by `max_bytes` and the roster, and always at least one. The generate config's `max_tool_output` does not apply to it, so a message is never cut. `read_messages` never waits; `swarm_wait` does.
 
-`list_members()` lists the members in roster order, with each one's role, its state (`pending`, `running` or `ended`) and, once it has ended, its status, such as `submitted`. It marks the caller with `(you)`.
+`list_members()` lists the members in roster order, with each one's role, its state (`pending`, `running` or `ended`) and, once it has ended, its status, such as `submitted`. It marks the caller with `(you)`, and ends with the caller's count of unread messages.
 
 ### Fences are labels
 
@@ -70,7 +70,7 @@ As in [Shared Memory](shared-memory.qmd#fences-are-labels), a fence is a label f
 
 ## Hearing about messages
 
-While a member has unread messages, every swarm tool result in its own loop ends with a line that counts them, such as `You have 2 unread messages.`: `send_message`, `list_members`, `shared_memory`, `swarm_wait` and the tools of any other channel. A `read_messages` result says how many remain unread instead. These lines hold counts only, never message text. Errors have no count: a member that gets one sees the count on its next result. A tool output limit smaller than the line can cut it, since the limit applies after the line is added. A member's subagents cannot read its messages, so their results do not count them.
+While a member has unread messages, the results of the swarm's own tools in its own loop end with a line that counts them, such as `You have 2 unread messages.`: `send_message`, `list_members`, `shared_memory` and `swarm_wait`. `list_members` also says when there are none, so a member can call it to check for messages. A `read_messages` result says how many remain unread instead. The tools of other channels, yours or Inspect's, carry no count. These lines hold counts only, never message text. Errors have no count: a member that gets one sees the count on its next result. A tool output limit smaller than the line can cut it, since the limit applies after the line is added. A member's subagents cannot read its messages, so their results do not count them.
 
 `swarm_wait` returns while the member has unread messages sent with `wake=True`, and names their senders: `2 unread messages (from worker-2, worker-4). Call read_messages() to read them.` It keeps returning until the member reads them. A result with other news too, such as a changed file or an ended member, also ends with the count. Messages sent with `wake=False` do not end a wait, but a wait that returns for another reason counts them. It also returns when another member ends, when every member is waiting, has ended or has not started, when the swarm stops, or after `timeout` seconds, as described in [Shared Memory](shared-memory.qmd#waiting-for-other-members). `max_wait` sets the longest wait, 120 seconds unless you change it. With `shared_memory()` too, the longer of the two channels' `max_wait` applies.
 

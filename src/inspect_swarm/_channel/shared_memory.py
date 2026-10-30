@@ -499,9 +499,10 @@ class _SharedMemoryState:
         if own:
             self._top[member] = loop
         if command == "changes":
-            return (
+            return with_lines(
                 self._status_line(loop, None)
-                or "Shared memory: no files changed since you last viewed them."
+                or "Shared memory: no files changed since you last viewed them.",
+                self._bus.status(context),
             )
         if command == "view":
             result = self._view(
@@ -527,7 +528,7 @@ class _SharedMemoryState:
             )
         else:
             raise ToolError(f"Unknown command: {command}")
-        return with_lines(result, self._status_line(loop))
+        return with_lines(result, self._status_line(loop), self._bus.status(context))
 
     async def _write(
         self,
