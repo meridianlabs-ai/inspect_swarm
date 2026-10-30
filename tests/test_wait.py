@@ -14,7 +14,13 @@ from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent, ToolEvent
 from inspect_ai.log import EvalSample
 from inspect_ai.log._transcript import Transcript
-from inspect_ai.model import ChatMessageAssistant, ModelOutput
+from inspect_ai.model import (
+    ChatMessageAssistant,
+    ChatMessageTool,
+    ChatMessageUser,
+    ModelOutput,
+    execute_tools,
+)
 from inspect_ai.tool import Tool, ToolCall, ToolDef, ToolError, tool
 from inspect_ai.util import Limit, time_limit
 from inspect_ai.util._span import span
@@ -408,6 +414,39 @@ async def test_a_wait_counts_unread_messages_that_do_not_wake_it() -> None:
             assert results == []
             r.bus.close()
         assert results == [f"{STOPPING}\nYou have 1 unread message."]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("board_first", [True, False])
+async def test_a_wait_with_other_news_ends_with_the_unread_count(
+    board_first: bool,
+) -> None:
+    # the longest member names, so that a 100-byte output limit cuts the middle
+    sender, reader, ender = "a" * 48, "b" * 48, "c" * 48
+    channels = [shared_memory(rate=None), messages(rate=None)]
+    if not board_first:
+        channels.reverse()
+    async with messages_run((sender, reader, ender), *channels) as (r, _):
+        await r.call(
+            sender,
+            "shared_memory",
+            command="create",
+            path="/shared_memory/a.md",
+            file_text="board",
+        )
+        await r.send(sender, reader, "message")
+        r.members[ender].state, r.members[ender].status = "ended", "submitted"
+        r.bus.member_ended(ender, "submitted")
+        tools = list((await r.resolve(reader)).values())
+        call = ModelOutput.for_tool_call("mockllm", "swarm_wait", {}).message
+        async with r._as(reader, "top", None):  # pyright: ignore[reportPrivateUsage]
+            result = await execute_tools(
+                [ChatMessageUser(content="task"), call], tools, max_output=100
+            )
+        [message] = [m for m in result.messages if isinstance(m, ChatMessageTool)]
+        # the limit cut the middle of the result, and kept the count at its end
+        assert "truncated" in message.text
+        assert "You have 1 unread message." in message.text
 
 
 _NOT_WAKING = "Messages sent with wake=False do not wake this wait; they are counted when it returns for another reason."

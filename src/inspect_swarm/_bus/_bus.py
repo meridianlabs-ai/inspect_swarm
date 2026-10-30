@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
+from weakref import WeakValueDictionary
 
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.agent._channel import current_agent_channel
@@ -63,7 +64,9 @@ class Bus:
         self._storms: dict[str, Storm] = {}
         self._prefixes: dict[str, str] = {}
         self._reach: dict[str, Literal["loop", "member"]] = {}
-        self._counting: dict[int, tuple[Tool, Tool]] = {}
+        # each tool's wrapper, by the tool's id, while something holds the wrapper: it
+        # holds the tool, so the id is not reused while the entry lasts
+        self._counting: WeakValueDictionary[int, Tool] = WeakValueDictionary()
         # the states of the channels that wake waits, and their longest wait
         waiting: dict[str, WaitingState] = {}
         max_wait: int | None = None
@@ -228,11 +231,11 @@ class Bus:
         # the tool as a member's own loop gets it beside the messages channel: its
         # results end with the status line, so no channel's tool needs to know the
         # messages channel. Its errors pass through unchanged, with no count: the member
-        # sees the count on its next result (decision: Ransom, 2026-10-30). One wrapper
-        # per tool and run.
+        # sees the count on its next result (decision: Ransom, 2026-10-30). A tool keeps
+        # its wrapper while the wrapper is in use; a channel's fresh tools do not pile up.
         cached = self._counting.get(id(tool))
         if cached is not None:
-            return cached[1]
+            return cached
         tool_def = ToolDef(tool)
         inner = tool_def.tool
 
@@ -252,8 +255,7 @@ class Bus:
             max_output=tool_def.max_output,
             options=tool_def.options,
         ).as_tool()
-        # the tool is kept with its wrapper, so that its id is not reused
-        self._counting[id(tool)] = (tool, wrapped)
+        self._counting[id(tool)] = wrapped
         return wrapped
 
     def _unread(self) -> str | None:

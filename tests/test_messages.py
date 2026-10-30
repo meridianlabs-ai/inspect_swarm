@@ -1,3 +1,5 @@
+import gc
+import weakref
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from functools import cached_property
@@ -8,7 +10,12 @@ import pytest
 from inspect_ai.agent import Agent, AgentState, agent, handoff
 from inspect_ai.agent._channel import agent_channel, current_agent_channel
 from inspect_ai.log._transcript import Transcript
-from inspect_ai.model import ModelOutput
+from inspect_ai.model import (
+    ChatMessageTool,
+    ChatMessageUser,
+    ModelOutput,
+    execute_tools,
+)
 from inspect_ai.tool import (
     Content,
     Tool,
@@ -613,3 +620,34 @@ async def test_a_tool_error_passes_the_count_unchanged(
         with pytest.raises(type(raised)) as caught:
             await r.call_resolved("w-2", "fail")
         assert caught.value is raised
+
+
+@pytest.mark.anyio
+async def test_the_bus_keeps_a_wrapper_only_while_a_loop_holds_it() -> None:
+    async with run(("w-1", "w-2"), None, _Loop()) as (r, _):
+        # the channel gives fresh tools at each resolution; their old wrappers go
+        old = weakref.ref((await r.resolve("w-1"))["loop_write"])
+        for _ in range(3):
+            await r.resolve("w-1")
+        gc.collect()
+        assert old() is None
+        # the messages channel's tools are the same each time, and so are their wrappers
+        held = (await r.resolve("w-1"))["send_message"]
+        assert (await r.resolve("w-1"))["send_message"] is held
+
+
+@pytest.mark.anyio
+async def test_an_output_limit_smaller_than_the_count_can_cut_it() -> None:
+    # normal truncation applies: the count line is not kept over the tool's limit
+    async with run(("w-1", "w-2")) as (r, _):
+        await r.send("w-1", "w-2", "private", wake=False)
+        tools = list((await r.resolve("w-2")).values())
+        call = ModelOutput.for_tool_call("mockllm", "list_members", {}).message
+        async with r._as("w-2", "top", None):
+            result = await execute_tools(
+                [ChatMessageUser(content="task"), call], tools, max_output=20
+            )
+        [message] = [m for m in result.messages if isinstance(m, ChatMessageTool)]
+        assert "truncated" in message.text
+        assert "You have 1 unread message." not in message.text
+        assert r.state.unread_line("w-2") == "You have 1 unread message."

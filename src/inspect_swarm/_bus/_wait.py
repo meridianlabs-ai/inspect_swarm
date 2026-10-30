@@ -246,15 +246,16 @@ class Waits:
                 else reason
             )
             lines: list[str] = []
-            # whether the result counts the member's unread messages already
-            counted = False
+            # the lines of the messages channel's news, which count unread messages
+            counting = 0
             for channel in channels:
                 state = self._states[channel]
                 news = state.news(spec)
                 if news is not None:
                     lines.extend(news.lines)
                     files.extend(news.files)
-                    counted = counted or isinstance(state, MessagesState)
+                    if isinstance(state, MessagesState):
+                        counting = len(news.lines)
             reported = self._reported.setdefault(spec.loop, set())
             ends = [
                 (member, status)
@@ -266,8 +267,10 @@ class Waits:
             release = _release_line(outcome, name, effective)
             if release is not None:
                 lines.append(release)
-            unread = None if counted else self._bus.status(context)
-            if unread is not None:
+            # the result ends with the count of unread messages unless it is only the
+            # messages' news, so that truncating the middle of a longer one keeps it
+            unread = self._bus.status(context)
+            if unread is not None and (not counting or len(lines) > counting):
                 lines.append(unread)
             # named, so that this loop's later waits do not report them again
             reported.update(member for member, _ in ends)
