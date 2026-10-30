@@ -195,6 +195,7 @@ class Waits:
         file_id: str | None,
         timeout: int | None,
         only: Sequence[str] | None = None,
+        cap: int | None = None,
     ) -> str:
         assert self.max_wait is not None
         context = self._bus.member()
@@ -218,9 +219,9 @@ class Waits:
                 f"{name} is already waiting: its own loop has a swarm_wait in progress."
             )
         channels = [c for c in self._reachable(own) if only is None or c in only]
-        effective = (
-            self.max_wait if timeout is None else min(max(timeout, 1), self.max_wait)
-        )
+        # a bridged member's waits are also capped by its tools' own maximum
+        longest = self.max_wait if cap is None else min(self.max_wait, cap)
+        effective = longest if timeout is None else min(max(timeout, 1), longest)
         spec = WaitSpec(
             id=f"x-{self._count + 1}",
             member=name,

@@ -274,11 +274,12 @@ The swarm adds no message to a member's conversation; a loop learns of changes f
 
 ### Bridged members
 
-A bridged member (Claude Code or Codex through inspect_swe) gets the `shared_memory` tool from `swarm_bridged_tools(["shared_memory"])` ([swarm-communication.md Bridged members](swarm-communication.md#bridged-members)). **Its CLI is one loop to the board, with one `seen` shared by all its conversations** (decision: Ransom, 2026-10-30). The host does not learn which of the CLI's conversations proposed a call, and every bridged call runs in the agent span the bridge was started in, so the board cannot tell the CLI's subagents from its top-level session. This is the board's form of the messages channel's shared inbox:
+A bridged member (Claude Code or Codex through inspect_swe) gets the `shared_memory` tool from `swarm_bridged_tools(["shared_memory"])` ([swarm-communication.md Bridged members](swarm-communication.md#bridged-members)). **Its CLI is one loop to the board, with one `seen` shared by all its conversations** (decision: Ransom, 2026-10-30). The bridge keeps the proposing call and its span, and places the host call's `ToolEvent` under that span. The swarm uses the service task's agent context instead, which every bridged call shares, and treats all conversations of a bridged member as one loop ([swarm-communication.md Bridged tools](swarm-communication.md#bridged-tools)). This is the board's form of the messages channel's shared inbox:
 
 - A view by any conversation marks the version seen for the CLI, so it satisfies the seen rule for the others (create over an existing file, insert, delete, rename) and takes the file out of their status lines and waits.
 - A write from any conversation is the member's, from that one loop, so it is never news to another conversation of the CLI.
-- The seen rule therefore guards the member against stale writes, not each conversation: a CLI subagent's view lets its parent overwrite a file the parent never viewed. No stricter rule could be enforced, since the conversations cannot be told apart.
+- The seen rule therefore guards the member against stale writes, not each conversation: a CLI subagent's view lets its parent overwrite a file the parent never viewed.
+- Its `swarm_wait` lasts at most the bridged-member wait limit, `swarm_bridged_tools(..., max_wait=280)`, or this channel's `max_wait` if that is shorter ([swarm-wait.md Bridged members](swarm-wait.md#bridged-members)).
 - Evidence is as below, with `via: "bridge"` and `nested: false`; `loop` is that agent span, and the tool span is the one inspect_ai opens for the host call.
 
 ### Evidence

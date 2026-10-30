@@ -28,8 +28,8 @@ PLAN = "/shared_memory/plan.md"
 # model call in one of the CLI's conversations, an agent span of its own, and runs in
 # the member's context, as the service task does, outside that span.
 class _Cli:
-    def __init__(self, channels: list[str]) -> None:
-        spec = swarm_bridged_tools(channels)
+    def __init__(self, channels: list[str], max_wait: int = 280) -> None:
+        spec = swarm_bridged_tools(channels, max_wait)
         self.bridge = SandboxAgentBridge(
             state=AgentState(messages=[]),
             filter=None,
@@ -203,6 +203,45 @@ async def test_a_bridged_member_never_counts_as_waiting() -> None:
 
 
 @pytest.mark.anyio
+async def test_a_bridged_wait_is_capped_by_the_tools_max_wait() -> None:
+    # below the CLI's own tool timeout, which the channel's longer wait would pass
+    started, done = anyio.Event(), anyio.Event()
+    results: dict[str, str] = {}
+
+    async def script() -> None:
+        await started.wait()
+        results["cli"] = await _Cli(["messages"], max_wait=1).call(
+            "parent", "swarm_wait"
+        )
+        # running until the native wait returns, so that its end does not release it
+        while "native" not in results:
+            await anyio.sleep(0.05)
+        done.set()
+
+    with anyio.fail_after(20):
+        outcome = await run_swarm(
+            swarm(
+                [
+                    member(waiter(started, done, results), name="w-1"),
+                    member(cli(script), name="cli", bridged=True),
+                ],
+                channels=[messages(max_wait=2)],
+                controller=leaderless(stop_on_submission=False),
+            )
+        )
+
+    # the native member's wait keeps the channel's maximum
+    assert results == {
+        "native": "Nothing you waited for happened in 2 s.",
+        "cli": "Nothing you waited for happened in 1 s.",
+    }
+    assert sorted(
+        (w["member"], w["timeout"]["effective"])
+        for w in evidence(outcome.transcript, "waited")
+    ) == [("cli", 1), ("w-1", 2)]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "tool,arguments,channel",
     [
@@ -298,3 +337,10 @@ async def test_the_bridged_tools_are_the_native_ones() -> None:
 def test_channels_must_be_the_built_in_ones_each_once(channels: Any) -> None:
     with pytest.raises(ValueError, match="channels must name 'messages' or"):
         swarm_bridged_tools(channels)
+
+
+def test_max_wait_must_be_at_least_one() -> None:
+    with pytest.raises(
+        ValueError, match="max_wait must be a whole number of at least 1"
+    ):
+        swarm_bridged_tools(["messages"], max_wait=0)

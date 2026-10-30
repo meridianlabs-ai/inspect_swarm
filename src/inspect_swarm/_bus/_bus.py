@@ -137,10 +137,11 @@ class Bus:
         file_id: str | None,
         timeout: int | None,
         channels: Sequence[str] | None = None,
+        cap: int | None = None,
     ) -> str:
         # the swarm_wait tool's body; a bridged member's waits only on `channels`, those
-        # its tools reach
-        return await self._waits.wait(path, file_id, timeout, channels)
+        # its tools reach, and at most `cap` seconds
+        return await self._waits.wait(path, file_id, timeout, channels, cap)
 
     def member_ended(self, name: str, status: str) -> None:
         # from the runtime, right after it marks the member ended
