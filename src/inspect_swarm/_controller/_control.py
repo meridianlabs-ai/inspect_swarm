@@ -47,7 +47,15 @@ from .._metrics import (
     gate_checks,
     swarm_metrics,
 )
-from .._record import MemberResult, MemberState
+from .._record import (
+    MemberResult,
+    MemberState,
+    SwarmResultRecord,
+    _swarm_ended,  # pyright: ignore[reportPrivateUsage]
+    _swarm_started,  # pyright: ignore[reportPrivateUsage]
+    write_record,
+    write_start,
+)
 
 if TYPE_CHECKING:
     from .._channel._channel import Channel
@@ -419,6 +427,10 @@ class SwarmRun:
             )
         )
         ended = False
+        # in the swarm's span, before any member can start; from here until the end
+        # of the finally below, swarm_result() refuses reads in this sample
+        write_start()
+        running = _swarm_started()
         try:
             # first: spans inside the swarm, members' included, log no StoreEvent;
             # the swarm's span, entered before, logs the net change
@@ -466,68 +478,75 @@ class SwarmRun:
             error = ex
             raise
         finally:
-            # synchronous, so that it runs under cancellation too; the provisional
-            # answer is already written, as each change to the record writes it
-            wall_clock = anyio.current_time() - self._start
-            ledger = interval.ledger(
-                budget=self._budget,
-                caps=self._caps,
-                time_cap=self._time,
-                members=[
-                    MemberAccount(
-                        name=m.name,
-                        status=m.status,
-                        bridged=m.context.bridged,
-                        lever=m.lever,
-                        span_id=m.context.span_id,
-                        cancelled=m.cancelled,
-                        background_started=m.outcome.background_started,
-                        background_cancelled=m.outcome.background_cancelled,
-                    )
-                    for m in self._members
-                ],
-                runtime=self._runtime_lever,
-                final=self._final_meter,
-                swarm=self._swarm_meter,
-                stop_reason=self.stop_reason,
-                ended_by=None if ended else _exhaustion(error),
-                interrupted=not ended,
-                # M1's final step does not await, so nothing can cancel it
-                final_cancelled=False,
-            )
-            write_ledger(ledger)
-            spans = {
-                m.name: m.context.span_id
-                for m in self._members
-                if m.context.span_id is not None
-            }
-            places = interval.places(spans)
-            # the record's answer, final or provisional
-            chosen = answer(
-                self._results(), self._final, self._pick, provisional=False
-            ).member
-            write_metrics(
-                swarm_metrics(
-                    ledger,
-                    interval.events,
-                    places,
-                    [MemberTimes(m.name, m.started, m.time) for m in self._members],
-                    [m.gates for m in self._members],
-                    [
-                        MemberWiring(tools=m.context.loop is not None)
+            try:
+                # synchronous, so that it runs under cancellation too; the record first,
+                # provisional unless the final step completed
+                results = self._results()
+                record = SwarmResultRecord(
+                    members=results,
+                    final=answer(
+                        results, self._final, self._pick, provisional=not ended
+                    ),
+                )
+                write_record(record)
+                wall_clock = anyio.current_time() - self._start
+                ledger = interval.ledger(
+                    budget=self._budget,
+                    caps=self._caps,
+                    time_cap=self._time,
+                    members=[
+                        MemberAccount(
+                            name=m.name,
+                            status=m.status,
+                            bridged=m.context.bridged,
+                            lever=m.lever,
+                            span_id=m.context.span_id,
+                            cancelled=m.cancelled,
+                            background_started=m.outcome.background_started,
+                            background_cancelled=m.outcome.background_cancelled,
+                        )
                         for m in self._members
                     ],
-                    list(self.bus.states),
-                    self.bus.waits.max_wait is not None,
-                    wall_clock,
-                    chosen,
+                    runtime=self._runtime_lever,
+                    final=self._final_meter,
+                    swarm=self._swarm_meter,
+                    stop_reason=self.stop_reason,
+                    ended_by=None if ended else _exhaustion(error),
+                    interrupted=not ended,
+                    # M1's final step does not await, so nothing can cancel it
+                    final_cancelled=False,
                 )
-            )
-            timelines.fill(places)
-            # last, so that the bus and the budget are current through the final step
-            # and the ledger
-            current_budget.reset(budget_token)
-            current_bus.reset(bus_token)
+                write_ledger(ledger)
+                spans = {
+                    m.name: m.context.span_id
+                    for m in self._members
+                    if m.context.span_id is not None
+                }
+                places = interval.places(spans)
+                write_metrics(
+                    swarm_metrics(
+                        ledger,
+                        interval.events,
+                        places,
+                        [MemberTimes(m.name, m.started, m.time) for m in self._members],
+                        [m.gates for m in self._members],
+                        [
+                            MemberWiring(tools=m.context.loop is not None)
+                            for m in self._members
+                        ],
+                        list(self.bus.states),
+                        self.bus.waits.max_wait is not None,
+                        wall_clock,
+                        record.final.member,
+                    )
+                )
+                timelines.fill(places)
+                # last, so that the bus and the budget are current through the final step
+                # and the ledger
+                current_budget.reset(budget_token)
+                current_bus.reset(bus_token)
+            finally:
+                _swarm_ended(running)
         if error is not None:
             raise error
 
@@ -626,7 +645,7 @@ class SwarmRun:
         self._queue.append(MemberEnded(m.name, status, m.submitted))
         self._notify()
 
-    # the record and the provisional answer, after each change
+    # the provisional answer, after each change
     def _settle(self) -> None:
         settle(
             self._state,

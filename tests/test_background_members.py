@@ -39,11 +39,19 @@ from inspect_ai.util import (
     token_limit,
 )
 
-from inspect_swarm import Budget, SwarmControl, leaderless, member, shared_memory, swarm
+from inspect_swarm import (
+    Budget,
+    SwarmControl,
+    leaderless,
+    member,
+    shared_memory,
+    swarm,
+    swarm_result,
+)
 from inspect_swarm._controller._control import SwarmRun
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import SwarmLedger
-from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
+from inspect_swarm._record import SwarmResultRecord
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
@@ -846,7 +854,9 @@ def _sample_ledger(sample: EvalSample) -> SwarmLedger:
 
 
 def _record(sample: EvalSample) -> SwarmResultRecord:
-    return SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
+    record = swarm_result(sample)
+    assert record is not None
+    return record
 
 
 @pytest.mark.anyio

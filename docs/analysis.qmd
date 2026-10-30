@@ -10,7 +10,7 @@ When the swarm ends it writes two entries to the sample store, each also logged 
 - `inspect_swarm:metrics`: tokens, cost and time for the swarm and each member, and counts of how each member acted, checked its work, communicated and waited ([Metrics](#metrics)).
 - `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, model calls that errored or reported no usage, unpriced models, and what stopped the swarm ([The ledger](#the-ledger)).
 
-The result record, `inspect_swarm:result`, is described in [Scoring](scoring.qmd#the-result-record).
+The result record is an event in the transcript, which `swarm_result(sample)` reads from a sample. It is described in [Scoring](scoring.qmd#the-result-record).
 
 ## Metrics
 

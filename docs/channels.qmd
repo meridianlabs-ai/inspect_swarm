@@ -44,7 +44,7 @@ Those tool calls are evidence that members may have communicated through files, 
 The same holds for every other path between members that the swarm does not carry:
 
 - A built-in tool given the same explicit `instance` in several members, such as `memory(instance="board")`, shares its state through the sample store. Members' `ToolEvent`s record its use, and nothing else does. See [Members](members.qmd#tool-state).
-- A tool that reads the swarm's result record gives members a view of each other's state, status and time ([Scoring](scoring.qmd#the-result-record)).
+- A tool that reads the transcript sees the other members' model and tool calls ([Scoring](scoring.qmd#the-record-belongs-to-the-swarm)).
 
 Channels limit what members are told, not what they can do. An arm meant to have one channel only, or none, needs members that cannot reach each other otherwise: their own sandboxes, and no shared tool instances.
 

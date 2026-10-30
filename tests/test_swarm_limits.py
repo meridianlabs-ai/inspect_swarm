@@ -12,6 +12,7 @@ from inspect_ai._util.exception import TerminateSampleError
 from inspect_ai.agent import Agent, AgentState, agent, react
 from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent
+from inspect_ai.log import EvalSample
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import (
     ChatMessageTool,
@@ -57,12 +58,13 @@ from inspect_swarm import (
     member,
     swarm,
     swarm_controller,
+    swarm_result,
 )
 from inspect_swarm._budget import CostPair, SwarmNode
 from inspect_swarm._controller._control import SwarmRun
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import SwarmLedger
-from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
+from inspect_swarm._record import SwarmResultRecord
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
@@ -83,6 +85,12 @@ def _controller(run: Any, name: str) -> Controller:
         return Controller(run)
 
     return factory()
+
+
+def _logged(sample: EvalSample) -> SwarmResultRecord:
+    record = swarm_result(sample)
+    assert record is not None
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +444,7 @@ def test_a_react_member_that_returns_without_a_submit_is_unsubmitted(
     assert log.samples is not None
     [sample] = log.samples
     assert script.calls == calls
-    [result] = SwarmResultRecord.model_validate(sample.store[RECORD_KEY]).members
+    [result] = _logged(sample).members
     assert result.status == expected
 
 
@@ -558,7 +566,7 @@ def test_a_member_that_stops_itself_ends_alone_and_is_never_chosen(
     assert log.samples is not None
     [sample] = log.samples
     assert sample.error is None
-    record = SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
+    record = _logged(sample)
     stopped, solved = record.members
     assert (stopped.status, stopped.submitted) == ("member_limit:custom", False)
     assert solved.status == "submitted"
@@ -878,7 +886,7 @@ def test_a_sample_limit_leaves_the_ledger_and_the_provisional_answer(
     assert sample.limit is not None and sample.limit.type == limit
     # the provisional answer
     assert sample.output.completion == "early answer"
-    record = SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
+    record = _logged(sample)
     assert (record.final.member, record.final.provisional) == ("early", True)
     # the ledger
     ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
@@ -1084,7 +1092,7 @@ async def test_the_ledger_is_written_after_the_final_step() -> None:
         and e.source == "inspect_swarm"
         and isinstance(e.data, dict)
     ]
-    assert kinds[-3:] == ["final", "ledger", "metrics"]
+    assert kinds[-4:] == ["final", "result_record", "ledger", "metrics"]
 
 
 @tool
