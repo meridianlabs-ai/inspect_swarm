@@ -76,9 +76,6 @@ A swarm with no member that chooses is not checked. The rule is an allowlist of 
 - 2026-10-22: the role line is still stated for a member that chooses its name (decision: Ransom, 2026-10-22).
 - 2026-10-22: the filesystem channel and `channels=[]` are the only configurations supported; channels with records are refused, and registering chosen names so that they can work is left for a later design (decision: Ransom, 2026-10-22).
 - 2026-10-22: `choose_name` is serialized into the plan step even at its default, as every member field is, accepting that adding the field changed the task identifiers of existing swarm tasks rather than omitting the default (decision: Ransom, 2026-10-22).
-- 2026-10-28: user channels are refused beside a member that chooses, including subclasses of `FilesystemChannel`, rather than accepted on a check of their instructions or on the channel's declaration (decision: Ransom, 2026-10-28).
-- 2026-10-28: the member is asked to choose and announce a name; a chooser gets a `<your name>` scratch path, and once any member chooses, named members are no longer told their directory is unused (decision: Ransom, 2026-10-28).
-- 2026-10-28: the result record holds the flag per member, not the name a member chose (decision: Ransom, 2026-10-28).
 
 ## Alternatives considered
 
