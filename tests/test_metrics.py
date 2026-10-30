@@ -62,6 +62,7 @@ from inspect_swarm import (
     WaitSpec,
     leaderless,
     member,
+    messages,
     shared_memory,
     swarm,
     swarm_channel,
@@ -1184,6 +1185,59 @@ async def test_a_read_in_the_answering_members_drain_counts(replace: bool) -> No
 
 
 @agent
+def writes_and_holds(model: Model, waited: anyio.Event) -> Agent:
+    """Make ten steps, write the file a peer waits for, and end only once the peer's wait has returned."""
+
+    async def execute(state: AgentState) -> AgentState:
+        memory = (await resolve())["shared_memory"]
+        for _ in range(10):
+            state.output = await model.generate(state.messages)
+        await memory(command="create", path=_p("peer.md"), file_text="peer content")
+        await waited.wait()
+        return state
+
+    return execute
+
+
+@agent
+def waits_for_news(model: Model, waited: anyio.Event) -> Agent:
+    """Make a step, wait for news, then make another step."""
+
+    async def execute(state: AgentState) -> AgentState:
+        wait = (await resolve())["swarm_wait"]
+        await model.generate(state.messages)
+        await wait()
+        waited.set()
+        state.output = await model.generate(state.messages)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_wait_that_also_reaches_messages_links_the_files_it_names() -> None:
+    # w's own loop waits on both channels and no message is sent: the wait names p's
+    # file, before p ends
+    waited = anyio.Event()
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(writes_and_holds(scripted_model(), waited), name="p"),
+                member(waits_for_news(scripted_model(), waited), name="w"),
+            ],
+            channels=[shared_memory(), messages()],
+            controller=_answered_by("w"),
+        )
+    )
+    [wait] = evidence(outcome.transcript, "waited")
+    assert sorted(wait["channels"]) == ["messages", "shared_memory"]
+    assert [f["version"] for f in wait["files"]] == [1]
+    assert wait["ended"] == []
+    metrics = _metrics(outcome.transcript)
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 11)
+
+
+@agent
 def writes_twice_and_views(model: Model) -> Agent:
     """Make a step, write f-1 of its board twice, and view it."""
 
@@ -1245,22 +1299,33 @@ def metrics_test_impostor() -> Channel:
     return _Impostor()
 
 
+# The same custom waiting channel under the built-in messages channel's name.
+class _MessagesImpostor(_Impostor):
+    name = "messages"
+    prefix = "n"
+
+
+@swarm_channel
+def metrics_test_messages_impostor() -> Channel:
+    return _MessagesImpostor()
+
+
 @agent
-def notes(model: Model, steps: int) -> Agent:
-    """Make `steps` steps, then post a note and record a read, each of the custom channel's own shape."""
+def notes(model: Model, steps: int, channel: str = "shared_memory") -> Agent:
+    """Make `steps` steps, then post a note to `channel` and record a read there, each of the custom channel's own shape."""
 
     async def execute(state: AgentState) -> AgentState:
         for _ in range(steps):
             state.output = await model.generate(state.messages)
         bus = current_bus.get()
         assert bus is not None
-        await bus.deliver(Draft("shared_memory", "note", wake=True))
+        await bus.deliver(Draft(channel, "note", wake=True))
         context = current_member.get()
         assert context is not None
         comm_read(
             context.span_id,
             context.name,
-            "shared_memory",
+            channel,
             "r-1",
             None,
             False,
@@ -1274,22 +1339,36 @@ def notes(model: Model, steps: int) -> Agent:
 
 
 @pytest.mark.anyio
-async def test_a_custom_channel_named_like_the_board_makes_no_file_edge(
-    caplog: pytest.LogCaptureFixture,
+@pytest.mark.parametrize(
+    "named",
+    [
+        pytest.param("shared_memory", id="board"),
+        pytest.param("messages", id="messages"),
+    ],
+)
+async def test_a_custom_channel_named_like_a_builtin_makes_no_file_edge(
+    named: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     # w waits once p has ended: the wait names the custom channel's entries, f-99
-    # version 7 among them, and p's end, which alone links
+    # version 7 among them, and p's end, which alone links. The one named `messages`
+    # sits beside the built-in board, so the wait reaches both.
+    channels: list[str | Channel] = (
+        ["metrics_test_impostor"]
+        if named == "shared_memory"
+        else [shared_memory(), "metrics_test_messages_impostor"]
+    )
     outcome = await run_swarm(
         swarm(
             [
-                member(notes(scripted_model(), 10), name="p"),
+                member(notes(scripted_model(), 10, named), name="p"),
                 member(after(["p"], waits_for_an_end(scripted_model())), name="w"),
             ],
-            channels=["metrics_test_impostor"],
+            channels=channels,
             controller=_answered_by("w"),
         )
     )
     [wait] = evidence(outcome.transcript, "waited")
+    assert sorted(wait["channels"]) == sorted({named, "shared_memory"})
     assert wait["files"] == [
         {"foreign_record": "x-1"},
         {"file": "f-99", "version": 7},
