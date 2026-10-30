@@ -366,6 +366,8 @@ def _field(record: SwarmResultRecord, field: str) -> str | None:
         pytest.param(f"attachment://{mm3_hash(OTHER)}", False, id="attachment-hash"),
         # removed from a log that does not log images
         pytest.param("data:;base64,SGVsbG8=", False, id="base64"),
+        # escaped when the log is written as JSON
+        pytest.param("lone " + chr(0xD800), False, id="surrogate"),
     ],
 )
 def test_a_record_reads_the_same_live_and_from_the_log(
@@ -376,6 +378,10 @@ def test_a_record_reads_the_same_live_and_from_the_log(
         with pytest.raises(ValueError, match="must not contain '/'"):
             _carrying(field, value)
         return
+    if field in ("name", "role") and chr(0xD800) in value:
+        pytest.skip(
+            "Inspect cannot log such a sample at all: spans carry the name and the preamble message the role"
+        )
     # the same outcome whether or not the eval logs images
     for log_images in (True, False):
         after_end: list[Read] = []
@@ -1001,6 +1007,58 @@ async def test_a_swarm_that_fails_at_either_end_keeps_its_accounting(
     if failure == "record-after-an-error":
         # the error that ended the swarm, with the record's
         assert any(UNWRITABLE in note for note in raised.value.__notes__)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("writer", ["write_ledger", "write_metrics"])
+@pytest.mark.parametrize("ending", ["controller-error", "record-error", "cancelled"])
+async def test_a_failed_accounting_write_keeps_what_ended_the_swarm(
+    monkeypatch: pytest.MonkeyPatch, writer: str, ending: str
+) -> None:
+    started = anyio.Event()
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        if ending == "cancelled":
+            started.set()
+            await anyio.sleep_forever()
+        async for _ in control.events():
+            pass
+        control.choose_answer(
+            "a", reason="tc://artifact" if ending == "record-error" else None
+        )
+        if ending == "controller-error":
+            raise RuntimeError("controller-failure")
+        return "chosen"
+
+    def fail(*args: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(f"inspect_swarm._controller._control.{writer}", fail)
+    agent_swarm = swarm(
+        [
+            member(generator(scripted_model()), name="a"),
+            member(generator(scripted_model()), name="b"),
+        ],
+        controller=_controller(run_controller, f"record_test_acct_{uuid4().hex}"),
+        channels=[],
+    )
+    async with sample() as t:
+        observers = len(t._event_loggers)
+        if ending == "cancelled":
+            # the cancellation, not the write's error, leaves the swarm
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(run, agent_swarm, "task")
+                await started.wait()
+                tg.cancel_scope.cancel()
+        else:
+            error = "controller-failure" if ending == "controller-error" else UNWRITABLE
+            with pytest.raises((RuntimeError, ValueError), match=error) as raised:
+                await run(agent_swarm, "task")
+            # the write's error is a note on it
+            assert any("OSError: disk full" in n for n in raised.value.__notes__)
+        assert len(t._event_loggers) == observers
 
 
 @agent

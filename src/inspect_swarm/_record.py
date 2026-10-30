@@ -1,7 +1,9 @@
+import json
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any, Literal, TypeGuard
 from uuid import uuid4
 
+from inspect_ai._util.json import to_json_safe
 from inspect_ai.event import Event, InfoEvent
 from inspect_ai.log import EvalSample, transcript
 from inspect_ai.log._condense import (
@@ -104,7 +106,7 @@ def write_record(record: SwarmResultRecord) -> None:
     }
     if _changed_by_logging(InfoEvent(data=data, source="inspect_swarm")):
         raise ValueError(
-            "The swarm's result record cannot be written: a string in it would read back from the log as other text. Inspect reads a string that begins with attachment:// or tc:// as a reference to an attachment, and removes base64 data: URIs when an eval does not log images. Check the members' names, roles and sandboxes, and the reason given to choose_answer()."
+            "The swarm's result record cannot be written: a string in it would read back from the log as other text. Inspect reads a string that begins with attachment:// or tc:// as a reference to an attachment, removes base64 data: URIs when an eval does not log images, and escapes text that is not valid UTF-8, such as a lone surrogate. Check the members' names, roles and sandboxes, and the reason given to choose_answer()."
         )
     transcript().info(data, source="inspect_swarm")
     store().set(RESULT_ID_KEY, id)
@@ -119,7 +121,9 @@ def forget_record() -> None:
 
 # Whether a log would give back other text than `event` holds. Inspect condenses an
 # event's strings when it logs it (long text into attachments, and base64 data: URIs
-# removed under log_images=False), and resolves them when a log is read or re-scored,
+# removed under log_images=False), writes the event and its attachments as JSON (which
+# escapes text that is not valid UTF-8, such as a lone surrogate), and resolves them
+# when a log is read or re-scored,
 # rewriting tc:// as attachment:// and replacing a reference with the attachment it
 # names. Resolving against the event's own attachments only, where any other reference
 # reads as something else, finds text that would read back as another attachment of
@@ -127,8 +131,10 @@ def forget_record() -> None:
 def _changed_by_logging(event: InfoEvent) -> bool:
     for log_images in (True, False):
         attachments: dict[str, str] = {}
-        own = _OwnAttachments(attachments)
-        resolved = condense_event(event, attachments, log_images)
+        condensed = condense_event(event, attachments, log_images)
+        # written and read back as the log writes and reads them
+        resolved: Event = InfoEvent.model_validate_json(to_json_safe(condensed))
+        own = _OwnAttachments(json.loads(to_json_safe(attachments)))
         # twice, as a sample read with its attachments resolved is resolved again by
         # swarm_result()
         for _ in range(2):
