@@ -178,6 +178,12 @@ async def test_all_addresses_every_other_running_member_once() -> None:
         # a member named all is a member, not the address
     async with run(("all", "w-2")) as (r, _):
         assert await r.send("w-2", "all", "x") == "Sent m-1 to all."
+        # and an unknown address's error does not offer it as the broadcast
+        with pytest.raises(ToolError) as raised:
+            await r.send("w-2", "w-9", "x")
+        assert raised.value.message == (
+            "'w-9' is not a member of the swarm; the members are all, w-2."
+        )
 
 
 @pytest.mark.anyio

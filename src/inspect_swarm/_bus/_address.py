@@ -39,8 +39,14 @@ def resolve(
         else:
             m = members.get(address)
             if m is None:
+                # `all` is the broadcast only when no member takes the name
+                broadcast = (
+                    ""
+                    if ALL in members
+                    else f", and {ALL} addresses every other running member"
+                )
                 raise ToolError(
-                    f"{address!r} is not a member of the swarm; the members are {', '.join(members)}, and {ALL} addresses every other running member."
+                    f"{address!r} is not a member of the swarm; the members are {', '.join(members)}{broadcast}."
                 )
             if address == sender:
                 raise ToolError(f"{address} is you; you cannot send to yourself.")
