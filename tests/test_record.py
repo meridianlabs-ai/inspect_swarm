@@ -7,6 +7,7 @@ import anyio
 import pytest
 from inspect_ai import Task, eval, score  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai._control.scoring import TaskScoring, _score_live_sample
+from inspect_ai._util.hash import mm3_hash
 from inspect_ai.agent import Agent, AgentState, agent, as_solver, react, run
 from inspect_ai.dataset import Sample
 from inspect_ai.event import Event, InfoEvent, SpanBeginEvent
@@ -18,6 +19,7 @@ from inspect_ai.solver import Generate, Solver, TaskState, fork, solver
 from inspect_ai.util import store, subtask
 
 from inspect_swarm import (
+    Budget,
     Controller,
     StopReason,
     SwarmControl,
@@ -25,9 +27,11 @@ from inspect_swarm import (
     leaderless,
     member,
     swarm,
+    swarm_budget,
     swarm_controller,
     swarm_result,
 )
+from inspect_swarm._bus._bus import current_bus
 from inspect_swarm._evidence import METRICS_KEY
 from inspect_swarm._metrics import SwarmMetrics
 from inspect_swarm._record import (
@@ -36,6 +40,7 @@ from inspect_swarm._record import (
     START_TYPE,
     _is_record,
     _transcript_result,
+    write_start,
 )
 
 from .swarm_runtime import Script, generator, sample, scripted_model
@@ -264,6 +269,45 @@ def _chooses(reason: str = LONG_REASON) -> Agent:
     )
 
 
+# the text of an attachment the sample logs before its swarm runs
+OTHER = "text that another step of the sample logged, " + "long enough to condense " * 5
+
+
+@solver
+def logs_other() -> Solver:
+    """Log `OTHER`, which the log keeps as an attachment."""
+
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        transcript().info({"text": OTHER})
+        return state
+
+    return solve
+
+
+@solver
+def catches_the_end(inner: Agent, match: str | None, seen: list[Read]) -> Solver:
+    """Run the swarm, catch the error its end raises when `match` is given, then read the record."""
+
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        if match is None:
+            state = await as_solver(inner)(state, generate)
+        else:
+            with pytest.raises((OSError, ValueError), match=match):
+                await as_solver(inner)(state, generate)
+        result: Read
+        try:
+            result = swarm_result(state)
+        except (RuntimeError, ValueError) as ex:
+            result = ex
+        seen.append(result)
+        return state
+
+    return solve
+
+
+UNWRITABLE = "cannot be written"
+
+
 @pytest.mark.parametrize(
     "reason,readable",
     [
@@ -274,33 +318,44 @@ def _chooses(reason: str = LONG_REASON) -> Agent:
         pytest.param("tc://artifact", False, id="short-tc"),
         pytest.param("tc://" + LONG_REASON, False, id="long-tc"),
         pytest.param("attachment://artifact", False, id="attachment"),
+        # a log would resolve these to OTHER
+        pytest.param(f"attachment://{mm3_hash(OTHER)}", False, id="attachment-hash"),
+        pytest.param(f"tc://{mm3_hash(OTHER)}", False, id="tc-hash"),
     ],
 )
 def test_a_record_reads_the_same_live_from_a_log_and_on_re_score(
     tmp_path: Path, reason: str, readable: bool
 ) -> None:
-    seen: list[tuple[bool, Read]] = []
-    _eval(tmp_path, _chooses(reason), [probe(seen)])
-    [(_, live)] = seen
+    after_end: list[Read] = []
+    final: list[tuple[bool, Read]] = []
+    solver = catches_the_end(
+        _chooses(reason), None if readable else UNWRITABLE, after_end
+    )
+    _eval(tmp_path, [logs_other(), solver], [probe(final)])
+    [(_, live)] = final
     path = str(next(tmp_path.glob("*.eval")))
     resolved = read_eval_log(path, resolve_attachments=True)
     unresolved = read_eval_log(path)
     assert resolved.samples is not None and unresolved.samples is not None
-    [event] = _record_events(unresolved.samples[0].events)
-    assert isinstance(event.data, dict) and isinstance(event.data["final"], dict)
-    # a long reason is condensed into an attachment, a short one is logged as it is
-    assert (event.data["final"]["reason"] == reason) is (len(reason) <= 100)
     reads = [
+        *after_end,
         live,
         _read(resolved.samples[0]),
         _read(unresolved.samples[0]),
         _rescore(unresolved, unresolved.samples[0]),
     ]
+    if not readable:
+        # the swarm refuses to write it, so no read gives other text
+        assert not _record_events(unresolved.samples[0].events)
+        for read in reads:
+            _value_error(read, LOST_ID)
+        return
+    [event] = _record_events(unresolved.samples[0].events)
+    assert isinstance(event.data, dict) and isinstance(event.data["final"], dict)
+    # a long reason is condensed into an attachment, a short one is logged as it is
+    assert (event.data["final"]["reason"] == reason) is (len(reason) <= 100)
     for read in reads:
-        if readable:
-            assert _record(read).final.reason == reason
-        else:
-            _value_error(read, "reads as an attachment reference")
+        assert _record(read).final.reason == reason
 
 
 def test_a_record_whose_attachments_are_missing_is_refused(tmp_path: Path) -> None:
@@ -794,22 +849,6 @@ def test_a_solver_reads_the_record_once_the_swarm_has_returned(
     assert record.final.provisional is (ending != "normal")
 
 
-@solver
-def survives_a_failed_write(seen: list[Read]) -> Solver:
-    """Run the swarm, catch the error of a write when it ends, then read the record."""
-
-    async def solve(state: TaskState, generate: Generate) -> TaskState:
-        with pytest.raises(OSError, match="disk full"):
-            await as_solver(_pair())(state, generate)
-        try:
-            seen.append(swarm_result(state))
-        except (RuntimeError, ValueError) as ex:
-            seen.append(ex)
-        return state
-
-    return solve
-
-
 @pytest.mark.parametrize("writer", ["write_record", "write_ledger", "write_metrics"])
 def test_a_failed_write_at_the_end_does_not_leave_the_swarm_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer: str
@@ -819,13 +858,92 @@ def test_a_failed_write_at_the_end_does_not_leave_the_swarm_running(
 
     monkeypatch.setattr(f"inspect_swarm._controller._control.{writer}", fail)
     seen: list[Read] = []
-    _eval(tmp_path, survives_a_failed_write(seen), [])
+    _eval(tmp_path, catches_the_end(_pair(), "disk full", seen), [])
     [read] = seen
     if writer == "write_record":
         # no record, but the swarm's events
         _value_error(read, LOST_ID)
     else:
         assert _names(read) == ["a", "b"]
+
+
+def test_a_record_that_cannot_be_written_leaves_no_earlier_record(
+    tmp_path: Path,
+) -> None:
+    # the second swarm's output is the sample's, so the first's record is not its record
+    seen: list[Read] = []
+    second = catches_the_end(_chooses("tc://artifact"), UNWRITABLE, seen)
+    _eval(tmp_path, [as_solver(_pair("first-")), second], [])
+    [read] = seen
+    _value_error(read, LOST_ID)
+
+
+@agent
+def nests_a_failing_swarm(inner: Agent, seen: list[bool]) -> Agent:
+    """Run a nested swarm whose end fails, then say whether the outer swarm's contexts are back."""
+
+    async def execute(state: AgentState) -> AgentState:
+        before = (_time_cap(), current_bus.get())
+        with pytest.raises((OSError, ValueError), match=f"disk full|{UNWRITABLE}"):
+            await run(inner, "inner task")
+        budget, bus = before
+        seen.append(_time_cap() == budget and current_bus.get() is bus)
+        return state
+
+    return execute
+
+
+def _time_cap() -> float | None:
+    time = swarm_budget().time
+    return None if time is None else time.cap
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("writer", ["write_start", "write_record"])
+async def test_a_failed_write_of_a_nested_swarm_restores_the_outer_contexts(
+    monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    if writer == "write_start":
+        # the outer swarm's start is written, the inner one's fails
+        calls: list[None] = []
+
+        def fail_second() -> None:
+            calls.append(None)
+            if len(calls) == 2:
+                raise OSError("disk full")
+            write_start()
+
+        monkeypatch.setattr(
+            "inspect_swarm._controller._control.write_start", fail_second
+        )
+        inner = swarm(member(plain(), name="i"), channels=[], budget=Budget(time=50))
+    else:
+        inner = swarm(
+            member(plain(), name="i"),
+            controller=_chooses_alone("tc://artifact"),
+            channels=["shared_memory"],
+            budget=Budget(time=50),
+        )
+    seen: list[bool] = []
+    outer = swarm(
+        member(nests_a_failing_swarm(inner, seen), name="o"),
+        channels=["shared_memory"],
+        budget=Budget(time=100),
+    )
+    async with sample():
+        await run(outer, "task")
+    assert seen == [True]
+
+
+def _chooses_alone(reason: str) -> Controller:
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("i")
+        async for _ in control.events():
+            pass
+        control.choose_answer("i", reason=reason)
+        return "chosen"
+
+    return _controller(run, f"record_test_alone_{uuid4().hex}")
 
 
 # ---------------------------------------------------------------------------

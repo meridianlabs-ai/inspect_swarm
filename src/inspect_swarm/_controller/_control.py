@@ -412,6 +412,9 @@ class SwarmRun:
         self._span_id = current_span_id()
         self._settle()
         error: BaseException | None = None
+        # in the swarm's span, before any member can start, and before the swarm sets
+        # its contexts, so that a failed write leaves none of them set
+        write_start()
         bus_token = current_bus.set(self.bus)
         # for swarm_budget(), in every member's context and the controller's
         budget_token = current_budget.set(
@@ -427,9 +430,8 @@ class SwarmRun:
             )
         )
         ended = False
-        # in the swarm's span, before any member can start; from here until the end
-        # of the finally below, swarm_result() refuses reads in this sample
-        write_start()
+        # from here until the end of the finally below, swarm_result() refuses reads
+        # in this sample
         running = _swarm_started()
         try:
             # first: spans inside the swarm, members' included, log no StoreEvent;
@@ -541,11 +543,11 @@ class SwarmRun:
                     )
                 )
                 timelines.fill(places)
-                # last, so that the bus and the budget are current through the final step
-                # and the ledger
+            finally:
+                # last, so that the bus and the budget are current through the final
+                # step and the ledger, and restored however the writes end
                 current_budget.reset(budget_token)
                 current_bus.reset(bus_token)
-            finally:
                 _swarm_ended(running)
         if error is not None:
             raise error

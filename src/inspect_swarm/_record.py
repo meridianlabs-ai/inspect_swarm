@@ -89,9 +89,19 @@ class SwarmResultRecord(BaseModel):
 # Only the runtime writes the record: once, when the swarm ends, in the swarm's span,
 # with its id in the store the swarm ran with, which ties the record to that store
 def write_record(record: SwarmResultRecord) -> None:
+    # first, so that a write that fails leaves no id rather than an earlier swarm's
+    if RESULT_ID_KEY in store():
+        store().delete(RESULT_ID_KEY)
+    data = record.model_dump(mode="json")
+    # a log cannot tell such text from a reference to another attachment of the
+    # sample, so the record is refused here rather than read as other text
+    if _unresolved(data):
+        raise ValueError(
+            "The swarm's result record cannot be written: a string in it begins with attachment:// or tc://, which Inspect reads as a reference to an attachment of the log. Check the members' names, roles and sandboxes, and the reason given to choose_answer()."
+        )
     id = uuid4().hex
     transcript().info(
-        {"type": RECORD_TYPE, "id": id, **record.model_dump(mode="json")},
+        {"type": RECORD_TYPE, "id": id, **data},
         source="inspect_swarm",
     )
     store().set(RESULT_ID_KEY, id)
