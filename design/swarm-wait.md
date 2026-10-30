@@ -316,7 +316,7 @@ The messages channel contributes its `max_wait` (default 120) to the effective m
 
 ### Bridged members
 
-`swarm_bridged_tools()` gives a bridged member `swarm_wait`, which waits on the channels it names that the swarm has; its description and parameters are chosen from those names as `swarm_tools()` chooses them from the loop's reach, and its timeout's description names the bridged-member wait limit, since the run's maximum is not known when the agent is built ([swarm-communication.md Bridged members](swarm-communication.md#bridged-members)).
+`swarm_bridged_tools()` gives a bridged member `swarm_wait`, which waits on the channels it names that the swarm has; its description and parameters are chosen from those names as `swarm_tools()` chooses them from the loop's reach, except that the description leaves out the all-waiting release and news from the member's own subagents, neither of which ends a bridged wait, and its timeout's description names the bridged-member wait limit, since the run's maximum is not known when the agent is built ([swarm-communication.md Bridged members](swarm-communication.md#bridged-members)).
 
 - **Never waiting.** A bridged member never counts as waiting for the all-waiting release, because the host cannot tell whether one blocked call is all its CLI is doing; a running bridged member counts as active. Its waits end by news, ends, the stop, the drain or the timeout, and they never run its idle clock.
 - **Per call.** The CLI is one loop, the member's own, but each of its conversations may wait, so the one-wait-at-a-time rule of the own loop does not apply to it. Its waits share the loop's record of the ends already named, so an end is named once for the CLI.

@@ -52,6 +52,20 @@ _BOTH_DESCRIPTION = (
 )
 
 
+# a bridged member's: it never counts as waiting, so no all-waiting release ends its
+# waits, and its CLI is one loop, so its subagents' writes are not news to it
+_BRIDGED_RELEASES = (
+    "It also returns when the swarm is stopping, or after `timeout` seconds. "
+)
+
+
+def _bridged(description: str) -> str:
+    return description.replace(_RELEASES, _BRIDGED_RELEASES).replace(
+        "another agent's write, including your own subagents'",
+        "another member's write",
+    )
+
+
 # the messages-only wait's signature, reflected once for its parameters: each run's
 # tool takes them in full, so that Inspect's reflection cache does not keep the run
 async def _wait_for_messages(timeout: int | None = None) -> str:
@@ -412,14 +426,19 @@ class Waits:
 
 # swarm_wait, described for the channels it waits on: the messages channel's wait takes
 # no filter, the shared memory's (`board`) a path or file id. `wait` is its body, called
-# with the path, the file id and the timeout.
+# with the path, the file id and the timeout; a bridged member's is described for how
+# its waits end.
 def wait_tool(
     wait: Callable[[str | None, str | None, int | None], Awaitable[str]],
     *,
     messages: bool,
     board: bool,
     timeout: str,
+    bridged: bool = False,
 ) -> Tool:
+    def describe(description: str) -> str:
+        return _bridged(description) if bridged else description
+
     if not board:
 
         async def messages_wait(timeout: int | None = None) -> str:
@@ -430,7 +449,7 @@ def wait_tool(
         return ToolDef(
             messages_wait,
             name="swarm_wait",
-            description=_MESSAGES_DESCRIPTION,
+            description=describe(_MESSAGES_DESCRIPTION),
             parameters=parameters,
             parallel=False,
         ).as_tool()
@@ -452,7 +471,7 @@ def wait_tool(
     return ToolDef(
         execute,
         name="swarm_wait",
-        description=_BOTH_DESCRIPTION if messages else _DESCRIPTION,
+        description=describe(_BOTH_DESCRIPTION if messages else _DESCRIPTION),
         parameters={
             "path": _PATH,
             "timeout": timeout,

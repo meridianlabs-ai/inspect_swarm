@@ -279,7 +279,7 @@ A bridged member (Claude Code or Codex through inspect_swe) gets the `shared_mem
 - A view by any conversation marks the version seen for the CLI, so it satisfies the seen rule for the others (create over an existing file, insert, delete, rename) and takes the file out of their status lines and waits.
 - A write from any conversation is the member's, from that one loop, so it is never news to another conversation of the CLI.
 - The seen rule therefore guards the member against stale writes, not each conversation: a CLI subagent's view lets its parent overwrite a file the parent never viewed.
-- Its `swarm_wait` lasts at most the bridged-member wait limit, `swarm_bridged_tools(..., max_wait=280)`, or this channel's `max_wait` if that is shorter ([swarm-wait.md Bridged members](swarm-wait.md#bridged-members)).
+- Its `swarm_wait` lasts at most the smaller of the bridged-member wait limit (`swarm_bridged_tools(..., max_wait=280)`) and the bus's effective maximum, the largest `max_wait` of its open waiting channels ([swarm-wait.md Bridged members](swarm-wait.md#bridged-members)).
 - Evidence is as below, with `via: "bridge"` and `nested: false`; `loop` is that agent span, and the tool span is the one inspect_ai opens for the host call.
 
 ### Evidence

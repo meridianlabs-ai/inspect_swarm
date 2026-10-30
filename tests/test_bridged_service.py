@@ -318,17 +318,34 @@ async def test_the_bridged_tools_are_the_native_ones() -> None:
     }
     assert sorted(bridged) == sorted(found)
     for name, native in found.items():
-        assert (native.description, native.max_output) == (
-            bridged[name].description,
-            bridged[name].max_output,
-        )
+        assert native.max_output == bridged[name].max_output
         if name == "swarm_wait":
-            # its timeout's description names the run's longest wait
+            # described for how a bridged wait ends (below), with a timeout that names
+            # the bridged limit rather than the run's longest wait
             assert list(native.parameters.properties) == list(
                 bridged[name].parameters.properties
             )
         else:
+            assert native.description == bridged[name].description
             assert native.parameters == bridged[name].parameters
+
+
+@pytest.mark.parametrize(
+    "channels", [["messages"], ["shared_memory"], ["messages", "shared_memory"]]
+)
+def test_a_bridged_wait_promises_only_what_ends_it(channels: list[str]) -> None:
+    # a bridged member never counts as waiting, and its subagents' writes are its own
+    # loop's, so neither may be offered as a way the wait ends
+    [wait] = [
+        ToolDef(t)
+        for t in swarm_bridged_tools(channels).tools
+        if ToolDef(t).name == "swarm_wait"
+    ]
+    assert "every member is waiting" not in wait.description
+    assert "subagents" not in wait.description
+    assert "when the swarm is stopping, or after `timeout` seconds" in wait.description
+    if "shared_memory" in channels:
+        assert "another member's write" in wait.description
 
 
 @pytest.mark.parametrize(

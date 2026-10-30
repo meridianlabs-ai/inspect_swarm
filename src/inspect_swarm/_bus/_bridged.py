@@ -107,6 +107,7 @@ def _wait(channels: Sequence[str], max_wait: int) -> Tool:
         wait,
         messages="messages" in channels,
         board="shared_memory" in channels,
+        bridged=True,
         timeout=f"Seconds to wait at most (default and maximum: {max_wait}, or less if the swarm's channels wait less).",
     )
 
