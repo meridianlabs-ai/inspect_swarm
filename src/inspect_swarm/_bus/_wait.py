@@ -9,6 +9,7 @@ from pydantic import JsonValue
 
 from .._budget import MemberContext
 from .._channel._channel import WaitingState, WaitSpec
+from .._channel.messages import MessagesState
 from .._evidence import comm_waited
 from ._record import Record
 
@@ -19,13 +20,52 @@ Outcome = Literal[
     "news", "all_waiting", "stopping", "member_ending", "timeout", "cancelled"
 ]
 
+_NOT_WAKING = "Messages sent with wake=False do not wake this wait; they are counted when it returns for another reason. "
+
+_RELEASES = "It also returns when every member is waiting, has ended or has not started, when the swarm is stopping, or after `timeout` seconds. "
+
 _DESCRIPTION = (
     "Wait until there is something for you to look at in the swarm: a shared memory file where you watch has a change you have not viewed (another agent's write, including your own subagents'), or another member has ended. "
     "Returns at once if that is already so, and keeps returning while a changed file there stays unviewed, so view what it names, or narrow `path`, or watch one file with `file_id`. "
-    "It also returns when every member is waiting, has ended or has not started, when the swarm is stopping, or after `timeout` seconds. "
-    "It returns file ids and member names, never file content. "
+    + _RELEASES
+    + "It returns file ids and member names, never file content. "
     "Use it instead of polling with sleep."
 )
+
+# with the messages channel, which only the member's own loop reaches
+_MESSAGES_DESCRIPTION = (
+    "Wait until there is something for you to look at in the swarm: an unread message sent to you with wake=True, or another member has ended. "
+    "Returns at once if that is already so, and keeps returning while such a message stays unread, so read it with read_messages. "
+    + _NOT_WAKING
+    + _RELEASES
+    + "It returns counts and member names, never message content. "
+    "Use it instead of polling with sleep."
+)
+
+_BOTH_DESCRIPTION = (
+    "Wait until there is something for you to look at in the swarm: an unread message sent to you with wake=True, a shared memory file where you watch has a change you have not viewed (another agent's write, including your own subagents'), or another member has ended. "
+    "Returns at once if that is already so, and keeps returning while such a message stays unread or a changed file there stays unviewed, so read your messages with read_messages and view the files it names, or narrow `path`, or watch one file with `file_id`. "
+    + _NOT_WAKING
+    + _RELEASES
+    + "It returns counts, file ids and member names, never message or file content. "
+    "Use it instead of polling with sleep."
+)
+
+
+# the messages-only wait's signature, reflected once for its parameters: each run's
+# tool takes them in full, so that Inspect's reflection cache does not keep the run
+async def _wait_for_messages(timeout: int | None = None) -> str:
+    """Wait for other members.
+
+    Args:
+        timeout: Seconds to wait at most.
+    """
+    ...
+
+
+_MESSAGES_PARAMETERS = ToolDef(
+    _wait_for_messages, description=_MESSAGES_DESCRIPTION
+).parameters
 
 _PATH = "A shared memory file or directory to watch, such as `/shared_memory/results`. Without it or `file_id`, any change to shared memory wakes you."
 
@@ -85,20 +125,19 @@ class Waits:
         # the members whose own loop has a wait in progress, from its acceptance to its
         # end, sleeping or not
         self._own_waits: set[str] = set()
-        self._tool: Tool | None = None
+        # the tool for each set of channels a loop reaches
+        self._tools: dict[tuple[str, ...], Tool] = {}
         # the swarm's start on the runtime's clock, for the evidence's swarm times
         self.start = 0.0
 
-    def tool(self) -> Tool | None:
-        if self.max_wait is None:
+    def tool(self, own: bool) -> Tool | None:
+        # the loop's swarm_wait, described for the channels it reaches
+        channels = tuple(self._reachable(own))
+        if not channels:
             return None
-        if self._tool is None:
-            self._tool = self._make_tool()
-        return self._tool
-
-    def reaches(self, own: bool) -> bool:
-        # whether a loop gets swarm_wait: some waiting channel reaches it
-        return bool(self._reachable(own))
+        if channels not in self._tools:
+            self._tools[channels] = self._make_tool(channels)
+        return self._tools[channels]
 
     # release sources
 
@@ -223,11 +262,16 @@ class Waits:
                 else reason
             )
             lines: list[str] = []
+            # the lines of the messages channel's news, which count unread messages
+            counting = 0
             for channel in channels:
-                news = self._states[channel].news(spec)
+                state = self._states[channel]
+                news = state.news(spec)
                 if news is not None:
                     lines.extend(news.lines)
                     files.extend(news.files)
+                    if isinstance(state, MessagesState):
+                        counting = len(news.lines)
             reported = self._reported.setdefault(spec.loop, set())
             ends = [
                 (member, status)
@@ -239,6 +283,11 @@ class Waits:
             release = _release_line(outcome, name, effective)
             if release is not None:
                 lines.append(release)
+            # the result ends with the count of unread messages unless it is only the
+            # messages' news, so that truncating the middle of a longer one keeps it
+            unread = self._bus.status(context)
+            if unread is not None and (not counting or len(lines) > counting):
+                lines.append(unread)
             # named, so that this loop's later waits do not report them again
             reported.update(member for member, _ in ends)
             ended = [{"member": member, "status": status} for member, status in ends]
@@ -268,7 +317,26 @@ class Waits:
                     ended=ended,
                 )
 
-    def _make_tool(self) -> Tool:
+    def _make_tool(self, channels: Sequence[str]) -> Tool:
+        # the messages channel's wait takes no filter; any other waiting channel's is
+        # the shared memory's
+        messages = [isinstance(self._states[c], MessagesState) for c in channels]
+        timeout = f"Seconds to wait at most (default and maximum: {self.max_wait})."
+        if all(messages):
+
+            async def wait(timeout: int | None = None) -> str:
+                return await self.wait(None, None, timeout)
+
+            parameters = _MESSAGES_PARAMETERS.model_copy(deep=True)
+            parameters.properties["timeout"].description = timeout
+            return ToolDef(
+                wait,
+                name="swarm_wait",
+                description=_MESSAGES_DESCRIPTION,
+                parameters=parameters,
+                parallel=False,
+            ).as_tool()
+
         async def execute(
             path: str | None = None,
             timeout: int | None = None,
@@ -286,10 +354,10 @@ class Waits:
         return ToolDef(
             execute,
             name="swarm_wait",
-            description=_DESCRIPTION,
+            description=_BOTH_DESCRIPTION if any(messages) else _DESCRIPTION,
             parameters={
                 "path": _PATH,
-                "timeout": f"Seconds to wait at most (default and maximum: {self.max_wait}).",
+                "timeout": timeout,
                 "file_id": _FILE_ID,
             },
             # alone in its loop's turn, so a loop in a wait is doing nothing else

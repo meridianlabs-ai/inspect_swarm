@@ -3,5 +3,6 @@
 # importing the package first. The built-in controllers and channels are
 # imported here as they are added.
 from ._channel.filesystem import filesystem as filesystem
+from ._channel.messages import messages as messages
 from ._channel.shared_memory import shared_memory as shared_memory
 from ._controller.leaderless import leaderless as leaderless

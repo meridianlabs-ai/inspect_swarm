@@ -65,9 +65,9 @@ class Record:
 
 
 # What a channel's tool hands to `Bus.deliver()`, which makes the `Record`: the
-# channel's name, the record's kind, member names to deliver to (`()` for an unaddressed
-# record), the payload, the channel's operation data, and whether the record can end a
-# wait.
+# channel's name, the record's kind, addresses to deliver to (`()` for an unaddressed
+# record), the payload, the channel's operation data, whether the record can end a
+# wait, and the id of a record it answers.
 @dataclass(frozen=True)
 class Draft:
     channel: str
@@ -76,6 +76,7 @@ class Draft:
     payload: str = ""
     op: dict[str, JsonValue] | None = None
     wake: bool = False
+    reply_to: str | None = None
 
 
 # A record's operation data, detached from the draft's and read-only at every depth.

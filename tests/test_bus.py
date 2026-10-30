@@ -277,7 +277,7 @@ async def test_a_record_is_applied_once_with_its_evidence(
             {"to": ("w-9",)},
             {},
             False,
-            "'w-9' is not a member of the swarm; the members are w-1, w-2, w-3.",
+            "'w-9' is not a member of the swarm; the members are w-1, w-2, w-3, and all addresses every other running member.",
             id="unknown",
         ),
         pytest.param({"to": ("w-1",)}, {}, False, "is you", id="self"),

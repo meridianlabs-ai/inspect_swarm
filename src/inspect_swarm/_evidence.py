@@ -107,11 +107,16 @@ def comm_read(
     loop: str | None,
     nested: bool,
     tool_span_id: str | None,
-    files: list[JsonValue],
+    files: list[JsonValue] | None,
     listing: bool,
+    records: list[JsonValue] | None = None,
 ) -> None:
-    # a loop's tool was shown peer content: `files` names what it was shown, from the
-    # channel's state, never from the content
+    # a loop's tool was shown peer content: the shared memory's `files` or the messages
+    # channel's `records` name what it was shown, from the channel's state, never from
+    # the content
+    shown: dict[str, JsonValue] = (
+        {"files": files} if files is not None else {"records": records}
+    )
     evidence(
         "comm",
         "read",
@@ -122,7 +127,7 @@ def comm_read(
         channel=channel,
         read=read,
         tool_span_id=tool_span_id,
-        files=files,
+        **shown,
         listing=listing,
     )
 

@@ -13,8 +13,10 @@ from pydantic import JsonValue
 
 from .._budget import MemberContext, current_member
 from .._channel._channel import Channel, ChannelRun, ChannelState, WaitingState
+from .._channel.messages import MessagesState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_sent
+from ._address import resolve
 from ._record import Draft, FrozenJson, Record, freeze_json, thaw_json
 from ._storm import Storm
 from ._wait import Waits
@@ -104,6 +106,11 @@ class Bus:
         return dict(self._reach)
 
     @property
+    def roster(self) -> Sequence["MemberHandle"]:
+        # the members' handles, in roster order
+        return list(self._members)
+
+    @property
     def stopping(self) -> bool:
         return self._stopping
 
@@ -145,7 +152,7 @@ class Bus:
         if self._stopping:
             raise ToolError(_STOPPING)
         state = self._state(draft.channel)
-        recipients = self._resolve(sender, draft.to)
+        recipients = resolve(sender, draft.to, self._by_name)
         number = self._ids.get(draft.channel, 0) + 1
         record = Record(
             id=f"{self._prefixes[draft.channel]}-{number}",
@@ -159,7 +166,7 @@ class Bus:
             # detached from the tool's own dict, and read-only at every depth
             op=None if draft.op is None else _frozen_op(draft),
             wake=draft.wake,
-            reply_to=None,
+            reply_to=draft.reply_to,
             sender_span_id=current_agent_span_id(),
             tool_span_id=current_span_id(),
         )
@@ -203,6 +210,18 @@ class Bus:
         # subagent's
         return context.loop is not None and current_agent_channel() is not context.loop
 
+    def status(self, context: MemberContext) -> str | None:
+        # the line that ends the results of the swarm's own tools in the member's own
+        # loop, after the channel's own: its unread messages, with the messages channel;
+        # nested loops cannot read them, so they are not told. Other channels' tools
+        # carry no count (decision: Ransom, 2026-10-30).
+        if self.nested(context):
+            return None
+        for state in self._states.values():
+            if isinstance(state, MessagesState):
+                return state.unread_line(context.name)
+        return None
+
     def read_id(self) -> str:
         # the id of a read's evidence, numbered across the run's channels
         self._reads += 1
@@ -230,25 +249,6 @@ class Bus:
             raise ValueError(
                 f"No channel named {channel!r} is open in this swarm; the open channels are {', '.join(self._states) or 'none'}."
             ) from None
-
-    def _resolve(self, sender: str, to: tuple[str, ...]) -> tuple[str, ...]:
-        # member names only; an unaddressed record resolves to nobody
-        recipients: list[str] = []
-        for name in to:
-            m = self._by_name.get(name)
-            if m is None:
-                raise ToolError(
-                    f"{name!r} is not a member of the swarm; the members are {', '.join(self._by_name)}."
-                )
-            if name == sender:
-                raise ToolError(f"{name} is you; you cannot send to yourself.")
-            if m.state == "pending":
-                raise ToolError(f"{name} has not started.")
-            if m.state == "ended":
-                raise ToolError(f"{name} has ended.")
-            if name not in recipients:
-                recipients.append(name)
-        return tuple(recipients)
 
     def _liveness(self, record: Record) -> tuple[str, str] | None:
         # step 0 checked the recipients and the stopping flag, and nothing has awaited

@@ -1,0 +1,102 @@
+---
+title: Messages
+llms-description: "The `messages` channel: direct messages between members with `send_message`, `read_messages` and `list_members`, addressing, how members hear about messages, `swarm_wait`, limits, and the record of messages; read it when members need to address each other."
+---
+
+## Overview
+
+`messages()` lets members address each other. A member sends with `send_message` and reads what was sent to it with `read_messages`. `list_members` shows who is in the swarm and whether each member is still running. Every message goes through the swarm as a record from the member that sent it, so the log keeps who sent what to whom and when it was read.
+
+The swarm adds no messages to a member's conversation. A member hears about new messages only through its tools.
+
+## Wiring
+
+Members get the tools from `swarm_tools()`, as for [Shared Memory](shared-memory.qmd#wiring). Call it inside a member builder registered with `@agent`:
+
+```python
+from inspect_ai.agent import Agent, agent, react
+from inspect_ai.tool import bash
+
+from inspect_swarm import filesystem, member, messages, swarm, swarm_tools
+
+
+@agent
+def worker() -> Agent:
+    return react(tools=[bash(), swarm_tools()])
+
+
+solver = swarm(
+    members=member(worker, count=4),
+    channels=[filesystem(), messages()],
+)
+```
+
+- Only the member's own loop gets the tools. Its subagents, such as a deepagent member's `general()`, do not, so each inbox has one reader.
+- The channel can be combined with `shared_memory()`. Then the member's own loop gets both channels' tools and one `swarm_wait` for both.
+- The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`. `all` and `swarm` are reserved.
+- Bridged members cannot use the channel yet, and `swarm()` refuses a bridged member beside it.
+
+## The tools
+
+`send_message(to, message, reply_to=None, wake=True)` sends a message and returns its id, such as `Sent m-3 to worker-2.`
+
+- `to` is a member name, a list of names, or `"all"` for every other running member.
+- `reply_to` is the id of a message the sender sent or read, which this one answers.
+- `wake=False` sends a message that does not end the recipient's `swarm_wait`.
+
+A send is refused, and reaches no one, when an address is not a running member other than the sender, or when one of the [limits](#limits) is passed. A message to a member that has ended, or has not started, is refused rather than kept.
+
+`read_messages()` returns the member's unread messages, oldest first, and marks them read:
+
+```
+2 messages, oldest first.
+
+<peer_message id="m-9" from="worker-2" to="worker-1, worker-3">
+...
+</peer_message>
+<peer_message id="m-14" from="worker-4" to="worker-1" reply_to="m-6">
+...
+</peer_message>
+1 more unread message; call read_messages() again.
+```
+
+One read returns as many whole messages as fit in a bound set by `max_bytes` and the roster, and always at least one. The generate config's `max_tool_output` does not apply to it, so a message is never cut. `read_messages` never waits; `swarm_wait` does.
+
+`list_members()` lists the members in roster order, with each one's role, its state (`pending`, `running` or `ended`) and, once it has ended, its status, such as `submitted`. It marks the caller with `(you)`, and ends with the caller's count of unread messages.
+
+### Fences are labels
+
+As in [Shared Memory](shared-memory.qmd#fences-are-labels), a fence is a label for the reader, not a security boundary. A message is delivered as it was typed, so a member can write text that looks like another member's message or a status line. The record of messages comes from the swarm's own events and ids, never from the text of a result.
+
+## Hearing about messages
+
+While a member has unread messages, the results of the swarm's own tools in its own loop end with a line that counts them, such as `You have 2 unread messages.`: `send_message`, `list_members`, `shared_memory` and `swarm_wait`. `list_members` also says when there are none, so a member can call it to check for messages. A `read_messages` result says how many remain unread instead. The tools of other channels, yours or Inspect's, carry no count. These lines hold counts only, never message text. Errors have no count: a member that gets one sees the count on its next result. A tool output limit smaller than the line can cut it, since the limit applies after the line is added. A member's subagents cannot read its messages, so their results do not count them.
+
+`swarm_wait` returns while the member has unread messages sent with `wake=True`, and names their senders: `2 unread messages (from worker-2, worker-4). Call read_messages() to read them.` It keeps returning until the member reads them. A result with other news too, such as a changed file or an ended member, also ends with the count. Messages sent with `wake=False` do not end a wait, but a wait that returns for another reason counts them. It also returns when another member ends, when every member is waiting, has ended or has not started, when the swarm stops, or after `timeout` seconds, as described in [Shared Memory](shared-memory.qmd#waiting-for-other-members). `max_wait` sets the longest wait, 120 seconds unless you change it. With `shared_memory()` too, the longer of the two channels' `max_wait` applies.
+
+A member busy in a long tool call hears nothing until the call ends.
+
+## Limits
+
+| Argument | Default | Limit |
+|---|---|---|
+| `max_bytes` | 8,000 | UTF-8 bytes in one message |
+| `max_unread` | 50 | Unread messages one member may have; a send that would pass it is refused |
+| `rate` | `(20, 60.0)` | Messages per member in a sliding window of seconds; a message to several members counts once; `None` for no limit |
+| `dedupe` | `True` | Refuse a message whose text a recipient still has unread from the same sender |
+| `max_wait` | 120 | The longest `swarm_wait`, in seconds, and its default timeout |
+
+An empty message is refused. Once the swarm begins to stop, sends are refused and reads still work.
+
+## The record of messages
+
+The swarm logs messages as `InfoEvent`s with source `inspect_swarm` and type `comm`, each in the span of the tool call that made it:
+
+- `sent`: a send that reached the swarm, with its addresses, recipients, text, `reply_to` and `wake`, and why it was refused if it was. An inbox that is full, or a duplicate, is refused by the control `admit`.
+- `delivered`: a message delivered, with its recipients and commit sequence number.
+- `read`: a `read_messages` result, with the ids of the messages it showed. A read that showed nothing has no event.
+- `waited`: a `swarm_wait` call, with what ended it and the unread messages it named.
+
+The [metrics](analysis.qmd#communication) count these events for each member.
+
+A native member's calls to `send_message` and `read_messages` are ordinary tool calls, so [Inspect Sentinel](https://meridianlabs-ai.github.io/inspect_sentinel)'s tool stages see them, as in [Shared Memory](shared-memory.qmd#monitoring-with-inspect-sentinel).
