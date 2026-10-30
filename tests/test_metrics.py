@@ -67,6 +67,7 @@ from inspect_swarm import (
     swarm,
     swarm_channel,
     swarm_controller,
+    swarm_result,
     swarm_tools,
 )
 from inspect_swarm._budget import current_member
@@ -75,7 +76,7 @@ from inspect_swarm._bus._record import Draft
 from inspect_swarm._evidence import METRICS_KEY, comm_read
 from inspect_swarm._ledger import EventLog, ScoreRecord
 from inspect_swarm._metrics import GateChecks, SwarmMetrics, gate_checks
-from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
+from inspect_swarm._record import SwarmResultRecord, _transcript_result
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
@@ -461,7 +462,8 @@ async def test_an_interrupted_swarm_counts_its_provisional_answer(ending: str) -
             else:
                 await agent(AgentState(messages=[]))
         assert outer.cancelled_caught is (ending == "cancel")
-        record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+        record = _transcript_result(store())
+        assert record is not None
         assert (record.final.member, record.final.provisional) == ("a", True)
         metrics = _metrics(t)
         assert (metrics.steps_to_answer, metrics.longest_member_steps) == (2, 2)
@@ -507,7 +509,8 @@ async def test_steps_to_answer_follow_an_answer_other_than_the_first(
                 await agent(AgentState(messages=[]))
         else:
             await agent(AgentState(messages=[]))
-        record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+        record = _transcript_result(store())
+        assert record is not None
         assert (record.final.mode, record.final.member, record.final.provisional) == (
             rule,
             "b",
@@ -770,7 +773,9 @@ def test_gate_checks(
     assert log.status == "success" and log.samples is not None, log.error
     [sample_log] = log.samples
     [metrics] = SwarmMetrics.model_validate(sample_log.store[METRICS_KEY]).members
-    [result] = SwarmResultRecord.model_validate(sample_log.store[RECORD_KEY]).members
+    record = swarm_result(sample_log)
+    assert record is not None
+    [result] = record.members
     assert (metrics.gate_checks, metrics.gate_passes) == (checks, passes)
     assert (result.gate_checks, result.gate_passes) == (checks, passes)
     assert result.first_pass_time == metrics.first_pass_time

@@ -404,6 +404,11 @@ class LedgerInterval:
     def events(self) -> EventLog:
         return self._events
 
+    # stops observing the transcript; idempotent, so that the swarm's end calls it
+    # however the swarm ends
+    def close(self) -> None:
+        self._unsubscribe()
+
     # where the spans of the interval lie, given the spans of the members that entered one
     def places(self, member_spans: Mapping[str, str]) -> "SpanPlaces":
         return SpanPlaces(self._events.parents, self._span_id, member_spans)
@@ -424,7 +429,7 @@ class LedgerInterval:
         final_cancelled: bool,
     ) -> SwarmLedger:
         # synchronous, so that it runs under cancellation too
-        self._unsubscribe()
+        self.close()
         calls, member_calls = count_calls(
             self._events,
             self.places({m.name: m.span_id for m in members if m.span_id is not None}),

@@ -102,9 +102,8 @@ The swarm logs every write, view and wait. See [Shared Memory](https://meridianl
 
 ## Results
 
-By default the swarm's answer is the first submission. `leaderless(stop_on_submission=False, final="last")` makes it the latest, and a controller of your own can choose it. The swarm's output is the chosen member's `ModelOutput`, unchanged. The swarm keeps three records in the sample store:
+By default the swarm's answer is the first submission. `leaderless(stop_on_submission=False, final="last")` makes it the latest, and a controller of your own can choose it. The swarm's output is the chosen member's `ModelOutput`, unchanged. When the swarm ends, it writes its result record to the transcript: each member's state and status, and which member's output is the answer. Read it with `swarm_result()`. The swarm keeps two more records in the sample store:
 
-- `inspect_swarm:result`: each member's state and status, and which member's output is the answer. Only the swarm writes it.
 - `inspect_swarm:ledger`: the swarm's caps and each member's usage and cost.
 - `inspect_swarm:metrics`: tokens, cost and time, and counts of how each member acted, communicated and waited.
 

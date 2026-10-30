@@ -22,9 +22,10 @@ from inspect_ai.model import (
 )
 from inspect_ai.tool import ToolChoice, ToolInfo
 
+from inspect_swarm import swarm_result
 from inspect_swarm._evidence import METRICS_KEY
 from inspect_swarm._metrics import SwarmMetrics
-from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
+from inspect_swarm._record import SwarmResultRecord
 from inspect_swarm.analysis import swarm_ledger
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
@@ -88,7 +89,9 @@ def _run(
 
 
 def _record(sample: EvalSample) -> SwarmResultRecord:
-    return SwarmResultRecord.model_validate(sample.store[RECORD_KEY])
+    record = swarm_result(sample)
+    assert record is not None
+    return record
 
 
 def _answers(name: str, messages: list[ChatMessage]) -> ModelOutput:

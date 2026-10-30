@@ -41,7 +41,7 @@ from inspect_swarm import (
     swarm_controller,
 )
 from inspect_swarm._controller._control import SwarmRun
-from inspect_swarm._record import RECORD_KEY
+from inspect_swarm._record import RESULT_ID_KEY
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
@@ -973,11 +973,14 @@ def test_no_span_inside_the_swarm_logs_store_events(
         # nothing about the swarm's or enclosing spans' events: a raising span logs
         # none today, which an upstream fix may change
         return
-    # the swarm's span logs the net change once, the result record included
+    # the swarm's span logs the net change once, the result record's id included and
+    # not the record, which is an event
     [changes] = [
         e.changes
         for e in sample.events
         if isinstance(e, StoreEvent) and e.span_id == swarm_span
     ]
-    assert {c.path.split("/")[1] for c in changes} >= {*names, RECORD_KEY}
+    keys = {c.path.split("/")[1] for c in changes}
+    assert keys >= {*names, RESULT_ID_KEY}
+    assert "inspect_swarm:result" not in keys
     assert store_from_events(sample.events) == sample.store

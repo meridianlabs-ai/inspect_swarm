@@ -47,9 +47,18 @@ from .._metrics import (
     gate_checks,
     swarm_metrics,
 )
-from .._record import MemberResult, MemberState
+from .._record import (
+    MemberResult,
+    MemberState,
+    SwarmResultRecord,
+    _swarm_ended,  # pyright: ignore[reportPrivateUsage]
+    _swarm_started,  # pyright: ignore[reportPrivateUsage]
+    write_record,
+    write_start,
+)
 
 if TYPE_CHECKING:
+    from .._bus._bus import Bus
     from .._channel._channel import Channel
 
 
@@ -406,22 +415,34 @@ class SwarmRun:
         self._span_id = current_span_id()
         self._settle()
         error: BaseException | None = None
-        bus_token = current_bus.set(self.bus)
-        # for swarm_budget(), in every member's context and the controller's
-        budget_token = current_budget.set(
-            BudgetState(
-                budget=self._budget,
-                caps=self._caps,
-                time=self._time,
-                start=self._start,
-                members={
-                    m.name: (m.context, self._shares.get(m.name, ()))
-                    for m in self._members
-                },
-            )
-        )
+        # what escaped the swarm, which the finally below must not replace
+        escaping: BaseException | None = None
+        started = False
         ended = False
+        bus_token: "contextvars.Token[Bus | None] | None" = None
+        budget_token: contextvars.Token[BudgetState | None] | None = None
+        running: int | None = None
         try:
+            # in the swarm's span, before any member can start
+            write_start()
+            started = True
+            bus_token = current_bus.set(self.bus)
+            # for swarm_budget(), in every member's context and the controller's
+            budget_token = current_budget.set(
+                BudgetState(
+                    budget=self._budget,
+                    caps=self._caps,
+                    time=self._time,
+                    start=self._start,
+                    members={
+                        m.name: (m.context, self._shares.get(m.name, ()))
+                        for m in self._members
+                    },
+                )
+            )
+            # from here until the end of the finally below, swarm_result() refuses
+            # reads in this sample
+            running = _swarm_started()
             # first: spans inside the swarm, members' included, log no StoreEvent;
             # the swarm's span, entered before, logs the net change
             with suspend_store_events(), ExitStack() as meter:
@@ -464,13 +485,79 @@ class SwarmRun:
                         )
                     ended = True
         except Exception as ex:
-            # from the final step, under the sample's limits
-            error = ex
+            # from the start event or the final step, under the sample's limits
+            error = escaping = ex
+            raise
+        except BaseException as ex:
+            escaping = ex
             raise
         finally:
-            # synchronous, so that it runs under cancellation too; the provisional
-            # answer is already written, as each change to the record writes it
-            wall_clock = anyio.current_time() - self._start
+            try:
+                # synchronous, so that it runs under cancellation too; for a swarm that
+                # started, the record first, provisional unless the final step
+                # completed, then the accounting
+                if started:
+                    results = self._results()
+                    record = SwarmResultRecord(
+                        members=results,
+                        final=answer(
+                            results, self._final, self._pick, provisional=not ended
+                        ),
+                    )
+                    failures: list[Exception] = []
+                    try:
+                        write_record(record)
+                    except Exception as ex:
+                        failures.append(ex)
+                    failures += self._account(
+                        interval, timelines, record, ended=ended, error=error
+                    )
+                    # the error or cancellation that ended the swarm stays the one
+                    # raised, else the first failure here; the others become its notes
+                    # `is not None`, as an exception's truthiness is its own to define
+                    first = (
+                        escaping
+                        if escaping is not None
+                        else error
+                        if error is not None
+                        else failures[0]
+                        if failures
+                        else None
+                    )
+                    for failure in failures:
+                        if failure is not first and first is not None:
+                            first.add_note(
+                                f"When the swarm ended: {type(failure).__name__}: {failure}"
+                            )
+                    if failures and first is failures[0]:
+                        raise failures[0]
+            finally:
+                # last, so that the bus and the budget are current through the final
+                # step and the ledger, and restored however the swarm ends
+                interval.close()
+                if budget_token is not None:
+                    current_budget.reset(budget_token)
+                if bus_token is not None:
+                    current_bus.reset(bus_token)
+                if running is not None:
+                    _swarm_ended(running)
+        if error is not None:
+            raise error
+
+    # The ledger and the metrics of a swarm that started, written however it ends, even
+    # when its record could not be; returns what failed rather than raising it, so that
+    # the error that ended the swarm stays the one raised.
+    def _account(
+        self,
+        interval: LedgerInterval,
+        timelines: MemberTimelines,
+        record: SwarmResultRecord,
+        *,
+        ended: bool,
+        error: BaseException | None,
+    ) -> list[Exception]:
+        wall_clock = anyio.current_time() - self._start
+        try:
             ledger = interval.ledger(
                 budget=self._budget,
                 caps=self._caps,
@@ -497,17 +584,20 @@ class SwarmRun:
                 # M1's final step does not await, so nothing can cancel it
                 final_cancelled=False,
             )
+        except Exception as ex:
+            return [ex]
+        failures: list[Exception] = []
+        try:
             write_ledger(ledger)
+        except Exception as ex:
+            failures.append(ex)
+        try:
             spans = {
                 m.name: m.context.span_id
                 for m in self._members
                 if m.context.span_id is not None
             }
             places = interval.places(spans)
-            # the record's answer, final or provisional
-            chosen = answer(
-                self._results(), self._final, self._pick, provisional=False
-            ).member
             write_metrics(
                 swarm_metrics(
                     ledger,
@@ -522,16 +612,13 @@ class SwarmRun:
                     list(self.bus.states),
                     self.bus.waits.max_wait is not None,
                     wall_clock,
-                    chosen,
+                    record.final.member,
                 )
             )
             timelines.fill(places)
-            # last, so that the bus and the budget are current through the final step
-            # and the ledger
-            current_budget.reset(budget_token)
-            current_bus.reset(bus_token)
-        if error is not None:
-            raise error
+        except Exception as ex:
+            failures.append(ex)
+        return failures
 
     def stop(self, reason: str) -> None:
         # the first call wins; everything before the grace period is synchronous, so
@@ -628,7 +715,7 @@ class SwarmRun:
         self._queue.append(MemberEnded(m.name, status, m.submitted))
         self._notify()
 
-    # the record and the provisional answer, after each change
+    # the provisional answer, after each change
     def _settle(self) -> None:
         settle(
             self._state,
