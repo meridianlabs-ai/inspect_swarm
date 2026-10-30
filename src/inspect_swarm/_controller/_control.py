@@ -760,10 +760,6 @@ class SwarmRun:
             m.gates = gate_checks(
                 self._interval.events, m.context.span_id, self._scorer, self._start
             )
-        key = self._result.answer_key if self._result is not None else None
-        if m.submitted and key is not None:
-            # task code: an error fails the sample
-            m.answer_key = key(m.agent_state.output.completion)
         # in the member's span, unless it ended before entering it
         evidence(
             "result",
@@ -775,6 +771,12 @@ class SwarmRun:
             sandbox=m.sandbox,
         )
         self._settle()
+        key = self._result.answer_key if self._result is not None else None
+        if m.submitted and key is not None:
+            # task code, after the member's end is recorded and its output settled, so
+            # that an error, which fails the sample, leaves the answer and the record
+            # agreeing
+            m.answer_key = key(m.agent_state.output.completion)
         if (
             m.submitted
             and self._verifier() is not None

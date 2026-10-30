@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from inspect_ai.agent import run as run_agent
 from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent
 from inspect_ai.log import read_eval_log
-from inspect_ai.model import Model, ModelOutput
+from inspect_ai.model import ChatMessageUser, Model, ModelOutput
 from inspect_ai.util import store, token_limit
 
 from inspect_swarm import (
@@ -408,12 +409,6 @@ async def test_the_hard_stop_ends_a_verification_in_progress() -> None:
             "must return a Verdict, got a bool",
             id="verifier-returns-no-verdict",
         ),
-        pytest.param(
-            answer_result(answer_key=lambda text: _raise()),
-            RuntimeError,
-            "contract failed",
-            id="answer-key-raises",
-        ),
     ],
 )
 async def test_a_failing_contract_fails_the_sample(
@@ -421,6 +416,27 @@ async def test_a_failing_contract_fails_the_sample(
 ) -> None:
     with pytest.raises(error, match=match):
         await run_swarm(swarm(answers("42"), channels=[], result=result))
+
+
+@pytest.mark.anyio
+async def test_a_failing_answer_key_fails_the_sample_after_the_members_end() -> None:
+    state = AgentState(messages=[ChatMessageUser(content="task")])
+    async with sample() as transcript:
+        with pytest.raises(RuntimeError, match="contract failed"):
+            await swarm(
+                answers("42"),
+                channels=[],
+                result=answer_result(answer_key=lambda text: _raise()),
+            )(state)
+        record = _transcript_result(store())
+    # the member's end is recorded and its output is the answer, as in the record
+    assert [e["status"] for e in evidence(transcript, "member_result")] == ["submitted"]
+    assert state.output.completion == "42"
+    assert record is not None
+    [m] = record.members
+    assert record.final.member == m.name and record.final.provisional
+    assert m.output is not None and m.output.completion == "42"
+    assert m.answer_key is None
 
 
 def _raise() -> Any:
@@ -487,8 +503,60 @@ async def test_the_record_keeps_each_members_output_however_it_ended() -> None:
     assert all(m.answer_key is None and m.verdict is None for m in stop.record.members)
 
 
+@pytest.mark.parametrize(
+    "text,left_out",
+    [
+        # read back as a reference to an attachment; the explanation only quotes it
+        pytest.param("attachment://0123", ["output", "answer_key"], id="reference"),
+        # not valid UTF-8, which the log escapes
+        pytest.param(
+            "bad \ud800 text", ["output", "answer_key", "explanation"], id="surrogate"
+        ),
+    ],
+)
+def test_model_text_a_log_would_change_is_left_out_of_its_member(
+    tmp_path: Path, text: str, left_out: list[str]
+) -> None:
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            [member(answers("42"), name="plain"), member(answers(text), name="odd")],
+            channels=[],
+            result=answer_result(answer_key=lambda text: text, verifier=Checker()),
+        ),
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    assert log.status == "success"
+    samples = read_eval_log(log.location).samples
+    assert samples is not None
+    [sample] = samples
+    record = swarm_result(sample)
+    assert record is not None
+    plain, odd = record.members
+    assert plain.left_out == []
+    assert plain.output is not None and plain.answer_key == "42"
+    assert odd.left_out == left_out
+    assert odd.output is None and odd.answer_key is None
+    assert odd.verdict is not None
+    assert (odd.verdict.passed, odd.verdict.value) == (False, 0.0)
+    if "explanation" in left_out:
+        assert odd.verdict.explanation is None
+    else:
+        assert odd.verdict.explanation == f"EXPLANATION-{text}"
+
+
 @pytest.mark.anyio
-async def test_an_output_a_log_would_change_fails_the_sample() -> None:
-    # a log would read this output back as a reference to an attachment
-    with pytest.raises(ValueError, match="the members' outputs"):
-        await run_swarm(swarm(answers("attachment://0123"), channels=[]))
+async def test_a_verdict_of_nan_is_recorded_whole() -> None:
+    async def nan_check(answer: str, metadata: dict[str, Any]) -> Verdict:
+        return Verdict(passed=True, value=math.nan, explanation="graded")
+
+    stop = await run_swarm(
+        swarm(answers("42"), channels=[], result=answer_result(verifier=nan_check))
+    )
+    [m] = stop.record.members
+    assert m.verdict is not None and math.isnan(m.verdict.value or 0.0)
+    assert (m.verdict.passed, m.verdict.explanation, m.left_out) == (
+        True,
+        "graded",
+        [],
+    )

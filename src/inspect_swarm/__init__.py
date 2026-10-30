@@ -35,7 +35,13 @@ from ._controller._controller import (
 from ._controller.leaderless import leaderless
 from ._final import FinalName
 from ._member import Member, member
-from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
+from ._record import (
+    FinalRecord,
+    LeftOut,
+    MemberResult,
+    SwarmResultRecord,
+    swarm_result,
+)
 from ._result import (
     MemberArtifacts,
     ResultKind,
@@ -63,6 +69,7 @@ __all__ = [
     "Controller",
     "FinalName",
     "FinalRecord",
+    "LeftOut",
     "Member",
     "MemberArtifacts",
     "MemberEnded",

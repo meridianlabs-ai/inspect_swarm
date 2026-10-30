@@ -449,7 +449,7 @@ A swarm of one returns an empty output when its member never submits, where a pl
 
 ### What the record adds
 
-Part 2 adds optional fields to M1's record ([What the swarm records](#what-the-swarm-records)). Each defaults to `None`, or to `False` for `tie`:
+Part 2 adds optional fields to M1's record ([What the swarm records](#what-the-swarm-records)). Each defaults to `None`, or to `False` for `tie` and `[]` for `left_out`:
 
 ```python
 class MemberResult(BaseModel):        # adds
@@ -457,6 +457,7 @@ class MemberResult(BaseModel):        # adds
     answer_key: str | None            # result.answer_key(output.completion), when defined
     verdict: Verdict | None           # verifier result for a submission, when a verifier exists
     verdict_time: float | None        # swarm time when the verdict was taken
+    left_out: list[LeftOut]           # values a log would change, left out; [] by default
 
 class FinalRecord(BaseModel):         # adds; reason gains e.g. "none_verified"
     chain: list[str] | None           # mode names, e.g. ["verify", "vote", "first"]; parameters are in the plan
@@ -472,7 +473,7 @@ class SwarmResultRecord(BaseModel):   # adds
 
 - **Why `output` comes here.** `member_scores` scores each member's output, in final scoring and in re-scoring, and reads the outputs from the record with `swarm_result(state)`. M1 needs neither ([No outputs in M1](#what-the-swarm-records)). Its tests: an output is kept after the member's own limit, and after a hard stop for an agent that updates its state in place.
 - **When they are written.** The runtime keeps them on its run as they arise: a member's output when it ends, with or without a contract, its key and verdict when its submission is recorded and verified, and the chain fields with the provisional answer and the final selection. They enter the record when it is written, as the swarm exits ([When it is written](#what-the-swarm-records)), so no member can read a peer's output, key or verdict from it during the run. The record holds a copy of each output, because validating a `ModelOutput` fills an empty `completion` from its message.
-- **Text a log would change.** Outputs, answer keys and verdict explanations come from model output, and the record's writer refuses text that a log would give back changed ([swarm-result-record.md](swarm-result-record.md#reading-it-swarm_result)): a string that begins with `attachment://` or `tc://`, an image's base64 `data:` URI, or text that is not valid UTF-8. A record holding such text is not written, and the swarm's end raises `ValueError`, which fails the sample; every read of it gives the lost-id `ValueError`. Ordinary text, long text and tool calls read back unchanged.
+- **Text a log would change.** Outputs, answer keys and verdict explanations come from model output, and a log can give some of it back changed ([swarm-result-record.md](swarm-result-record.md#reading-it-swarm_result)): a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8. The writer checks each such value on its own, the same way it checks the whole record. A value that would change is left out (`output` or `answer_key` set to `None`, or the verdict's `explanation`), and named in the member's `left_out: list[LeftOut]`, where `LeftOut = Literal["output", "answer_key", "explanation"]`; the rest of the record is written. `member_scores` (step 4) reports a member whose output was left out as unavailable, and the analysis reads a left-out answer key as no comparable answer. So one member's output never costs the sample its record or its scores (decision: Ransom, 2026-10-30). Ordinary text, long text and tool calls read back unchanged, and a NaN verdict value is kept: the writer compares as JSON text, in which NaN matches itself. The record's other text is the eval author's and is still refused.
 - **The `verdict` event.** Each verdict also produces an evidence event of kind `verdict`, alongside M1's `member_result` and `final`. It is written in the swarm's span, where the verifier runs, and carries the member, its span id, `passed`, `value` and the verdict's swarm time, never the explanation. A submission left unverified has no `verdict` event.
 - **The cost boundary**, when it is built, adds `solve_usage`, `solve_role_usage` and `solve_exit` ([The cost boundary](#the-cost-boundary-deferred)).
 
@@ -591,7 +592,7 @@ The scorer `member_scores(scorer, result, ...)` builds works in six steps.
      - This keeps a scorer's environment fallback from crediting the team's work to a member that produced nothing.
      - It is a backstop, not the contract. A non-empty completion can still extract to nothing (an empty fenced block), which is why `kind="answer"` requires a scorer that never reads the answer from the environment.
    - **Graded.** Otherwise it builds a deep copy of the `TaskState` whose `output` is the member's `ModelOutput` and whose `messages` are the sample's input messages plus the member's `output.message`. It awaits the scorer with the sample's target, and converts the value with `value_to_float`.
-   - **Unavailable.** The scorer returned `None`, a NaN value (`Score.unscored()`), or a dict or list value (there is no general best of a dict). The member's value is NaN, with the scorer's own `reason` kept, or `"scorer_returned_none"` or `"non_scalar_value"`.
+   - **Unavailable.** The record left the member's output out (`"output"` in its `left_out`; [What the record adds](#what-the-record-adds)), so there is nothing to score and it is not empty either; or the scorer returned `None`, a NaN value (`Score.unscored()`), or a dict or list value (there is no general best of a dict). The member's value is NaN, with reason `"output_left_out"`, the scorer's own `reason`, or `"scorer_returned_none"` or `"non_scalar_value"`. This is checked before **Empty**, since a left-out output is `None` in the record.
 5. **Aggregates over the members with a value** (empty and graded). It ignores unavailable and not-started members explicitly, rather than through `max`/`mean` on NaN, so the result does not depend on roster order.
    - `best_member` is their maximum and `mean_member` their mean.
    - Metadata records `members_total` (the roster), `members_started`, `members_valued` and `complete` (no started member unavailable). Analysis can then restrict to complete samples and see how many members a conditional controller ran.
@@ -903,7 +904,7 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
 1. **Result contract and record additions.** Builds on [swarm-result-record.md](swarm-result-record.md#implementation-plan)'s pull request: the added fields enter the record the runtime writes when the swarm ends, and every reader uses `swarm_result()`.
    - `src/inspect_swarm/_result.py`: `ResultSpec`, `answer_result`, `artifact_result`, `Verdict`, `Verifier`, `MemberArtifacts`.
    - `swarm(result=)`, with swarm-api.md's `TypeError` for the string a replay passes.
-   - The record's added fields that this step writes: `MemberResult`'s `output`, `answer_key`, `verdict` and `verdict_time`, and `SwarmResultRecord`'s `kind` and `verifier`. The final record's `chain`, `votes` and `tie`, and `final_verdict`, come with the chain (step 2), and `synthesize_error` with `synthesize` (step 3), the steps that write them.
+   - The record's added fields that this step writes: `MemberResult`'s `output`, `answer_key`, `verdict`, `verdict_time` and `left_out`, and `SwarmResultRecord`'s `kind` and `verifier`. The final record's `chain`, `votes` and `tie`, and `final_verdict`, come with the chain (step 2), and `synthesize_error` with `synthesize` (step 3), the steps that write them.
    - The runtime verifies submissions, writes `verdict` events, and puts each verdict's `VerdictSummary` on the handle and `MemberEnded` before queuing the event (`_swarm.py`, `_controller/_control.py`, `_evidence.py`).
    - Exports in `src/inspect_swarm/__init__.py`. Tests in `tests/test_result.py`.
 2. **Final-answer chain.**

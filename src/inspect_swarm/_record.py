@@ -1,5 +1,6 @@
 import json
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import replace
 from typing import Any, Literal, TypeGuard
 from uuid import uuid4
 
@@ -20,6 +21,9 @@ from ._result import ResultKind, Verdict
 
 MemberState = Literal["pending", "running", "ended"]
 """A member's lifecycle: not started, running, or ended."""
+
+LeftOut = Literal["output", "answer_key", "explanation"]
+"""A member's value that the record leaves out, because a log would give it back changed: its output, its answer key, or its verdict's explanation."""
 
 RECORD_TYPE = "result_record"
 RESULT_ID_KEY = "inspect_swarm:result_id"
@@ -77,6 +81,9 @@ class MemberResult(BaseModel):
     verdict_time: float | None = None
     """Swarm time when the verdict was taken; `None` without one."""
 
+    left_out: list[LeftOut] = []
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8. Empty when nothing was left out."""
+
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
@@ -123,14 +130,45 @@ def write_record(record: SwarmResultRecord) -> None:
     data: dict[str, JsonValue] = {
         "type": RECORD_TYPE,
         "id": id,
-        **record.model_dump(mode="json"),
+        **_logged_members(record).model_dump(mode="json"),
     }
-    if _changed_by_logging(InfoEvent(data=data, source="inspect_swarm")):
+    if _changed_by_logging(data):
         raise ValueError(
-            "The swarm's result record cannot be written: a string in it would read back from the log as other text. Inspect reads a string that begins with attachment:// or tc:// as a reference to an attachment, removes base64 data: URIs, such as images, when an eval does not log images, and escapes text that is not valid UTF-8, such as a lone surrogate. Check the members' names, roles and sandboxes, the reason given to choose_answer(), and the members' outputs, answer keys and verdict explanations."
+            "The swarm's result record cannot be written: a string in it would read back from the log as other text. Inspect reads a string that begins with attachment:// or tc:// as a reference to an attachment, removes base64 data: URIs when an eval does not log images, and escapes text that is not valid UTF-8, such as a lone surrogate. Check the members' names, roles and sandboxes, and the reason given to choose_answer()."
         )
     transcript().info(data, source="inspect_swarm")
     store().set(RESULT_ID_KEY, id)
+
+
+# Model text, the members' outputs, answer keys and verdict explanations, that a log
+# would give back changed is left out of its member and named in its left_out, so that
+# one member's output never costs the sample its record; text from the task's author is
+# refused instead.
+def _logged_members(record: SwarmResultRecord) -> SwarmResultRecord:
+    return record.model_copy(
+        update={"members": [_logged_member(m) for m in record.members]}
+    )
+
+
+def _logged_member(m: MemberResult) -> MemberResult:
+    update: dict[str, Any] = {}
+    left_out = list(m.left_out)
+    if m.output is not None and _changed_by_logging(m.output.model_dump(mode="json")):
+        update["output"] = None
+        left_out.append("output")
+    if m.answer_key is not None and _changed_by_logging(m.answer_key):
+        update["answer_key"] = None
+        left_out.append("answer_key")
+    if (
+        m.verdict is not None
+        and m.verdict.explanation is not None
+        and _changed_by_logging(m.verdict.explanation)
+    ):
+        update["verdict"] = replace(m.verdict, explanation=None)
+        left_out.append("explanation")
+    if not update:
+        return m
+    return m.model_copy(update={**update, "left_out": left_out})
 
 
 # Removes the store's record id, so that a swarm that leaves no record never leaves an
@@ -140,7 +178,7 @@ def forget_record() -> None:
         store().delete(RESULT_ID_KEY)
 
 
-# Whether a log would give back other text than `event` holds. Inspect condenses an
+# Whether a log would give back other text than `data` holds, as an event's data. Inspect condenses an
 # event's strings when it logs it (long text into attachments, and base64 data: URIs
 # removed under log_images=False), writes the event and its attachments as JSON (which
 # escapes text that is not valid UTF-8, such as a lone surrogate), and resolves them
@@ -148,8 +186,10 @@ def forget_record() -> None:
 # rewriting tc:// as attachment:// and replacing a reference with the attachment it
 # names. Resolving against the event's own attachments only, where any other reference
 # reads as something else, finds text that would read back as another attachment of
-# the sample or not at all.
-def _changed_by_logging(event: InfoEvent) -> bool:
+# the sample or not at all. Compared as JSON text, so that NaN, which the log keeps,
+# matches itself.
+def _changed_by_logging(data: JsonValue) -> bool:
+    event = InfoEvent(data=data, source="inspect_swarm")
     for log_images in (True, False):
         attachments: dict[str, str] = {}
         condensed = condense_event(event, attachments, log_images)
@@ -161,9 +201,13 @@ def _changed_by_logging(event: InfoEvent) -> bool:
         for _ in range(2):
             [resolved] = resolve_events_attachments([resolved], own)
         assert isinstance(resolved, InfoEvent)
-        if resolved.data != event.data:
+        if _json(resolved.data) != _json(event.data):
             return True
     return False
+
+
+def _json(value: JsonValue) -> str:
+    return json.dumps(value, sort_keys=True)
 
 
 # An event's own attachments, which give any other hash a value no string holds.
