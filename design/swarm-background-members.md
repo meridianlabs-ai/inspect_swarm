@@ -119,7 +119,7 @@ sample task group (unchanged; background() lands here when the seam is unset)
 
 1. The member's agent returns (or ends on its own limits, the lever or a cap). Its status is worked out from how it ended, as in M1, and kept.
 2. Drain: close the member's lever, wait for the owner's tasks up to the effective grace, leave the owner (cancelling what is left and awaiting it).
-3. The member ends: its status, output (on its run record), time, result record and `MemberEnded`, all at once, as `_end()` does in M1. Until then it is `running`.
+3. The member ends: its status, output and time on its run record, its `member_result` evidence event, the provisional answer and `MemberEnded`, all at once, as `_end()` does in M1. Until then it is `running`. The swarm's result record, which holds every member's result, is written once, when the swarm ends ([swarm-result-record.md When it is written](swarm-result-record.md#when-it-is-written)).
 
 A swarm cap reached anywhere in the member, by its agent or by a child, inside a tool call or not, calls `stop("swarm_cap")` from the cap node as it is detected.
 
@@ -283,7 +283,7 @@ Nothing new is needed; the drain composes with [Stopping](swarm-limits.md#stoppi
 
 ### Statuses, ended, and the record
 
-**One end time per member.** A member ends when its drain ends. Until then its `MemberHandle.state` is `running`; then the runtime's `_end()` sets its state `ended` and its status, writes its `MemberResult` (status, time), keeps its output on the run record (`MemberRun.agent_state`) and updates the provisional answer, and queues `MemberEnded`, all at once, as in M1. There is no earlier, separate decision (decision: Ransom, 2026-10-16: "it doesn't make sense to charge them for work but not be able to include that in the answer"). So:
+**One end time per member.** A member ends when its drain ends. Until then its `MemberHandle.state` is `running`; then the runtime's `_end()` sets its state `ended`, its status and its time on the run record (`MemberRun`, from which the member's `MemberResult` is built), writes its `member_result` evidence event, keeps its output on the run record (`MemberRun.agent_state`) and updates the provisional answer (the swarm's `AgentState.output`), and queues `MemberEnded`, all at once, as in M1. The result record is not written here: the runtime writes it once, when the swarm ends ([swarm-result-record.md When it is written](swarm-result-record.md#when-it-is-written)). There is no earlier, separate decision (decision: Ransom, 2026-10-16: "it doesn't make sense to charge them for work but not be able to include that in the answer"). So:
 
 - The swarm's guarantee holds without extra state: a member reported `ended` has no work left running.
 - `events()` ends, and `leaderless` returns `all_done`, only when no member is running, so never while children still spend. `leaderless`'s default stop at the first submission comes at that member's `MemberEnded`, after its drain.
@@ -356,7 +356,7 @@ M2-5 relies on this contract from M1-4 and M1-5, and changes it only as this des
 - the wrapper's structure: member ContextVar, then `tool_state_scope(name)` and `context.scope`, then the member's nodes entered around the agent call with the lever among them, and `classify_errors()` (the owner goes between the scopes and the node stack, with the classifying `try` inside it);
 - the cap notification at the cap node: `SwarmNode.exceeded()` calls `stop_swarm("swarm_cap")`, set by the runtime on each cap, for native and bridged members alike ([Cap notification at the cap node](#cap-notification-at-the-cap-node));
 - `stop()` closing the levers of running members, `_supervise()` waiting for and cancelling running members, `events()` waiting while any member is running, and `_grace_now()`;
-- `_end()` setting the state, the status and the record together, unchanged except that it reads the counts from `outcome`;
+- `_end()` setting the state, the status and the time on the run record and writing the `member_result` event together, unchanged except that it reads the counts from `outcome` (the result record is written at the swarm's end, [swarm-result-record.md](swarm-result-record.md#when-it-is-written));
 - the wrapper keeping the member's `AgentState` as `as_solver()` does, which the scoring contract needs anyway ([Entering the owner](#entering-the-owner)).
 
 If a later change moves the wrapper, M2-5 keeps the same placements: the owner inside the member's cancel scope and tool-state scope and outside the member's nodes (so the member's time limit cancels only the agent), the member's nodes and the caps as its contained set, the drain before the member ends, and the cap notification at the node that detects the cap.
