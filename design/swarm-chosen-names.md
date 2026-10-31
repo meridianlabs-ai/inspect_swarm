@@ -155,7 +155,7 @@ The name a member chose is **not** recorded. The swarm never learns it: the memb
 - `choose_name=True` with a single member: the one-member sentence above.
 - `choose_name=True` with `channels=[]`: no channel instructions are added. Members without `sandbox=` share the sample's sandbox; members with their own sandboxes (`member(sandbox="{member}")`) keep the existing own-sandbox sentence (`_swarm.py:148-156`) and sandbox routing, as today.
 - `choose_name=True` with per-member sandboxes and `filesystem(shared_volume=True)`: allowed; no name appears. `sandbox="{member}"` still names the environment after the swarm's name, which the swarm does not show.
-- `choose_name=True` with a bridged member: allowed with `filesystem`; bridged members cannot use channels with records anyway.
+- `choose_name=True` with a bridged member: allowed with `filesystem` only, as for any member that chooses its name.
 - A mixed roster: named members keep the unchanged first paragraph, and with the filesystem channel get the mixed-roster scratch sentence above.
 - A controller's `start(member, input=...)` is the eval author's text and is used as given.
 

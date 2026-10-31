@@ -33,7 +33,7 @@ def swarm_bridged_tools(
 
     A bridged member never counts as waiting, since one call in `swarm_wait` does not show that its CLI is idle: its waits end on news, a member's end, the swarm's stop or their timeout, never because every member is waiting. A bridged wait lasts at most `max_wait` seconds, or the longest wait of the swarm's channels if that is shorter, because the CLI gives up on a tool call that runs too long: Claude Code and Codex both stop one after 300 seconds by default, and the shared memory's waits last up to 600. Claude Code's limit cannot be raised for bridged tools, so keep the default of 280 for it. A Codex member whose timeout is raised with `codex_cli(config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"})` can take a matching `max_wait`.
 
-    A member whose own loop uses `swarm_tools()` cannot also use these tools: a bridged subagent of it would be a second reader of its inbox.
+    A swarm with the messages channel needs `"messages"` here too: other members can send to the member, and without the messages tools it could never read what they send, so the tools of a bridge given only `"shared_memory"` return an error saying to add it. A member uses these tools or `swarm_tools()`, never both, in either order: each would be a reader of its inbox.
 
     Args:
         channels: The channels whose tools to give: `"messages"`, `"shared_memory"` or both.
@@ -53,7 +53,9 @@ def swarm_bridged_tools(
         )
     check_bound("swarm_bridged_tools", "max_wait", max_wait, 1)
     tools = [
-        _relay(name, declaration) for name in names for declaration in _CHANNELS[name]()
+        _relay(name, declaration, names)
+        for name in names
+        for declaration in _CHANNELS[name]()
     ]
     tools.append(_wait(names, max_wait))
     return BridgedToolsSpec(name=SERVER, tools=tools)
@@ -61,9 +63,9 @@ def swarm_bridged_tools(
 
 # A channel's tool for a bridged member: the run's tool of that name, called through the
 # bridge as the member.
-def _relay(channel: str, declaration: ToolDeclaration) -> Tool:
+def _relay(channel: str, declaration: ToolDeclaration, channels: Sequence[str]) -> Tool:
     async def execute(**arguments: Any) -> str:
-        bus = _bus(declaration.name)
+        bus = _bus(declaration.name, channels)
         state = _state(bus, channel)
         if state is None:
             raise ToolError(
@@ -91,7 +93,7 @@ def _relay(channel: str, declaration: ToolDeclaration) -> Tool:
 # most `max_wait` seconds
 def _wait(channels: Sequence[str], max_wait: int) -> Tool:
     async def wait(path: str | None, file_id: str | None, timeout: int | None) -> str:
-        bus = _bus("swarm_wait")
+        bus = _bus("swarm_wait", channels)
         states = [s for s in (_state(bus, c) for c in channels) if s is not None]
         if not states:
             raise ToolError(
@@ -112,7 +114,8 @@ def _wait(channels: Sequence[str], max_wait: int) -> Tool:
     )
 
 
-def _bus(tool: str) -> Bus:
+# the run's bus, for a call of a bridged tool given with `channels`
+def _bus(tool: str, channels: Sequence[str]) -> Bus:
     bus = current_bus.get()
     context = bus.member() if bus is not None else None
     if bus is None or context is None:
@@ -122,6 +125,13 @@ def _bus(tool: str) -> Bus:
         raise ToolError(
             f"{tool} is for a bridged member; {context.name} uses the swarm's tools from swarm_tools()."
         )
+    # peers can send to the member, and without the messages tools it could never read
+    if "messages" not in channels and _state(bus, "messages") is not None:
+        raise ToolError(
+            f'{tool} cannot be used: the swarm has a messages channel, which {context.name}\'s swarm tools leave out, so it could never read the messages other members send it. Add "messages" to swarm_bridged_tools().'
+        )
+    # so that the member cannot then bind a loop with swarm_tools()
+    context.bridge_used = True
     return bus
 
 

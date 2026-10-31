@@ -52,7 +52,9 @@ solver = swarm(
 ```
 
 - `"messages"` gives `send_message`, `read_messages` and `list_members`, and `"shared_memory"` gives `shared_memory`. Both give `swarm_wait`. The CLI sees them as the MCP server `swarm`.
-- A tool whose channel the swarm does not have returns an error that says so. A member whose own loop uses `swarm_tools()` cannot also use these tools.
+- A tool whose channel the swarm does not have returns an error that says so.
+- A bridged member in a swarm with `messages()` needs `"messages"` too: other members can send to it, and without `read_messages` it could never read them. Its tools return an error that says to add it. `["messages"]` alone, in a swarm that also has the shared memory, is fine.
+- A member uses `swarm_bridged_tools()` or `swarm_tools()`, never both.
 - The CLI is one agent to the swarm, whichever of its conversations calls, its subagents included. They share the member's inbox, so a message any of them reads is read for all. They share what the member has viewed in the shared memory, so a view by a subagent lets the top-level session overwrite or delete that file. Sends and writes from any of them are the member's.
 - A bridged member never counts as waiting, since one call in `swarm_wait` does not show that its CLI is idle. Its waits end on news, a member's end, the swarm's stop or their timeout, never because every member is waiting. A native member waiting beside a running bridged member is released by its own timeout at worst.
 - The log records these calls as `ToolEvent`s, and their `comm` events have `via` set to `"bridge"`. Inspect Sentinel does not see them; the bridge's `approval=` policies do.

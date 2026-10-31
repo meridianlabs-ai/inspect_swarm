@@ -48,7 +48,7 @@ Non-goals:
 - **Stopping.** `stop(reason)` calls `self.bus.close()` first, synchronously (`_control.py:470-476`); `close()` only sets the stopping flag that refuses later records (`_bus.py:91-93`). Then levers close, grace runs, and the hard stop cancels each running member's scope (`_control.py:580-591`).
 - **Delivery.** `Bus.deliver()` runs steps 0 and 2 to 4 with no `await`; step 4 applies the record and writes `delivered` (`_bus.py:94-151`). Every record is built with `wake=False` (`_bus.py:118`); `Draft` has no `wake` field (`src/inspect_swarm/_bus/_record.py:69-75`).
 - **Loops.** `swarm_tools()` binds the member to the first agent channel it is resolved in (`context.loop`) and gives other loops only `"member"`-reach channels' tools (`src/inspect_swarm/_bus/_tools.py:11-29`). `Bus.nested(context)` is true in any loop but the member's own, and `Bus.running(name)` says whether a member has started and not ended (`_bus.py:153-160`).
-- **Who can be a member beside a bus channel.** `swarm()` refuses a bridged member when any channel has records (`_check_bus_channels`, `src/inspect_swarm/_swarm.py:272-307`). A bridged agent the rule misses runs without the channel's tools. Background members are accepted (M2-5).
+- **Who can be a member beside a bus channel.** Any member: a bridged member reaches the channels through `swarm_bridged_tools()` ([Bridged members](#bridged-members)), and background members are accepted (M2-5).
 
 ### The shared-memory channel (M2-8)
 

@@ -186,7 +186,7 @@ def no_secrets_on_board() -> Protocol:
     return decide
 ```
 
-Pass it to the task as `Task(..., sentinel=no_secrets_on_board())`. The member gets the decision's message as the tool call's error. A step's `conversation` is the agent span id of the loop that made the call, and each `comm` event names that loop beside its member, so the two can be joined. Sentinel does not run on bridged members' tool calls, which is one reason bridged members cannot use the channel yet.
+Pass it to the task as `Task(..., sentinel=no_secrets_on_board())`. The member gets the decision's message as the tool call's error. A step's `conversation` is the agent span id of the loop that made the call, and each `comm` event names that loop beside its member, so the two can be joined. Sentinel does not run on bridged tool calls; use the bridge's approval policies for those calls.
 
 ## Migrating from `memory(instance=...)` {#migrating-from-memoryinstance}
 

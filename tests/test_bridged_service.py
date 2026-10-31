@@ -241,30 +241,138 @@ async def test_a_bridged_wait_is_capped_by_the_tools_max_wait() -> None:
     ) == [("cli", 1), ("w-1", 2)]
 
 
+_NO_BOARD = "The swarm has no shared_memory channel, so {tool} cannot be used."
+
+_ADD_MESSAGES = 'cannot be used: the swarm has a messages channel, which cli\'s swarm tools leave out, so it could never read the messages other members send it. Add "messages" to swarm_bridged_tools().'
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "tool,arguments,channel",
+    "given,swarm_channels,tool,arguments,error",
     [
-        ("shared_memory", {"command": "changes"}, "shared_memory"),
-        ("swarm_wait", {}, "shared_memory"),
+        # a tool whose channel the swarm lacks says so
+        (
+            ["messages", "shared_memory"],
+            ["messages"],
+            "shared_memory",
+            {"command": "changes"},
+            _NO_BOARD,
+        ),
+        (["shared_memory"], ["filesystem"], "swarm_wait", {}, _NO_BOARD),
+        # a board-only bridge beside the messages channel is refused: peers could send
+        # to it, and it could never read their messages
+        (
+            ["shared_memory"],
+            ["messages", "shared_memory"],
+            "shared_memory",
+            {"command": "changes"},
+            "{tool} " + _ADD_MESSAGES,
+        ),
+        (
+            ["shared_memory"],
+            ["messages", "shared_memory"],
+            "swarm_wait",
+            {},
+            "{tool} " + _ADD_MESSAGES,
+        ),
     ],
 )
-async def test_a_tool_of_a_channel_the_swarm_lacks_says_so(
-    tool: str, arguments: dict[str, Any], channel: str
+async def test_bridged_tools_the_swarm_cannot_serve_are_refused(
+    given: list[str],
+    swarm_channels: list[str],
+    tool: str,
+    arguments: dict[str, Any],
+    error: str,
 ) -> None:
     errors: list[str] = []
 
     async def script() -> None:
         try:
-            await _Cli([channel]).call("parent", tool, **arguments)
+            await _Cli(given).call("parent", tool, **arguments)
         except ToolError as ex:
             errors.append(str(ex))
 
     await run_swarm(
-        swarm(member(cli(script), name="cli", bridged=True), channels=["messages"])
+        swarm(member(cli(script), name="cli", bridged=True), channels=swarm_channels)
+    )
+    assert errors == [error.format(tool=tool)]
+
+
+@agent
+def writer(written: anyio.Event, done: anyio.Event) -> Agent:
+    """Write a board file, then message the CLI, and stay running until `done`."""
+
+    async def execute(state: AgentState) -> AgentState:
+        tools = {ToolDef(t).name: t for t in await swarm_tools().tools()}
+        await tools["shared_memory"](command="create", path=PLAN, file_text="a\n")
+        written.set()
+        await anyio.sleep(0.2)
+        await tools["send_message"](to="cli", message="now")
+        await done.wait()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_messages_only_bridged_wait_ignores_the_board() -> None:
+    # the swarm has both channels; the bridge gives only the messages tools, so board
+    # news it cannot view does not end its wait, and a message does
+    written, done = anyio.Event(), anyio.Event()
+    results: dict[str, str] = {}
+
+    async def script() -> None:
+        await written.wait()
+        results["wait"] = await _Cli(["messages"]).call("parent", "swarm_wait")
+        done.set()
+
+    with anyio.fail_after(20):
+        outcome = await run_swarm(
+            swarm(
+                [
+                    member(writer(written, done), name="w-1"),
+                    member(cli(script), name="cli", bridged=True),
+                ],
+                channels=[messages(rate=None), shared_memory(rate=None)],
+                controller=leaderless(stop_on_submission=False),
+            )
+        )
+
+    assert results == {
+        "wait": "1 unread message (from w-1). Call read_messages() to read them."
+    }
+    [wait] = [w for w in evidence(outcome.transcript, "waited") if w["member"] == "cli"]
+    assert (wait["channels"], wait["outcome"]) == (["messages"], "news")
+
+
+@agent
+def bridge_first(script: Any, errors: list[str]) -> Agent:
+    """Run `script` with a bridged CLI, then resolve swarm_tools()."""
+
+    async def execute(state: AgentState) -> AgentState:
+        await script()
+        try:
+            await swarm_tools().tools()
+        except RuntimeError as ex:
+            errors.append(str(ex))
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_member_that_used_bridged_tools_cannot_bind_swarm_tools() -> None:
+    # its own loop would be a second reader of the inbox its CLI reads
+    errors: list[str] = []
+
+    async def script() -> None:
+        await _Cli(["messages"]).call("parent", "list_members")
+
+    await run_swarm(
+        swarm(member(bridge_first(script, errors), name="w-1"), channels=["messages"])
     )
     assert errors == [
-        f"The swarm has no shared_memory channel, so {tool} cannot be used."
+        "swarm_tools() was resolved in w-1, which has used swarm_bridged_tools(). A member uses one or the other: a bridged member's CLI is its own loop, and a second one would read its inbox too."
     ]
 
 
