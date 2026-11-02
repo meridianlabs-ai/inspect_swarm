@@ -94,8 +94,10 @@ The swarm logs messages as `InfoEvent`s with source `inspect_swarm` and type `co
 
 - `sent`: a send that reached the swarm, with its addresses, recipients, text, `reply_to` and `wake`, and why it was refused if it was. An inbox that is full, or a duplicate, is refused by the control `admit`.
 - `delivered`: a message delivered, with its recipients and commit sequence number.
-- `read`: a `read_messages` result, with the ids of the messages it showed. A read that showed nothing has no event.
-- `waited`: a `swarm_wait` call, with what ended it and the unread messages it named.
+- `read`: a `read_messages` result, with the ids of the messages it showed (`records`) and the messages it depends on (`depends_on`). A read that showed nothing has no event.
+- `waited`: a `swarm_wait` call, with what ended it and the unread messages it named. A wait that reports unread messages depends on all of them, including those sent with `wake=False`. A wait that ends with only the unread count depends on none.
+
+`depends_on` names each message once per loop, so a read of messages that an earlier wait reported depends on none of them.
 
 The [metrics](analysis.qmd#communication) count these events for each member.
 

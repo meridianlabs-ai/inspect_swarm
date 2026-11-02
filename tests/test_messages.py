@@ -156,11 +156,14 @@ async def test_a_message_is_read_once_fenced_with_its_bound_sender() -> None:
             "w-1/top",
         )
         [read] = evidence(transcript, "read")
-        assert {k: read[k] for k in ("member", "channel", "read", "records")} == {
+        assert {
+            k: read[k] for k in ("member", "channel", "read", "records", "depends_on")
+        } == {
             "member": "w-2",
             "channel": "messages",
             "read": "r-1",
             "records": ["m-1", "m-2"],
+            "depends_on": ["m-1", "m-2"],
         }
         assert (read["loop"], read["tool_span_id"], read["listing"]) == (
             "w-2/top",

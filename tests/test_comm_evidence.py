@@ -28,6 +28,7 @@ from inspect_swarm._metrics import CommMetrics, MemberMetrics, SwarmMetrics
 
 from .swarm_runtime import Script, evidence, scripted_model
 from .test_wait import (  # pyright: ignore[reportPrivateUsage]
+    ROOT,
     _p,
     _Run,
     changed,
@@ -224,6 +225,7 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
             "outcome": "news",
             "woken_by": [1],
             "files": [{"file": "f-1", "version": 1, "deleted": False}],
+            "depends_on": ["w-1"],
             "ended": [],
         }
         assert timing["started"] >= 0
@@ -379,12 +381,13 @@ async def test_a_wait_released_then_cancelled_names_nothing() -> None:
             await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
             tg.cancel_scope.cancel()
         [data] = waited(transcript)
-        assert (data["outcome"], data["woken_by"], data["files"], data["ended"]) == (
-            "cancelled",
-            [1],
-            [],
-            [],
-        )
+        assert (
+            data["outcome"],
+            data["woken_by"],
+            data["files"],
+            data["depends_on"],
+            data["ended"],
+        ) == ("cancelled", [1], [], [], [])
 
 
 @pytest.mark.anyio
@@ -399,3 +402,58 @@ async def test_writes_wake_and_a_wait_shows_no_content_or_peer_path() -> None:
         )
         [sent] = evidence(transcript, "sent")
         assert sent["record"]["wake"] is True
+
+
+# What the board's results depend on: a view, every write in the shown file's history;
+# a tombstone, the delete; a listing, nothing; a wait, the write it reports for each
+# file. Each record once per loop.
+
+
+@pytest.mark.anyio
+async def test_a_view_depends_on_the_files_history_and_a_listing_on_nothing() -> None:
+    async with run() as (r, transcript):
+        await r.sm("w-1", "create", path=_p("d/a.md"), file_text="1")
+        await r.sm("w-1", "create", path=_p("d/c.md"), file_text="c")
+        await r.sm("w-1", "append", path=_p("d/a.md"), append_text="2")
+        await r.sm("w-1", "str_replace", path=_p("d/a.md"), old_str="1", new_str="0")
+        # w-5 renames both files
+        await r.sm("w-1", "rename", old_path=_p("d"), new_path=_p("e"))
+        await r.sm("w-2", "view", path=_p("e/a.md"))
+        await r.sm("w-2", "view", "child", file_id="f-1", view_range=[1, 1])
+        await r.sm("w-2", "view", path=_p("e/a.md"))
+        await r.sm("w-2", "view", path=ROOT)
+        await r.sm("w-2", "view", path=_p("e/c.md"))
+        await r.sm("w-1", "delete", path=_p("e/a.md"))
+        await r.sm("w-2", "view", file_id="f-1")
+        reads = evidence(transcript, "read")
+        assert [(r["loop"], r["records"], r["depends_on"]) for r in reads] == [
+            ("w-2/top", ["w-5"], ["w-1", "w-3", "w-4", "w-5"]),
+            # a partial view, in another loop
+            ("w-2/child", ["w-5"], ["w-1", "w-3", "w-4", "w-5"]),
+            # the same version again
+            ("w-2/top", ["w-5"], []),
+            # a listing of both files, which w-5 last wrote
+            ("w-2/top", ["w-5"], []),
+            ("w-2/top", ["w-5"], ["w-2"]),
+            # the tombstone
+            ("w-2/top", ["w-6"], ["w-6"]),
+        ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "writer", [("w-2", "top"), ("w-1", "child")], ids=["peer", "subagent"]
+)
+async def test_a_wait_after_a_blind_append_depends_on_the_write_it_reports(
+    writer: tuple[str, str],
+) -> None:
+    async with run() as (r, transcript):
+        await r.sm(writer[0], "create", path=_p("a.md"), file_text="x", loop=writer[1])
+        await r.sm("w-1", "append", path=_p("a.md"), append_text="y")
+        # both return at once; the second depends on nothing new
+        reported = changed("f-1 new", writer[0], "f-1")
+        assert await r.wait("w-1") == await r.wait("w-1") == reported
+        assert [(w["woken_by"], w["depends_on"]) for w in waited(transcript)] == [
+            ([], ["w-1"]),
+            ([], []),
+        ]
