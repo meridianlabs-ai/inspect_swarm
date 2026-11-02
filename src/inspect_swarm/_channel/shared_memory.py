@@ -975,6 +975,11 @@ def builtin_board(states: Mapping[str, ChannelState]) -> str | None:
     )
 
 
+# Whether a channel is the built-in board, which swarm_bridged_tools() serves.
+def is_builtin_board(channel: Channel) -> bool:
+    return type(channel) is _SharedMemory
+
+
 def _by_others(f: _BoardFile, loop: str | None) -> tuple[int, str | None, str | None]:
     # the latest version of a file written by another loop than `loop`, its writer and
     # its record

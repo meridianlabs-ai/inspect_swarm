@@ -394,6 +394,11 @@ def builtin_messages(states: Mapping[str, ChannelState]) -> str | None:
     )
 
 
+# Whether a channel is the built-in messages channel, which swarm_bridged_tools() serves.
+def is_builtin_messages(channel: Channel) -> bool:
+    return type(channel) is _Messages
+
+
 def _fenced(record: Record) -> str:
     attributes = [
         ("id", record.id),
