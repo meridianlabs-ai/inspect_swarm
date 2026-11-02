@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
 import anyio
+from inspect_ai._util.json import to_json_safe
 from inspect_ai._util.working import known_work
 from inspect_ai.agent import AgentChannel, AgentState
 from inspect_ai.model import (
@@ -72,9 +73,11 @@ def ended_reason(origin: str) -> str:
     return f"ended by {origin}"
 
 
-# The SHA-256 of a message as the log serializes it, its id excluded.
+# The SHA-256 of a message as the log serializes it, its id excluded: through
+# Inspect's safe serializer, which writes a value JSON cannot hold as null and escapes
+# text UTF-8 cannot encode, such as a lone surrogate.
 def message_hash(message: ChatMessage) -> str:
-    data = message.model_dump(mode="json", exclude_none=True, exclude={"id"})
+    data = json.loads(to_json_safe(message, exclude={"id"}, indent=None))
     text = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(text.encode()).hexdigest()
 

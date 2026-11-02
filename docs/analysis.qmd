@@ -95,7 +95,7 @@ When a controller holds a member at turn boundaries ([Controllers](controllers.q
 - `order`: the result's ids in order, only when the kept messages changed their order.
 - `applied`: whether the change is in the member's conversation. It is `false` when a later callback ended the member or raised, the swarm stopped, or the change was rejected.
 
-A hash is the SHA-256 of the message as the log serializes it, without its id, so a change can be matched to the messages in a later `ModelEvent`'s input. When a callback rewrites the conversation, compaction summaries that describe messages it changed are removed, and the removal is one more `changed` event with origin `swarm`.
+A hash is the SHA-256 of the message as the log serializes it, without its id (a value JSON cannot hold counts as null, and text UTF-8 cannot encode is escaped), so a change can be matched to the messages in a later `ModelEvent`'s input. When a callback rewrites the conversation, compaction summaries that describe messages it changed are removed, and the removal is one more `changed` event with origin `swarm`.
 
 ### Wiring checks
 

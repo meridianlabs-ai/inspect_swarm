@@ -644,11 +644,12 @@ def _returned(
         # delivered when its last call was the one that stopped it, even if the agent
         # then stopped itself
         return context.stop_cause
+    if stopped:
+        # the agent stopped itself with an error, which an end request does not change
+        return "member_limit:custom"
     if gate.end_origin is not None:
         # an end requested before the agent returned wins over its output
         return "stopped"
-    if stopped:
-        return "member_limit:custom"
     if state.output.empty:
         return "submitted"
     return _return_status(state.output.stop_reason)

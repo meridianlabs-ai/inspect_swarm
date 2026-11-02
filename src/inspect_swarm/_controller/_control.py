@@ -445,7 +445,8 @@ class SwarmRun:
             self._members_tg.start_soon, self._run_member, m, messages, name=m.name
         )
         if m.gate.end_origin is not None:
-            # ended while pending: it ends at its first boundary
+            # ended while pending: it ends at its first boundary, its grace counted from
+            # now
             self._end_timer(m)
         self._notify()
 
@@ -846,13 +847,15 @@ class SwarmRun:
             self._end_timer(m)
 
     # end()'s grace: the member is cancelled, as the hard stop cancels one, if it is
-    # still running when the effective grace has passed
+    # still running when the effective grace has passed. The deadline is fixed now, so
+    # work that blocks the event loop before the timer's task runs counts against it.
     def _end_timer(self, m: MemberRun) -> None:
         assert self._runtime_tg is not None
-        self._runtime_tg.start_soon(self._end_grace, m)
+        deadline = anyio.current_time() + self._grace_now()
+        self._runtime_tg.start_soon(self._end_grace, m, deadline)
 
-    async def _end_grace(self, m: MemberRun) -> None:
-        with anyio.move_on_after(self._grace_now()):
+    async def _end_grace(self, m: MemberRun, deadline: float) -> None:
+        with anyio.CancelScope(deadline=deadline):
             while m.state == "running":
                 await self._changed.wait()
         if m.state == "running":

@@ -1,6 +1,7 @@
 import json
 import re
 import tempfile
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ from inspect_ai.event import (
     SwarmEvent,
     ToolEvent,
 )
-from inspect_ai.log import EvalSample
+from inspect_ai.log import EvalSample, transcript
 from inspect_ai.model import (
     ChatMessage,
     ChatMessageAssistant,
@@ -58,6 +59,7 @@ from inspect_ai.tool import (
     tool,
 )
 from inspect_ai.util import (
+    LimitExceededError,
     background,
     message_limit,
     suspend_working_limit,
@@ -931,13 +933,14 @@ async def test_only_a_callback_model_call_in_flight_at_the_cancellation_marks_th
 
 
 @agent
-def slow_cleanup(inner: Agent, seconds: float) -> Agent:
-    """Run `inner`, then take `seconds` to clean up, however it ended."""
+def slow_cleanup(inner: Agent, seconds: float, blocking: float = 0) -> Agent:
+    """Run `inner`, then clean up, however it ended: block the event loop for `blocking` seconds, then wait `seconds`."""
 
     async def execute(state: AgentState) -> AgentState:
         try:
             return await inner(state)
         finally:
+            time.sleep(blocking)
             await anyio.sleep(seconds)
 
     return execute
@@ -998,6 +1001,79 @@ async def test_ending_a_held_member_gives_its_cleanup_the_grace(
     assert _statuses(outcome) == {"a": status}
     assert script.started == 0
     assert _ledger(outcome).members[0].cancelled is (status == "cancelled")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ending", ["end()", "callback"])
+@pytest.mark.parametrize("blocking,status", [(0.3, "cancelled"), (0.02, "stopped")])
+async def test_the_end_grace_counts_from_the_request(
+    ending: str, blocking: float, status: str
+) -> None:
+    script = _Recording([_submit()])
+
+    async def callback(b: Boundary) -> Result:
+        if ending == "callback":
+            return "end"
+        await anyio.sleep_forever()
+        return None
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        control.member("a").on_boundary(callback, origin="test")
+        control.start("a")
+        if ending == "end()":
+            while not control.member("a").held:
+                await anyio.sleep(0.01)
+            control.member("a").end(origin="operator")
+        return await _drain(control)
+
+    # cleanup that blocks the event loop, then waits briefly: past the deadline once
+    # it yields when the blocking outlasts the grace
+    agent_ = slow_cleanup(_react(script), 0.05, blocking=blocking)
+    with anyio.fail_after(3):
+        outcome = await _run(
+            [member(agent_, name="a")], run_controller, budget=Budget(grace=0.15)
+        )
+    assert _statuses(outcome) == {"a": status}
+
+
+@agent
+def stops_itself(how: str) -> Agent:
+    """Wait a moment, then stop itself with a custom limit error (`bare` or `grouped`), or `return` an answer."""
+
+    async def execute(state: AgentState) -> AgentState:
+        await anyio.sleep(0.2)
+        if how == "return":
+            state.output = ModelOutput.from_content("mockllm", "answer")
+            return state
+
+        def stop() -> LimitExceededError:
+            return LimitExceededError("custom", value=1, limit=1, message="done")
+
+        if how == "bare":
+            raise stop()
+        raise ExceptionGroup("stopped", [stop(), stop()])
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("how", ["bare", "grouped", "return"])
+@pytest.mark.parametrize("ended", [True, False])
+async def test_an_end_request_does_not_change_an_agents_own_stop(
+    how: str, ended: bool
+) -> None:
+    async def run_controller(control: SwarmControl) -> StopReason:
+        control.start("a")
+        await anyio.sleep(0.05)
+        if ended:
+            control.member("a").end(origin="operator")
+        return await _drain(control)
+
+    outcome = await _run([member(stops_itself(how), name="a")], run_controller)
+    if how == "return":
+        assert _statuses(outcome) == {"a": "stopped" if ended else "submitted"}
+    else:
+        assert _statuses(outcome) == {"a": "member_limit:custom"}
 
 
 @pytest.mark.anyio
@@ -2135,6 +2211,94 @@ async def test_the_boundary_output_is_the_loops_own_and_stays_the_members_output
     assert boundary_output.usage.output_tokens == 7
     assert kept.completion == "cut off"
     assert kept.stop_reason == "max_tokens"
+
+
+def _odd(value: str) -> ChatMessageUser:
+    # a message Inspect accepts and generates with, though its JSON is not plain: an
+    # opaque metadata value, or text with a lone surrogate
+    if value == "opaque-metadata":
+        return ChatMessageUser(content="odd message", metadata={"handle": object()})
+    return ChatMessageUser(content="odd message \udc80")
+
+
+def _as_logged(message: ChatMessage, value: str) -> ChatMessage:
+    # the message as Inspect's safe serializer writes it
+    if value == "opaque-metadata":
+        return message.model_copy(update={"metadata": {"handle": None}})
+    return message.model_copy(update={"content": "odd message \\udc80"})
+
+
+@agent
+def with_odd_message(inner: Agent, value: str) -> Agent:
+    """Add an odd message to the conversation, then run `inner`."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state.messages.append(_odd(value))
+        return await inner(state)
+
+    return execute
+
+
+@agent
+def capturing(inner: Agent, events: list[Event]) -> Agent:
+    """Run `inner`, then keep the sample's events."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state = await inner(state)
+        events.extend(transcript().history.events_from(0))
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("value", ["opaque-metadata", "lone-surrogate"])
+@pytest.mark.parametrize("changing", [False, True])
+async def test_a_message_inspect_accepts_is_hashed_as_its_safe_serializer_writes_it(
+    value: str, changing: bool, tmp_path: Path
+) -> None:
+    script = _Recording([_submit()])
+    statuses: list[str | None] = []
+
+    async def callback(b: Boundary) -> Result:
+        return [*b.messages, _odd(value)] if changing and b.index == 0 else None
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        result = await _starting({"a": [("test", callback)]})(control)
+        statuses.append(control.member("a").status)
+        return result
+
+    agent_ = _react(script) if changing else with_odd_message(_react(script), value)
+    events: list[Event] = []
+    # Inspect's log writer cannot write such a message in a model event's input, so
+    # the sample is not logged and its events are kept as it runs
+    [log] = await eval_async(
+        Task(
+            dataset=[Sample(input="task")],
+            solver=capturing(
+                _swarm([member(agent_, name="a")], run_controller), events
+            ),
+        ),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+        log_samples=False,
+    )
+    assert log.status == "success", log.error
+    assert statuses == ["submitted"]
+    seam = [e for e in events if isinstance(e, SwarmEvent)]
+    assert [e.data["outcome"] for e in seam if e.kind == "boundary"] == ["continue"]
+    [first, *_] = [e for e in events if isinstance(e, ModelEvent)]
+    [odd] = [m for m in first.input if m.text.startswith("odd message")]
+    assert message_hash(odd) == message_hash(_as_logged(odd, value))
+    if changing:
+        [change] = [e.data for e in seam if e.kind == "changed"]
+        assert change["added"] == [
+            {
+                "id": odd.id,
+                "hash": message_hash(odd),
+                "index": first.input.index(odd),
+            }
+        ]
 
 
 @pytest.mark.anyio
