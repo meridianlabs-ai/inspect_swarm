@@ -219,8 +219,9 @@ def _logged_output(output: ModelOutput) -> bool:
 _MAX_OUTPUT_DEPTH = MAX_TOOL_CALL_ARGUMENTS_DEPTH + 20
 
 
-# Whether `value` is JSON data: dicts with string keys, lists, valid UTF-8 text, numbers,
-# booleans and None, nested no deeper than `_MAX_OUTPUT_DEPTH`, counting it as `depth`.
+# Whether `value` is JSON data: dicts with string keys, lists or tuples (as a citation's
+# range is), valid UTF-8 text, numbers, booleans and None, nested no deeper than
+# `_MAX_OUTPUT_DEPTH`, counting it as `depth`.
 def _json_data(value: object, depth: int) -> bool:
     if value is None or isinstance(value, bool | int | float):
         return True
@@ -237,7 +238,7 @@ def _json_data(value: object, depth: int) -> bool:
             isinstance(k, str) and _json_data(k, depth) and _json_data(v, depth + 1)
             for k, v in cast(dict[object, object], value).items()
         )
-    if isinstance(value, list):
+    if isinstance(value, list | tuple):
         return all(_json_data(v, depth + 1) for v in cast(list[object], value))
     return False
 

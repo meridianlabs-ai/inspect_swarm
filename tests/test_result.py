@@ -16,7 +16,13 @@ from inspect_ai.agent import run as run_agent
 from inspect_ai.dataset import Sample
 from inspect_ai.event import InfoEvent
 from inspect_ai.log import read_eval_log
-from inspect_ai.model import ChatMessageUser, Model, ModelOutput
+from inspect_ai.model import (
+    ChatMessageUser,
+    ContentText,
+    Model,
+    ModelOutput,
+    UrlCitation,
+)
 from inspect_ai.util import store, token_limit
 
 from inspect_swarm import (
@@ -628,6 +634,22 @@ def test_an_output_too_deep_for_a_json_log_is_left_out(tmp_path: Path) -> None:
     record = swarm_result(samples[0])
     assert record is not None
     _assert_left_out(record)
+
+
+@pytest.mark.anyio
+async def test_an_output_with_a_cited_range_is_kept() -> None:
+    citation = UrlCitation(url="https://example.com", cited_text=(0, 2))
+
+    def cited() -> ModelOutput:
+        return ModelOutput.from_content(
+            "mockllm", [ContentText(text="41", citations=[citation])]
+        )
+
+    stop = await run_swarm(_plain_then(cited, "result_test_cited_range"))
+    _, kept = stop.record.members
+    assert kept.left_out == [] and kept.output is not None
+    [content] = kept.output.message.content
+    assert isinstance(content, ContentText) and content.citations == [citation]
 
 
 # A swarm whose plain member's submission comes first, so that it is the answer, and
