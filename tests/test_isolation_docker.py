@@ -42,7 +42,7 @@ services:
     network_mode: none
     tmpfs:
       - /scratch:mode=755
-"""
+{extra}"""
 
 Step = tuple[str, str]
 """A member's step: the tool and its input. `bash`, `python`, `session` (`bash_session()`), `team` (`bash_session(instance="team")`), `root` (`bash(user="root")`) or `edit` (`text_editor()` creating the file)."""
@@ -143,10 +143,12 @@ def case_solver() -> Solver:
     return solve
 
 
-def _eval(tmp_path: Path, cases: dict[str, Case]) -> dict[str, EvalSample]:
+def _eval(
+    tmp_path: Path, cases: dict[str, Case], compose_extra: str = ""
+) -> dict[str, EvalSample]:
     _CASES.update(cases)
     compose = tmp_path / "compose.yaml"
-    compose.write_text(_COMPOSE.format(context=_IMAGE))
+    compose.write_text(_COMPOSE.format(context=_IMAGE, extra=compose_extra))
     [log] = eval(
         Task(
             dataset=[
@@ -232,6 +234,7 @@ def test_members_cannot_reach_each_others_homes_and_share_the_shares(
 ) -> None:
     writer: list[Step] = [
         ("bash", "echo secret > ~/secret && mkdir /shared/d && echo one > /shared/d/f"),
+        ("bash", "touch /shared/top /shared/nested/n"),
     ]
     peer: list[Step] = [
         ("bash", "cat /scratch/w-1/secret"),
@@ -241,17 +244,23 @@ def test_members_cannot_reach_each_others_homes_and_share_the_shares(
         ("bash", "cat /data/existing"),
         ("bash", "echo x >> /data/existing"),
         ("bash", "touch /data/new"),
+        (
+            "bash",
+            "rm /shared/top && mv /shared/nested/n /shared/nested/m && ls /shared/nested",
+        ),
     ]
     cases = {
         peers: Case(
             runs=[Run({**_RW_RO, "peers": peers}, {"w-1": writer, "w-2": peer})],
-            setup=_DATA,
+            # sticky directories, which setup must make plain so that members can
+            # delete and rename each other's files
+            setup=f"{_DATA} && mkdir -p /shared/nested && chmod 1777 /shared /shared/nested",
         )
         for peers in ("none", "read")
     }
     _eval(tmp_path, cases)
     for peers, case in cases.items():
-        read, write, rename, share, data, append, create = case.results["w-2"]
+        read, write, rename, share, data, append, create, move = case.results["w-2"]
         if peers == "read":
             assert _ok(read) == "secret"
         else:
@@ -260,6 +269,7 @@ def test_members_cannot_reach_each_others_homes_and_share_the_shares(
             _refused(result)
         assert _ok(share) == "one\ntwo"
         assert _ok(data) == "data"
+        assert _ok(move) == "m"
 
 
 @pytest.mark.slow
@@ -348,6 +358,11 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             setup="rm /usr/bin/setfacl",
             error=f"{refused}users isolation needs setfacl and getfacl in the sandbox for shared directories (package acl)",
         ),
+        "unreadable-ro-share": Case(
+            runs=[Run({"shared": [{"path": "/inputs/data", "access": "ro"}]}, idle)],
+            setup="mkdir -m 700 /inputs && mkdir /inputs/data && echo x > /inputs/data/f",
+            error="users isolation: the self-test failed in sandbox 'default' as swarm-w-",
+        ),
         "sudo": Case(
             runs=[Run({"shared": []}, idle)],
             setup="echo 'ALL ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/all && chmod 0440 /etc/sudoers.d/all",
@@ -358,6 +373,31 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
     sudo = samples["sudo"].error
     assert sudo is not None
     assert "the member can become root with sudo" in sudo.message
+    unreadable = samples["unreadable-ro-share"].error
+    assert unreadable is not None
+    assert (
+        "the member cannot read all of the shared directory /inputs/data: find: "
+        in unreadable.message
+    )
+
+
+@pytest.mark.slow
+def test_an_incomplete_id_scan_is_refused(tmp_path: Path) -> None:
+    # without these capabilities root cannot enter a directory another user keeps
+    # private, so the scan cannot see the id of the file in it
+    cases = {
+        "hidden": Case(
+            runs=[Run({"shared": []}, {"w-1": []})],
+            setup="mkdir /opt/hidden && touch /opt/hidden/f && chown 61000 /opt/hidden/f && chown 1000 /opt/hidden && chmod 700 /opt/hidden",
+            # the first unreadable directory may be the image's own, such as apt's
+            error="users isolation could not set up sandbox 'default': users isolation could not scan all of / for the user ids its files take, so it cannot choose ids that own nothing: find: ",
+        )
+    }
+    _eval(
+        tmp_path,
+        cases,
+        compose_extra="    cap_drop:\n      - DAC_OVERRIDE\n      - DAC_READ_SEARCH\n",
+    )
 
 
 @pytest.mark.slow

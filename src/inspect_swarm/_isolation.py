@@ -270,7 +270,8 @@ _LAST_ID = 61999
 # user's uid, so that a later swarm run in the sample accepts them
 _RECORD_KEY = "inspect_swarm:isolation"
 
-# Refusals in the scripts below exit with this status and a message on stderr.
+# Refusals in the scripts below exit with this status and a message on stderr, as
+# their last line.
 _REFUSED = 3
 
 _PRELUDE = r"""
@@ -298,7 +299,10 @@ awk -F: '$1 ~ /^swarm-/ { print "username", $1 }' /etc/passwd
 awk -F: '{ print "id", $3 }' /etc/passwd /etc/group
 for root in "$@"; do
   [ -d "$root" ] || continue
-  find -P "$root" -xdev \( \( -uid +$((lo - 1)) -uid -$((hi + 1)) \) -o \( -gid +$((lo - 1)) -gid -$((hi + 1)) \) \) -printf 'id %U\nid %G\n' 2>/dev/null
+  # the ids go to stdout, the traversal's errors to $errors: an incomplete scan could
+  # miss an id a file takes
+  { errors=$(find -P "$root" -xdev \( \( -uid +$((lo - 1)) -uid -$((hi + 1)) \) -o \( -gid +$((lo - 1)) -gid -$((hi + 1)) \) \) -printf 'id %U\nid %G\n' 2>&1 1>&3); } 3>&1 \
+    || fail "users isolation could not scan all of $root for the user ids its files take, so it cannot choose ids that own nothing: $(printf '%s' "$errors" | head -n 1)"
 done
 exit 0
 """
@@ -395,7 +399,9 @@ rw_share() {
   chown -h 0 "$s" || fail "users isolation could not change the owner of $s"
   find -P "$s" -xdev -exec chgrp -h "$group" {} + || fail "users isolation could not change the group of the files in $s"
   find -P "$s" -xdev ! -type l -exec chmod g+rwX {} + || fail "users isolation could not change the modes of the files in $s"
-  find -P "$s" -xdev -type d -exec chmod g+s {} + || fail "users isolation could not change the modes of the directories in $s"
+  # setgid so that new files take the group; not sticky, so that every member can
+  # rename and delete every member's files
+  find -P "$s" -xdev -type d -exec chmod g+s,-t {} + || fail "users isolation could not change the modes of the directories in $s"
   find -P "$s" -xdev ! -type l -exec setfacl -P -m "g:$group:rwX,m:rwX" {} + || fail "users isolation could not set ACLs on the files in $s; its filesystem may not support them"
   find -P "$s" -xdev -type d -exec setfacl -P -d -m "g:$group:rwX,m:rwX" {} + || fail "users isolation could not set default ACLs on the directories in $s; its filesystem may not support them"
   if command -v git >/dev/null 2>&1; then
@@ -465,10 +471,15 @@ if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
 fi
 printf probe >"$home/$probe" || fail "the member could not write its home, $home"
 while [ $# -gt 0 ]; do
+  # every entry readable and every directory, the share's ancestors included, searchable
+  unreadable=$(find -P "$2" -xdev ! -type l \( ! -readable -o -type d ! -executable \) -printf '%p\n' -quit 2>&1) \
+    || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$unreadable" | head -n 1)"
+  [ -z "$unreadable" ] || fail "the member cannot read $unreadable in the shared directory $2"
   if [ "$1" = rw ]; then
     printf probe >"$2/$probe" || fail "the member could not write the shared directory $2"
   else
-    w=$(find -P "$2" -xdev -writable -print -quit 2>/dev/null)
+    w=$(find -P "$2" -xdev -writable -print -quit 2>&1) \
+      || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$w" | head -n 1)"
     [ -z "$w" ] || fail "the member can write $w in the read-only shared directory $2"
     if (: >"$2/$probe") 2>/dev/null; then
       rm -f -- "$2/$probe"
@@ -501,7 +512,9 @@ if mv -- "$home" "$home.swarm-probe" 2>/dev/null; then
   fail "a peer could rename $home"
 fi
 for s in "$@"; do
-  (printf x >>"$s/${file##*/}") 2>/dev/null || fail "a member could not change a file another member created in the shared directory $s; its filesystem may not keep ACLs"
+  f="$s/${file##*/}"
+  (printf x >>"$f") 2>/dev/null || fail "a member could not change a file another member created in the shared directory $s; its filesystem may not keep ACLs"
+  { mv -- "$f" "$f.moved" && mv -- "$f.moved" "$f"; } 2>/dev/null || fail "a member could not rename a file another member created in the shared directory $s"
 done
 """
 )
@@ -627,7 +640,12 @@ async def _self_test(
     rw = [share.path for share in isolation.shared if share.access == "rw"]
     files = [
         *(f"{i.home}/{probe}-{i.user}" for i in identities),
-        *(f"{path}/{probe}-{i.user}" for path in rw for i in identities),
+        *(
+            f"{path}/{probe}-{i.user}{moved}"
+            for path in rw
+            for i in identities
+            for moved in ("", ".moved")
+        ),
     ]
     try:
         await _check_members(env, env_name, isolation, identities, probe, shares, rw)
