@@ -933,15 +933,6 @@ class _SharedMemoryState:
         return _status(len(files), self._labels(loop, files, listed))
 
 
-# The record name of the built-in board among a run's open channel states, by its
-# state's type rather than its name, which a custom channel may take; None without one.
-def builtin_board(states: Mapping[str, ChannelState]) -> str | None:
-    return next(
-        (name for name, s in states.items() if isinstance(s, _SharedMemoryState)),
-        None,
-    )
-
-
 def _by_others(f: _BoardFile, loop: str | None) -> tuple[int, str | None, str | None]:
     # the latest version of a file written by another loop than `loop`, its writer and
     # its record
