@@ -107,11 +107,12 @@ class SwarmMetrics(BaseModel):
     longest_member_steps: int
     # critical path, the dependency-linked definition: the longest chain of steps
     # (completed model calls, cache replays included) ending at the answering member's
-    # end, linked across members where a read or a swarm_wait result showed a write of
-    # the built-in board, or a wait named a member's end. Not a bound on causal depth
-    # either way; see docs/analysis.qmd, "The critical path". None with no answer, when
-    # the answering member has no recorded end, when the evidence is inconsistent (with
-    # a warning), for a resumed sample, and in metrics written before this field.
+    # end, linked across members where a channel's result showed another member's
+    # commit, as the channel reports it, or a wait named a member's end. Not a bound on
+    # causal depth either way; see docs/analysis.qmd, "The critical path". None with no
+    # answer, when the answering member has no recorded end, when the evidence names a
+    # record no recorded commit made (with a warning), for a resumed sample, and in
+    # metrics written before this field.
     critical_steps_to_answer: int | None = None
 
 
