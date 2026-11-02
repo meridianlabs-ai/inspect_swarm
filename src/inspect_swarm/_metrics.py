@@ -47,7 +47,8 @@ class MemberMetrics(BaseModel):
     running_time: float | None
     # harness validity: the longest run of consecutive tool calls in the member's spans
     # with the same function and arguments. A signal, with no threshold. None for a
-    # bridged member, whose tool calls leave no tool events.
+    # bridged member: the CLI's own tool calls are not recorded, only its bridged host
+    # tool calls.
     longest_identical_tool_run: int | None
     # gate checks (`GateChecks`): the in-loop checks of the member's own submissions,
     # those that passed, and the swarm time of the first that passed. Passes assume

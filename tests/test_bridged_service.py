@@ -259,6 +259,14 @@ _ADD_MESSAGES = 'cannot be used: the swarm has a messages channel, which cli\'s 
             _NO_BOARD,
         ),
         (["shared_memory"], ["filesystem"], "swarm_wait", {}, _NO_BOARD),
+        # a wait on messages alone takes no board filter, which nothing would check
+        (
+            ["messages", "shared_memory"],
+            ["messages"],
+            "swarm_wait",
+            {"path": "/shared_memory/x", "timeout": 1},
+            "The swarm has no shared_memory channel, so swarm_wait takes no path or file_id; call it without them to wait for messages.",
+        ),
         # a board-only bridge beside the messages channel is refused: peers could send
         # to it, and it could never read their messages
         (

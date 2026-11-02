@@ -6,7 +6,7 @@ from inspect_ai.tool import Tool, ToolDef, ToolError
 
 from .._channel._channel import ToolDeclaration
 from .._channel._params import check_bound
-from .._channel.messages import MessagesState
+from .._channel.messages import builtin_messages
 from .._channel.messages import declarations as messages_declarations
 from .._channel.shared_memory import builtin_board
 from .._channel.shared_memory import declarations as board_declarations
@@ -99,6 +99,14 @@ def _wait(channels: Sequence[str], max_wait: int) -> Tool:
             raise ToolError(
                 f"The swarm has no {' or '.join(channels)} channel, so swarm_wait cannot be used."
             )
+        # the filters are the shared memory's, which would check them; without it they
+        # would be ignored
+        if (path is not None or file_id is not None) and _state(
+            bus, "shared_memory"
+        ) not in states:
+            raise ToolError(
+                "The swarm has no shared_memory channel, so swarm_wait takes no path or file_id; call it without them to wait for messages."
+            )
         token = current_via.set("bridge")
         try:
             return await bus.wait(path, file_id, timeout, states, max_wait)
@@ -140,6 +148,4 @@ def _bus(tool: str, channels: Sequence[str]) -> Bus:
 def _state(bus: Bus, channel: str) -> str | None:
     if channel == "shared_memory":
         return builtin_board(bus.states)
-    return next(
-        (name for name, s in bus.states.items() if isinstance(s, MessagesState)), None
-    )
+    return builtin_messages(bus.states)
