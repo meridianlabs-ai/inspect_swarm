@@ -19,6 +19,8 @@ from inspect_ai.log import read_eval_log
 from inspect_ai.model import (
     ChatMessageUser,
     ContentText,
+    Logprob,
+    Logprobs,
     Model,
     ModelOutput,
     UrlCitation,
@@ -602,6 +604,10 @@ def _nested(depth: int) -> list[Any]:
             id="non-string-key",
         ),
         pytest.param(lambda: _with_metadata(_cycle()), id="cycle"),
+        # JSON turns it into null outside a float field
+        pytest.param(
+            lambda: _with_metadata({"value": float("inf")}), id="infinity-in-metadata"
+        ),
         # text that is not valid UTF-8 in a dict's key, which JSON would replace
         pytest.param(
             lambda: _tool_call_output({"bad \ud800 key": "value"}),
@@ -636,20 +642,60 @@ def test_an_output_too_deep_for_a_json_log_is_left_out(tmp_path: Path) -> None:
     _assert_left_out(record)
 
 
-@pytest.mark.anyio
-async def test_an_output_with_a_cited_range_is_kept() -> None:
+def _cited_range() -> ModelOutput:
     citation = UrlCitation(url="https://example.com", cited_text=(0, 2))
+    output = ModelOutput.from_content(
+        "mockllm", [ContentText(text="41", citations=[citation])]
+    )
+    output.message.id = "odd"
+    return output
 
-    def cited() -> ModelOutput:
-        return ModelOutput.from_content(
-            "mockllm", [ContentText(text="41", citations=[citation])]
-        )
 
-    stop = await run_swarm(_plain_then(cited, "result_test_cited_range"))
-    _, kept = stop.record.members
-    assert kept.left_out == [] and kept.output is not None
-    [content] = kept.output.message.content
-    assert isinstance(content, ContentText) and content.citations == [citation]
+def _infinite_logprob() -> ModelOutput:
+    output = ModelOutput.from_content("mockllm", "41")
+    output.message.id = "odd"
+    output.choices[0].logprobs = Logprobs(
+        content=[Logprob(token="41", logprob=float("-inf"))]
+    )
+    return output
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "kept",
+    [
+        # a citation's range is a tuple, which JSON holds as a list
+        pytest.param(_cited_range, id="cited-range"),
+        # a float field keeps an infinite number in JSON
+        pytest.param(_infinite_logprob, id="infinite-logprob"),
+    ],
+)
+async def test_an_output_whose_json_reads_back_whole_is_kept(
+    kept: Callable[[], ModelOutput],
+) -> None:
+    stop = await run_swarm(_plain_then(kept, "result_test_kept"))
+    _, odd = stop.record.members
+    assert odd.left_out == [] and odd.output == kept()
+
+
+def test_a_message_without_an_id_reads_back_without_one(tmp_path: Path) -> None:
+    def no_id() -> ModelOutput:
+        output = ModelOutput.from_content("mockllm", "41")
+        output.message.id = None
+        return output
+
+    task = Task(
+        dataset=[Sample(input="task")], solver=_plain_then(no_id, "result_test_no_id")
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    samples = read_eval_log(log.location).samples
+    assert samples is not None
+    # each read gives the same record, with no id made up for the message
+    for _ in range(2):
+        record = swarm_result(samples[0])
+        assert record is not None
+        _, odd = record.members
+        assert odd.output is not None and odd.output.message.id is None
 
 
 # A swarm whose plain member's submission comes first, so that it is the answer, and

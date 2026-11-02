@@ -1,9 +1,11 @@
 import json
+import math
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from typing import Any, Literal, TypeGuard, cast
 from uuid import uuid4
 
+from inspect_ai._util.constants import get_deserializing_context
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.event import Event, InfoEvent
 from inspect_ai.log import EvalSample, transcript
@@ -89,7 +91,7 @@ class MemberResult(BaseModel):
     """Swarm time when the verdict was taken; `None` without one."""
 
     left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8, and an output the record cannot hold as JSON, such as one with an object, bytes or a key that is not a string in its metadata, or one nested too deep. Empty when nothing was left out."""
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8, and an output the record cannot hold as JSON, such as one with an object, bytes, a key that is not a string or a NaN or infinite number in its metadata, or one nested too deep. Empty when nothing was left out."""
 
     # Validating a `ModelOutput` fills an empty completion from its message, both when
     # the record is made and when it is read; the record keeps the completion the
@@ -205,9 +207,13 @@ def _logged_member(m: MemberResult) -> MemberResult:
 # out like one the log would change.
 def _logged_output(output: ModelOutput) -> bool:
     try:
-        if not _json_data(output.model_dump(), 1):
+        raw = output.model_dump()
+        if not _json_data(raw, 1):
             return False
         data = output.model_dump(mode="json")
+        # the JSON form turns a non-finite number into None, except in a float field
+        if _non_finite(data) != _non_finite(raw):
+            return False
         return not _changed_by_logging({"members": [{"output": data}]})
     except Exception:
         return False
@@ -241,6 +247,17 @@ def _json_data(value: object, depth: int) -> bool:
     if isinstance(value, list | tuple):
         return all(_json_data(v, depth + 1) for v in cast(list[object], value))
     return False
+
+
+# How many NaN and infinite numbers `value` holds.
+def _non_finite(value: object) -> int:
+    if isinstance(value, float):
+        return 0 if math.isfinite(value) else 1
+    if isinstance(value, dict):
+        return sum(_non_finite(v) for v in cast(dict[object, object], value).values())
+    if isinstance(value, list | tuple):
+        return sum(_non_finite(v) for v in cast(list[object], value))
+    return 0
 
 
 # Removes the store's record id, so that a swarm that leaves no record never leaves an
@@ -418,7 +435,10 @@ def _read(
             f"{where}: the swarm's result record holds a string that reads as an attachment reference (attachment:// or tc://). Either the sample was read without its attachments, so read it, or the log being re-scored, with them (read_eval_log() without exclude_fields={{'attachments'}}), or the record's own text begins with such a prefix, which Inspect's attachment resolution cannot tell from a reference."
         )
     try:
-        return SwarmResultRecord.model_validate(data)
+        # as a log is read, so that a message keeps a missing id rather than gaining one
+        return SwarmResultRecord.model_validate(
+            data, context=get_deserializing_context()
+        )
     except ValidationError as ex:
         raise ValueError(
             f"{where}: the swarm's result record is not one this inspect_swarm can read: {ex}"
