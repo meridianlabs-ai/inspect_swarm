@@ -1,4 +1,5 @@
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -546,11 +547,12 @@ def test_model_text_a_log_would_change_is_left_out_of_its_member(
 
 
 @agent
-def returns(output: ModelOutput) -> Agent:
-    """Return `output` as the member's output, making no model call."""
+def returns(build: Callable[[], ModelOutput]) -> Agent:
+    """Return the output `build` gives as the member's output, making no model call."""
 
     async def execute(state: AgentState) -> AgentState:
-        state.output = output
+        # built here, so that the agent's logged arguments never hold it
+        state.output = build()
         return state
 
     return execute
@@ -560,37 +562,42 @@ def _tool_call_output(arguments: dict[str, Any]) -> ModelOutput:
     return ModelOutput.for_tool_call("mockllm", "submit", arguments)
 
 
-def _with_metadata(metadata: dict[str, Any], *, on_message: bool) -> ModelOutput:
+def _with_metadata(metadata: dict[str, Any]) -> ModelOutput:
     output = ModelOutput.from_content("mockllm", "41")
-    if on_message:
-        output.message.metadata = metadata
-    else:
-        output.metadata = metadata
+    output.metadata = metadata
     return output
+
+
+def _cycle() -> dict[str, Any]:
+    cycle: dict[str, Any] = {}
+    cycle["self"] = cycle
+    return cycle
+
+
+def _nested(depth: int) -> list[Any]:
+    value: list[Any] = []
+    for _ in range(depth):
+        value = [value]
+    return value
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "odd",
     [
-        # a value the record's JSON cannot represent
+        # values the record's JSON cannot represent
         pytest.param(
-            lambda: _with_metadata({"diagnostic": object()}, on_message=False),
-            id="object-in-metadata",
+            lambda: _with_metadata({"diagnostic": object()}), id="object-in-metadata"
         ),
-        pytest.param(
-            lambda: _tool_call_output({"answer": object()}),
-            id="object-in-tool-arguments",
-        ),
+        pytest.param(lambda: _with_metadata({"value": b"\xff"}), id="bytes"),
+        pytest.param(lambda: _with_metadata(_cycle()), id="cycle"),
         # text that is not valid UTF-8 in a dict's key, which JSON would replace
         pytest.param(
             lambda: _tool_call_output({"bad \ud800 key": "value"}),
             id="surrogate-in-tool-argument-key",
         ),
-        pytest.param(
-            lambda: _with_metadata({"bad \ud800 key": "value"}, on_message=True),
-            id="surrogate-in-message-metadata-key",
-        ),
+        # fits on its own, but not at its depth in the record
+        pytest.param(lambda: _with_metadata({"value": _nested(195)}), id="too-deep"),
     ],
 )
 async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> None:
@@ -604,7 +611,7 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
 
     stop = await run_swarm(
         swarm(
-            [member(answers("42"), name="plain"), member(returns(odd()), name="odd")],
+            [member(answers("42"), name="plain"), member(returns(odd), name="odd")],
             controller=controller(run, "result_test_left_out"),
             channels=[],
         )
@@ -614,6 +621,42 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
     assert plain.left_out == [] and plain.output is not None
     assert plain.output.completion == "42"
     assert (left.status, left.output, left.left_out) == ("submitted", None, ["output"])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "result,match",
+    [
+        pytest.param(
+            answer_result(answer_key=lambda text: 42),  # pyright: ignore[reportArgumentType]
+            "answer_key must return a str or None, got a int",
+            id="answer-key-not-a-str",
+        ),
+        pytest.param(
+            answer_result(verifier=lambda answer, metadata: _verdict(value="high")),
+            "a Verdict whose passed is a bool, value a float or None",
+            id="verdict-value-not-a-float",
+        ),
+    ],
+)
+async def test_a_mistyped_contract_result_fails_the_sample_with_its_record(
+    result: ResultSpec, match: str
+) -> None:
+    async with sample():
+        with pytest.raises(TypeError, match=match):
+            await run_agent(swarm(answers("42"), channels=[], result=result), "task")
+        record = _transcript_result(store())
+        ledger = store().get(LEDGER_KEY)
+    # the member's end, its output, the record and the accounting are kept
+    assert record is not None and ledger is not None
+    [m] = record.members
+    assert (m.state, m.status) == ("ended", "submitted")
+    assert m.output is not None and m.output.completion == "42"
+    assert (m.answer_key, m.verdict) == (None, None)
+
+
+async def _verdict(value: Any) -> Verdict:
+    return Verdict(passed=True, value=value)
 
 
 @pytest.mark.anyio

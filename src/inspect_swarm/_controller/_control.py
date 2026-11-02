@@ -776,7 +776,13 @@ class SwarmRun:
             # task code, after the member's end is recorded and its output settled, so
             # that an error, which fails the sample, leaves the answer and the record
             # agreeing
-            m.answer_key = key(m.agent_state.output.completion)
+            # task code, so checked as returned rather than as annotated
+            answer_key = cast(object, key(m.agent_state.output.completion))
+            if answer_key is not None and not isinstance(answer_key, str):
+                raise TypeError(
+                    f"The result contract's answer_key must return a str or None, got a {type(answer_key).__name__} for member {m.name!r}."
+                )
+            m.answer_key = answer_key
         if (
             m.submitted
             and self._verifier() is not None
@@ -828,6 +834,21 @@ class SwarmRun:
         if not isinstance(verdict, Verdict):
             raise TypeError(
                 f"The result contract's verifier must return a Verdict, got a {type(verdict).__name__} for member {m.name!r}."
+            )
+        # task code, so checked as returned rather than as annotated
+        passed = cast(object, verdict.passed)
+        value = cast(object, verdict.value)
+        explanation = cast(object, verdict.explanation)
+        if not (
+            isinstance(passed, bool)
+            and (
+                value is None
+                or (isinstance(value, int | float) and not isinstance(value, bool))
+            )
+            and (explanation is None or isinstance(explanation, str))
+        ):
+            raise TypeError(
+                f"The result contract's verifier must return a Verdict whose passed is a bool, value a float or None and explanation a str or None, got {verdict!r} for member {m.name!r}."
             )
         m.verified = verdict
         m.verified_time = anyio.current_time() - self._start

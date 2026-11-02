@@ -16,7 +16,6 @@ from inspect_ai.model import ModelOutput
 from inspect_ai.solver import TaskState
 from inspect_ai.util import Store, store
 from pydantic import BaseModel, JsonValue, ValidationError
-from pydantic_core import PydanticSerializationError
 
 from ._result import ResultKind, Verdict
 
@@ -83,7 +82,7 @@ class MemberResult(BaseModel):
     """Swarm time when the verdict was taken; `None` without one."""
 
     left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8, and an output with a value the record cannot hold as JSON, such as an object in its metadata. Empty when nothing was left out."""
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8, and an output the record cannot hold as JSON, such as one with an object or bytes in its metadata, or one nested too deep. Empty when nothing was left out."""
 
 
 class FinalRecord(BaseModel):
@@ -172,17 +171,19 @@ def _logged_member(m: MemberResult) -> MemberResult:
     return m.model_copy(update={**update, "left_out": left_out})
 
 
-# Whether an output reads back from the log as it is. Its JSON form cannot hold a value
-# pydantic cannot represent, such as an object in its metadata, and replaces text that
-# is not valid UTF-8 in a dict's keys, so its own strings are checked first.
+# Whether an output reads back from the log as it is, judged where the record holds it,
+# so that nesting too deep for the record fails here. Its JSON form replaces text that
+# is not valid UTF-8 in a dict's keys, so its own strings are checked first. An output
+# none of this can take (an object or bytes in its metadata, a cycle) raises, and is
+# left out like one the log would change.
 def _logged_output(output: ModelOutput) -> bool:
-    if not _valid_text(output.model_dump()):
-        return False
     try:
+        if not _valid_text(output.model_dump()):
+            return False
         data = output.model_dump(mode="json")
-    except PydanticSerializationError:
+        return not _changed_by_logging({"members": [{"output": data}]})
+    except Exception:
         return False
-    return not _changed_by_logging(data)
 
 
 # Whether every string in `value`, dict keys included, is valid UTF-8.
