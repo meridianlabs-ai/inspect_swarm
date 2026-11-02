@@ -273,22 +273,18 @@ def test_members_cannot_reach_each_others_homes_and_share_the_shares(
 
 
 @pytest.mark.slow
-def test_acl_entries_and_files_already_in_a_share_are_kept_out_of_the_way(
+def test_files_already_in_a_share_are_kept_and_members_edit_them(
     tmp_path: Path,
 ) -> None:
-    # read-only named-user entries for every id setup might choose, on a file and as
-    # a default on a directory, which would beat the group's grant for that uid; and
-    # files at the names the self-test's probes once had
-    ids = "$(seq 61002 61020)"
+    # files at the names the self-test's probes once had, which it must not touch; and
+    # a directory that was there before setup, in which a member creates and edits a file
     sentinels = "/shared/.swarm-probe-swarm-w-1 /shared/.swarm-probe-swarm-w-1.moved"
     setup = (
-        f"mkdir -p /shared/inherited && touch /shared/existing"
-        f" && for i in {ids}; do setfacl -m u:$i:r-- /shared/existing"
-        f" && setfacl -d -m u:$i:r-- /shared/inherited; done"
+        "mkdir -p /shared/inherited && touch /shared/existing"
         f" && for f in {sentinels}; do echo sentinel > $f; done"
     )
     cases = {
-        "acl": Case(
+        "existing": Case(
             runs=[
                 Run(
                     {"shared": [{"path": "/shared", "access": "rw"}]},
@@ -296,13 +292,13 @@ def test_acl_entries_and_files_already_in_a_share_are_kept_out_of_the_way(
                         "w-1": [
                             (
                                 "bash",
-                                "echo a >> /shared/existing && echo b > /shared/inherited/new",
+                                "echo a >> /shared/existing && echo b > /shared/inherited/new && echo c >> /shared/inherited/new",
                             )
                         ],
                         "w-2": [
                             (
                                 "bash",
-                                "echo c >> /shared/existing && echo d >> /shared/inherited/new && cat /shared/existing /shared/inherited/new",
+                                "echo d >> /shared/existing && echo e >> /shared/inherited/new && cat /shared/existing /shared/inherited/new",
                             ),
                             ("bash", f"cat {sentinels} && ls -a /shared"),
                         ],
@@ -312,17 +308,49 @@ def test_acl_entries_and_files_already_in_a_share_are_kept_out_of_the_way(
             setup=setup,
         )
     }
-    samples = _eval(tmp_path, cases)
-    edits, listing = cases["acl"].results["w-2"]
-    assert _ok(edits).split() == ["a", "c", "b", "d"]
+    _eval(tmp_path, cases)
+    edits, listing = cases["existing"].results["w-2"]
+    assert _ok(edits).split() == ["a", "d", "b", "c", "e"]
     lines = _ok(listing).splitlines()
     assert lines[:2] == ["sentinel", "sentinel"]
     assert [n for n in lines[2:] if n.startswith(".swarm-probe")] == [
         ".swarm-probe-swarm-w-1",
         ".swarm-probe-swarm-w-1.moved",
     ]
-    record = samples["acl"].store["inspect_swarm:isolation"]["default"]
-    assert all(uid > 61020 for uid in [record["gid"], *record["users"].values()])
+
+
+@pytest.mark.slow
+def test_mounts_inside_shares_and_under_the_homes_parent_are_refused(
+    tmp_path: Path,
+) -> None:
+    # setup would not reach the files of a mount inside a share or under the homes'
+    # parent, which -xdev keeps it on one filesystem for; a mount at a share's or the
+    # homes' parent's own path is supported, as /scratch is in every test here
+    idle: dict[str, list[Step]] = {"w-1": [], "w-2": []}
+    refused = "users isolation could not set up sandbox 'default': "
+    cases = {
+        "ro-share": Case(
+            runs=[
+                Run(
+                    {
+                        "home": "/home/{member}",
+                        "shared": [{"path": "/data", "access": "ro"}],
+                    },
+                    idle,
+                )
+            ],
+            error=f"{refused}users isolation does not support a mount inside the shared directory /data, as at /data/nested",
+        ),
+        "homes": Case(
+            runs=[Run({"shared": []}, idle)],
+            error=f"{refused}users isolation does not support a mount under the members' homes' parent /scratch, as at /scratch/other",
+        ),
+    }
+    _eval(
+        tmp_path,
+        cases,
+        compose_extra="      - /data/nested\n      - /scratch/other\n",
+    )
 
 
 @pytest.mark.slow
@@ -410,6 +438,26 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
             setup="rm /usr/bin/setfacl",
             error=f"{refused}users isolation needs setfacl and getfacl in the sandbox for shared directories (package acl)",
+        ),
+        "acl-on-homes-parent": Case(
+            runs=[Run({"home": "/home/{member}", "shared": []}, idle)],
+            setup="setfacl -d -m u:61005:rwx /home",
+            error=f"{refused}users isolation does not support ACLs on the members' homes' parent /home, which homes would inherit",
+        ),
+        "named-acl-on-a-file": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir /shared && touch /shared/existing && setfacl -m u:61003:r-- /shared/existing",
+            error=f"{refused}users isolation does not support ACL entries it did not set in a shared directory: /shared/existing: user:61003:r--",
+        ),
+        "named-default-acl": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir -p /shared/inherited && setfacl -d -m u:61003:r-- /shared/inherited",
+            error="/shared/inherited: default:user:61003:r--",
+        ),
+        "default-owner-acl": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir -p /shared/inherited && setfacl -d -m u::r-x /shared/inherited",
+            error=f"{refused}users isolation does not support ACL entries it did not set in a shared directory: /shared/inherited: default:user::r-x",
         ),
         "unreadable-ro-share": Case(
             runs=[Run({"shared": [{"path": "/inputs/data", "access": "ro"}]}, idle)],

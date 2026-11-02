@@ -76,7 +76,7 @@ def users(
 
     - The sandbox must let commands run as root and as other users: Docker, or Kubernetes with a root container. The `local` sandbox is refused.
     - The image needs `useradd` and `groupadd` (package `passwd`) and GNU `find`; with any share, also `setfacl` and `getfacl` (package `acl`), which the default Inspect image and `python:3.12-bookworm` lack.
-    - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. Homes must not exist yet.
+    - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, and mounts inside a share or under the homes' parent are refused.
     - Members are not root: they cannot install system packages or write system directories. Tasks that need root while the members work are unsuitable.
     - Custom tools that call `sandbox().exec()` directly run as the sandbox's default user, usually root, unless they pass the member's user themselves. `computer()`, `web_browser()` and `skill()` raise inside the scope, and so do tools built with another `user`.
     - Bridged members (inspect_swe agents) need inspect_ai and inspect_swe versions with bridge support for users isolation, which they do not have yet.
@@ -279,18 +279,19 @@ _PRELUDE = r"""
 fail() { printf '%s\n' "$*" >&2; exit 3; }
 """
 
-# Whether the image has what setup needs, which users and group exist, and which ids in
-# the window are taken, by a passwd or group entry or by the owner or group of a file
-# on any filesystem the homes, shares or world-writable directories are on, or by a
-# named entry in an access or default ACL in a rw share, which would take precedence
-# over the group's grant there.
-# $1 group, $2 first id, $3 last id, $4 1 when there are shares, then the roots, `--`,
-# and the rw shares.
+# Whether the image has what setup needs and a layout it supports, which users and group
+# exist, and which ids in the window are taken, by a passwd or group entry or by the
+# owner or group of a file on any filesystem the homes, shares or world-writable
+# directories are on. Setup does not reconcile permission state it did not make, so it
+# refuses ACL entries other than its own in a share or on the homes' parent, and a
+# mount inside a share or under the homes' parent, whose files it would not reach.
+# $1 group, $2 first id, $3 last id, $4 1 when there are shares, $5 the homes' parent,
+# then the roots, `--`, and the shares.
 _PROBE = (
     _PRELUDE
     + r"""
-group=$1 lo=$2 hi=$3 acl=$4
-shift 4
+group=$1 lo=$2 hi=$3 acl=$4 parent=$5
+shift 5
 command -v useradd >/dev/null 2>&1 || fail "users isolation needs useradd in the sandbox (package passwd)"
 command -v groupadd >/dev/null 2>&1 || fail "users isolation needs groupadd in the sandbox (package passwd)"
 command -v awk >/dev/null 2>&1 || fail "users isolation needs awk in the sandbox"
@@ -299,6 +300,61 @@ if [ "$acl" = 1 ]; then
   command -v setfacl >/dev/null 2>&1 && command -v getfacl >/dev/null 2>&1 || fail "users isolation needs setfacl and getfacl in the sandbox for shared directories (package acl)"
 fi
 awk -F: -v g="$group" '$1 == g { print "groupname", $3 }' /etc/group
+gid=$(awk -F: -v g="$group" '$1 == g { print $3 }' /etc/group)
+
+# a mount point strictly inside $1, as /proc/self/mountinfo writes it (\040 for a space)
+mount_inside() {
+  awk -v p="$1" '
+    function esc(s,  r, i, c) {
+      r = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\\") r = r "\\134"
+        else if (c == " ") r = r "\\040"
+        else if (c == "\t") r = r "\\011"
+        else r = r c
+      }
+      return r
+    }
+    BEGIN { p = esc(p); if (p != "/") p = p "/" }
+    index($5, p) == 1 && $5 != p { print $5; exit }
+  ' /proc/self/mountinfo
+}
+
+# the first ACL entry in getfacl's output (-n -p -E) that setup did not write: in an
+# access ACL, a named entry other than group $1's; in a default ACL, anything but
+# user::rwx, group $1 with rwx, mask::rwx and the group and other classes
+foreign_acl() {
+  awk -v g="$1" '
+    function finish() {
+      if (file != "" && defaults && !ours) { print file ": a default ACL setup did not write"; done = 1; exit }
+    }
+    /^# file: / { finish(); file = substr($0, 9); defaults = 0; ours = 0; next }
+    /^#/ || NF == 0 { next }
+    {
+      n = split($0, f, ":")
+      if (f[1] == "default") { d = 1; t = f[2]; q = f[3]; m = f[4] } else { d = 0; t = f[1]; q = f[2]; m = f[3] }
+      bad = 0
+      if (d) {
+        defaults = 1
+        if (t == "user") bad = (q != "" || m != "rwx")
+        else if (t == "group" && q != "") { if (g != "" && q == g && m == "rwx") ours = 1; else bad = 1 }
+        else if (t == "mask") bad = (m != "rwx")
+      } else if (q != "" && !(t == "group" && g != "" && q == g)) bad = 1
+      if (bad) { print file ": " $0; done = 1; exit }
+    }
+    END { if (!done) finish() }
+  '
+}
+
+[ -r /proc/self/mountinfo ] || fail "users isolation needs /proc/self/mountinfo to check for mounts inside its directories"
+if [ -e "$parent" ]; then
+  m=$(mount_inside "$parent")
+  [ -z "$m" ] || fail "users isolation does not support a mount under the members' homes' parent $parent, as at $m"
+  case $(ls -ld -- "$parent") in
+    ??????????+*) fail "users isolation does not support ACLs on the members' homes' parent $parent, which homes would inherit; remove them (setfacl -b)" ;;
+  esac
+fi
 awk -F: '$1 ~ /^swarm-/ { print "username", $1 }' /etc/passwd
 awk -F: '{ print "id", $3 }' /etc/passwd /etc/group
 while [ "$1" != -- ]; do
@@ -313,9 +369,12 @@ done
 shift
 for share in "$@"; do
   [ -d "$share" ] || continue
-  acls=$(getfacl -R -P -n -p --skip-base -- "$share" 2>&1) \
+  m=$(mount_inside "$share")
+  [ -z "$m" ] || fail "users isolation does not support a mount inside the shared directory $share, as at $m"
+  acls=$(getfacl -R -P -n -p -E --skip-base -- "$share" 2>&1) \
     || fail "users isolation could not read the ACLs in $share: $(printf '%s' "$acls" | grep -v '^#' | head -n 1)"
-  printf '%s\n' "$acls" | sed -nE 's/^(default:)?(user|group):([0-9]+):.*/id \3/p'
+  bad=$(printf '%s\n' "$acls" | foreign_acl "$gid")
+  [ -z "$bad" ] || fail "users isolation does not support ACL entries it did not set in a shared directory: $bad; remove them (setfacl -b)"
 done
 exit 0
 """
@@ -578,9 +637,10 @@ async def setup_isolation(
         str(_FIRST_ID),
         str(_LAST_ID),
         "1" if isolation.shared else "0",
+        parent,
         *dict.fromkeys(roots),
         "--",
-        *(share.path for share in isolation.shared if share.access == "rw"),
+        *(share.path for share in isolation.shared),
     )
     taken: set[int] = set(recorded_users.values())
     if recorded_gid is not None:
