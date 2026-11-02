@@ -1,13 +1,12 @@
 import os
 from collections.abc import Callable
-from typing import Any
 
 import anyio
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent, ModelEvent, ToolEvent
+from inspect_ai.event import CommunicationEvent, ModelEvent, ToolEvent
 from inspect_ai.log import EvalSample, transcript
 from inspect_ai.model import ChatMessageTool, ChatMessageUser
 from inspect_ai.tool import ToolDef
@@ -20,6 +19,8 @@ from inspect_swarm import (
     swarm_bridged_tools,
     swarm_tools,
 )
+
+from .swarm_runtime import data
 
 inspect_swe = pytest.importorskip("inspect_swe")
 
@@ -120,16 +121,20 @@ def test_a_cli_member_messages_a_native_member(cli: str) -> None:
     [sample] = log.samples
 
     # the bus bound the sender, through the bridge
-    records = [s["record"] for s in _evidence(sample, "sent") if s["member"] == cli]
-    assert {(r["via"], r["sender"]) for r in records} == {("bridge", cli)}
-    assert any(f"hello from {cli}" in r["payload"].lower() for r in records)
-    assert any(WORDS[cli] in r["payload"] for r in records)
-    reads = [r for r in _evidence(sample, "read") if r["member"] == cli]
-    assert reads and {r["via"] for r in reads} == {"bridge"}
+    sends = [e for e in _comm(sample, "sent") if e.agent == cli]
+    assert {
+        (data(e)["record"]["via"], e.send.record.sender) for e in sends if e.send
+    } == {("bridge", cli)}
+    payloads = [e.send.record.content or "" for e in sends if e.send]
+    assert any(f"hello from {cli}" in p.lower() for p in payloads)
+    assert any(WORDS[cli] in p for p in payloads)
+    reads = [e for e in _comm(sample, "read") if e.agent == cli]
+    assert reads and {data(e)["via"] for e in reads} == {"bridge"}
     # its wait outlasted the delay and returned the message, not an MCP timeout
-    [wait] = [w for w in _evidence(sample, "waited") if w["member"] == cli]
-    assert (wait["outcome"], wait["via"]) == ("news", "bridge")
-    assert wait["duration"] > 60
+    [waited] = [e for e in _comm(sample, "waited") if e.agent == cli]
+    assert waited.wait is not None
+    assert (waited.wait.outcome, data(waited)["via"]) == ("news", "bridge")
+    assert waited.wait.duration > 60
     assert any(
         "Call read_messages() to read them." in m.text
         for e in sample.events
@@ -155,12 +160,11 @@ def test_a_cli_member_messages_a_native_member(cli: str) -> None:
             assert TASK not in first.text
 
 
-def _evidence(sample: EvalSample, kind: str) -> list[dict[str, Any]]:
+def _comm(sample: EvalSample, kind: str) -> list[CommunicationEvent]:
     return [
-        e.data
+        e
         for e in sample.events
-        if isinstance(e, InfoEvent)
+        if isinstance(e, CommunicationEvent)
         and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-        and e.data.get("kind") == kind
+        and e.kind == kind
     ]

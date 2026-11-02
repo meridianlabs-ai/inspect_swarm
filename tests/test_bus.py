@@ -10,7 +10,12 @@ import anyio
 import pytest
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.agent import Agent, AgentState, agent, run
-from inspect_ai.event import InfoEvent, SpanBeginEvent
+from inspect_ai.event import (
+    CommunicationDelivery,
+    CommunicationEvent,
+    CommunicationRejection,
+    SpanBeginEvent,
+)
 from inspect_ai.log import EvalSample
 from inspect_ai.log._condense import condense_sample
 from inspect_ai.log._recorders.eval import _parse_sample_data
@@ -41,7 +46,7 @@ from inspect_swarm._bus._bus import Bus, Delivery, current_bus
 from inspect_swarm._bus._record import Draft, thaw_json
 from inspect_swarm._bus._storm import StormControls
 
-from .swarm_runtime import evidence, run_swarm, sample
+from .swarm_runtime import data, run_swarm, sample, send, swarm_events
 
 
 class _BoardState:
@@ -208,14 +213,8 @@ async def _send(
         return await bus.deliver(Draft(channel, "note", to, payload, op))
 
 
-def _comm(transcript: Transcript) -> list[dict[str, Any]]:
-    return [
-        e.data
-        for e in transcript.events
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "comm"
-    ]
+def _comm(transcript: Transcript) -> list[CommunicationEvent]:
+    return [e for e in transcript.events if isinstance(e, CommunicationEvent)]
 
 
 def _board(bus: Bus) -> _BoardState:
@@ -247,27 +246,35 @@ async def test_a_record_is_applied_once_with_its_evidence(
     assert (delivery.seq, delivery.notify) == (1, recipients)
     assert _board(bus).applied == [record]
     sent, delivered = _comm(transcript)
-    assert sent["kind"] == "sent"
-    assert sent["member"] == "w-1"
-    assert sent["record"]["to"] == list(to)
-    assert sent["record"]["recipients"] == recipients
-    assert sent["record"]["op"] == {"n": 1}
-    assert sent["rejected"] is None
-    assert delivered == {
-        "version": 1,
-        "type": "comm",
-        "kind": "delivered",
-        "channel": "board",
-        "member": "w-1",
-        "span_id": None,
-        "loop": None,
-        "nested": False,
-        "record": "b-1",
-        "recipients": recipients,
-        "seq": 1,
-        "notify": recipients,
-        "result": {"size": 1},
-    }
+    assert sent.kind == "sent"
+    assert sent.agent == "w-1"
+    assert send(sent).record.to == list(to)
+    assert send(sent).record.recipients == recipients
+    assert data(sent)["record"]["op"] == {"n": 1}
+    assert send(sent).rejected is None
+    assert (
+        delivered.kind,
+        delivered.source,
+        delivered.channel,
+        delivered.agent,
+        delivered.agent_span_id,
+        delivered.loop_span_id,
+        delivered.nested,
+        delivered.record_ids,
+        delivered.delivery,
+        delivered.data,
+    ) == (
+        "delivered",
+        "inspect_swarm",
+        "board",
+        "w-1",
+        None,
+        None,
+        False,
+        ["b-1"],
+        CommunicationDelivery(recipients=recipients, seq=1),
+        {"version": 1, "notify": recipients, "result": {"size": 1}},
+    )
 
 
 @pytest.mark.anyio
@@ -339,7 +346,9 @@ async def test_max_bytes_counts_utf8_bytes_of_the_payload(
         assert len(_board(bus).applied) == 1
     else:
         assert _board(bus).applied == []
-        assert sent["rejected"] == {"control": "max_bytes", "reason": error}
+        assert send(sent).rejected == CommunicationRejection(
+            control="max_bytes", reason=error
+        )
 
 
 @pytest.mark.anyio
@@ -360,8 +369,8 @@ async def test_the_rate_counts_each_senders_commits_in_a_sliding_window() -> Non
         # the window slides
         await anyio.sleep(0.6)
         await _send(bus)
-    rejected = [e["rejected"] for e in _comm(transcript) if e["kind"] == "sent"]
-    assert [r["control"] if r else None for r in rejected] == [
+    rejected = [send(e).rejected for e in _comm(transcript) if e.kind == "sent"]
+    assert [r.control if r else None for r in rejected] == [
         None,
         None,
         "rate",
@@ -392,7 +401,9 @@ async def test_a_payload_that_is_not_valid_text_is_refused_with_evidence() -> No
             await _send(bus, payload="a\ud800")
     assert _board(bus).applied == []
     [sent] = _comm(transcript)
-    assert sent["rejected"] == {"control": "payload", "reason": reason}
+    assert send(sent).rejected == CommunicationRejection(
+        control="payload", reason=reason
+    )
 
 
 @pytest.mark.anyio
@@ -406,7 +417,9 @@ async def test_a_sender_that_has_ended_is_refused_with_evidence() -> None:
             await _send(bus, to=("w-2", "w-3"))
     assert _board(bus).applied == []
     [sent] = _comm(transcript)
-    assert sent["rejected"] == {"control": "liveness", "reason": reason}
+    assert send(sent).rejected == CommunicationRejection(
+        control="liveness", reason=reason
+    )
 
 
 @pytest.mark.anyio
@@ -439,7 +452,7 @@ async def test_a_record_keeps_the_operation_data_it_was_sent_with() -> None:
     for record in (delivery.record, _board(bus).applied[0]):
         assert record.op is not None and thaw_json(record.op) == original
     sent, _ = _comm(transcript)
-    assert sent["record"]["op"] == original
+    assert data(sent)["record"]["op"] == original
 
 
 @pytest.mark.anyio
@@ -537,12 +550,9 @@ async def test_operation_data_commits_only_if_the_log_reads_it_back_as_sent(
         )
     )
     sent = [
-        e.data["record"]
+        data(e)["record"]
         for e in read.events
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("kind") == "sent"
-        and isinstance(e.data["record"], dict)
+        if isinstance(e, CommunicationEvent) and e.kind == "sent"
     ]
     if refusal is not None:
         assert sent == []
@@ -697,13 +707,15 @@ async def test_comm_evidence_names_the_members_span_and_the_record_the_loops(
     spans = {
         e.id: e.name for e in outcome.transcript.events if isinstance(e, SpanBeginEvent)
     }
-    [result] = evidence(outcome.transcript, "member_result")
-    member_span = result["span_id"]
+    [result] = swarm_events(outcome.transcript, "member_result")
+    member_span = result.data["span_id"]
+    assert isinstance(member_span, str)
     assert spans[member_span] == "w"
     sent, delivered = _comm(outcome.transcript)
-    assert (sent["span_id"], delivered["span_id"]) == (member_span, member_span)
-    assert (sent["member"], delivered["member"]) == ("w", "w")
-    loop_span = sent["record"]["sender_span_id"]
+    assert (sent.agent_span_id, delivered.agent_span_id) == (member_span, member_span)
+    assert (sent.agent, delivered.agent) == ("w", "w")
+    loop_span = data(sent)["record"]["sender_span_id"]
+    assert sent.loop_span_id == loop_span
     assert spans[loop_span] == ("bus_test_child" if nested else "w")
 
 
@@ -824,10 +836,14 @@ async def test_only_a_record_with_wake_releases_a_wait() -> None:
                 assert results == []
                 await send(True)
     assert results == ["a note for w-2"]
-    sent = [c["record"]["wake"] for c in _comm(transcript) if c["kind"] == "sent"]
+    sent = [data(c)["record"]["wake"] for c in _comm(transcript) if c.kind == "sent"]
     assert sent == [False, True]
-    [waited] = [c for c in _comm(transcript) if c["kind"] == "waited"]
-    assert (waited["channels"], waited["woken_by"]) == (["waking", "longer"], [2])
+    [waited] = [c for c in _comm(transcript) if c.kind == "waited"]
+    assert waited.wait is not None
+    assert (waited.wait.channels, data(waited)["woken_by"]) == (
+        ["waking", "longer"],
+        [2],
+    )
 
 
 @pytest.mark.anyio
@@ -886,23 +902,40 @@ async def test_a_read_names_its_records_and_writes_each_dependency_once_per_loop
         # than it concerns
         await _report(bus, ["b-1"], loop="child")
         await _report(bus, ["b-1"], member="w-3", depends_on=["b-2", "b-2"])
-    reads = [c for c in _comm(transcript) if c["kind"] == "read"]
-    assert {k: v for k, v in reads[0].items() if k != "span_id"} == {
+    reads = [c for c in _comm(transcript) if c.kind == "read"]
+    first = reads[0]
+    assert (
+        first.source,
+        first.agent,
+        first.loop_span_id,
+        first.nested,
+        first.channel,
+        first.record_ids,
+        first.send,
+        first.delivery,
+        first.wait,
+    ) == (
+        "inspect_swarm",
+        "w-2",
+        "w-2/top",
+        False,
+        "board",
+        ["b-1", "b-2"],
+        None,
+        None,
+        None,
+    )
+    assert first.data == {
         "version": 1,
-        "type": "comm",
-        "kind": "read",
-        "member": "w-2",
-        "loop": "w-2/top",
-        "nested": False,
-        "channel": "board",
         "read": "r-1",
         "tool_span_id": "w-2/top/tool",
-        "records": ["b-1", "b-2"],
         "depends_on": ["b-1", "b-2"],
         "listing": False,
         "via": "tool",
     }
-    assert [(r["member"], r["loop"], r["records"], r["depends_on"]) for r in reads] == [
+    assert [
+        (r.agent, r.loop_span_id, r.record_ids, data(r)["depends_on"]) for r in reads
+    ] == [
         ("w-2", "w-2/top", ["b-1", "b-2"], ["b-1", "b-2"]),
         ("w-2", "w-2/top", ["b-2", "b-1"], []),
         ("w-2", "w-2/child", ["b-1"], ["b-1"]),
@@ -943,8 +976,8 @@ async def test_a_read_naming_a_record_its_channel_did_not_commit_is_refused(
             await _report(bus, **report)
         # a refusal marks nothing written for the loop
         await _report(bus, ["b-1"])
-    [read] = [c for c in _comm(transcript) if c["kind"] == "read"]
-    assert (read["records"], read["depends_on"]) == (["b-1"], ["b-1"])
+    [read] = [c for c in _comm(transcript) if c.kind == "read"]
+    assert (read.record_ids, data(read)["depends_on"]) == (["b-1"], ["b-1"])
 
 
 @pytest.mark.anyio
@@ -998,8 +1031,8 @@ async def test_a_waits_news_writes_each_dependency_once_per_loop(
         else:
             # both find the news at once; the second depends on nothing new
             assert await wait() == await wait() == "a note for w-2"
-    waits = [c for c in _comm(transcript) if c["kind"] == "waited"]
-    assert [(w["outcome"], w["depends_on"]) for w in waits] == (
+    waits = [c for c in _comm(transcript) if c.wait is not None]
+    assert [(c.wait.outcome, data(c)["depends_on"]) for c in waits if c.wait] == (
         [("news", [])] if extra else [("news", ["k-1"]), ("news", [])]
     )
 

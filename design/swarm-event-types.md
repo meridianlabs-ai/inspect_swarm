@@ -221,7 +221,7 @@ A `model_validator(mode="after")` refuses the shapes no producer writes, so a bu
 - *What*: the record of a send, with the fields every message system has (Codex's `agent_message` has an author, a recipient and content; Claude Code's teammate messages a sender, a recipient and text); the ids that join a send to its delivery and a delivery to the reads of the state it made (`record_ids`); a delivery's order (`delivery.seq`), which the swarm's critical-path analysis and `swarm_wait`'s `woken_by` use.
 - *Outcome*: a send's rejection, by control, which the metrics count; a wait's channels, outcome and duration, which they total.
 
-Everything the swarm writes beyond these is shared-memory or bus mechanics and stays in `data`, owned by inspect_swarm: the operation and its files, `routed_out`, `wake`, `notify`, a read's files and listing flag, a wait's filters, timeout, idle time, wake-ups and ends. `kind` is a closed literal because the four kinds are the vocabulary readers render and count; a new kind is an inspect_ai change, and older readers would refuse it, like a new event type. Values that are producer vocabulary (`send.record.kind`, `send.rejected.control`, `wait.outcome`) are strings.
+Everything the swarm writes beyond these is shared-memory or bus mechanics and stays in `data`, owned by inspect_swarm: the operation and its files, `routed_out`, `wake`, `notify`, `via` (whether a call came through the bridge), a read's files and listing flag, a wait's filters, timeout, idle time, wake-ups and ends. `kind` is a closed literal because the four kinds are the vocabulary readers render and count; a new kind is an inspect_ai change, and older readers would refuse it, like a new event type. Values that are producer vocabulary (`send.record.kind`, `send.rejected.control`, `wait.outcome`) are strings.
 
 **What a bridged producer would write**, for the later mapping, to check the shape (not designed here): a Codex `agent_message` from `explorer` to the parent is a `sent` with `send.record.sender="explorer"`, `to` and `recipients` the recipient, and `content` the text or `None` when it is encrypted, then a `delivered` when it enters the recipient's input; Codex's `wait` on spawned agents is a `waited`; a Claude Code teammate's mailbox read is a `read`. Each would have its own `source`.
 
@@ -266,15 +266,15 @@ Both are written with `transcript()._event(event)`, the private, synchronous cal
 | `channel` (sent, delivered, read) | `channel` |
 | sent `record.id`, `kind`, `sender`, `to`, `recipients`, `payload`, `reply_to` | `send.record` with `id`, `kind`, `sender`, `to`, `recipients`, `content`, `reply_to`; `record_ids=[record.id]` |
 | sent `record.channel` | dropped: it is `channel` |
-| sent `record.routed_out`, `op`, `wake`, `sender_span_id`, `tool_span_id` | `data["record"]` with these five keys |
+| sent `record.routed_out`, `op`, `wake`, `sender_span_id`, `tool_span_id`, `via` | `data["record"]` with these six keys; `via` is `"bridge"` for a bridged member's call through `swarm_bridged_tools()`, else `"tool"` |
 | sent `rejected` | `send.rejected` |
 | delivered `record`, `recipients`, `seq` | `record_ids=[record]`, `delivery` (`recipients`, `seq`) |
 | delivered `notify`, `result` | `data` |
-| read `files` | `data["files"]` (each file's id, version, last record, line range and `deleted`); `record_ids` the distinct non-null `record` values of `files`, in order: each file's last write at the version read, whether the read was a listing, a partial or full view, or a tombstone |
-| read `records` (the messages channel) | `record_ids`, the messages the read showed |
-| read `read`, `tool_span_id`, `listing` | `data` |
+| read `files` | `data["files"]` (each file's id, version, last record, line range and `deleted`) |
+| read `records` | `record_ids`: for the messages channel, the messages the read showed; for the shared memory, each shown file's last write at the version read, whether the read was a listing, a partial or full view, or a tombstone |
+| read `read`, `tool_span_id`, `depends_on`, `listing`, `via` | `data` |
 | waited `wait`, `channels`, `outcome`, `duration` | `wait` (`id`, `channels`, `outcome`, `duration`) |
-| waited `path`, `file_id`, `timeout`, `started`, `idle`, `woken_by`, `files`, `ended` | `data` |
+| waited `path`, `file_id`, `timeout`, `started`, `idle`, `woken_by`, `files`, `depends_on`, `ended`, `via` | `data` |
 | `version: 1` | `data["version"] = 1` |
 
 | Today (`InfoEvent.data`) | `SwarmEvent` |

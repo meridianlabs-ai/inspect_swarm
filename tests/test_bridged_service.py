@@ -19,7 +19,7 @@ from inspect_swarm import (
     swarm_tools,
 )
 
-from .swarm_runtime import evidence, run_swarm
+from .swarm_runtime import comm_events, data, run_swarm, send, wait
 
 PLAN = "/shared_memory/plan.md"
 
@@ -136,20 +136,26 @@ async def test_a_bridged_cli_is_one_loop_of_its_member() -> None:
     assert results["send"] == "Sent m-3 to w-1."
     assert 'from="cli"' in results["native"] and "hi" in results["native"]
 
-    reads = [r for r in evidence(outcome.transcript, "read") if r["member"] == "cli"]
+    reads = [r for r in comm_events(outcome.transcript, "read") if r.agent == "cli"]
     # the read that found nothing is no read
-    assert [(r["via"], r["nested"]) for r in reads] == [("bridge", False)] * 2
-    assert len({r["loop"] for r in reads}) == 1
-    assert None not in {r["tool_span_id"] for r in reads}
-    sends = [s for s in evidence(outcome.transcript, "sent") if s["member"] == "cli"]
-    assert [(s["record"]["via"], s["nested"]) for s in sends] == [("bridge", False)] * 2
-    assert [s["record"]["kind"] for s in sends] == ["insert", "message"]
-    [wait] = [w for w in evidence(outcome.transcript, "waited")]
-    assert (wait["member"], wait["via"], wait["outcome"]) == ("cli", "bridge", "news")
+    assert [(data(r)["via"], r.nested) for r in reads] == [("bridge", False)] * 2
+    assert len({r.loop_span_id for r in reads}) == 1
+    assert None not in {data(r)["tool_span_id"] for r in reads}
+    sends = [s for s in comm_events(outcome.transcript, "sent") if s.agent == "cli"]
+    assert [(data(s)["record"]["via"], s.nested) for s in sends] == [
+        ("bridge", False)
+    ] * 2
+    assert [send(s).record.kind for s in sends] == ["insert", "message"]
+    [waited] = comm_events(outcome.transcript, "waited")
+    assert (waited.agent, data(waited)["via"], wait(waited).outcome) == (
+        "cli",
+        "bridge",
+        "news",
+    )
     native_sends = [
-        s for s in evidence(outcome.transcript, "sent") if s["member"] == "w-1"
+        s for s in comm_events(outcome.transcript, "sent") if s.agent == "w-1"
     ]
-    assert {s["record"]["via"] for s in native_sends} == {"tool"}
+    assert {data(s)["record"]["via"] for s in native_sends} == {"tool"}
 
 
 @agent
@@ -175,13 +181,13 @@ async def test_a_bridged_member_never_counts_as_waiting() -> None:
         c = _Cli(["messages"])
         await started.wait()
 
-        async def wait(conversation: str) -> None:
+        async def call_wait(conversation: str) -> None:
             results[conversation] = await c.call(conversation, "swarm_wait")
 
         # its waits are per call, so two conversations wait at once
         async with anyio.create_task_group() as tg:
-            tg.start_soon(wait, "parent")
-            tg.start_soon(wait, "child")
+            tg.start_soon(call_wait, "parent")
+            tg.start_soon(call_wait, "child")
         done.set()
 
     with anyio.fail_after(20):
@@ -199,7 +205,9 @@ async def test_a_bridged_member_never_counts_as_waiting() -> None:
     # with every member in a wait, none was released for all waiting
     timeout = "Nothing you waited for happened in 1 s."
     assert results == {"native": timeout, "parent": timeout, "child": timeout}
-    assert {w["outcome"] for w in evidence(outcome.transcript, "waited")} == {"timeout"}
+    assert {wait(w).outcome for w in comm_events(outcome.transcript, "waited")} == {
+        "timeout"
+    }
 
 
 @pytest.mark.anyio
@@ -236,8 +244,8 @@ async def test_a_bridged_wait_is_capped_by_the_tools_max_wait() -> None:
         "cli": "Nothing you waited for happened in 1 s.",
     }
     assert sorted(
-        (w["member"], w["timeout"]["effective"])
-        for w in evidence(outcome.transcript, "waited")
+        (w.agent, data(w)["timeout"]["effective"])
+        for w in comm_events(outcome.transcript, "waited")
     ) == [("cli", 1), ("w-1", 2)]
 
 
@@ -349,8 +357,10 @@ async def test_a_messages_only_bridged_wait_ignores_the_board() -> None:
     assert results == {
         "wait": "1 unread message (from w-1). Call read_messages() to read them."
     }
-    [wait] = [w for w in evidence(outcome.transcript, "waited") if w["member"] == "cli"]
-    assert (wait["channels"], wait["outcome"]) == (["messages"], "news")
+    [waited] = [
+        w for w in comm_events(outcome.transcript, "waited") if w.agent == "cli"
+    ]
+    assert (wait(waited).channels, wait(waited).outcome) == (["messages"], "news")
 
 
 @agent

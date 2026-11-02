@@ -27,7 +27,7 @@ from .._budget import (
     current_budget,
     is_bridged,
 )
-from .._evidence import MemberTimelines, evidence, write_ledger, write_metrics
+from .._evidence import MemberTimelines, swarm_event, write_ledger, write_metrics
 from .._final import FinalName, Pick, answer, finalise, settle
 from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
@@ -110,7 +110,7 @@ class MemberEnded:
     """Whether it ended with a submission."""
 
 
-SwarmEvent = MemberEnded
+ControlEvent = MemberEnded
 """An event a controller receives from `SwarmControl.events()`. Later versions add kinds, so test an event's type before reading its fields."""
 
 
@@ -150,7 +150,7 @@ class SwarmControl(Protocol):
         """
         ...
 
-    def events(self) -> AsyncGenerator[SwarmEvent, None]:
+    def events(self) -> AsyncGenerator[ControlEvent, None]:
         """The swarm's events, in order from the swarm's start.
 
         Each event is yielded once. The iterator ends when no member is running and no event is waiting; a member started later is reported by a new `events()` call. Use one iterator at a time: an iterator holds the events from its first step until it ends or is closed (`aclose()`, or leaving a `contextlib.aclosing()` block).
@@ -308,7 +308,7 @@ class SwarmRun:
         self._controller_scope = anyio.CancelScope()
         self._members_tg: TaskGroup | None = None
         self._member_ctx: contextvars.Context | None = None
-        self._queue: deque[SwarmEvent] = deque()
+        self._queue: deque[ControlEvent] = deque()
         self._changed = anyio.Event()
         self._iterating = False
         self._stopped = anyio.Event()
@@ -360,7 +360,7 @@ class SwarmRun:
         )
         self._notify()
 
-    async def events(self) -> AsyncGenerator[SwarmEvent, None]:
+    async def events(self) -> AsyncGenerator[ControlEvent, None]:
         # an iterator holds the events from its first step until it ends or is closed,
         # so a second one cannot take events from its stream
         if self._iterating:
@@ -702,8 +702,7 @@ class SwarmRun:
                 self._interval.events, m.context.span_id, self._scorer, self._start
             )
         # in the member's span, unless it ended before entering it
-        evidence(
-            "result",
+        swarm_event(
             "member_result",
             member=m.name,
             span_id=m.context.span_id,

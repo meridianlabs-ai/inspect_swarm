@@ -8,7 +8,7 @@ from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent, react
 from inspect_ai.agent import run as run_agent
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent, SpanBeginEvent, SpanEndEvent
+from inspect_ai.event import SpanBeginEvent, SpanEndEvent, SwarmEvent
 from inspect_ai.log import transcript as current_transcript
 from inspect_ai.model import (
     ChatMessageAssistant,
@@ -43,7 +43,7 @@ from inspect_swarm._record import (
     RESULT_ID_KEY,
     MemberResult,
     SwarmResultRecord,
-    _is_record,
+    _record_data,
     _transcript_result,
 )
 
@@ -52,7 +52,6 @@ from .swarm_runtime import (
     Outcome,
     Script,
     after,
-    evidence,
     final,
     generator,
     output,
@@ -61,6 +60,7 @@ from .swarm_runtime import (
     scripted_model,
     sleeper,
     statuses,
+    swarm_events,
 )
 
 
@@ -70,17 +70,6 @@ def _controller(run: Any, name: str) -> Controller:
         return Controller(run)
 
     return factory()
-
-
-def final_event(outcome: Outcome) -> InfoEvent:
-    [event] = [
-        e
-        for e in outcome.transcript.events
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("kind") == "final"
-    ]
-    return event
 
 
 # the record, read in a sample context with no TaskState, after the swarm has ended
@@ -384,11 +373,7 @@ def test_an_answer_finalisation_cannot_fit_ends_the_sample_on_its_message_limit(
         True,
     )
     assert not [
-        e
-        for e in sample.events
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("kind") == "final"
+        e for e in sample.events if isinstance(e, SwarmEvent) and e.kind == "final"
     ]
 
 
@@ -433,7 +418,7 @@ async def test_a_submission_during_grace_is_chosen_only_without_an_earlier_one(
         "provisional": False,
     }
     assert stop.state.output.completion == expected
-    assert final(stop.transcript)["member"] == expected
+    assert final(stop.transcript).member == expected
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +428,7 @@ async def test_a_submission_during_grace_is_chosen_only_without_an_earlier_one(
 # whether the transcript holds a record event and the store a record id
 def _live_record() -> tuple[bool, bool]:
     return (
-        any(_is_record(e) for e in current_transcript().events),
+        any(_record_data(e) is not None for e in current_transcript().events),
         RESULT_ID_KEY in store(),
     )
 
@@ -488,24 +473,13 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
     # at the start, after the start and after the end, and from the member's tool
     assert seen == [(False, False)] * 3
     assert probed == [(False, False)]
-    infos = [
-        e
-        for e in transcript.events
-        if isinstance(e, InfoEvent)
-        and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-    ]
-    kinds = [
-        e.data.get("kind", e.data.get("type"))
-        for e in infos
-        if isinstance(e.data, dict)
-    ]
+    swarm_evidence = [e for e in transcript.events if isinstance(e, SwarmEvent)]
+    kinds = [e.kind for e in swarm_evidence]
     assert kinds[-4:] == ["final", RECORD_TYPE, "ledger", "metrics"]
-    [event] = [e for e in infos if _is_record(e)]
-    final_payload = final(transcript)
+    [event] = [e for e in swarm_evidence if e.kind == RECORD_TYPE]
     # in the swarm's span, where the final event is written
-    assert event.span_id == final_payload["span_id"]
-    assert isinstance(event.data, dict)
+    assert event.span_id == final(transcript).data["span_id"]
+    assert event.member is None
     assert event.data["id"] == record_id
     # no member's output: those stay in the members' states
     members = event.data["members"]
@@ -578,8 +552,12 @@ async def test_a_member_blocked_entering_its_span_is_hard_stopped() -> None:
         )
     [blocked] = stop.record.members
     assert (blocked.state, blocked.status) == ("ended", "cancelled")
-    [result] = evidence(stop.transcript, "member_result")
-    assert (result["status"], result["span_id"]) == ("cancelled", None)
+    [result] = swarm_events(stop.transcript, "member_result")
+    assert (result.member, result.data["status"], result.data["span_id"]) == (
+        "blocked",
+        "cancelled",
+        None,
+    )
 
 
 @pytest.mark.anyio
@@ -623,13 +601,10 @@ async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> No
     }
     span_ends = {e.id: i for i, e in enumerate(events) if isinstance(e, SpanEndEvent)}
     results = {
-        str(e.data["member"]): (i, e)
+        str(e.member): (i, e)
         for i, e in enumerate(events)
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("kind") == "member_result"
+        if isinstance(e, SwarmEvent) and e.kind == "member_result"
     }
-    common = {"version": 1, "type": "result"}
     assert statuses(stop) == {
         "a": "submitted",
         "b": "stopped",
@@ -637,24 +612,24 @@ async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> No
     }
     for name, (i, e) in results.items():
         r = e.data
-        assert isinstance(r, dict)
-        assert r | common == r
-        assert (r["kind"], r["status"]) == ("member_result", statuses(stop)[name])
+        assert r["version"] == 1
+        assert r["status"] == statuses(stop)[name]
         # written in the member's span, before it ends
         assert r["span_id"] == e.span_id == spans[name]
         assert i < span_ends[spans[name]]
-    payload = final(stop.transcript)
-    assert payload == {
-        **common,
-        "kind": "final",
-        "member": "a",
-        "span_id": spans["swarm"],
-        "mode": "first",
-        "reason": None,
-        "stop_reason": "controller:enough",
-    }
-    assert final_event(stop).span_id == spans["swarm"]
-    assert secret not in repr([*(e.data for _, e in results.values()), payload])
+    event = final(stop.transcript)
+    assert (event.member, event.data) == (
+        "a",
+        {
+            "version": 1,
+            "span_id": spans["swarm"],
+            "mode": "first",
+            "reason": None,
+            "stop_reason": "controller:enough",
+        },
+    )
+    assert event.span_id == spans["swarm"]
+    assert secret not in repr([*(e for _, e in results.values()), event])
 
 
 # ---------------------------------------------------------------------------
@@ -754,7 +729,7 @@ async def test_a_team_swarm_answers_with_its_last_submission() -> None:
         "reason": None,
         "provisional": False,
     }
-    assert (final(stop.transcript)["mode"], final(stop.transcript)["member"]) == (
+    assert (final(stop.transcript).data["mode"], final(stop.transcript).member) == (
         "last",
         "b",
     )
@@ -865,8 +840,8 @@ async def test_a_controller_chooses_the_answer_in_place_of_its_final_rule() -> N
         "reason": "most complete",
         "provisional": False,
     }
-    payload = final(transcript)
-    assert (payload["mode"], payload["member"], payload["reason"]) == (
+    event = final(transcript)
+    assert (event.data["mode"], event.member, event.data["reason"]) == (
         "controller",
         "b",
         "most complete",

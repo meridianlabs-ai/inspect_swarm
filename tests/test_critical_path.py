@@ -11,7 +11,12 @@ from pydantic import JsonValue
 from inspect_swarm._bus._record import Record
 from inspect_swarm._channel._channel import WaitSpec
 from inspect_swarm._critical_path import PathLog, critical_steps_to_answer
-from inspect_swarm._evidence import comm_delivered, comm_read, comm_waited, evidence
+from inspect_swarm._evidence import (
+    comm_delivered,
+    comm_read,
+    comm_waited,
+    swarm_event,
+)
 from inspect_swarm._ledger import EventLog
 from inspect_swarm._metrics import _completed  # pyright: ignore[reportPrivateUsage]
 
@@ -200,8 +205,7 @@ def wait(
 
 def end(member: str) -> Op:
     def op(run: _Run) -> None:
-        evidence(
-            "result",
+        swarm_event(
             "member_result",
             member=member,
             span_id=f"span-{member}",

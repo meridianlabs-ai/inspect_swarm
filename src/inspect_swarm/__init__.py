@@ -20,11 +20,11 @@ from ._channel.filesystem import filesystem
 from ._channel.messages import messages
 from ._channel.shared_memory import shared_memory
 from ._controller._control import (
+    ControlEvent,
     MemberEnded,
     MemberHandle,
     MemberState,
     SwarmControl,
-    SwarmEvent,
 )
 from ._controller._controller import (
     Controller,
@@ -51,6 +51,7 @@ __all__ = [
     "Channel",
     "ChannelRun",
     "ChannelState",
+    "ControlEvent",
     "Controller",
     "FinalName",
     "FinalRecord",
@@ -64,7 +65,6 @@ __all__ = [
     "StopReason",
     "SwarmBudget",
     "SwarmControl",
-    "SwarmEvent",
     "SwarmResultRecord",
     "WaitNews",
     "WaitSpec",
