@@ -92,7 +92,7 @@ An empty message is refused. Once the swarm begins to stop, sends are refused an
 
 The swarm logs messages as `CommunicationEvent`s with source `inspect_swarm`, each in the span of the tool call that made it. Its `kind` is one of:
 
-- `sent`: a send that reached the swarm, with its addresses, recipients, text and `reply_to` in `send.record`, why it was refused in `send.rejected` if it was, and `wake` in `data`. An inbox that is full, or a duplicate, is refused by the control `admit`.
+- `sent`: a send that reached the swarm, with its addresses, recipients, text and `reply_to` in `send.record`, why it was refused in `send.rejected` if it was, and `wake` in `data["record"]`. An inbox that is full, or a duplicate, is refused by the control `admit`.
 - `delivered`: a message delivered, with its recipients and commit sequence number in `delivery`.
 - `read`: a `read_messages` result, with the ids of the messages it showed in `record_ids`. A read that showed nothing has no event.
 - `waited`: a `swarm_wait` call, with what ended it and the unread messages it named.

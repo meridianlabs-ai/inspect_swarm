@@ -10,7 +10,13 @@ from inspect_ai._control.scoring import TaskScoring, _score_live_sample
 from inspect_ai._util.hash import mm3_hash
 from inspect_ai.agent import Agent, AgentState, agent, as_solver, react, run
 from inspect_ai.dataset import Sample
-from inspect_ai.event import Event, InfoEvent, SpanBeginEvent, SwarmEvent
+from inspect_ai.event import (
+    CommunicationEvent,
+    Event,
+    InfoEvent,
+    SpanBeginEvent,
+    SwarmEvent,
+)
 from inspect_ai.log import EvalLog, EvalSample, read_eval_log, transcript
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import GenerateConfig, ModelOutput, get_model
@@ -606,7 +612,23 @@ def test_a_sample_whose_store_lost_the_id_is_refused(tmp_path: Path) -> None:
     died = recovered.model_copy(
         update={"events": [e for e in logged.events if e is not record_event]}
     )
-    for refused in (recovered, died):
+    # and a sample an inspect_swarm wrote before its evidence had event types of its
+    # own, whose only swarm evidence is an InfoEvent
+    legacy = recovered.model_copy(
+        update={
+            "events": [
+                *(
+                    e
+                    for e in logged.events
+                    if not isinstance(e, SwarmEvent | CommunicationEvent)
+                ),
+                InfoEvent(
+                    source="inspect_swarm", data={"type": START_TYPE, "version": 1}
+                ),
+            ]
+        }
+    )
+    for refused in (recovered, died, legacy):
         _value_error(_read(refused), LOST_ID)
         _value_error(_rescore(log, refused), LOST_ID)
 

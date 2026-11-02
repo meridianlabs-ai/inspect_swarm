@@ -140,8 +140,8 @@ A write that would pass a limit is refused with an error that says which. Once t
 
 The swarm logs the members' writes, views and waits as `CommunicationEvent`s with source `inspect_swarm`. Each is in the span of the tool call that made it, and its `kind` is one of:
 
-- `sent`: a write that reached the swarm, with its payload in `send.record.content`, why it was refused in `send.rejected` if it was, and its operation in `data`.
-- `delivered`: a write applied to the board, with its commit sequence number in `delivery.seq` and each file's previous and new version in `data`. Replaying the delivered writes in sequence order rebuilds every version of the board.
+- `sent`: a write that reached the swarm, with its payload in `send.record.content`, why it was refused in `send.rejected` if it was, and its operation in `data["record"]["op"]`.
+- `delivered`: a write applied to the board, with its commit sequence number in `delivery.seq` and each file's previous and new version in `data["result"]["files"]`. Replaying the delivered writes in sequence order rebuilds every version of the board.
 - `read`: a view or a listing. `record_ids` names the record that last wrote each file at the version shown, and `data` has each file's version.
 - `waited`: a `swarm_wait` call, with what ended it and how long it took in `wait`.
 
