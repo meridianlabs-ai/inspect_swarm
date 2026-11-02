@@ -45,6 +45,7 @@ from inspect_swarm._budget import MemberContext, current_member
 from inspect_swarm._bus._bus import Bus, Delivery, current_bus
 from inspect_swarm._bus._record import Draft, thaw_json
 from inspect_swarm._bus._storm import StormControls
+from inspect_swarm._seam import BoundaryCallback
 
 from .swarm_runtime import data, run_swarm, sample, send, swarm_events
 
@@ -164,6 +165,18 @@ class _Member:
     @property
     def submitted(self) -> bool:
         return self.status == "submitted"
+
+    @property
+    def held(self) -> bool:
+        return False
+
+    def on_boundary(
+        self, callback: BoundaryCallback, *, origin: str
+    ) -> Callable[[], None]:
+        raise NotImplementedError
+
+    def end(self, *, origin: str) -> None:
+        raise NotImplementedError
 
 
 MEMBERS = ("w-1", "w-2", "w-3")

@@ -47,6 +47,60 @@ def swarm_event(
     )
 
 
+# The turn seam's evidence, in the member's span, at a boundary where its callbacks ran:
+# one `boundary` event, with what ended the chain, and one `changed` event for each
+# callback whose result differed from what it received (origin `swarm` for the stale
+# summaries the runtime removed), with message ids and hashes, never text. `applied` says
+# whether the change is in the member's live conversation.
+def seam_boundary(
+    member: str,
+    *,
+    boundary: int,
+    after: str,
+    origins: list[str],
+    held_for: float,
+    outcome: str,
+    messages: tuple[int, int],
+    detail: Mapping[str, JsonValue],
+) -> None:
+    # `detail` is the origin and the error's type, for the outcomes that have them
+    _seam_event(
+        "boundary",
+        member,
+        {
+            "boundary": boundary,
+            "after": after,
+            "origins": list[JsonValue](origins),
+            "held_for": held_for,
+            "outcome": outcome,
+            "messages": {"before": messages[0], "after": messages[1]},
+            **detail,
+        },
+    )
+
+
+def seam_changed(
+    member: str,
+    *,
+    boundary: int,
+    origin: str,
+    change: Mapping[str, JsonValue],
+    applied: bool,
+) -> None:
+    _seam_event(
+        "changed",
+        member,
+        {"boundary": boundary, "origin": origin, **change, "applied": applied},
+    )
+
+
+def _seam_event(kind: str, member: str, data: dict[str, JsonValue]) -> None:
+    # synchronous, so that it is written however the chain ends
+    transcript()._event(  # pyright: ignore[reportPrivateUsage]
+        SwarmEvent(kind=kind, member=member, data={"version": 1, **data})
+    )
+
+
 # Communication evidence: a `CommunicationEvent` with source "inspect_swarm" for each
 # record that reached the bus (`sent`), for each one it delivered (`delivered`), for
 # each read of a channel's content (`read`) and for each wait (`waited`), written in the

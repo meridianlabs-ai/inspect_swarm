@@ -85,7 +85,7 @@ def escalate(first: str = "fast") -> Controller:
     return Controller(run, check=check)
 ```
 
-- `swarm.members` are the members in roster order, as `MemberHandle`s: name, role, state (`pending`, `running` or `ended`), status and whether it submitted. A controller never sees what a member wrote.
+- `swarm.members` are the members in roster order, as `MemberHandle`s: name, role, state (`pending`, `running` or `ended`), status and whether it submitted. A controller never sees what a member wrote unless it holds the member at a turn boundary ([Boundary callbacks](#boundary-callbacks)).
 - `swarm.start(member, input=None)` starts a member and returns at once. `input` replaces the swarm's input for that member; `None` gives it the swarm's input. The member's preamble follows either. A member runs once, and starting one after the stop has begun raises.
 - `swarm.events()` yields each event once, in order from the swarm's start. Its only kind is `MemberEnded`, with the member's name, status and whether it submitted. The iterator ends when no member is running and no event is waiting, so a member started later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
 - `check`, if given, is called with the roster when `swarm()` is called. Raise `ValueError` for a roster the controller cannot run.
@@ -127,6 +127,51 @@ def prefer(role: str) -> Controller:
 
     return Controller(run)
 ```
+
+## Boundary callbacks
+
+A controller can hold a member between the turns of its agent loop. `handle.on_boundary(callback, origin=...)` registers a callback that runs at every turn boundary of the member's own loop: before its first generation and before each one after it, with no model or tool call of the loop in flight. It returns a function that unregisters the callback from the next boundary.
+
+The callback gets a `Boundary`:
+
+- `member` and `index`: the member, and the boundary's number, 0 before the first generation.
+- `after`: what the conversation ends with: `start` at index 0, `tools` after a tool result, `reply` after an assistant reply with no tool calls, `user` after anything else.
+- `messages` and `output`: copies of the member's conversation and of its last output. Changing them changes nothing.
+
+It returns `None` to let the member go on, a list of messages to go on with that conversation, or `"end"` to end the member `stopped`. A returned list keeps each message's id, and must hold a user message.
+
+While its callbacks run the member is held: `handle.held` is `True`, its time limit does not run, and `swarm_wait` does not count it as active. A callback can wait as long as it likes. Its own model calls count towards the member's limits. Its time counts as working time unless it marks its idle waits with `suspend_working_limit()`:
+
+```python
+import anyio
+from inspect_ai.util import suspend_working_limit
+
+from inspect_swarm import Boundary, StopReason, SwarmControl
+
+
+async def run(swarm: SwarmControl) -> StopReason:
+    go = anyio.Event()
+
+    async def wait_for_go(boundary: Boundary) -> None:
+        if boundary.index == 0:
+            with suspend_working_limit():
+                await go.wait()
+        return None
+
+    swarm.member("worker").on_boundary(wait_for_go, origin="scheduler")
+    swarm.start("worker")
+    ...
+```
+
+Several callbacks run in the order they were registered, each receiving the conversation as the ones before it left it. So callers compose: a pause registered after a scheduler holds the member after the scheduler lets it go.
+
+`handle.end(origin=...)` ends a member from outside the chain, `stopped`, with the reason `ended by <origin>`. A held member ends at once: the waiting callback is cancelled and no change from that boundary is applied. A member in the middle of a turn ends at its next boundary, and its next model call is refused; if it is still running after the swarm's grace period, it is cancelled. A member whose agent returns after `end()` ends `stopped`, whatever its output.
+
+A swarm stop ends every member at its next boundary, and a held member at once.
+
+Only members whose agent runs an Inspect agent loop, such as `react()` or `deepagent()`, reach a boundary. Subagents and other nested loops run inside a turn of the member's loop and are not held on their own. `on_boundary()` raises `ValueError` for a bridged member and for `deepagent()` with background dispatch. A member with background work running when it reaches a boundary with callbacks, a member that starts a second agent loop after its first ended, and a member whose callbacks never ran because it never reached a boundary all end `errored`.
+
+The swarm records each boundary where callbacks ran, and each change they made, by message id and hash ([Analysis](analysis.qmd#boundary-callbacks)).
 
 ## Stopping on the first proof
 

@@ -1023,10 +1023,10 @@ async def test_a_cap_reached_in_a_childs_tool_call_stops_the_swarm_while_the_par
     assert nested_event.error is not None and nested_event.error.type == "limit"
     [line] = ledger.members
     if released == "within_grace":
-        # each child was refused its next call and ended alone; the parent then met
-        # the cap
+        # each child was refused its next call and ended alone; the parent then
+        # ended at its next turn boundary, as the swarm's stop ends a member there
         assert sorted(log) == ["capper finished", "other finished"]
-        assert line.status == "swarm_cap"
+        assert line.status == "stopped"
         assert line.background_cancelled == 0
         assert ledger.calls.errored == 0
     else:

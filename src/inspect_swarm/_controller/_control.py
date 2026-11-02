@@ -24,6 +24,7 @@ from .._budget import (
     Lever,
     MemberContext,
     SwarmNode,
+    SwarmTimeNode,
     current_budget,
     is_bridged,
 )
@@ -38,6 +39,7 @@ from .._member import (
     member_nodes,
     member_sandbox,
     run_member,
+    seam_refusal,
 )
 from .._metrics import (
     GateChecks,
@@ -56,6 +58,7 @@ from .._record import (
     write_record,
     write_start,
 )
+from .._seam import BoundaryCallback, MemberGate, check_origin
 
 if TYPE_CHECKING:
     from .._bus._bus import Bus
@@ -93,6 +96,46 @@ class MemberHandle(Protocol):
     @property
     def submitted(self) -> bool:
         """Whether the member ended with a submission (status `submitted`)."""
+        ...
+
+    @property
+    def held(self) -> bool:
+        """Whether the member is held at a turn boundary: its boundary callbacks are running."""
+        ...
+
+    def on_boundary(
+        self, callback: BoundaryCallback, *, origin: str
+    ) -> Callable[[], None]:
+        """Register a boundary callback, called at every turn boundary of the member's own agent loop.
+
+        A boundary comes before the loop's first generation and before each one after it, with no model or tool call of the loop in flight. The callbacks run there in the order they were registered, in the member's task, while the member is held: its time limit pauses, `swarm_wait` does not count it as active, and a stop ends it at once. Each receives a `Boundary` and returns `None` to continue, a list of messages to continue with that conversation (it must hold a user message), or `"end"` to end the member `stopped`. Registered on a pending member, the callback sees boundary 0, before the first generation; on a running one, from its next boundary.
+
+        A callback's model and tool calls count towards the member's limits and the sample's working time, and so does the rest of its time: wrap an idle wait in `suspend_working_limit()` to count it as waiting. An exception a callback raises ends the member `errored`. Every change a callback makes is recorded as a `changed` event, with `origin`.
+
+        Args:
+            callback: The callback.
+            origin: Names the caller in the evidence, such as `orbit` or `operator`: 1 to 64 letters, digits, `_`, `-`, `.` or `:`. `swarm` is reserved.
+
+        Returns:
+            A function that unregisters the callback, from the next boundary.
+
+        Raises:
+            ValueError: If `origin` is invalid, or the member cannot be held: a bridged member, or `deepagent()` with background dispatch.
+            RuntimeError: If the member has ended, or the swarm is stopping.
+        """
+        ...
+
+    def end(self, *, origin: str) -> None:
+        """End the member `stopped`, with the reason `ended by <origin>`.
+
+        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary; if it is still running when the swarm's grace period has passed, it is cancelled and ends `cancelled`. A pending member ends at its first boundary once started. A member whose agent returns after the request ends `stopped`, whatever its output. A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
+
+        Args:
+            origin: Names the caller in the evidence, as for `on_boundary()`.
+
+        Raises:
+            ValueError: If `origin` is invalid.
+        """
         ...
 
 
@@ -224,15 +267,57 @@ class MemberRun:
             bridged=is_bridged(cast(Agent, agent), record.bridged),
         )
         self.lever, self.nodes = member_nodes(record, name, share)
+        self.gate = MemberGate(
+            name,
+            self.context,
+            self.lever,
+            time_nodes=[n for n in self.nodes if isinstance(n, SwarmTimeNode)],
+        )
+        # set by the runtime: starts the grace timer of an end requested mid-turn
+        self.end_timer: Callable[["MemberRun"], None] = lambda _: None
 
     @property
     def submitted(self) -> bool:
         return self.status == "submitted"
 
     @property
+    def held(self) -> bool:
+        return self.gate.held
+
+    def on_boundary(
+        self, callback: BoundaryCallback, *, origin: str
+    ) -> Callable[[], None]:
+        call = f"on_boundary({self.name!r})"
+        check_origin(origin, call)
+        refusal = seam_refusal(self.record, self.context)
+        if refusal is not None:
+            raise ValueError(
+                f"{call}: the member cannot be held at a turn boundary: {refusal}."
+            )
+        if self.state == "ended":
+            raise RuntimeError(f"{call}: the member has ended.")
+        stopping = self.gate.stopping()
+        if stopping is not None:
+            raise _Stopping(
+                f"{call}: the swarm is stopping ({stopping}), so no callback can be registered."
+            )
+        return self.gate.register(callback, origin)
+
+    def end(self, *, origin: str) -> None:
+        check_origin(origin, f"end({self.name!r})")
+        if self.state == "ended" or self.gate.end_origin is not None:
+            return
+        held = self.gate.held
+        self.gate.request_end(origin)
+        if self.state == "running" and not held:
+            # a turn may not reach its next boundary soon
+            self.end_timer(self)
+
+    @property
     def cancelled(self) -> bool:
-        # its agent loop or its background drain was cancelled: the hard stop, the
-        # bridged branch, a member time limit, or a cancellation from outside the swarm
+        # its agent loop or its background drain was cancelled: the hard stop, end()'s
+        # grace timer, the bridged branch, a member time limit, or a cancellation from
+        # outside the swarm
         return self.context.scope.cancel_called or self.status in (
             "cancelled",
             "member_limit:time",
@@ -286,6 +371,11 @@ class SwarmRun:
             {m.name: m.context for m in self._members},
             channels,
         )
+        for m in self._members:
+            m.gate.stopping = lambda: self.stop_reason
+            m.gate.recheck = self.bus.recheck
+            m.gate.call_mark = self._call_mark
+            m.end_timer = self._end_timer
         for node in caps:
             if isinstance(node, SwarmNode):
                 node.stop_swarm = self.stop
@@ -307,6 +397,7 @@ class SwarmRun:
         self._final_meter = CostPair(owner=None, role="meter")
         self._controller_scope = anyio.CancelScope()
         self._members_tg: TaskGroup | None = None
+        self._runtime_tg: TaskGroup | None = None
         self._member_ctx: contextvars.Context | None = None
         self._queue: deque[ControlEvent] = deque()
         self._changed = anyio.Event()
@@ -358,6 +449,9 @@ class SwarmRun:
         self._member_ctx.copy().run(
             self._members_tg.start_soon, self._run_member, m, messages, name=m.name
         )
+        if m.gate.end_origin is not None:
+            # ended while pending: it ends at its first boundary
+            self._end_timer(m)
         self._notify()
 
     async def events(self) -> AsyncGenerator[ControlEvent, None]:
@@ -456,6 +550,7 @@ class SwarmRun:
                             self._members_tg = members_tg
                             self._member_ctx = contextvars.copy_context()
                             async with anyio.create_task_group() as runtime_tg:
+                                self._runtime_tg = runtime_tg
                                 runtime_tg.start_soon(self._supervise, runtime_tg)
                                 if self._time is not None:
                                     runtime_tg.start_soon(self._time_cap, self._time)
@@ -572,6 +667,7 @@ class SwarmRun:
                         cancelled=m.cancelled,
                         background_started=m.outcome.background_started,
                         background_cancelled=m.outcome.background_cancelled,
+                        cancelled_chains=list(m.gate.cancelled_chains),
                     )
                     for m in self._members
                 ],
@@ -603,7 +699,16 @@ class SwarmRun:
                     ledger,
                     interval.events,
                     places,
-                    [MemberTimes(m.name, m.started, m.time) for m in self._members],
+                    [
+                        MemberTimes(
+                            m.name,
+                            m.started,
+                            m.time,
+                            holds=m.gate.holds,
+                            held_time=m.gate.held_time,
+                        )
+                        for m in self._members
+                    ],
                     [m.gates for m in self._members],
                     [
                         MemberWiring(tools=m.context.loop is not None)
@@ -633,6 +738,8 @@ class SwarmRun:
         for m in self._members:
             if m.state == "running":
                 m.lever.close(reason)
+            # a held member ends at once, at its boundary
+            m.gate.cancel_chain()
         self._runtime_lever.close(reason)
         self._effective_grace = self._grace_now()
         self._stopped.set()
@@ -686,6 +793,7 @@ class SwarmRun:
             # the sample's remaining time then
             self._grace_now,
             m.outcome,
+            m.gate,
             end,
         )
 
@@ -733,6 +841,24 @@ class SwarmRun:
         return {
             m.name: m.agent_state.output for m in self._members if m.state == "ended"
         }
+
+    # end()'s grace for a member it reached mid-turn: the member is cancelled, as the
+    # hard stop cancels one, if it is still running when the effective grace has passed
+    def _end_timer(self, m: MemberRun) -> None:
+        assert self._runtime_tg is not None
+        self._runtime_tg.start_soon(self._end_grace, m)
+
+    async def _end_grace(self, m: MemberRun) -> None:
+        with anyio.move_on_after(self._grace_now()):
+            while m.state == "running":
+                await self._changed.wait()
+        if m.state == "running":
+            m.context.scope.cancel()
+
+    # the number of model events the ledger has seen, for the turn gate's cancelled
+    # chains
+    def _call_mark(self) -> int:
+        return 0 if self._interval is None else self._interval.call_count()
 
     async def _time_cap(self, seconds: float) -> None:
         await anyio.sleep(seconds)

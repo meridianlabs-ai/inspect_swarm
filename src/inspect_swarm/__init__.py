@@ -35,6 +35,7 @@ from ._controller.leaderless import leaderless
 from ._final import FinalName
 from ._member import Member, member
 from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
+from ._seam import Boundary, BoundaryCallback
 from ._swarm import swarm
 from ._tools import swarm_resources
 
@@ -45,6 +46,8 @@ except ImportError:
 
 
 __all__ = [
+    "Boundary",
+    "BoundaryCallback",
     "Budget",
     "BudgetUsage",
     "Channel",

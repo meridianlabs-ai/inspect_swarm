@@ -32,6 +32,7 @@ For each member, in roster order:
 - `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member, whose tool calls leave no tool events.
 - `gate_checks`, `gate_passes`, `first_pass_time`: its in-loop checks ([Scoring](scoring.qmd#checks-during-the-run)).
 - `comm`, `waits`, `waits_by_outcome`, `wait_time`, `idle_time`: below.
+- `holds`, `held_time`: the turn boundaries at which a controller's callbacks held it, and the seconds it was held. `running_time` includes them ([Boundary callbacks](#boundary-callbacks)).
 
 ### The critical path
 
@@ -74,6 +75,27 @@ Each member's metrics count its `swarm_wait` calls, its subagents' included:
 - `idle_time`: the seconds the member did nothing but wait: its own agent in `swarm_wait`, not yet released, and none of its background work running. A subagent's wait adds to `wait_time` but not to `idle_time`.
 
 In a swarm with no `swarm_wait` (`filesystem` only, or `channels=[]`) the four are `null`, so 0 means the wait was offered and unused. Waiting is wall-clock time, so a member's `running_time` includes it.
+
+### Boundary callbacks
+
+When a controller holds a member at turn boundaries ([Controllers](controllers.qmd#boundary-callbacks)), the swarm writes two kinds of `SwarmEvent` in the member's span, with `member` set. Neither holds message text.
+
+`boundary`, once for each boundary where callbacks ran:
+
+- `boundary`: the boundary's index. `after`: what the conversation ended with.
+- `origins`: the origins of the callbacks that ran, in order. `held_for`: the seconds the member was held.
+- `messages`: the number of messages `before` and `after`.
+- `outcome`: `continue` (any change is in the conversation), `end` (with `origin`), `stop`, `error` (a callback raised, or its result was invalid; with `origin` and `error`, the error's type), `rejected` (applying the change failed, such as at the member's message limit; with `error`) or `cancelled` (a cancellation from outside the swarm).
+
+`changed`, once for each callback whose result differed from what it received, with its `boundary` and `origin`:
+
+- `added`: each new message's `id`, `hash` and `index` in the result.
+- `removed`: the ids of messages no longer there.
+- `replaced`: each message kept under its id with new content, with its `id` and its hashes `before` and `after`.
+- `order`: the result's ids in order, only when the kept messages changed their order.
+- `applied`: whether the change is in the member's conversation. It is `false` when a later callback ended the member or raised, the swarm stopped, or the change was rejected.
+
+A hash is the SHA-256 of the message as the log serializes it, without its id, so a change can be matched to the messages in a later `ModelEvent`'s input. When a callback rewrites the conversation, compaction summaries that describe messages it changed are removed, and the removal is one more `changed` event with origin `swarm`.
 
 ### Wiring checks
 
