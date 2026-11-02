@@ -83,7 +83,7 @@ Each item a deep dive assigns to a milestone, with the milestone it is in and wh
 |---|---|---|---|
 | Swarm nodes, `Budget`, member wrapper, stopping, exhaustion, ledger | [swarm-limits.md](swarm-limits.md#implementation-plan) steps 1–4 | M1 | The cap and the ledger are what M1's comparisons rest on |
 | Budget splits and the sweep example | swarm-limits.md step 5 | M1 | Budget split is one of the library's sweepable axes ([swarm.md Goals](swarm.md#goals)); small, and a leaf of the graph |
-| Optional inspect_ai observability PRs (a `Model.compact()` event; a status code on errored model events) | swarm-limits.md [open question 3](swarm-limits.md#open-questions) | Optional, alongside M1, not blocking | They relax the ledger's completeness rules; the ledger works without them |
+| Optional inspect_ai observability PRs (a `Model.compact()` event; a status code on errored model events) | swarm-limits.md [open question 2](swarm-limits.md#open-questions) | Optional, alongside M1, not blocking | They relax the ledger's completeness rules; the ledger works without them |
 | Record and `first` | [swarm-scoring.md](swarm-scoring.md#implementation-plan-for-m1) | M1 | M1's answer and the record scorers read |
 | Per-member sandboxes, `member(sandbox=, visible_sandboxes=)` | [Lean Rec. 1](swarm-lean-open-problems.md#1-m2-per-member-sandboxes-as-an-opt-in-member-field) | M2 | Needed by the external port; internal first use runs on the shared default (decision: Ransom, 2026-10-07) |
 | Agent-raised custom limit ends only the member | [Lean Rec. 2](swarm-lean-open-problems.md#2-m2-an-agent-raised-custom-limit-ends-only-the-member) | M2 | Needed by the external port; until then such an error ends the sample loudly, as it does for any agent today, rather than producing a wrong result |
@@ -169,7 +169,7 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 **AI-3 (optional). An event from `Model.compact()` at invocation.** Lets the ledger judge native compaction per call instead of treating every run in a process that has loaded a native-compaction provider as a lower bound.
 - Files and tests: inspect_ai's model and event modules; to be scoped when proposed.
 - Depends on: nothing. Nothing in M1 depends on it.
-- Implements: [swarm-limits.md open question 3](swarm-limits.md#open-questions) and its "Native compaction" item under Not this design. The question is undecided; this plan carries it as optional.
+- Implements: [swarm-limits.md open question 2](swarm-limits.md#open-questions) and its "Native compaction" item under Not this design. The question is undecided; this plan carries it as optional.
 
 **AI-4 (optional). A status code on errored model events.** Lets the ledger count a verified pre-inference rejection (an HTTP 429) as zero spend instead of unknown.
 - Depends on: nothing. Nothing in M1 depends on it.
@@ -195,7 +195,7 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 - Depends on: M1-0, AI-1.
 - Implements: [swarm-api.md](swarm-api.md#implementation-plan) step 2; [Resolving names](swarm-api.md#resolving-names).
 
-**M1-2. Swarm nodes and the budget parameter.** `Budget` as a frozen pydantic model with validation and cap derivation, the swarm node classes and cost pairs (ownership, messages, per-call pricing, the bridged branch), bridged detection, and the tests that pin the inspect_ai behaviour the nodes rely on.
+**M1-2. Swarm nodes and the budget parameter.** `Budget` as a frozen pydantic model with validation and cap derivation, the swarm node classes and cost pairs (ownership, messages, per-call pricing), bridged detection, and the tests that pin the inspect_ai behaviour the nodes rely on.
 - Files: `src/inspect_swarm/_budget.py`.
 - Tests: `tests/test_budget.py` (pinned behaviour, validation, derivation, nodes).
 - Depends on: M1-0. Independent of M1-1.
@@ -462,7 +462,6 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 - ORBIT on inspect_swarm ([swarm-orbit.md](swarm-orbit.md)), including how read results name their records for ORBIT's exposure observer ([swarm-orbit.md P2](swarm-orbit.md#p2-bus-extensions)).
 - Red-team features: forged senders, secret channels, targeted injection.
 - Inspect Scout scanners for coordination failures.
-- The inspect_ai fix for limits reached inside bridged agents (swarm-limits.md's open question 2).
 - Checkpoint and resume for swarms.
 - A swarm view in the log viewer.
 

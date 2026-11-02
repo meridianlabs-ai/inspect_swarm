@@ -51,7 +51,6 @@ from inspect_ai.util._limit_overrides import (
 from inspect_swarm import (
     Budget,
     Controller,
-    MemberHandle,
     StopReason,
     SwarmControl,
     leaderless,
@@ -69,6 +68,7 @@ from inspect_swarm._record import SwarmResultRecord
 from .swarm_runtime import (
     TOKENS_PER_CALL,
     Script,
+    cli,
     generator,
     run_swarm,
     sample,
@@ -76,7 +76,7 @@ from .swarm_runtime import (
     sleeper,
     statuses,
 )
-from .test_budget import _bridge_generate, _GenerateCompaction
+from .test_budget import _written_ledger
 
 
 def _controller(run: Any, name: str) -> Controller:
@@ -836,9 +836,11 @@ def interrupter() -> Agent:
     return execute
 
 
-def _busy(limit: str) -> Agent:
+def _busy(limit: str, bridged: bool) -> Agent:
     # the member still working when the sample's limit or the operator ends it
     match limit:
+        case "message" if bridged:
+            return cli(scripted_model(Script(delay=0.01)), calls=None)
         case "message":
             return generator(scripted_model(Script(delay=0.01)), calls=None)
         case "operator":
@@ -847,10 +849,21 @@ def _busy(limit: str) -> Agent:
             return sleeper()
 
 
-@pytest.mark.parametrize("limit", ["message", "time", "working", "operator"])
+@pytest.mark.parametrize(
+    "limit,bridged",
+    [
+        pytest.param("message", False, id="message"),
+        # a bridged member reaches the sample's message limit as a native one does
+        pytest.param("message", True, id="message-bridged"),
+        pytest.param("time", False, id="time"),
+        pytest.param("working", False, id="working"),
+        pytest.param("operator", False, id="operator"),
+    ],
+)
 def test_a_sample_limit_leaves_the_ledger_and_the_provisional_answer(
-    tmp_path: Path, limit: str
+    tmp_path: Path, limit: str, bridged: bool
 ) -> None:
+
     async def run_members(control: SwarmControl) -> StopReason:
         control.start("early")
         async for _ in control.events():
@@ -869,9 +882,15 @@ def test_a_sample_limit_leaves_the_ledger_and_the_provisional_answer(
                     generator(scripted_model(), calls=1, answer="early answer"),
                     name="early",
                 ),
-                member(_busy(limit), name="busy"),
+                member(
+                    _busy(limit, bridged),
+                    name="busy",
+                    bridged=bridged,
+                ),
             ],
-            controller=_controller(run_members, f"limits_test_exhaustion_{limit}"),
+            controller=_controller(
+                run_members, f"limits_test_exhaustion_{limit}_{bridged}"
+            ),
             channels=[],
             # a time cap above the sample's limit, which ends the swarm first
             budget=Budget(time=60) if limit == "time" else Budget(),
@@ -1405,45 +1424,8 @@ async def test_a_split_the_swarm_cannot_make_is_refused_at_start(
         await run_swarm(agent_swarm)
 
 
-@agent
-def bridged_builder(model: Model, raised: list[str]) -> Agent:
-    # a bridged agent outside inspect_swe, whose first request's bridge compaction
-    # generates before the bridge's mark
-    async def execute(state: AgentState) -> AgentState:
-        try:
-            await _bridge_generate(model, _GenerateCompaction(model, []))
-        except LimitExceededError:
-            # in a sandboxed sample this raise would reach the sandbox service and end
-            # the sample
-            raised.append("raised")
-            raise
-        return state
-
-    return execute
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("bridged", [True, None])
-async def test_a_member_declared_bridged_is_cancelled_at_its_first_compaction(
-    bridged: bool | None,
-) -> None:
-    raised: list[str] = []
-    stop = await run_swarm(
-        swarm(
-            member(
-                bridged_builder(scripted_model(), raised),
-                name="cli",
-                bridged=bridged,
-            ),
-            channels=[],
-            budget=Budget(tokens=TOKENS_PER_CALL // 2),
-        )
-    )
-    assert stop.reason == "swarm_cap"
-    assert statuses(stop) == {"cli": "swarm_cap"}
-    # declared, it is cancelled with no error raised in its code; undeclared, it is
-    # counted native until the bridge's mark and the cap's error is raised
-    assert raised == ([] if bridged else ["raised"])
+# ---------------------------------------------------------------------------
+# Bridged members
 
 
 @pytest.mark.anyio
@@ -1462,19 +1444,11 @@ async def test_a_member_declared_bridged_is_cancelled_at_its_first_compaction(
         pytest.param([], Budget(), "submitted", id="control"),
     ],
 )
-@pytest.mark.parametrize("self_stop", [False, True])
-async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
-    limits: list[Limit], budget: Budget, expected: str, self_stop: bool
+async def test_a_bridged_member_ends_with_a_native_members_status(
+    limits: list[Limit], budget: Budget, expected: str
 ) -> None:
-    # the node cancels the member rather than raising, and the member returns, or stops
-    # itself, before the cancellation reaches it; the node's cause is kept
-    if self_stop and expected == "submitted":
-        expected = "member_limit:custom"
-    handles: list[MemberHandle] = []
-
     async def run(control: SwarmControl) -> StopReason:
-        handles.append(control.member("generator"))
-        control.start("generator")
+        control.start("cli")
         async for _ in control.events():
             pass
         return "all_done"
@@ -1484,24 +1458,46 @@ async def test_a_bridged_member_stopped_by_its_last_call_is_not_submitted(
     stop = await run_swarm(
         swarm(
             [
-                member(
-                    stopper(scripted_model(), "self_stop")
-                    if self_stop
-                    else generator(scripted_model()),
-                    name="generator",
-                    bridged=True,
-                    limits=limits,
-                ),
+                member(cli(scripted_model(), calls=2), bridged=True, limits=limits),
                 *sibling,
             ],
             controller=_controller(
-                run,
-                f"limits_test_last_call_{expected.replace(':', '_')}_{self_stop}",
+                run, f"limits_test_bridged_{expected.replace(':', '_')}"
             ),
             channels=[],
             budget=budget,
         )
     )
-    assert statuses(stop) == {"generator": expected} | {m.name: None for m in sibling}
-    [handle] = handles
-    assert (handle.status, handle.submitted) == (expected, expected == "submitted")
+    assert statuses(stop) == {"cli": expected} | {m.name: None for m in sibling}
+    line = next(m for m in _written_ledger(stop.transcript).members if m.name == "cli")
+    # the limit was raised, as for a native member, not met by cancelling the member
+    assert line.bridged and not line.cancelled
+
+
+@pytest.mark.anyio
+async def test_a_bridged_members_call_in_flight_at_a_soft_stop_completes() -> None:
+    gate = anyio.Event()
+    script = Script(gate=gate)
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("cli")
+        while script.started < 1:
+            await anyio.sleep(0)
+        # released as the stop begins: the call in flight completes
+        gate.set()
+        return "enough"
+
+    stop = await run_swarm(
+        swarm(
+            member(cli(scripted_model(script), calls=None), bridged=True),
+            controller=_controller(run, "limits_test_bridged_soft_stop"),
+            channels=[],
+        )
+    )
+    assert statuses(stop) == {"cli": "stopped"}
+    # the call in flight completed and was recorded; the next was refused
+    assert (script.started, script.calls) == (1, 1)
+    [line] = _written_ledger(stop.transcript).members
+    assert not line.cancelled
+    assert (line.calls.calls, line.calls.errored) == (1, 0)
+    assert line.meter.usage.total_tokens == TOKENS_PER_CALL

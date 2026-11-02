@@ -99,7 +99,7 @@ class MemberLedger(BaseModel):
     """How the member ended (`submitted`, `swarm_cap`, ...), or `None` for a member never started."""
 
     bridged: bool
-    """The member runs a CLI agent through Inspect's agent bridge."""
+    """The member runs a CLI agent through Inspect's agent bridge: declared with `member(..., bridged=True)`, or an `inspect_swe` agent left undeclared."""
 
     meter: Meter
     """Usage and cost of the calls made in the member's context."""
@@ -108,7 +108,7 @@ class MemberLedger(BaseModel):
     """Model events in the member's spans."""
 
     cancelled: bool
-    """The member's agent was cancelled, or the swarm's hard stop cancelled its background drain after the agent had returned. A hard stop during the drain keeps the agent's status, so `cancelled` can be `True` with `status="submitted"`. The agent is cancelled by the hard stop after a grace period, a member time limit or a cancellation from outside the swarm. A bridged member is also cancelled at once when it reaches a cap, its share or one of its own limits, or makes a call after the swarm stopped it."""
+    """The member's agent was cancelled, or the swarm's hard stop cancelled its background drain after the agent had returned. A hard stop during the drain keeps the agent's status, so `cancelled` can be `True` with `status="submitted"`. The agent is cancelled by the hard stop after a grace period, a member time limit or a cancellation from outside the swarm."""
 
     background_started: int = 0
     """Tasks the member's agent started with `background()`, such as `deepagent()` background subagents."""

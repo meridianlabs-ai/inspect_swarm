@@ -8,6 +8,8 @@ from uuid import uuid4
 
 import anyio
 from inspect_ai.agent import Agent, AgentState, agent, run
+from inspect_ai.agent._bridge.types import AgentBridge
+from inspect_ai.agent._bridge.util import bridge_generate
 from inspect_ai.event import InfoEvent
 from inspect_ai.log import transcript as current_transcript
 from inspect_ai.log._transcript import Transcript, _transcript
@@ -26,6 +28,7 @@ from inspect_ai.model import (
 from inspect_ai.model._model import init_sample_model_usage
 from inspect_ai.tool import ToolChoice, ToolInfo
 from inspect_ai.util import (
+    LimitExceededError,
     cost_limit,
     message_limit,
     time_limit,
@@ -116,6 +119,42 @@ def generator(model: Model, calls: int | None = 1, answer: str = "") -> Agent:
             n += 1
         if answer:
             state.output = ModelOutput.from_content("mockllm", answer)
+        return state
+
+    return execute
+
+
+async def bridged_generate(model: Model, messages: list[ChatMessage]) -> ModelOutput:
+    """A generation the agent bridge serves, through inspect_ai's `bridge_generate()`."""
+    output, _ = await bridge_generate(
+        AgentBridge(AgentState(messages=[])),
+        model,
+        messages,
+        [],
+        None,
+        GenerateConfig(),
+        requested_model=None,
+    )
+    return output
+
+
+@agent
+def cli(model: Model, calls: int | None = 1) -> Agent:
+    """A CLI agent run as inspect_ai's sandbox bridge runs one: `calls` bridged generations (`None`: until stopped); a limit one reaches is answered with an error reply, on which the CLI exits, and the bridge then raises that limit."""
+
+    async def execute(state: AgentState) -> AgentState:
+        reached: LimitExceededError | None = None
+        n = 0
+        while calls is None or n < calls:
+            try:
+                state.output = await bridged_generate(model, state.messages)
+            except LimitExceededError as ex:
+                reached = ex
+                break
+            state.messages.append(state.output.message)
+            n += 1
+        if reached is not None:
+            raise reached
         return state
 
     return execute

@@ -540,7 +540,7 @@ The limits deep dive's `stop(reason)` applies unchanged ([Stopping](swarm-limits
   - Interventions staged but not committed are recorded with `committed: false` ([P5](#p5-trusted-interventions)).
 - **The status of a released member.**
   - Returning `False` makes `react()` return normally, and the spike shows that a member released after a tool-call turn keeps `stop_reason == "tool_calls"`. M1-9's rule would read that as `submitted`.
-  - So the hook sets the member's stop cause to `stopped` whenever it returns `False` because of a stop, and the member wrapper gives a normal return with a stop cause that status (`m.stop_cause or _status_for(err)`, where today only the cancelled branch reads it).
+  - So the hook sets a stop cause on the member's context, `stopped`, whenever it returns `False` because of a stop, and the member wrapper gives a normal return with a stop cause that status (`m.stop_cause or _status_for(err)`). The member context gains that field for this.
   - The one exception is the conversational boundary. A member released after a tool-free reply under `no_tool_calls="stop"` returns as `react(submit=False)` alone would, so it ends `submitted`, with its last reply as its output.
 
 A stop the controller did not request (`swarm_cap`, `swarm_time`) cancels the controller's `run`, and with it any `activate()` call in flight. The member stays running until its next boundary or its next model call, where the soft stop ends it.
