@@ -92,7 +92,7 @@ def users(
         The isolation, for `swarm(isolation=...)`.
 
     Raises:
-        ValueError: If a path is not absolute and normalised, or holds a newline or NUL; `home` does not have `{member}` once, in its last component; or two shares, or a share and the homes' parent directory, are the same or one is inside the other.
+        ValueError: If a path is not absolute and normalised, or holds a newline, NUL or backslash; `home` does not have `{member}` once, in its last component; or two shares, or a share and the homes' parent directory, are the same or one is inside the other.
     """
     isolation = UserIsolation(
         sandbox=sandbox,
@@ -135,10 +135,10 @@ def check_isolation(isolation: UserIsolation, where: str) -> None:
             not posixpath.isabs(path)
             or path.startswith("//")
             or posixpath.normpath(path) != path
-            or any(c in path for c in "\n\0")
+            or any(c in path for c in "\n\0\\")
         ):
             raise ValueError(
-                f"{where}: {field} must be an absolute, normalised path with no '..', '.', repeated or trailing '/', newline or NUL, got {path!r}."
+                f"{where}: {field} must be an absolute, normalised path with no '..', '.', repeated or trailing '/', newline, NUL or backslash, got {path!r}."
             )
     home = isolation.home
     last = posixpath.basename(home)
@@ -299,18 +299,19 @@ find / -maxdepth 0 -writable -printf '' >/dev/null 2>&1 || fail "users isolation
 if [ "$acl" = 1 ]; then
   command -v setfacl >/dev/null 2>&1 && command -v getfacl >/dev/null 2>&1 || fail "users isolation needs setfacl and getfacl in the sandbox for shared directories (package acl)"
 fi
-awk -F: -v g="$group" '$1 == g { print "groupname", $3 }' /etc/group
 gid=$(awk -F: -v g="$group" '$1 == g { print $3 }' /etc/group)
+dir=$(mktemp -d) || fail "users isolation could not create a temporary directory"
+trap 'rm -rf "$dir"' EXIT
 
-# a mount point strictly inside $1, as /proc/self/mountinfo writes it (\040 for a space)
+# a mount point strictly inside $1, as /proc/self/mountinfo writes it (\040 for a space;
+# configured paths have no backslash, which awk -v would read as an escape)
 mount_inside() {
   awk -v p="$1" '
     function esc(s,  r, i, c) {
       r = ""
       for (i = 1; i <= length(s); i++) {
         c = substr(s, i, 1)
-        if (c == "\\") r = r "\\134"
-        else if (c == " ") r = r "\\040"
+        if (c == " ") r = r "\\040"
         else if (c == "\t") r = r "\\011"
         else r = r c
       }
@@ -347,6 +348,16 @@ foreign_acl() {
   '
 }
 
+# a directory setup would create inherits the default ACL of its nearest existing
+# ancestor, so that ancestor must have none
+inherits_acl() {
+  a=$1
+  while [ ! -e "$a" ] && [ ! -L "$a" ]; do a=$(dirname -- "$a"); done
+  case $(ls -ld -- "$a") in
+    ??????????+*) fail "users isolation would create $1 inside $a, whose ACL its new directories would inherit; remove it (setfacl -b)" ;;
+  esac
+}
+
 [ -r /proc/self/mountinfo ] || fail "users isolation needs /proc/self/mountinfo to check for mounts inside its directories"
 if [ -e "$parent" ]; then
   m=$(mount_inside "$parent")
@@ -354,20 +365,24 @@ if [ -e "$parent" ]; then
   case $(ls -ld -- "$parent") in
     ??????????+*) fail "users isolation does not support ACLs on the members' homes' parent $parent, which homes would inherit; remove them (setfacl -b)" ;;
   esac
+else
+  inherits_acl "$parent"
 fi
-awk -F: '$1 ~ /^swarm-/ { print "username", $1 }' /etc/passwd
-awk -F: '{ print "id", $3 }' /etc/passwd /etc/group
+awk -F: '{ print $3 }' /etc/passwd /etc/group >"$dir/ids"
 while [ "$1" != -- ]; do
   root=$1
   shift
   [ -d "$root" ] || continue
-  # the ids go to stdout, the traversal's errors to $errors: an incomplete scan could
-  # miss an id a file takes
-  { errors=$(find -P "$root" -xdev \( \( -uid +$((lo - 1)) -uid -$((hi + 1)) \) -o \( -gid +$((lo - 1)) -gid -$((hi + 1)) \) \) -printf 'id %U\nid %G\n' 2>&1 1>&3); } 3>&1 \
-    || fail "users isolation could not scan all of $root for the user ids its files take, so it cannot choose ids that own nothing: $(printf '%s' "$errors" | head -n 1)"
+  # an incomplete scan could miss an id a file takes
+  find -P "$root" -xdev \( \( -uid +$((lo - 1)) -uid -$((hi + 1)) \) -o \( -gid +$((lo - 1)) -gid -$((hi + 1)) \) \) -printf '%U\n%G\n' >>"$dir/ids" 2>"$dir/errors" \
+    || fail "users isolation could not scan all of $root for the user ids its files take, so it cannot choose ids that own nothing: $(head -n 1 "$dir/errors")"
 done
 shift
 for share in "$@"; do
+  if [ ! -e "$share" ] && [ ! -L "$share" ]; then
+    inherits_acl "$share"
+    continue
+  fi
   [ -d "$share" ] || continue
   m=$(mount_inside "$share")
   [ -z "$m" ] || fail "users isolation does not support a mount inside the shared directory $share, as at $m"
@@ -376,6 +391,13 @@ for share in "$@"; do
   bad=$(printf '%s\n' "$acls" | foreign_acl "$gid")
   [ -z "$bad" ] || fail "users isolation does not support ACL entries it did not set in a shared directory: $bad; remove them (setfacl -b)"
 done
+# the answer: at most one line per id in the window, between markers, so that output a
+# provider cut short is found out rather than read as fewer taken ids
+echo begin
+awk -F: -v g="$group" '$1 == g { print "groupname", $3 }' /etc/group
+awk -F: '$1 ~ /^swarm-/ { print "username", $1 }' /etc/passwd
+awk -v lo="$lo" -v hi="$hi" '$1 >= lo && $1 <= hi { print "id", $1 }' "$dir/ids" | sort -u
+echo end
 exit 0
 """
 )
@@ -647,7 +669,12 @@ async def setup_isolation(
         taken.add(recorded_gid)
     existing_gid: int | None = None
     existing_users: set[str] = set()
-    for line in probe.stdout.splitlines():
+    lines = probe.stdout.splitlines()
+    if lines[:1] != ["begin"] or lines[-1:] != ["end"]:
+        raise RuntimeError(
+            f"users isolation: the id scan's output in sandbox {env_name!r} came back incomplete (the provider may limit command output), so it cannot choose ids that own nothing."
+        )
+    for line in lines[1:-1]:
         kind, _, value = line.partition(" ")
         if kind == "id" and value.isdigit():
             taken.add(int(value))

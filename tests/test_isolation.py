@@ -42,12 +42,14 @@ class IsolationStub(SandboxEnvironment):
         uid: str = "0",
         fail: ExecResult[str] | None = None,
         fail_on: str = "add_users()",
+        probe: str = "begin\nend\n",
     ) -> None:
         super().__init__()
         self.calls: list[tuple[str | None, str, list[str]]] = []
         self.uid = uid
         self.fail = fail
         self.fail_on = fail_on
+        self.probe = probe
 
     async def exec(
         self,
@@ -67,6 +69,8 @@ class IsolationStub(SandboxEnvironment):
             return ExecResult(
                 True, 0, _ROOT_PROBE.replace("Uid:\t0", f"Uid:\t{self.uid}"), ""
             )
+        if "echo begin" in cmd[2]:
+            return ExecResult(True, 0, self.probe, "")
         if self.fail is not None and self.fail_on in cmd[2]:
             return self.fail
         return ExecResult(True, 0, "", "")
@@ -250,6 +254,14 @@ async def test_members_of_a_swarm_without_isolation_run_as_the_default_user() ->
         ),
         pytest.param(
             users(),
+            # what a provider that keeps only the last bytes of a long output returns
+            IsolationStub(probe="id 61003\nid 61004\nend\n"),
+            RuntimeError,
+            "users isolation: the id scan's output in sandbox 'default' came back incomplete",
+            id="truncated-probe",
+        ),
+        pytest.param(
+            users(),
             IsolationStub(uid="1000"),
             RuntimeError,
             "users isolation needs root in sandbox 'default' to create users; its root access is unusable (commands run as uid 1000, not as root)",
@@ -373,6 +385,16 @@ async def test_the_preamble_ends_with_the_members_user_and_directories(
             {"shared": [Share(path="/sh\0ared", access="rw")]},
             "users(): shared must be an absolute, normalised path",
             id="nul",
+        ),
+        pytest.param(
+            {"home": "/scr\\tatch/{member}"},
+            "users(): home must be an absolute, normalised path",
+            id="backslash-home",
+        ),
+        pytest.param(
+            {"shared": [Share(path="/data\\t", access="ro")]},
+            "users(): shared must be an absolute, normalised path",
+            id="backslash-share",
         ),
         pytest.param(
             {"shared": [{"path": "shared", "access": "rw"}]},
@@ -533,3 +555,15 @@ def test_isolation_resolves_from_a_name_or_its_fields() -> None:
             channels=[],
             isolation=isolation,  # pyright: ignore[reportArgumentType]
         )
+
+
+@pytest.mark.anyio
+async def test_ids_the_probe_reports_taken_are_skipped() -> None:
+    seen: dict[str, dict[str, str | None]] = {}
+    stub = IsolationStub(probe="begin\nid 61000\nid 61002\nend\n")
+    with environments(default=stub):
+        await run_swarm(swarm(_scoped(seen), channels=[], isolation="users"))
+        record = store().get("inspect_swarm:isolation")
+    assert record == {
+        "default": {"gid": 61001, "users": {"swarm-w-1": 61003, "swarm-w-2": 61004}}
+    }

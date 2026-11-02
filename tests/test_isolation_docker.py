@@ -459,6 +459,21 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             setup="mkdir -p /shared/inherited && setfacl -d -m u::r-x /shared/inherited",
             error=f"{refused}users isolation does not support ACL entries it did not set in a shared directory: /shared/inherited: default:user::r-x",
         ),
+        "missing-share-under-acl": Case(
+            runs=[Run({"shared": [{"path": "/work/shared", "access": "rw"}]}, idle)],
+            setup="mkdir /work && setfacl -d -m u::r-x /work",
+            error=f"{refused}users isolation would create /work/shared inside /work, whose ACL its new directories would inherit; remove it (setfacl -b)",
+        ),
+        "missing-homes-parent-under-acl": Case(
+            runs=[
+                Run(
+                    {"home": "/work/homes/{member}", "shared": [], "peers": "read"},
+                    idle,
+                )
+            ],
+            setup="mkdir /work && setfacl -d -m u:61005:rwx /work",
+            error=f"{refused}users isolation would create /work/homes inside /work, whose ACL its new directories would inherit; remove it (setfacl -b)",
+        ),
         "unreadable-ro-share": Case(
             runs=[Run({"shared": [{"path": "/inputs/data", "access": "ro"}]}, idle)],
             setup="mkdir -m 700 /inputs && mkdir /inputs/data && echo x > /inputs/data/f",
