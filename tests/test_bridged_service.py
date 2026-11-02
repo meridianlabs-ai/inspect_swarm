@@ -384,6 +384,46 @@ async def test_a_member_that_used_bridged_tools_cannot_bind_swarm_tools() -> Non
     ]
 
 
+@pytest.mark.anyio
+async def test_integral_floats_are_converted_as_for_a_native_call() -> None:
+    # the schema takes 1.0 as an integer; unconverted, a float line number or range
+    # reached the board's slicing and failed the sample
+    results: dict[str, str] = {}
+    failed: list[bool] = []
+
+    async def script() -> None:
+        c = _Cli(["messages", "shared_memory"], max_wait=5)
+        await c.call(
+            "parent", "shared_memory", command="create", path=PLAN, file_text="a\nb\n"
+        )
+        results["insert"] = await c.call(
+            "parent",
+            "shared_memory",
+            command="insert",
+            path=PLAN,
+            insert_line=1.0,
+            insert_text="x",
+        )
+        results["view"] = await c.call(
+            "parent", "shared_memory", command="view", path=PLAN, view_range=[2.0, 2.0]
+        )
+        results["wait"] = await c.call("parent", "swarm_wait", timeout=1.0)
+        failed.append(c.bridge._failure_requested.is_set())  # pyright: ignore[reportPrivateUsage]
+
+    with anyio.fail_after(20):
+        await run_swarm(
+            swarm(
+                member(cli(script), name="cli", bridged=True),
+                channels=[messages(), shared_memory(rate=None)],
+            )
+        )
+
+    assert results["insert"].startswith("Inserted text after line 1")
+    assert "     2\tx" in results["view"] and "\ta" not in results["view"]
+    assert results["wait"].startswith("Nothing you waited for happened in 1 s.")
+    assert failed == [False]
+
+
 @agent
 def mixed(script: Any) -> Agent:
     """A native member that resolves swarm_tools(), then runs `script` with a bridged CLI, as a bridged subagent would."""

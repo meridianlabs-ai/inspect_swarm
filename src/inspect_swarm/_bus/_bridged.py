@@ -2,6 +2,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from inspect_ai.agent import BridgedToolsSpec
+from inspect_ai.model._call_tools import tool_params
 from inspect_ai.tool import Tool, ToolDef, ToolError
 
 from .._channel._channel import ToolDeclaration
@@ -76,7 +77,7 @@ def _relay(channel: str, declaration: ToolDeclaration, channels: Sequence[str]) 
         )
         token = current_via.set("bridge")
         try:
-            return str(await tool(**arguments))
+            return await _call(tool, arguments)
         finally:
             current_via.reset(token)
 
@@ -113,13 +114,33 @@ def _wait(channels: Sequence[str], max_wait: int) -> Tool:
         finally:
             current_via.reset(token)
 
-    return wait_tool(
-        wait,
-        messages="messages" in channels,
-        board="shared_memory" in channels,
-        bridged=True,
-        timeout=f"Seconds to wait at most (default and maximum: {max_wait}, or less if the swarm's channels wait less).",
+    tool = ToolDef(
+        wait_tool(
+            wait,
+            messages="messages" in channels,
+            board="shared_memory" in channels,
+            bridged=True,
+            timeout=f"Seconds to wait at most (default and maximum: {max_wait}, or less if the swarm's channels wait less).",
+        )
     )
+
+    async def execute(**arguments: Any) -> str:
+        return await _call(tool.tool, arguments)
+
+    return ToolDef(
+        execute,
+        name=tool.name,
+        description=tool.description,
+        parameters=tool.parameters,
+        parallel=tool.parallel,
+    ).as_tool()
+
+
+# Calls `tool` with the arguments converted to its parameters' types, as Inspect
+# converts a native call's: the bridge only validates them against the schema, which
+# takes 1.0 as an integer.
+async def _call(tool: Callable[..., Any], arguments: dict[str, Any]) -> str:
+    return str(await tool(**tool_params(arguments, tool)))
 
 
 # the run's bus, for a call of a bridged tool given with `channels`
