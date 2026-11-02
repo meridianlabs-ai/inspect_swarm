@@ -17,7 +17,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### SwarmControl
 ### MemberHandle
 ### MemberEnded
-### SwarmEvent
+### ControlEvent
 ### MemberInfo
 ### MemberState
 ### StopReason

@@ -14,7 +14,7 @@ from inspect_ai.agent import (
 )
 from inspect_ai.agent._channel import current_agent_channel
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent, SpanBeginEvent
+from inspect_ai.event import CommunicationEvent, SpanBeginEvent
 from inspect_ai.log import EvalLog
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import (
@@ -43,6 +43,8 @@ from inspect_swarm._budget import current_member
 from inspect_swarm._bus._bus import Bus
 from inspect_swarm._bus._record import Draft
 from inspect_swarm._bus._storm import StormControls
+
+from .swarm_runtime import data, send
 
 
 # A test channel whose one tool, `<name>_write`, delivers its text as a record. The
@@ -162,15 +164,12 @@ async def _eval(solver: Agent, tmp_path: Path) -> EvalLog:
     return log
 
 
-def _sent(log: EvalLog) -> list[dict[str, Any]]:
+def _sent(log: EvalLog) -> list[CommunicationEvent]:
     assert log.samples is not None
     return [
-        e.data
+        e
         for e in log.samples[0].events
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "comm"
-        and e.data.get("kind") == "sent"
+        if isinstance(e, CommunicationEvent) and e.kind == "sent"
     ]
 
 
@@ -224,11 +223,11 @@ async def test_a_subagent_gets_only_member_reach_tools_and_writes_as_the_member(
     sent = _sent(log)
     assert [
         (
-            s["channel"],
-            s["record"]["payload"],
-            s["member"],
-            s["nested"],
-            s["rejected"] and s["rejected"]["control"],
+            s.channel,
+            send(s).record.content,
+            s.agent,
+            s.nested,
+            (rejected := send(s).rejected) and rejected.control,
         )
         for s in sent
     ] == [
@@ -238,16 +237,18 @@ async def test_a_subagent_gets_only_member_reach_tools_and_writes_as_the_member(
         ("loop", "parent after the child", "w", False, None),
     ]
     # the remaining window depends on how long the run took to get there
-    assert re.fullmatch(r"rate limit: retry in \d+ s", sent[2]["rejected"]["reason"])
+    rejected = send(sent[2]).rejected
+    assert rejected is not None
+    assert re.fullmatch(r"rate limit: retry in \d+ s", rejected.reason)
     # each write names the loop that made it
     assert log.samples is not None
     spans = {
         e.id: e.name for e in log.samples[0].events if isinstance(e, SpanBeginEvent)
     }
-    loops = [s["loop"] for s in sent]
-    assert all(s["loop"] == s["record"]["sender_span_id"] for s in sent)
+    loops = [s.loop_span_id for s in sent]
+    assert all(s.loop_span_id == data(s)["record"]["sender_span_id"] for s in sent)
     assert loops[0] == loops[3] != loops[1] == loops[2]
-    assert spans[loops[1]] == "general"
+    assert loops[1] is not None and spans[loops[1]] == "general"
 
 
 @tool

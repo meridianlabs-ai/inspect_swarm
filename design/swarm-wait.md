@@ -208,7 +208,7 @@ One `waited` communication event per wait, written when it ends (in the synchron
 - the files the result named, with their versions and whether deleted, and the members the result named as ended, with their statuses;
 - the records whose news the result reported (`depends_on`), from each reached channel's `WaitNews.depends_on`, each written once per loop: for the board, the write it reported for every changed file, not only the ten it names; for the messages channel, every unread message its news counts ([swarm-critical-path-records.md](swarm-critical-path-records.md#evidence)).
 
-`delivered` is unchanged. A wait's waking commits join it to the `delivered` events that ended it by their commit sequence numbers; with the files it named (ids and versions), the later dependency-linked critical path can tell that a member's idle time ended at a peer's commit, which the `read` that usually follows then links by content.
+`delivered` is unchanged. A wait's waking commits join it to the `delivered` events that ended it by their commit sequence numbers, so analysis can tell that a member's idle time ended at a peer's commit. The dependency-linked critical path links the wait to the commits in its `depends_on` and the ends it named, not to `woken_by` ([swarm-critical-path.md](swarm-critical-path.md)).
 
 ### Metrics
 
@@ -320,7 +320,7 @@ The messages channel contributes its `max_wait` (default 120) to the effective m
 ### Room for later work
 
 - **Bridged members' bus tools** (later) give them `swarm_wait` through `swarm_bridged_tools()`. A bridged member never counts as waiting, because the host cannot tell whether one blocked call is all its CLI is doing, as swarm-communication.md already says; its waits end by news, ends, the stop or timeout. Its CLI's MCP timeout must exceed the bus's effective maximum wait.
-- **Persistent members and wake from idle.** An idle member (submitted, held between activations) is not in a tool call, so it is not a waiter. The all-waiting check generalises to quiescence: no member active, idle members counting as not active, and every channel's `quiescent()`. Waking an idle member stays the controller's decision on a `SwarmEvent` ([swarm-communication.md Wake later](swarm-communication.md#wake-and-turn-boundaries)).
+- **Persistent members and wake from idle.** An idle member (submitted, held between activations) is not in a tool call, so it is not a waiter. The all-waiting check generalises to quiescence: no member active, idle members counting as not active, and every channel's `quiescent()`. Waking an idle member stays the controller's decision on a `ControlEvent` ([swarm-communication.md Wake later](swarm-communication.md#wake-and-turn-boundaries)).
 - **Push delivery.** An urgent message to a member in `swarm_wait` ends the wait (outcome `waiting` in the urgent-message table), as it ended a `read_messages` wait.
 
 ## Alternatives considered

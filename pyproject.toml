@@ -15,11 +15,12 @@ classifiers = [
     "Development Status :: 3 - Alpha",
 ]
 dependencies = [
-    # Temporarily a git reference, to unblock work: users isolation enters
-    # inspect_ai's sandbox_identity() scope (UKGovernmentBEIS/inspect_ai#6190),
-    # which no release has yet, so this tracks inspect_ai's `main`. PyPI rejects
-    # git dependencies, so go back to a released `inspect-ai>=X` floor before
-    # inspect_swarm is published.
+    # Temporarily a git reference, to unblock work: the swarm writes its evidence as
+    # CommunicationEvent and SwarmEvent (UKGovernmentBEIS/inspect_ai#6164), and users
+    # isolation enters inspect_ai's sandbox_identity() scope
+    # (UKGovernmentBEIS/inspect_ai#6190); no release has either yet, so this tracks
+    # inspect_ai's `main`. PyPI rejects git dependencies, so go back to a released
+    # `inspect-ai>=X` floor before inspect_swarm is published.
     "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",
     # imported directly; inspect-ai depends on them too, but a transitive
     # dependency is not a promise

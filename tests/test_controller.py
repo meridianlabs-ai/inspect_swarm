@@ -9,7 +9,7 @@ from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai.agent import Agent, AgentState, agent, as_solver
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent, SpanBeginEvent, StoreEvent
+from inspect_ai.event import SpanBeginEvent, StoreEvent, SwarmEvent
 from inspect_ai.log import EvalSample
 from inspect_ai.log._samples import (
     _sample_active,  # pyright: ignore[reportPrivateUsage]
@@ -47,13 +47,13 @@ from .swarm_runtime import (
     TOKENS_PER_CALL,
     Script,
     after,
-    evidence,
     generator,
     run_swarm,
     sample,
     scripted_model,
     sleeper,
     statuses,
+    swarm_events,
 )
 
 
@@ -545,8 +545,8 @@ async def test_no_member_text_reaches_the_controller() -> None:
     )
     assert statuses(stop) == {"generator": "submitted"}
     swarm_evidence = [
-        *evidence(stop.transcript, "member_result"),
-        *evidence(stop.transcript, "final"),
+        *swarm_events(stop.transcript, "member_result"),
+        *swarm_events(stop.transcript, "final"),
     ]
     assert seen and not any(secret in text for text in [*seen, repr(swarm_evidence)])
 
@@ -910,10 +910,7 @@ def _swarm_span(sample: EvalSample) -> tuple[str, set[str]]:
     [swarm_span] = [
         e.span_id
         for e in sample.events
-        if isinstance(e, InfoEvent)
-        and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "ledger"
+        if isinstance(e, SwarmEvent) and e.kind == "ledger"
     ]
     assert swarm_span is not None
     parents = {
