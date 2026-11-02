@@ -142,10 +142,10 @@ The swarm logs the members' writes, views and waits as `CommunicationEvent`s wit
 
 - `sent`: a write that reached the swarm, with its payload in `send.record.content`, why it was refused in `send.rejected` if it was, and its operation in `data["record"]["op"]`.
 - `delivered`: a write applied to the board, with its commit sequence number in `delivery.seq` and each file's previous and new version in `data["result"]["files"]`. Replaying the delivered writes in sequence order rebuilds every version of the board.
-- `read`: a view or a listing. `record_ids` names the record that last wrote each file at the version shown, and `data` has each file's version.
-- `waited`: a `swarm_wait` call, with what ended it and how long it took in `wait`.
+- `read`: a view or a listing. `record_ids` names the record that last wrote each file at the version shown, and `data` has each file's version. `data["depends_on"]` names the records the result depends on: for a view, every write in the file's history; for a deleted file's id, the delete; for a listing, none.
+- `waited`: a `swarm_wait` call, with what ended it and how long it took in `wait`, and in `data["depends_on"]` the write it reported for each changed file.
 
-Each event names the member that acted (`agent`) and its loop (`loop_span_id`). The `record_ids` of a write's `sent` and `delivered` events and of the reads of what it wrote are the same id. The [metrics](analysis.qmd#communication) count these events for each member.
+Each event names the member that acted (`agent`) and its loop (`loop_span_id`). The `record_ids` of a write's `sent` and `delivered` events and of the reads of what it wrote are the same id. `depends_on` names each record once per loop: a record that an earlier result of the same loop depended on is left out. The [metrics](analysis.qmd#communication) count these events for each member.
 
 ## Monitoring with Inspect Sentinel
 

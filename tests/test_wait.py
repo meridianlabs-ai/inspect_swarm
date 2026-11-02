@@ -299,7 +299,14 @@ async def test_eleven_files_are_named_ten_and_one_more_by_each_wait() -> None:
         expected = changed(f"{ids}, and 1 more", "w-2", "f-1", count=11)
         assert await r.wait("w-1") == expected
         assert await r.wait("w-1") == expected
-        assert [len(data_of(w)["files"]) for w in waited(transcript)] == [10, 10]
+        # every file's write, once for the loop
+        assert [
+            (len(data_of(w)["files"]), len(data_of(w)["depends_on"]))
+            for w in waited(transcript)
+        ] == [
+            (10, 11),
+            (10, 0),
+        ]
 
 
 @pytest.mark.anyio
@@ -337,11 +344,8 @@ async def test_a_release_whose_news_is_gone_at_resume_sleeps_again(gone: str) ->
             wait_of(record).outcome,
             data_of(record)["woken_by"],
             data_of(record)["files"],
-        ) == (
-            "timeout",
-            [1],
-            [],
-        )
+            data_of(record)["depends_on"],
+        ) == ("timeout", [1], [], [])
 
 
 # Ends
@@ -403,16 +407,26 @@ async def test_a_waking_message_ends_its_recipients_own_wait_until_it_is_read() 
             r.bus.close()
         assert results == {"top": STOPPING, "child": STOPPING}
         first, second, *_ = waited(transcript)
+        # the quiet m-1 too: the news counts it
         assert (
             wait_of(first).outcome,
             data_of(first)["woken_by"],
             data_of(first)["files"],
+            data_of(first)["depends_on"],
         ) == (
             "news",
             [2],
             [{"record": "m-1", "from": "w-1"}, {"record": "m-2", "from": "w-1"}],
+            ["m-1", "m-2"],
         )
-        assert (wait_of(second).outcome, data_of(second)["woken_by"]) == ("news", [])
+        assert (
+            wait_of(second).outcome,
+            data_of(second)["woken_by"],
+            data_of(second)["depends_on"],
+        ) == ("news", [], [])
+        # the read concerns both, and depends on nothing the loop's waits had not
+        [read] = comm_events(transcript, "read")
+        assert (read.record_ids, data_of(read)["depends_on"]) == (["m-1", "m-2"], [])
 
 
 @pytest.mark.anyio
@@ -430,6 +444,64 @@ async def test_a_wait_counts_unread_messages_that_do_not_wake_it() -> None:
             assert results == []
             r.bus.close()
         assert results == [f"{STOPPING}\nYou have 1 unread message."]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "release,outcome",
+    [
+        ("write", "news"),
+        ("at_once", "news"),
+        ("end", "news"),
+        ("timeout", "timeout"),
+        ("stop", "stopping"),
+    ],
+)
+async def test_a_wait_without_message_news_depends_on_no_message(
+    release: str, outcome: str
+) -> None:
+    # w-2's only unread message is quiet, so whatever ends its wait shows only the
+    # count of it; w-3 runs and does not wait
+    async with messages_run(
+        ("w-1", "w-2", "w-3"), messages(rate=None), shared_memory(rate=None)
+    ) as (r, transcript):
+        await r.send("w-1", "w-2", "quiet", wake=False)
+
+        async def write() -> None:
+            await r.call(
+                "w-1", "shared_memory", command="create", path=_p("a.md"), file_text="x"
+            )
+
+        if release == "at_once":
+            await write()
+        results: list[str] = []
+
+        async def wait() -> None:
+            timeout = 1 if release == "timeout" else None
+            results.append(await r.call("w-2", "swarm_wait", timeout=timeout))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(wait)
+            await anyio.wait_all_tasks_blocked()
+            match release:
+                case "write":
+                    await write()
+                case "end":
+                    r.members["w-1"].state, r.members["w-1"].status = (
+                        "ended",
+                        "submitted",
+                    )
+                    r.bus.member_ended("w-1", "submitted")
+                case "stop":
+                    r.bus.close()
+                case _:
+                    pass
+        assert results[0].endswith("You have 1 unread message.")
+        [record] = waited(transcript)
+        assert (wait_of(record).outcome, data_of(record)["depends_on"]) == (
+            outcome,
+            ["w-1"] if release in ("write", "at_once") else [],
+        )
 
 
 @pytest.mark.anyio

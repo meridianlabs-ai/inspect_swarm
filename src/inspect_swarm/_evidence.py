@@ -161,21 +161,16 @@ def comm_read(
     loop: str | None,
     nested: bool,
     tool_span_id: str | None,
-    files: list[JsonValue] | None,
+    records: list[str],
+    depends_on: list[str],
     listing: bool,
-    records: list[str] | None = None,
+    files: list[JsonValue] | None = None,
 ) -> None:
-    # a loop's tool was shown peer content: the shared memory's `files` or the messages
-    # channel's `records` name what it was shown, from the channel's state, never from
-    # the content. The record ids are the messages shown, or each file's last write at
-    # the version shown, whether the read listed the file, showed part of it or showed
-    # its tombstone.
-    if files is not None:
-        record_ids = _file_records(files)
-        shown: dict[str, JsonValue] = {"files": files}
-    else:
-        record_ids = list(records or [])
-        shown = {}
+    # a loop's tool was shown peer content, from the channel's state, never from the
+    # content: `records` are the records the result concerns, `depends_on` those whose
+    # content or news it showed that no earlier result of the loop had, and the shared
+    # memory's `files` the versions it showed
+    shown: dict[str, JsonValue] = {} if files is None else {"files": files}
     _comm(
         "read",
         agent=member,
@@ -183,10 +178,11 @@ def comm_read(
         loop=loop,
         nested=nested,
         channel=channel,
-        record_ids=record_ids,
+        record_ids=list(records),
         data={
             "read": read,
             "tool_span_id": tool_span_id,
+            "depends_on": list(depends_on),
             **shown,
             "listing": listing,
         },
@@ -206,12 +202,13 @@ def comm_waited(
     outcome: str,
     woken_by: list[int],
     files: list[JsonValue],
+    depends_on: list[str],
     ended: list[JsonValue],
 ) -> None:
     # one swarm_wait, when it returns or is cancelled: what ended it, the commits that
-    # released it for news (`delivered`'s `delivery.seq`), and the files and ends its
-    # result named; `idle` is the seconds of it during which its member counted as
-    # waiting
+    # released it for news (`delivered`'s `delivery.seq`), the files and ends its result
+    # named, and the records whose news it showed that no earlier result of the loop
+    # had; `idle` is the seconds of it during which its member counted as waiting
     _comm(
         "waited",
         agent=spec.member,
@@ -231,20 +228,10 @@ def comm_waited(
             "idle": idle,
             "woken_by": list(woken_by),
             "files": files,
+            "depends_on": list(depends_on),
             "ended": ended,
         },
     )
-
-
-# The distinct records that last wrote the files read, at the versions read, in order.
-def _file_records(files: list[JsonValue]) -> list[str]:
-    ids: list[str] = []
-    for entry in files:
-        assert isinstance(entry, dict)
-        record = entry.get("record")
-        if isinstance(record, str) and record not in ids:
-            ids.append(record)
-    return ids
 
 
 # The ledger and the metrics: a `SwarmEvent` whose `data` is the store entry, the

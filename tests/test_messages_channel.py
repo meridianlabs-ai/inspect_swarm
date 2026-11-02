@@ -210,6 +210,11 @@ async def test_one_swarm_object_keeps_concurrent_samples_inboxes_apart(
         assert [(data(r)["read"], r.record_ids) for r in _comm(sample, "read")] == [
             ("r-1", ["m-1"])
         ]
+        # p's wait showed m-1's news, so its read of m-1 depends on nothing new
+        assert [
+            data(w)["depends_on"] for w in _comm(sample, "waited") if w.agent == "p"
+        ] == [["m-1"]]
+        assert [data(r)["depends_on"] for r in _comm(sample, "read")] == [[]]
 
 
 @pytest.mark.anyio

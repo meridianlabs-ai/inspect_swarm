@@ -405,7 +405,7 @@ Monitoring aligns with inspect_sentinel, with no swarm monitor type (decision: R
 |---|---|---|---|
 | `sent` | step 3, every attempt that reached the bus | sender's tool span (or agent span via the bridge) | the full record, and for a refused attempt the control that refused it (`liveness`, `payload`, `max_bytes`, `rate` or `admit`) and the reason. Later, with the bus hook: the hook's decision (action, explanation), the original payload when modified, and controls for the hook's rejections and failures |
 | `delivered` | step 4 | same span | the record, its recipients, its commit sequence number, the members whose own loop the record is news to, and the result `apply()` returned |
-| `read` | `read_messages` returns | reader's tool span | the read id, the records read, and the reader's tool span, through which the result message's tool call id is found ([Records in model input](#records-and-the-bus)) |
+| `read` | `read_messages` returns | reader's tool span | the read id, the records read (`records`), those the read depends on (`depends_on`: the same, less any an earlier result of the loop depended on, such as a wait that counted them), and the reader's tool span, through which the result message's tool call id is found ([Records in model input](#records-and-the-bus)) |
 
 **No exposure event.** Whether a model received a record is not swarm evidence. A `read` event says that a loop's tool returned the record; its `ToolEvent` lets analysis of a generation's input correlate the result with that input, within the limits in [Records in model input](#records-and-the-bus). Read but not seen is almost always a loop that never generated again, which the member's status shows, or author code that removed the result. Bridged reads have no tool span in the CLI's conversation: the CLI builds its own conversation, so only the fenced ids in the result text identify their records there ([Alternatives considered](#alternatives-considered)).
 
@@ -480,7 +480,7 @@ class Channel:                                                      # shared: co
 
 @dataclass(frozen=True)
 class ChannelRun:                                                   # what open() gets
-    bus: Bus                               # deliver() and deliver_internal() for this run
+    bus: Bus                               # deliver(), read() and deliver_internal() for this run
     roster: Sequence[MemberInfo]
 
 class ChannelState(Protocol):                                       # per run

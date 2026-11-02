@@ -158,12 +158,13 @@ async def test_a_message_is_read_once_fenced_with_its_bound_sender() -> None:
             "w-1/top",
         )
         [read] = comm_events(transcript, "read")
-        assert (read.agent, read.channel, data(read)["read"], read.record_ids) == (
-            "w-2",
-            "messages",
-            "r-1",
-            ["m-1", "m-2"],
-        )
+        assert (
+            read.agent,
+            read.channel,
+            data(read)["read"],
+            read.record_ids,
+            data(read)["depends_on"],
+        ) == ("w-2", "messages", "r-1", ["m-1", "m-2"], ["m-1", "m-2"])
         assert "records" not in read.data and "files" not in read.data
         assert (
             read.loop_span_id,
