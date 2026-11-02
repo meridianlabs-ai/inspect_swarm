@@ -474,6 +474,16 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             setup="mkdir /work && setfacl -d -m u:61005:rwx /work",
             error=f"{refused}users isolation would create /work/homes inside /work, whose ACL its new directories would inherit; remove it (setfacl -b)",
         ),
+        "rw-share-root-without-owner-rwx": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir -m 555 /shared",
+            error=f"{refused}users isolation does not support a directory without owner rwx in a read-write shared directory: /shared is mode 555",
+        ),
+        "rw-share-subdirectory-without-owner-rwx": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir -p /shared/nested && chmod 555 /shared/nested",
+            error=f"{refused}users isolation does not support a directory without owner rwx in a read-write shared directory: /shared/nested is mode 555",
+        ),
         "unreadable-ro-share": Case(
             runs=[Run({"shared": [{"path": "/inputs/data", "access": "ro"}]}, idle)],
             setup="mkdir -m 700 /inputs && mkdir /inputs/data && echo x > /inputs/data/f",

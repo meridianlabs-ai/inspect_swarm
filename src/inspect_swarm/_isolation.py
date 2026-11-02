@@ -286,7 +286,7 @@ fail() { printf '%s\n' "$*" >&2; exit 3; }
 # refuses ACL entries other than its own in a share or on the homes' parent, and a
 # mount inside a share or under the homes' parent, whose files it would not reach.
 # $1 group, $2 first id, $3 last id, $4 1 when there are shares, $5 the homes' parent,
-# then the roots, `--`, and the shares.
+# then the roots, `--`, and each share's access and path.
 _PROBE = (
     _PRELUDE
     + r"""
@@ -378,7 +378,9 @@ while [ "$1" != -- ]; do
     || fail "users isolation could not scan all of $root for the user ids its files take, so it cannot choose ids that own nothing: $(head -n 1 "$dir/errors")"
 done
 shift
-for share in "$@"; do
+while [ $# -gt 0 ]; do
+  access=$1 share=$2
+  shift 2
   if [ ! -e "$share" ] && [ ! -L "$share" ]; then
     inherits_acl "$share"
     continue
@@ -390,6 +392,14 @@ for share in "$@"; do
     || fail "users isolation could not read the ACLs in $share: $(printf '%s' "$acls" | grep -v '^#' | head -n 1)"
   bad=$(printf '%s\n' "$acls" | foreign_acl "$gid")
   [ -z "$bad" ] || fail "users isolation does not support ACL entries it did not set in a shared directory: $bad; remove them (setfacl -b)"
+  if [ "$access" = rw ]; then
+    # the default ACL setup writes takes its owner entry from the directory's owner
+    # bits, and an owner entry beats the group's grant, so a member could not edit
+    # the files it creates in a directory whose owner lacks rwx
+    narrow=$(find -P "$share" -xdev -type d ! -perm -u=rwx -printf '%p is mode %m' -quit 2>&1) \
+      || fail "users isolation could not scan the directories in $share: $(printf '%s' "$narrow" | head -n 1)"
+    [ -z "$narrow" ] || fail "users isolation does not support a directory without owner rwx in a read-write shared directory: $narrow; its owner bits would become the default ACL of the files members create there"
+  fi
 done
 # the answer: at most one line per id in the window, between markers, so that output a
 # provider cut short is found out rather than read as fewer taken ids
@@ -662,7 +672,7 @@ async def setup_isolation(
         parent,
         *dict.fromkeys(roots),
         "--",
-        *(share.path for share in isolation.shared),
+        *(item for share in isolation.shared for item in (share.access, share.path)),
     )
     taken: set[int] = set(recorded_users.values())
     if recorded_gid is not None:
