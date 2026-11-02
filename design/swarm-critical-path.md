@@ -232,7 +232,7 @@ def critical_steps_to_answer(
 
 ## Decisions
 
-- 2026-10-14: the dependency-linked critical path is what latency curves are interpreted from; M1 shipped the simple definition first (decision: Ransom, 2026-10-14).
+- 2026-10-14: the dependency-linked critical path is what latency curves are interpreted from (decision: Ransom, 2026-10-14).
 - 2026-10-28: the metric is always computed and reported, with no list of unobserved sharing (`critical_path_unobserved` dropped) and no omission when sharing outside the evidence is possible; the longest chain anywhere (`critical_steps`) is dropped, overall depth staying with `longest_member_steps` (decision: Ransom, 2026-10-28).
 - 2026-10-29: a member's steps are one chain, with no happens-before graph inside a member (decision: Ransom, 2026-10-29).
 - 2026-10-29: the answer ends at the answering member's end, after the drain, not at its agent's return, and the output is not frozen at the return (decision: Ransom, 2026-10-29).
@@ -269,7 +269,7 @@ def critical_steps_to_answer(
 
 - **No untrusted text reaches the computation.** It reads span ids, positions, model event status, and from the swarm's own evidence member names and record ids; paths, payloads and file contents are neither stored in the `PathLog` nor read. Record ids come from channel state, assigned by the bus, never from a model's arguments; a model reaches them only by making writes and reads the channel validated.
 - **Channel and agent code are the eval author's and trusted.** The bus still refuses an id the channel did not commit, so a buggy channel fails loudly rather than linking another channel's or another run's records. Agent code can write a `CommunicationEvent` with source `inspect_swarm` or a `SwarmEvent` through `transcript()._event()`; a `depends_on` naming no recorded commit yields `None` and a warning, never an exception.
-- **Size.** Results are driven by model behaviour and views are not rate-limited, so the evidence must not grow with views times history within a loop: per-loop trimming bounds the `depends_on` ids a run writes by its commits times its loops ([The bus checks and trims](#the-bus-checks-and-trims)), and `record_ids` is one id per file or message shown. The bus keeps one `_committed` entry per commit and one `_depended` entry per commit per loop that depended on it, the board one history id per version. The metric's work and memory are linear in the events of the interval.
+- **Size.** Results are driven by model behaviour and views are not rate-limited, so the evidence must not grow with views times history within a loop: per-loop trimming bounds the `depends_on` ids a run writes by its commits times its loops ([The bus checks and trims](#the-bus-checks-and-trims)), and `record_ids` is one id per file or message shown. The bus keeps one `_committed` entry per commit and one `_depended` entry per commit per loop that depended on it, the board one history id per version. The `PathLog` keeps every result's `depends_on` list, and the metric visits every id in it, so its work and memory are linear in the events of the interval plus the dependency ids they carry. Those ids are bounded by commits times loops, not by events: N commits to one file followed by L fresh loops each viewing it once are O(N + L) events carrying N × L ids.
 
 ## Not this design
 
