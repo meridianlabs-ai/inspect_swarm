@@ -16,7 +16,13 @@ from inspect_ai.model import ModelOutput
 from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
 from inspect_ai.solver import TaskState
 from inspect_ai.util import Store, store
-from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic import (
+    BaseModel,
+    JsonValue,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+)
 
 from ._result import ResultKind, Verdict
 
@@ -84,6 +90,25 @@ class MemberResult(BaseModel):
 
     left_out: list[LeftOut] = []
     """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8, and an output the record cannot hold as JSON, such as one with an object, bytes or a key that is not a string in its metadata, or one nested too deep. Empty when nothing was left out."""
+
+    # Validating a `ModelOutput` fills an empty completion from its message, both when
+    # the record is made and when it is read; the record keeps the completion the
+    # member returned.
+    @field_validator("output", mode="wrap")
+    @classmethod
+    def _keep_completion(
+        cls, value: object, handler: ValidatorFunctionWrapHandler
+    ) -> ModelOutput | None:
+        if isinstance(value, ModelOutput):
+            completion: object = value.completion
+        elif isinstance(value, dict):
+            completion = cast(dict[str, object], value).get("completion")
+        else:
+            completion = None
+        output = cast(ModelOutput | None, handler(value))
+        if output is not None and isinstance(completion, str):
+            output.completion = completion
+        return output
 
 
 class FinalRecord(BaseModel):

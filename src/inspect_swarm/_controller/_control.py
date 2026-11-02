@@ -284,8 +284,7 @@ class MemberRun:
             gate_checks=self.gates.checks,
             gate_passes=self.gates.passes,
             first_pass_time=self.gates.first_pass_time,
-            # a copy: validating a ModelOutput sets an empty completion from its
-            # message, which must not change the member's own output
+            # a copy, so that the record never shares the member's own output
             output=self.agent_state.output.model_copy()
             if self.state == "ended"
             else None,
