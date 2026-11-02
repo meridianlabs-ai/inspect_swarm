@@ -361,7 +361,7 @@ Native and bridged members learn of changes the same way, so there is no deliver
 
 **With the messages channel** (later), the member's own loop's wait returns while it has unread `wake=True` messages, and its result counts them and names their senders; reading them is the acknowledgment; a `wake=False` message is delivered and counted in the status line, but does not end a wait. Nested loops' waits never consider messages, since they cannot read them. `read_messages` itself no longer waits. Time spent waiting is wall-clock time inside a tool call, which counts towards time limits as any tool call does ([swarm-limits.md](swarm-limits.md#interactions)). The idle-time metric in swarm.md is the time a member does nothing but wait, defined exactly in [swarm-wait.md Metrics](swarm-wait.md#metrics).
 
-**Wake later.** For persistent members (coordinator topologies), the bus reports each step-4 delivery to an idle member to the runtime, which queues a `SwarmEvent` for the controller (swarm-api.md reserves idle and woken members as later event kinds). The event carries the member's name, the record id, the channel and `record.wake`, never the payload, because a controller sees no member text ([swarm-api.md](swarm-api.md#controllers)). The controller decides whether to wake the member, through the wake operation persistent members add to `SwarmControl`; a `wake=False` record waits for the next activation. The bus does not run members.
+**Wake later.** For persistent members (coordinator topologies), the bus reports each step-4 delivery to an idle member to the runtime, which queues a `ControlEvent` for the controller (swarm-api.md reserves idle and woken members as later event kinds). The event carries the member's name, the record id, the channel and `record.wake`, never the payload, because a controller sees no member text ([swarm-api.md](swarm-api.md#controllers)). The controller decides whether to wake the member, through the wake operation persistent members add to `SwarmControl`; a `wake=False` record waits for the next activation. The bus does not run members.
 
 ### The binder and ACP
 
@@ -405,7 +405,22 @@ Monitoring aligns with inspect_sentinel, with no swarm monitor type (decision: R
 |---|---|---|---|
 | `sent` | step 3, every attempt that reached the bus | sender's tool span (or agent span via the bridge) | the full record, and for a refused attempt the control that refused it (`liveness`, `payload`, `max_bytes`, `rate` or `admit`) and the reason. Later, with the bus hook: the hook's decision (action, explanation), the original payload when modified, and controls for the hook's rejections and failures |
 | `delivered` | step 4 | same span | the record, its recipients, its commit sequence number, the members whose own loop the record is news to, and the result `apply()` returned |
-| `read` | `read_messages` returns | reader's tool span | the read id, the records read, and the reader's tool span, through which the result message's tool call id is found ([Records in model input](#records-and-the-bus)) |
+| `read` | `read_messages` returns | reader's tool span | the read id, the records read (`records`), those the read depends on (`depends_on`: the same, less any an earlier result of the loop depended on, such as a wait that counted them), and the reader's tool span, through which the result message's tool call id is found ([Records in model input](#records-and-the-bus)) |
+
+**What a messages result depends on.** A messages result reports two lists of record ids through `Bus.read()` and the channel's wait news ([swarm-critical-path.md What channels report](swarm-critical-path.md#what-channels-report)): `records`, the messages the result concerns, complete, and `depends_on`, the messages whose content or news it showed, which the dependency-linked critical path links. The bus keeps only the `depends_on` ids the loop has not depended on before. The channel's rule:
+
+| Result | `records` | `depends_on` |
+|---|---|---|
+| `read_messages` | every message the read returned and marked read; no event for a read that showed none | the same |
+| a `swarm_wait` result with the channel's news (an unread `wake=True` message is waiting) | (none: `waited`) | every unread message the news counts, `wake=False` ones included |
+| a `swarm_wait` result without the channel's news (only `wake=False` messages unread), whatever ended it | | none |
+| the unread count on other results, `list_members` | no evidence | |
+
+- **A message links at its commit.** The reader follows the sender's chain at the message's `delivered` event, which is also its send, since a commit is one synchronous step. The sender's work after the send is not linked, since the message could not contain it; the steps that led to it are, the generation that called `send_message` included.
+- **News counts.** A wait whose result tells the member that a peer sent it something makes its next step follow that send, as a board wait does; its line counts every unread message and names every sender, so it depends on the `wake=False` ones too. A later `read_messages` of the same message in that loop keeps it in `records` and adds nothing to `depends_on`.
+- **A count is not news.** A wait without the channel's news, which a board write, a peer's end, the timeout or the stop can end with only `wake=False` messages unread, shows the unread count, which makes no edge, as the count on every other result. A quiet message links when it is read, or when a wait with the channel's news counts it beside a waking one. Reporting it from a wait without news would need news that does not make the wait reportable, while `Waits._reportable()` treats any news as a reason to return, so a `wake=False` message would end waits.
+
+`_read()` calls `self._bus.read(CHANNEL, ids)`, so `depends_on` defaults to the same ids, and `news()` returns `WaitNews(..., depends_on=[r.id for r in unread])`.
 
 **No exposure event.** Whether a model received a record is not swarm evidence. A `read` event says that a loop's tool returned the record; its `ToolEvent` lets analysis of a generation's input correlate the result with that input, within the limits in [Records in model input](#records-and-the-bus). Read but not seen is almost always a loop that never generated again, which the member's status shows, or author code that removed the result. Bridged reads have no tool span in the CLI's conversation: the CLI builds its own conversation, so only the fenced ids in the result text identify their records there ([Alternatives considered](#alternatives-considered)).
 
@@ -480,7 +495,7 @@ class Channel:                                                      # shared: co
 
 @dataclass(frozen=True)
 class ChannelRun:                                                   # what open() gets
-    bus: Bus                               # deliver() and deliver_internal() for this run
+    bus: Bus                               # deliver(), read() and deliver_internal() for this run
     roster: Sequence[MemberInfo]
 
 class ChannelState(Protocol):                                       # per run
@@ -513,7 +528,7 @@ class ChannelState(Protocol):                                       # per run
 - **Mutable state** follows swarm.md's rules: append-only notes, compare-and-swap as above, TTL leases that report conflicts.
 - **Reads** use the shared envelope, with a channel-specific tag, and write `read` events.
 - **Names a member chooses** (a board thread title, a task title) are payload: fenced in reads, never in status lines, which refer to the swarm-assigned id.
-- **`quiescent()`** lets the runtime's quiescence check (persistent members, later) ask whether a channel has open or claimed work; the runtime then reports quiescence to the controller as the later `SwarmEvent` kind swarm-api.md reserves.
+- **`quiescent()`** lets the runtime's quiescence check (persistent members, later) ask whether a channel has open or claimed work; the runtime then reports quiescence to the controller as the later `ControlEvent` kind swarm-api.md reserves.
 
 `swarm_tools()` returns the tools of every opened channel state in the member's bound loop, and those of `"member"`-reach channels in its other loops, so members stay identical across channel ablations.
 

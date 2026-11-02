@@ -138,14 +138,14 @@ A write that would pass a limit is refused with an error that says which. Once t
 
 ## The record of the board
 
-The swarm logs the members' writes, views and waits as `InfoEvent`s with source `inspect_swarm` and type `comm`. Each is in the span of the tool call that made it:
+The swarm logs the members' writes, views and waits as `CommunicationEvent`s with source `inspect_swarm`. Each is in the span of the tool call that made it, and its `kind` is one of:
 
-- `sent`: a write that reached the swarm, with its operation and payload, and why it was refused if it was.
-- `delivered`: a write applied to the board, with its commit sequence number and each file's previous and new version. Replaying the delivered writes in sequence order rebuilds every version of the board.
-- `read`: a view, with each file's version and the record that last wrote it, or a listing.
-- `waited`: a `swarm_wait` call, with what ended it and how long it took.
+- `sent`: a write that reached the swarm, with its payload in `send.record.content`, why it was refused in `send.rejected` if it was, and its operation in `data["record"]["op"]`.
+- `delivered`: a write applied to the board, with its commit sequence number in `delivery.seq` and each file's previous and new version in `data["result"]["files"]`. Replaying the delivered writes in sequence order rebuilds every version of the board.
+- `read`: a view or a listing. `record_ids` names the record that last wrote each file at the version shown, and `data` has each file's version. `data["depends_on"]` names the records the result depends on: for a view, every write in the file's history; for a deleted file's id, the delete; for a listing, none.
+- `waited`: a `swarm_wait` call, with what ended it and how long it took in `wait`, and in `data["depends_on"]` the write it reported for each changed file.
 
-Each event names the member and the loop that acted. The [metrics](analysis.qmd#communication) count these events for each member.
+Each event names the member that acted (`agent`) and its loop (`loop_span_id`). The `record_ids` of a write's `sent` and `delivered` events and of the reads of what it wrote are the same id. `depends_on` names each record once per loop: a record that an earlier result of the same loop depended on is left out. The [metrics](analysis.qmd#communication) count these events for each member.
 
 ## Monitoring with Inspect Sentinel
 
@@ -186,11 +186,11 @@ def no_secrets_on_board() -> Protocol:
     return decide
 ```
 
-Pass it to the task as `Task(..., sentinel=no_secrets_on_board())`. The member gets the decision's message as the tool call's error. A step's `conversation` is the agent span id of the loop that made the call, and each `comm` event names that loop beside its member, so the two can be joined. Sentinel does not run on bridged members' tool calls, which is one reason bridged members cannot use the channel yet.
+Pass it to the task as `Task(..., sentinel=no_secrets_on_board())`. The member gets the decision's message as the tool call's error. A step's `conversation` is the agent span id of the loop that made the call, and each `CommunicationEvent` names that loop in `loop_span_id`, so the two can be joined. Sentinel does not run on bridged members' tool calls, which is one reason bridged members cannot use the channel yet.
 
 ## Migrating from `memory(instance=...)` {#migrating-from-memoryinstance}
 
-Before this channel, a board shared on purpose was a `memory()` tool with an explicit instance in every member's tools, `memory(instance="board")`, with the prompt saying it is shared. That still works, and it is a different channel: members' `ToolEvent`s record its use, with no sender, fence, status line, bounds or `comm` events. Nothing refuses using both; an arm that wants the board as its only channel gives no two members a shared instance.
+Before this channel, a board shared on purpose was a `memory()` tool with an explicit instance in every member's tools, `memory(instance="board")`, with the prompt saying it is shared. That still works, and it is a different channel: members' `ToolEvent`s record its use, with no sender, fence, status line, bounds or `CommunicationEvent`s. Nothing refuses using both; an arm that wants the board as its only channel gives no two members a shared instance.
 
 To move a task to the channel:
 

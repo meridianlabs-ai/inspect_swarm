@@ -14,7 +14,7 @@ from inspect_ai._util.registry import (
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.agent import run as run_agent
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent
+from inspect_ai.event import SwarmEvent
 from inspect_ai.log import read_eval_log
 from inspect_ai.model import (
     ChatMessageUser,
@@ -43,20 +43,20 @@ from inspect_swarm import (
 )
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import SwarmLedger
-from inspect_swarm._record import SwarmResultRecord, _is_record, _transcript_result
+from inspect_swarm._record import RECORD_TYPE, SwarmResultRecord, _transcript_result
 from inspect_swarm._result import verifier_label
 
 from .swarm_runtime import (
     TOKENS_PER_CALL,
     Script,
     controller,
-    evidence,
     generator,
     output,
     run_swarm,
     sample,
     scripted_model,
     statuses,
+    swarm_events,
 )
 
 
@@ -286,28 +286,20 @@ async def test_submissions_are_keyed_and_verified_before_their_events() -> None:
         assert m.verdict_time is not None and m.time is not None
         assert m.verdict_time > m.time
 
-    events = evidence(stop.transcript, "verdict")
-    assert sorted((e["member"], e["passed"], e["value"]) for e in events) == [
+    events = swarm_events(stop.transcript, "verdict")
+    assert sorted((e.member, e.data["passed"], e.data["value"]) for e in events) == [
         ("right", True, 1.0),
         ("wrong", False, 0.0),
     ]
     # written in the swarm's span
-    swarm_events = [
-        e
-        for e in stop.transcript.events
-        if isinstance(e, InfoEvent) and e.source == "inspect_swarm"
-    ]
-    [swarm_span] = {e.span_id for e in swarm_events if _kind(e) == "final"}
-    assert {e.span_id for e in swarm_events if _kind(e) == "verdict"} == {swarm_span}
+    evidence = [e for e in stop.transcript.events if isinstance(e, SwarmEvent)]
+    [swarm_span] = {e.span_id for e in evidence if e.kind == "final"}
+    assert {e.span_id for e in evidence if e.kind == "verdict"} == {swarm_span}
     # the explanation is in the record alone, written when the swarm ends
     assert "EXPLANATION" not in repr(
-        [e.data for e in swarm_events if not _is_record(e)]
+        [e.data for e in evidence if e.kind != RECORD_TYPE]
     )
     assert "EXPLANATION" not in repr(seen)
-
-
-def _kind(event: InfoEvent) -> object:
-    return event.data.get("kind") if isinstance(event.data, dict) else None
 
 
 def test_the_verifier_gets_the_answer_and_the_samples_metadata(
@@ -439,7 +431,9 @@ async def test_a_failing_answer_key_fails_the_sample_after_the_members_end() -> 
             )(state)
         record = _transcript_result(store())
     # the member's end is recorded and its output is the answer, as in the record
-    assert [e["status"] for e in evidence(transcript, "member_result")] == ["submitted"]
+    assert [e.data["status"] for e in swarm_events(transcript, "member_result")] == [
+        "submitted"
+    ]
     assert state.output.completion == "42"
     assert record is not None
     [m] = record.members

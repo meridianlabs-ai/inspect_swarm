@@ -270,11 +270,11 @@ Both are written with `transcript()._event(event)`, the private, synchronous cal
 | sent `rejected` | `send.rejected` |
 | delivered `record`, `recipients`, `seq` | `record_ids=[record]`, `delivery` (`recipients`, `seq`) |
 | delivered `notify`, `result` | `data` |
-| read `files` | `data["files"]` (each file's id, version, last record, line range and `deleted`); `record_ids` the distinct non-null `record` values of `files`, in order: each file's last write at the version read, whether the read was a listing, a partial or full view, or a tombstone |
-| read `records` (the messages channel) | `record_ids`, the messages the read showed |
-| read `read`, `tool_span_id`, `listing` | `data` |
+| read `files` | `data["files"]` (each file's id, version, last record, line range and `deleted`) |
+| read `records` | `record_ids`: for the messages channel, the messages the read showed; for the shared memory, each shown file's last write at the version read, whether the read was a listing, a partial or full view, or a tombstone |
+| read `read`, `tool_span_id`, `depends_on`, `listing` | `data` |
 | waited `wait`, `channels`, `outcome`, `duration` | `wait` (`id`, `channels`, `outcome`, `duration`) |
-| waited `path`, `file_id`, `timeout`, `started`, `idle`, `woken_by`, `files`, `ended` | `data` |
+| waited `path`, `file_id`, `timeout`, `started`, `idle`, `woken_by`, `files`, `depends_on`, `ended` | `data` |
 | `version: 1` | `data["version"] = 1` |
 
 | Today (`InfoEvent.data`) | `SwarmEvent` |

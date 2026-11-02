@@ -19,6 +19,7 @@ from inspect_swarm._channel.messages import (
 )
 from inspect_swarm._registry import resolve
 
+from .swarm_runtime import data, delivery
 from .test_shared_memory_channel import (
     _comm,  # pyright: ignore[reportPrivateUsage]
     _eval,  # pyright: ignore[reportPrivateUsage]
@@ -175,7 +176,7 @@ async def test_react_members_message_each_other(tmp_path: Path) -> None:
     assert _results(sample, "list_members") == [
         "p: running\nw (you): running\nYou have no unread messages."
     ]
-    assert [d["recipients"] for d in _comm(sample, "delivered")] == [["p"]]
+    assert [delivery(d).recipients for d in _comm(sample, "delivered")] == [["p"]]
     assert any("`send_message`" in text for text in _preambles(sample))
 
 
@@ -205,10 +206,15 @@ async def test_one_swarm_object_keeps_concurrent_samples_inboxes_apart(
     )
     assert log.samples is not None and len(log.samples) == 2
     for sample in log.samples:
-        assert [d["record"] for d in _comm(sample, "delivered")] == ["m-1"]
-        assert [(r["read"], r["records"]) for r in _comm(sample, "read")] == [
+        assert [d.record_ids for d in _comm(sample, "delivered")] == [["m-1"]]
+        assert [(data(r)["read"], r.record_ids) for r in _comm(sample, "read")] == [
             ("r-1", ["m-1"])
         ]
+        # p's wait showed m-1's news, so its read of m-1 depends on nothing new
+        assert [
+            data(w)["depends_on"] for w in _comm(sample, "waited") if w.agent == "p"
+        ] == [["m-1"]]
+        assert [data(r)["depends_on"] for r in _comm(sample, "read")] == [[]]
 
 
 @pytest.mark.anyio

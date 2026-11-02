@@ -205,9 +205,12 @@ One `waited` communication event per wait, written when it ends (in the synchron
 - the idle time: the seconds of the wait during which its member counted as waiting ([The idle clock](#metrics)); 0 for a nested loop's wait;
 - the outcome: `news`, `all_waiting`, `stopping`, `member_ending`, `timeout` or `cancelled`;
 - the commit sequence numbers of the commits that released it for news, in order, including any whose news was gone at resume (none when none did);
-- the files the result named, with their versions and whether deleted, and the members the result named as ended, with their statuses.
+- the files the result named, with their versions and whether deleted, and the members the result named as ended, with their statuses;
+- the records whose news the result reported (`depends_on`), from each reached channel's `WaitNews.depends_on`, each written once per loop: for the board, the write it reported for every changed file, not only the ten it names ([swarm-memory-channel.md What a result depends on](swarm-memory-channel.md#what-a-result-depends-on)); for the messages channel, every unread message its news counts ([swarm-communication.md](swarm-communication.md#evidence-and-provenance), "What a messages result depends on").
 
-`delivered` is unchanged. A wait's waking commits join it to the `delivered` events that ended it by their commit sequence numbers; with the files it named (ids and versions), the later dependency-linked critical path can tell that a member's idle time ended at a peer's commit, which the `read` that usually follows then links by content.
+**How `depends_on` is collected.** After the wait's last `await`, `Waits.wait()` reads each reached channel's `news()` in channel order and passes its `depends_on` through `Bus.depends()` for the waiting loop, which checks that every id is a record that channel committed in this run and keeps those the loop has not depended on before ([swarm-critical-path.md What channels report](swarm-critical-path.md#what-channels-report)). Nothing can cancel the wait between that marking and the evidence, which the `finally` writes. The ids come from what the result reported when the wait returned, never from `woken_by`: a wait that finds news at once has `woken_by: []` and depends on the records its news names; a release whose news has gone by the time the waiter resumes keeps its commit in `woken_by` and, unless the news is back, does not depend on it; a wait released by `all_waiting`, `stopping`, `member_ending` or its timeout still depends on the news it reports; a cancelled wait writes `depends_on: []`, as it writes `files: []` and `ended: []`. A channel whose news names a record it did not commit fails the wait with `ValueError` from the bus, before its lines and files are added, and the `finally` still writes the `waited` event with what the earlier channels gave. The result's `ended` names each member's end once per loop, so a loop's later waits do not report it again.
+
+`delivered` is unchanged. A wait's waking commits join it to the `delivered` events that ended it by their commit sequence numbers, so analysis can tell that a member's idle time ended at a peer's commit. The dependency-linked critical path links the wait to the commits in its `depends_on` and the ends it named, not to `woken_by` ([swarm-critical-path.md](swarm-critical-path.md)).
 
 ### Metrics
 
@@ -249,6 +252,7 @@ class WaitSpec:
 class WaitNews:
     lines: list[str]                      # the channel's lines for the result
     files: list[dict[str, JsonValue]]     # what `lines` name, for `waited.files`
+    depends_on: list[str] = field(default_factory=list[str])  # the records `lines` report, for `waited.depends_on`
 
 class WaitingState(ChannelState, Protocol):
     def wait_check(self, spec: WaitSpec) -> None: ...                # validate the filter; raise ToolError
@@ -318,7 +322,7 @@ The messages channel contributes its `max_wait` (default 120) to the effective m
 ### Room for later work
 
 - **Bridged members' bus tools** (later) give them `swarm_wait` through `swarm_bridged_tools()`. A bridged member never counts as waiting, because the host cannot tell whether one blocked call is all its CLI is doing, as swarm-communication.md already says; its waits end by news, ends, the stop or timeout. Its CLI's MCP timeout must exceed the bus's effective maximum wait.
-- **Persistent members and wake from idle.** An idle member (submitted, held between activations) is not in a tool call, so it is not a waiter. The all-waiting check generalises to quiescence: no member active, idle members counting as not active, and every channel's `quiescent()`. Waking an idle member stays the controller's decision on a `SwarmEvent` ([swarm-communication.md Wake later](swarm-communication.md#wake-and-turn-boundaries)).
+- **Persistent members and wake from idle.** An idle member (submitted, held between activations) is not in a tool call, so it is not a waiter. The all-waiting check generalises to quiescence: no member active, idle members counting as not active, and every channel's `quiescent()`. Waking an idle member stays the controller's decision on a `ControlEvent` ([swarm-communication.md Wake later](swarm-communication.md#wake-and-turn-boundaries)).
 - **Push delivery.** An urgent message to a member in `swarm_wait` ends the wait (outcome `waiting` in the urgent-message table), as it ended a `read_messages` wait.
 
 ## Alternatives considered

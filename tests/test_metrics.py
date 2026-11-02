@@ -18,9 +18,11 @@ from inspect_ai.agent import (
 )
 from inspect_ai.dataset import Sample
 from inspect_ai.event import (
-    InfoEvent,
+    CommunicationEvent,
+    Event,
     ModelEvent,
     SpanBeginEvent,
+    SwarmEvent,
     Timeline,
     TimelineEvent,
     TimelineSpan,
@@ -46,7 +48,7 @@ from inspect_ai.scorer import (
     scorer,
 )
 from inspect_ai.solver import TaskState
-from inspect_ai.tool import Tool, ToolCall, tool
+from inspect_ai.tool import Tool, ToolCall, ToolDef, tool
 from inspect_ai.util import background, store
 from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import JsonValue
@@ -82,32 +84,27 @@ from .swarm_runtime import (
     TOKENS_PER_CALL,
     Script,
     after,
+    comm_events,
     controller,
-    evidence,
+    data,
     generator,
     output,
     run_swarm,
     sample,
     scripted_model,
     sleeper,
+    swarm_events,
 )
+from .swarm_runtime import wait as wait_of
 from .test_wait import _p, nested_loop, resolve  # pyright: ignore[reportPrivateUsage]
 
 
 def _metrics(transcript: Transcript) -> SwarmMetrics:
-    [data] = [
-        e.data
-        for e in transcript.events
-        if isinstance(e, InfoEvent)
-        and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "metrics"
-    ]
-    assert isinstance(data, dict)
-    record = {k: v for k, v in data.items() if k != "type"}
+    [event] = swarm_events(transcript, "metrics")
     # the store entry is the same record
-    assert store().get(METRICS_KEY) == record
-    return SwarmMetrics.model_validate(record)
+    assert event.member is None
+    assert store().get(METRICS_KEY) == event.data
+    return SwarmMetrics.model_validate(event.data)
 
 
 def _by_name(metrics: SwarmMetrics) -> dict[str, Any]:
@@ -611,6 +608,39 @@ def test_each_member_has_a_timeline_of_its_spans(
 
 
 @pytest.mark.anyio
+async def test_a_member_timeline_holds_its_communication_and_result_events() -> None:
+    outcome = await run_swarm(
+        swarm(
+            [member(notes(scripted_model(), 1), name=name) for name in ("a", "b")],
+            channels=["metrics_test_impostor"],
+            controller=_answered_by("b"),
+        )
+    )
+    timelines = {t.name: t for t in outcome.transcript.timelines}
+    for name in ("a", "b"):
+        events = _events(timelines[name].root)
+        comms = [e for e in events if isinstance(e, CommunicationEvent)]
+        assert [(e.kind, e.agent) for e in comms] == [
+            ("sent", name),
+            ("delivered", name),
+            ("read", name),
+        ]
+        assert [(e.kind, e.member) for e in events if isinstance(e, SwarmEvent)] == [
+            ("member_result", name)
+        ]
+
+
+def _events(span: TimelineSpan) -> list[Event]:
+    found: list[Event] = []
+    for item in span.content:
+        if isinstance(item, TimelineEvent):
+            found.append(item.event)
+        else:
+            found.extend(_events(item))
+    return found
+
+
+@pytest.mark.anyio
 async def test_timelines_and_metrics_are_written_when_a_cancellation_ends_the_swarm() -> (
     None
 ):
@@ -970,12 +1000,7 @@ def _answered_by(name: str) -> Controller:
 def _all_metrics(transcript: Transcript) -> list[SwarmMetrics]:
     # every swarm's metrics in a sample, in the order the swarms ended
     return [
-        SwarmMetrics.model_validate({k: v for k, v in e.data.items() if k != "type"})
-        for e in transcript.events
-        if isinstance(e, InfoEvent)
-        and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "metrics"
+        SwarmMetrics.model_validate(e.data) for e in swarm_events(transcript, "metrics")
     ]
 
 
@@ -1127,8 +1152,8 @@ async def test_a_wait_for_an_end_follows_the_members_drained_work() -> None:
             controller=_answered_by("w"),
         )
     )
-    [wait] = evidence(outcome.transcript, "waited")
-    assert wait["ended"] == [{"member": "q", "status": "submitted"}]
+    [wait] = comm_events(outcome.transcript, "waited")
+    assert data(wait)["ended"] == [{"member": "q", "status": "submitted"}]
     metrics = _metrics(outcome.transcript)
     assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 5)
 
@@ -1220,9 +1245,18 @@ def waits_for_news(model: Model, waited: anyio.Event) -> Agent:
 
 
 @pytest.mark.anyio
-async def test_a_wait_that_also_reaches_messages_links_the_files_it_names() -> None:
-    # w's own loop waits on both channels and no message is sent: the wait names p's
-    # file, before p ends
+@pytest.mark.parametrize(
+    "other",
+    [
+        pytest.param(messages, id="messages"),
+        pytest.param(lambda: "metrics_test_messages_impostor", id="custom"),
+    ],
+)
+async def test_a_wait_that_also_reaches_another_channel_links_the_board_write(
+    other: Callable[[], str | Channel],
+) -> None:
+    # w's own loop waits on the board and another waiting channel, which has no news:
+    # the wait depends on p's write, before p ends
     waited = anyio.Event()
     outcome = await run_swarm(
         swarm(
@@ -1230,14 +1264,15 @@ async def test_a_wait_that_also_reaches_messages_links_the_files_it_names() -> N
                 member(writes_and_holds(scripted_model(), waited), name="p"),
                 member(waits_for_news(scripted_model(), waited), name="w"),
             ],
-            channels=[shared_memory(), messages()],
+            channels=[shared_memory(), other()],
             controller=_answered_by("w"),
         )
     )
-    [wait] = evidence(outcome.transcript, "waited")
-    assert sorted(wait["channels"]) == ["messages", "shared_memory"]
-    assert [f["version"] for f in wait["files"]] == [1]
-    assert wait["ended"] == []
+    [wait] = comm_events(outcome.transcript, "waited")
+    assert sorted(wait_of(wait).channels) == ["messages", "shared_memory"]
+    assert [f["version"] for f in data(wait)["files"]] == [1]
+    assert data(wait)["depends_on"] == ["w-1"]
+    assert data(wait)["ended"] == []
     metrics = _metrics(outcome.transcript)
     assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 11)
 
@@ -1335,8 +1370,10 @@ def notes(model: Model, steps: int, channel: str = "shared_memory") -> Agent:
             None,
             False,
             None,
-            [{"file": "f-99", "version": 7, "lines": None, "deleted": False}],
+            [],
+            [],
             False,
+            [{"file": "f-99", "version": 7, "lines": None, "deleted": False}],
         )
         return state
 
@@ -1372,16 +1409,218 @@ async def test_a_custom_channel_named_like_a_builtin_makes_no_file_edge(
             controller=_answered_by("w"),
         )
     )
-    [wait] = evidence(outcome.transcript, "waited")
-    assert sorted(wait["channels"]) == sorted({named, "shared_memory"})
-    assert wait["files"] == [
+    [wait] = comm_events(outcome.transcript, "waited")
+    assert sorted(wait_of(wait).channels) == sorted({named, "shared_memory"})
+    assert data(wait)["files"] == [
         {"foreign_record": "x-1"},
         {"file": "f-99", "version": 7},
     ]
-    assert wait["ended"] == [{"member": "p", "status": "submitted"}]
+    assert data(wait)["ended"] == [{"member": "p", "status": "submitted"}]
     metrics = _metrics(outcome.transcript)
     assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 11)
     assert not _warnings(caplog)
+
+
+@agent
+def sends(model: Model, sent: anyio.Event, done: anyio.Event, wake: bool) -> Agent:
+    """Make ten steps, send r a message, make five more, and end once r has read it."""
+
+    async def execute(state: AgentState) -> AgentState:
+        send = (await resolve())["send_message"]
+        for _ in range(10):
+            state.output = await model.generate(state.messages)
+        await send(to="r", message="hello", wake=wake)
+        sent.set()
+        for _ in range(5):
+            state.output = await model.generate(state.messages)
+        await done.wait()
+        return state
+
+    return execute
+
+
+@agent
+def reads_messages(
+    model: Model, sent: anyio.Event, done: anyio.Event, wait: bool
+) -> Agent:
+    """Wait for news (if `wait`, else for the send), read the messages, then make a step."""
+
+    async def execute(state: AgentState) -> AgentState:
+        tools = await resolve()
+        if wait:
+            await tools["swarm_wait"]()
+        else:
+            await sent.wait()
+        assert "hello" in str(await tools["read_messages"]())
+        done.set()
+        state.output = await model.generate(state.messages)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("wait", [False, True])
+async def test_a_message_links_the_reader_to_the_senders_work_at_the_send(
+    wait: bool,
+) -> None:
+    # p's five steps after the send are not linked; with a wait first, the wait links
+    # and the read adds nothing
+    sent, done = anyio.Event(), anyio.Event()
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(sends(scripted_model(), sent, done, True), name="p"),
+                member(reads_messages(scripted_model(), sent, done, wait), name="r"),
+            ],
+            channels=[messages()],
+            controller=_answered_by("r"),
+        )
+    )
+    [read] = comm_events(outcome.transcript, "read")
+    assert read.record_ids == ["m-1"]
+    assert data(read)["depends_on"] == ([] if wait else ["m-1"])
+    waits = comm_events(outcome.transcript, "waited")
+    assert [data(w)["depends_on"] for w in waits] == ([["m-1"]] if wait else [])
+    metrics = _metrics(outcome.transcript)
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (1, 11)
+
+
+@agent
+def writes_after(model: Model, sent: anyio.Event) -> Agent:
+    """Once the message is sent, make a step and write a board file."""
+
+    async def execute(state: AgentState) -> AgentState:
+        memory = (await resolve())["shared_memory"]
+        await sent.wait()
+        state.output = await model.generate(state.messages)
+        await memory(command="create", path=_p("q.md"), file_text="x")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_quiet_message_links_when_it_is_read() -> None:
+    # p's wake=False message does not end r's wait, which q's board write does; the
+    # wait shows only the unread count, and the read links p
+    sent, done = anyio.Event(), anyio.Event()
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(sends(scripted_model(), sent, done, False), name="p"),
+                member(writes_after(scripted_model(), sent), name="q"),
+                member(reads_messages(scripted_model(), sent, done, True), name="r"),
+            ],
+            channels=[shared_memory(), messages()],
+            controller=_answered_by("r"),
+        )
+    )
+    [wait] = comm_events(outcome.transcript, "waited")
+    assert data(wait)["depends_on"] == ["w-1"]
+    [read] = comm_events(outcome.transcript, "read")
+    assert data(read)["depends_on"] == ["m-1"]
+    metrics = _metrics(outcome.transcript)
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (1, 11)
+
+
+# A custom waiting channel that reports what its results show: its `read_notes` tool
+# shows every note by another member, and its waits have news of them.
+class _ReportingState(_ImpostorState):
+    def __init__(self, run: ChannelRun) -> None:
+        super().__init__()
+        self._bus = run.bus
+
+    def tools(self) -> list[Tool]:
+        async def execute() -> str:
+            """Read the other members' notes."""
+            context = current_member.get()
+            assert context is not None
+            shown = [r.id for r in self.applied if r.sender != context.name]
+            self._bus.read(_NOTES, shown)
+            return ", ".join(shown)
+
+        return [ToolDef(execute, name="read_notes").as_tool()]
+
+    def news(self, spec: WaitSpec) -> WaitNews | None:
+        shown = [r.id for r in self.applied if r.sender != spec.member]
+        if not shown:
+            return None
+        return WaitNews([f"{len(shown)} notes"], [], depends_on=shown)
+
+
+_NOTES = "notes"
+
+
+class _Reporting(Channel):
+    name = _NOTES
+    prefix = "s"
+    max_wait = 5
+
+    def open(self, run: ChannelRun) -> ChannelState | None:
+        return _ReportingState(run)
+
+
+@swarm_channel
+def metrics_test_reporting() -> Channel:
+    return _Reporting()
+
+
+@agent
+def posts_and_holds(model: Model, posted: anyio.Event, done: anyio.Event) -> Agent:
+    """Make ten steps, post a note, and end once a peer has seen it."""
+
+    async def execute(state: AgentState) -> AgentState:
+        for _ in range(10):
+            state.output = await model.generate(state.messages)
+        bus = current_bus.get()
+        assert bus is not None
+        await bus.deliver(Draft(_NOTES, "note", wake=True))
+        posted.set()
+        await done.wait()
+        return state
+
+    return execute
+
+
+@agent
+def sees_notes(
+    model: Model, posted: anyio.Event, done: anyio.Event, wait: bool
+) -> Agent:
+    """Wait for news (if `wait`) or read the notes once posted, then make a step."""
+
+    async def execute(state: AgentState) -> AgentState:
+        tools = await resolve()
+        if wait:
+            await tools["swarm_wait"]()
+        else:
+            await posted.wait()
+            assert await tools["read_notes"]() == "s-1"
+        done.set()
+        state.output = await model.generate(state.messages)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("wait", [False, True])
+async def test_a_custom_channel_that_reports_links_its_results(wait: bool) -> None:
+    posted, done = anyio.Event(), anyio.Event()
+    outcome = await run_swarm(
+        swarm(
+            [
+                member(posts_and_holds(scripted_model(), posted, done), name="p"),
+                member(sees_notes(scripted_model(), posted, done, wait), name="r"),
+            ],
+            channels=["metrics_test_reporting"],
+            controller=_answered_by("r"),
+        )
+    )
+    [result] = comm_events(outcome.transcript, "waited" if wait else "read")
+    assert data(result)["depends_on"] == ["s-1"]
+    metrics = _metrics(outcome.transcript)
+    assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (1, 11)
 
 
 @agent
@@ -1434,8 +1673,9 @@ async def test_a_nested_swarms_channels_make_no_edge_for_the_outer_swarm(
     steps: int,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # the outer member views the outer board's f-1 after the inner swarm ends, so inner
-    # evidence taken as the outer board's would make that view inconsistent
+    # the outer member views the outer board's f-1 after the inner swarm ends; the inner
+    # run's record ids restart at 1, so its commits taken as the outer run's would
+    # change what that view links
     outer = swarm(
         member(nests(scripted_model(), inner()), name="m"), channels=[shared_memory()]
     )

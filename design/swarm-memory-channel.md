@@ -281,16 +281,36 @@ Evidence follows [swarm-communication.md Evidence and provenance](swarm-communic
 |---|---|---|---|
 | `sent` | step 3, every write that reached the bus | writer's tool span | the full record (its kind, the operation and the files it names, the payload, the writing loop and tool span); for a refused write, the control and reason. Later, with the bus hook: the hook's decision, and the original payload when modified |
 | `delivered` | step 4 | writer's tool span | the record, its commit sequence number, and each file it changed with the version it was applied to (its base), the version it produced, its path and whether it deleted the file; and the running members to whose top loop the write is news, the writing member included when a child of it wrote |
-| `read` | a `view` returns | reader's tool span | the read id; each file read, with its version, the record of its last write at that version, the line range if any, and whether it was a tombstone; for a directory view, that it was a listing, with every listed file; the reader's tool span |
+| `read` | a `view` returns | reader's tool span | the read id; each file read, with its version, the record of its last write at that version, the line range if any, and whether it was a tombstone; for a directory view, that it was a listing, with every listed file; the reader's tool span; the records the result concerns (`records`, each shown file's last write) and those it depends on (`depends_on`: every write in a live file's history, a tombstone's delete, none for a listing), each dependency written once per loop ([What a result depends on](#what-a-result-depends-on)) |
 
-**What the dependency-linked critical path needs**, all present above, so the later metric is built over this evidence without changing it:
+**What the dependency-linked critical path reads** ([swarm-critical-path.md](swarm-critical-path.md)): each `delivered` event's record id and sender, which place a write at the sender's step, and each `read` and `waited` event's `depends_on`, which the board fills by its rule ([What a result depends on](#what-a-result-depends-on)). It reads no files, versions or listings. The rest of the evidence serves analysis:
 
 - **Each write attributed to its member and its step.** `sent` and `delivered` carry the member, the writing loop and the write's tool span. The write's step is its commit, the `delivered` event, written in the tool span of the call that made it; analysis that wants the generation that proposed the call finds it from that span in the Inspect log.
 - **The lineage of every version.** A `delivered` event gives, for every file a write touched, the `base` it was applied to and the `version` it produced, so analysis knows which writes a shown version contains: the write that produced it and, transitively through `base`, every earlier write since the file was created (renames keep the id; a delete ends the chain with a tombstone version).
-- **Reads of another member's writes.** `read` names the version shown and its last record, in the reader's tool span, which identifies the reader's step. A cross-member edge runs from the `delivered` event of each write in the shown version's lineage by another member to the reader's `read`. Listings are marked as such because they show paths, not content; whether a listing makes an edge is the metric's choice.
+- **Reads of another member's writes.** `read` names the version shown and its last record, in the reader's tool span, which identifies the reader's step, and its `depends_on` names the writes in the shown version's history that the loop had not depended on before. Listings are marked as such because they show paths, not content; a listing depends on nothing.
 - **Order.** Writes are totally ordered by their commit sequence numbers, not by record id ([Concurrency](#concurrency-and-compare-and-swap)); reads are ordered by event time within the transcript. Replaying the applied writes in `seq` order reproduces every version of the board.
 
 A partial view (`view_range`) depends on part of a version only; the evidence records the range, and treating it as the whole version over-approximates the edge, which is the conservative direction for a critical path.
+
+#### What a result depends on
+
+A board result reports two lists of record ids through `Bus.read()` and its wait news ([swarm-critical-path.md What channels report](swarm-critical-path.md#what-channels-report)): `records`, the writes the result concerns, complete, and `depends_on`, the writes whose content or news it showed, which the critical path links. The bus keeps only the `depends_on` ids the loop has not depended on before. The board's rule:
+
+| Result | `records` | `depends_on` |
+|---|---|---|
+| a view of a live file, full or with `view_range` | its last write at the shown version | every write in its history: the record of each version from 1 to the shown one, the writes that created, appended to, edited and renamed it included |
+| a view of a deleted file's id | the delete | the delete |
+| a listing | each listed file's last write | none |
+| `changes`, and the changed-file line on other results | no evidence | |
+| a `swarm_wait` result (a `waited` event, which has no `records`) | | for every file the result reports, not only the ten its `files` name, the write it reports: the current version's when another loop wrote it, and otherwise the latest version by another loop |
+
+The state keeps, for each file id, the record of each version in order (`_history`, appended in `apply()` for each change), and each file keeps its latest earlier version written by a loop other than the one that wrote the current version, with that version's writer and record (`peer_version`, `peer_writer`, `peer_record`), which `_by_others()` returns. A view passes the file's whole history; `news()` builds `depends_on` from every reportable file.
+
+- **A live view depends on the whole history**, not only the last write, because different members write a file at different depths: a one-step member's append to a ten-step member's file leaves a version whose content depends on both. A version's history also holds writes whose text a later edit removed, which over-approximates in the same direction as a partial view.
+- **A tombstone view** shows that the file was deleted and by whom, not content, so it depends on the delete.
+- **A listing** shows ids, versions, writers and paths of up to the whole board; depending on every listed file's writes would tie the reader to nearly every earlier step. A loop that acts on a listing views what it needs, and that view makes the edge.
+- **The changed-file line and `changes`** name files by id without their content, write no evidence, and the step that sees them was not blocked on them.
+- **A wait depends on every reported file's write**: its line counts every file and names every writer, so each one's news reached the model, though `files` lists only the first ten ids the line names. When the waiter's own blind append made the current version, the write the result reports is the peer write before it, so that is the one it depends on.
 
 ### Storm controls and truncation
 

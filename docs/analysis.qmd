@@ -5,7 +5,7 @@ llms-description: "The `inspect_swarm:metrics` and `inspect_swarm:ledger` store 
 
 ## Overview
 
-When the swarm ends it writes two entries to the sample store, each also logged as an `InfoEvent` with source `inspect_swarm`:
+When the swarm ends it writes two entries to the sample store, each also logged as a `SwarmEvent` of kind `metrics` or `ledger` whose `data` is the entry:
 
 - `inspect_swarm:metrics`: tokens, cost and time for the swarm and each member, and counts of how each member acted, checked its work, communicated and waited ([Metrics](#metrics)).
 - `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, model calls that errored or reported no usage, unpriced models, and what stopped the swarm ([The ledger](#the-ledger)).
@@ -39,20 +39,18 @@ For each member, in roster order:
 
 Each member's calls, its subagents' and background work's included, form one chain in the order they began. Chains link between members in two ways:
 
-- A view of a `shared_memory` file, or a `swarm_wait` result that names a file, follows the writes it showed. A view of a file follows every write in its history; a view of a deleted file follows the delete. Directory listings and the `changes` status line make no link.
+- A channel's result follows the records it showed, as the channel reports them. It links to each record's sender at the point the record was committed, so the sender's work after a send or write is not linked. `shared_memory`: a view of a file follows every write in its history, a view of a deleted file follows the delete, and a `swarm_wait` result follows the write of each file it reports. Directory listings and the `changes` status line make no link. `messages`: `read_messages` follows the messages it returned, and a `swarm_wait` result that reports messages follows every unread message it counts. A message sent with `wake=False` links when it is read, or when a wait that reports messages counts it. A custom channel links what it reports ([Channels](channels.qmd#writing-a-channel)).
 - A `swarm_wait` result that names a member's end follows all of that member's calls.
-
-A wait that also reached a custom waiting channel links no files, since its evidence does not say which channel named them. Its links to member ends count either way.
 
 The chain ends when the answering member ends, after its background work has finished, since that work can still change the member's output.
 
 The number over-counts work inside a member. Parallel and background subagents, tool calls of one turn, and any other concurrent work count one after another, and the answering member's background work after its agent returned, its reads included, counts whether or not it changed the answer. That excess reaches peers through the member's later writes.
 
-The number also misses links. Only `shared_memory` and `swarm_wait` make them, so information that members share in other ways adds none: messages, a shared sandbox, a shared volume, a service, a custom channel and its wait results, a shared tool or store key, or a controller that passes one member's result to another. A `swarm_wait` result that reports more than ten files names only the first ten in its evidence, so the rest make no link until the member views them. Missed links can only lower the number.
+The number also misses links. Only channel results and `swarm_wait` make them, so information that members share in other ways adds none: a shared sandbox, a shared volume, a service, a custom channel that reports no dependencies, a shared tool or store key, or a controller that passes one member's result to another. Counts alone make no link either: the unread-message count and the line of changed files on other results, and `list_members`. Missed links can only lower the number.
 
-With both effects it is not a bound on true causal depth in either direction. A nested swarm's board makes no link for the outer swarm; its own metrics count it.
+With both effects it is not a bound on true causal depth in either direction. A nested swarm's channels make no link for the outer swarm; its own metrics count it.
 
-It is `null` when there is no answer, when the answering member has no recorded end, when the board's evidence is inconsistent (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.
+It is `null` when there is no answer, when the answering member has no recorded end, when the evidence names a record no recorded commit made (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.
 
 ### Communication
 
