@@ -168,6 +168,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   </li>  
 </ul>
             <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="../CHANGELOG.html"> 
+<span class="menu-text">Changelog</span></a>
+  </li>  
   <li class="nav-item compact">
     <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm"> <i class="bi bi-github" role="img">
 </i> 
@@ -244,6 +248,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="../shared-memory.html" class="sidebar-item-text sidebar-link">
  <span class="menu-text">Shared Memory</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../messages.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Messages</span></a>
   </div>
 </li>
       </ul>
@@ -489,14 +499,14 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="../reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_tools</span></a>
+  <a href="../reference/inspect_swarm.html#messages" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">messages</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="../reference/inspect_swarm.html#swarm_on_continue" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_on_continue</span></a>
+  <a href="../reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_tools</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -543,14 +553,32 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="../reference/inspect_swarm.html#noticeline" class="sidebar-item-text sidebar-link">
- <span class="menu-text">NoticeLine</span></a>
+  <a href="../reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Record</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="../reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
- <span class="menu-text">Record</span></a>
+  <a href="../reference/inspect_swarm.html#swarm_result" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_result</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#swarmresultrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">SwarmResultRecord</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#memberresult" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberResult</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#finalrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">FinalRecord</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -641,7 +669,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <h3 class="anchored" data-anchor-id="swarmcolumns">SwarmColumns</h3>
 <p>Columns for <code>inspect_ai.analysis.samples_df()</code> with each sample’s realized cost and what the swarm’s ledger says about it, as in <code>samples_df(logs, columns=SampleSummary + SwarmColumns)</code>. The <code>inspect_swarm.analysis</code> module docstring lists every column.</p>
 <div class="source-link">
-<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/3cd681e3033bd04f3ee457036c33169ad76fe786/src/inspect_swarm/analysis/_columns.py#L111">Source</a>
+<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/analysis/_columns.py#L111">Source</a>
 </div>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode python doc-declaration code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a>SwarmColumns: <span class="bu">list</span>[Column] <span class="op">=</span> [</span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>    SampleColumn(<span class="st">"swarm_cost"</span>, path<span class="op">=</span>_cost, <span class="bu">type</span><span class="op">=</span><span class="bu">float</span>, full<span class="op">=</span><span class="va">True</span>),</span>
@@ -664,7 +692,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <h3 class="anchored" data-anchor-id="swarm_ledger">swarm_ledger</h3>
 <p>Read the swarm’s ledger from a sample.</p>
 <div class="source-link">
-<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/3cd681e3033bd04f3ee457036c33169ad76fe786/src/inspect_swarm/analysis/_columns.py#L14">Source</a>
+<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/analysis/_columns.py#L14">Source</a>
 </div>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode python doc-declaration code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> swarm_ledger(sample: EvalSample) <span class="op">-&gt;</span> SwarmLedger <span class="op">|</span> <span class="va">None</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <dl>
@@ -680,7 +708,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <p>The swarm writes its ledger once, when it ends, to the sample store as <code>inspect_swarm:ledger</code> and as an <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent">InfoEvent</a></span> with source <code>inspect_swarm</code>. Read it from a sample with <span class="element-type-name ref-interlink"><a href="../reference/inspect_swarm.analysis.html#swarm_ledger">swarm_ledger()</a></span>.</p>
 <p>The store entry’s shape follows <code>version</code>. This inspect_swarm reads version 1 only.</p>
 <div class="source-link">
-<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/3cd681e3033bd04f3ee457036c33169ad76fe786/src/inspect_swarm/_ledger.py#L119">Source</a>
+<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L120">Source</a>
 </div>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python doc-declaration code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> SwarmLedger(BaseModel)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <section class="level4">
@@ -764,7 +792,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </dd>
 <dt><code class="ref-definition">resumed</code> <span class="element-type"><span class="element-type-name">bool</span></span></dt>
 <dd>
-<p>The sample resumed from a checkpoint, so the swarm restarted its caps from zero.</p>
+<p>The sample resumed from a checkpoint, so the swarm restarted its caps from zero. Swarms now refuse checkpointing, so only logs from earlier versions can have it true.</p>
 </dd>
 <dt><code class="ref-definition">total_complete</code> <span class="element-type"><span class="element-type-name">bool</span></span></dt>
 <dd>
@@ -781,7 +809,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <h3 class="anchored" data-anchor-id="memberledger">MemberLedger</h3>
 <p>One member’s entry in the swarm’s ledger.</p>
 <div class="source-link">
-<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/3cd681e3033bd04f3ee457036c33169ad76fe786/src/inspect_swarm/_ledger.py#L89">Source</a>
+<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L90">Source</a>
 </div>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode python doc-declaration code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> MemberLedger(BaseModel)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <section class="level4">
@@ -827,7 +855,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <p>Usage and cost recorded by one of the swarm’s meters.</p>
 <p>A meter counts the model calls made in its context: one member’s, the runtime’s, the final step’s, or the whole swarm’s.</p>
 <div class="source-link">
-<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/3cd681e3033bd04f3ee457036c33169ad76fe786/src/inspect_swarm/_ledger.py#L47">Source</a>
+<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L48">Source</a>
 </div>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode python doc-declaration code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> Meter(BaseModel)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <section class="level4">
@@ -853,7 +881,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <p>Counts of the model events in the swarm, or in one member’s spans.</p>
 <p><code>errored</code>, <code>no_usage</code> and <code>unpriced</code> count calls whose cost is missing, so any of them above zero makes the cost a lower bound.</p>
 <div class="source-link">
-<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/3cd681e3033bd04f3ee457036c33169ad76fe786/src/inspect_swarm/_ledger.py#L65">Source</a>
+<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L66">Source</a>
 </div>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb6"><pre class="sourceCode python doc-declaration code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> Calls(BaseModel)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <section class="level4">

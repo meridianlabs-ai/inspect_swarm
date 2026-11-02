@@ -98,9 +98,8 @@ inspect eval examples/getting_started.py --model openai/gpt-5-mini -T k=4
 
 ## What the log shows
 
-Each member’s events are in a timeline named after it, so the log viewer can show one member’s trajectory. The sample’s messages are its input followed by the answer’s message. The swarm also writes three entries to the sample store:
+Each member’s events are in a timeline named after it, so the log viewer can show one member’s trajectory. The sample’s messages are its input followed by the answer’s message. When the swarm ends, it writes its result record to the transcript: each member’s state and status, and which member’s output is the answer. Read it with [swarm_result()](./reference/inspect_swarm.html.md#swarm_result); see [Scoring](./scoring.html.md#the-result-record). It also writes two entries to the sample store:
 
-- `inspect_swarm:result`: each member’s state and status, and which member’s output is the answer. See [Scoring](./scoring.html.md#the-result-record).
 - `inspect_swarm:ledger`: the swarm’s caps and the usage and cost of each member. See [Analysis](./analysis.html.md#the-ledger).
 - `inspect_swarm:metrics`: tokens, cost and time for the swarm and each member, and counts of how members acted and communicated. See [Analysis](./analysis.html.md#metrics).
 

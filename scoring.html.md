@@ -19,14 +19,14 @@ The swarm’s output is the chosen member’s [ModelOutput](https://inspect.aisi
 
 ### The result record
 
-The swarm keeps a record of what it did in the sample store under `inspect_swarm:result`:
+When the swarm ends, it writes a record of what it did to the transcript, as an evidence event in the swarm’s span. Read it with `swarm_result(state)` in a scorer, or `swarm_result(sample)` for a sample read from a log, which needs the sample’s events and attachments. The record is:
 
 ``` json
 {
   "version": 1,
   "members": [
-    {"name": "react-1", "role": null, "state": "ended", "status": "submitted", "submitted": true, "time": 41.2, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null},
-    {"name": "react-2", "role": null, "state": "ended", "status": "swarm_cap", "submitted": false, "time": 57.9, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null}
+    {"name": "react-1", "role": null, "choose_name": false, "state": "ended", "status": "submitted", "submitted": true, "time": 41.2, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null},
+    {"name": "react-2", "role": null, "choose_name": false, "state": "ended", "status": "swarm_cap", "submitted": false, "time": 57.9, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null}
   ],
   "final": {"mode": "first", "member": "react-1", "reason": null, "provisional": false}
 }
@@ -34,17 +34,20 @@ The swarm keeps a record of what it did in the sample store under `inspect_swarm
 
 - A member’s `state` is `pending` (never started), `running` or `ended`, and `status` says how it ended ([Members](./members.html.md#how-a-member-ends)).
 - `time` is seconds from the swarm’s start to the member’s end.
+- `choose_name` is `true` for a member that chose its own name ([Members](./members.html.md#members-that-choose-their-names)). `name` is still the swarm’s name for it; the name it chose is in its transcript.
 - `sandbox` is the member’s own sandbox, or `null` when it shares the sample’s.
 - `gate_checks`, `gate_passes` and `first_pass_time` count the member’s in-loop checks ([Checks during the run](#checks-during-the-run)).
 - `final.mode` is `first`, `last` or `controller`, and `final.member` names the chosen member. Under `controller`, `final.reason` is the reason the controller gave. With no submission, `mode` and `member` are `null` and `final.reason` is `"no_submissions"`.
 
-The record is updated as members start and end. If a limit or error ends the sample before the swarm finishes, the record keeps the answer so far with `provisional: true`, and that submission is the sample’s output: the first submission so far, the latest under `last`, or the controller’s choice once it has made one.
+The event adds `"type": "result_record"` and an `"id"`, which the swarm also puts in the sample store under `inspect_swarm:result_id`, so that [swarm_result()](./reference/inspect_swarm.html.md#swarm_result) finds the record of the store it is given. If a limit, error or cancellation ends the swarm before it finalises its answer, the record has the answer so far with `provisional: true`, and that submission is the sample’s output: the first submission so far, the latest under `last`, or the controller’s choice once it has made one.
+
+[swarm_result()](./reference/inspect_swarm.html.md#swarm_result) returns `None` when no swarm ran in the sample. It raises `ValueError` for a sample it cannot read the record of: one read without its events or attachments, one written by an inspect_swarm that kept the record in the store under `inspect_swarm:result`, or one that holds a swarm’s events but whose store names no record, as for a sample recovered from a crashed eval.
 
 ### The record belongs to the swarm
 
-Only the swarm writes `inspect_swarm:result`. Task code (tools, member builders, controllers, scorers) must not write it.
+Only the swarm writes the record and `inspect_swarm:result_id`. Task code (tools, member builders, controllers, scorers) must not write that key or an event with source `inspect_swarm`. Member names, roles and sandboxes, and a controller’s `choose_answer()` reason, must be text that a log keeps as it is: not beginning with `attachment://` or `tc://`, which a log reads as a reference to an attachment, not a base64 `data:` URI, which a log removes when images are not logged, and valid UTF-8. The swarm does not write a record that holds such text, and its end raises `ValueError`.
 
-Any code can read it. A scorer that reads it after the swarm is how a task finds each member’s sandbox ([Per-member sandboxes](#per-member-sandboxes)). But a tool that reads it while the swarm runs gives members a view of each other’s state, status and time. That is a channel between members outside the swarm’s channels, and the swarm records no evidence of it.
+There is no record while the swarm runs, so no member can read another’s results from it. A scorer that reads it after the swarm is how a task finds each member’s sandbox ([Per-member sandboxes](#per-member-sandboxes)). A tool that reads the transcript sees every member’s model and tool calls anyway. That is a channel between members outside the swarm’s channels, and the swarm records no evidence of it.
 
 ## Scoring what members leave
 
@@ -61,13 +64,17 @@ With per-member sandboxes, the scorer still runs outside every member, where [sa
 def tests_pass() -> Scorer:
     """Run the task's tests in each member's sandbox."""
 
-    async def score(state: TaskState, target: Target) -> Score:
-        # the swarm's result record; task code reads it but never writes it
-        record: dict[str, Any] = state.store.get("inspect_swarm:result")
+    async def score(state: TaskState, target: Target) -> Score | None:
+        # the record exists once the swarm has ended; a member's react(attempts=...)
+        # or live control scoring calls this scorer during the solve
+        if not state.completed:
+            return None
+        record = swarm_result(state)
+        assert record is not None, "the task's solver is a swarm"
         passed = [
-            m["name"]
-            for m in record["members"]
-            if (await sandbox(m["sandbox"]).exec(["sh", "/tests/run.sh"])).success
+            m.name
+            for m in record.members
+            if (await sandbox(m.sandbox).exec(["sh", "/tests/run.sh"])).success
         ]
         return Score(value=CORRECT if passed else INCORRECT, metadata={"passed": passed})
 
@@ -97,6 +104,8 @@ A task’s scorer can also run inside a member, as `react(attempts=...)` runs it
 - `first_pass_time`: the swarm time of the first pass.
 
 They are in the result record and the [metrics](./analysis.html.md#metrics). A member with its own `score_value` can pass its own gate where the count does not, since the count assumes the default converter. Inside a member, a scorer’s [sandbox()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sandbox) is the member’s own.
+
+A scorer that runs during the solve, under `react(attempts=...)`, the other attempt loops or live control scoring, cannot read the result record: [swarm_result()](./reference/inspect_swarm.html.md#swarm_result) raises while a swarm in the sample runs. Such a scorer returns `None` until `state.completed` is `True`, as the [per-member sandboxes](#per-member-sandboxes) example does. Inspect drops a `None` score, so the task also needs a scorer that returns a value during the solve, since an attempt loop fails when it gets no score. List that scorer first: the swarm counts checks from the task’s first scorer.
 
 ## Comparisons
 

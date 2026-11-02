@@ -71,7 +71,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="site_libs/quarto-search/fuse.min.js"></script>
 <script src="site_libs/quarto-search/quarto-search.js"></script>
 <meta name="quarto:offset" content="./">
-<link href="./budget.html" rel="next">
+<link href="./messages.html" rel="next">
 <link href="./channels.html" rel="prev">
 <script src="site_libs/quarto-html/quarto.js" type="module"></script>
 <script src="site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
@@ -169,6 +169,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   </li>  
 </ul>
             <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="./CHANGELOG.html"> 
+<span class="menu-text">Changelog</span></a>
+  </li>  
   <li class="nav-item compact">
     <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm"> <i class="bi bi-github" role="img">
 </i> 
@@ -245,6 +249,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./shared-memory.html" class="sidebar-item-text sidebar-link active">
  <span class="menu-text">Shared Memory</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./messages.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Messages</span></a>
   </div>
 </li>
       </ul>
@@ -490,14 +500,14 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_tools</span></a>
+  <a href="./reference/inspect_swarm.html#messages" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">messages</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_on_continue" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_on_continue</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_tools</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -544,14 +554,32 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#noticeline" class="sidebar-item-text sidebar-link">
- <span class="menu-text">NoticeLine</span></a>
+  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Record</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
- <span class="menu-text">Record</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_result" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_result</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarmresultrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">SwarmResultRecord</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#memberresult" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberResult</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#finalrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">FinalRecord</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -598,9 +626,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <li><a href="#wiring" id="toc-wiring" class="nav-link" data-scroll-target="#wiring">Wiring</a></li>
   <li><a href="#the-tool" id="toc-the-tool" class="nav-link" data-scroll-target="#the-tool">The tool</a>
   <ul class="collapse">
+  <li><a href="#fences-are-labels" id="toc-fences-are-labels" class="nav-link" data-scroll-target="#fences-are-labels">Fences are labels</a></li>
   <li><a href="#the-seen-rule" id="toc-the-seen-rule" class="nav-link" data-scroll-target="#the-seen-rule">The seen rule</a></li>
   </ul></li>
-  <li><a href="#notices" id="toc-notices" class="nav-link" data-scroll-target="#notices">Notices</a></li>
+  <li><a href="#hearing-about-changes" id="toc-hearing-about-changes" class="nav-link" data-scroll-target="#hearing-about-changes">Hearing about changes</a></li>
   <li><a href="#waiting-for-other-members" id="toc-waiting-for-other-members" class="nav-link" data-scroll-target="#waiting-for-other-members">Waiting for other members</a></li>
   <li><a href="#subagents" id="toc-subagents" class="nav-link" data-scroll-target="#subagents">Subagents</a></li>
   <li><a href="#limits" id="toc-limits" class="nav-link" data-scroll-target="#limits">Limits</a></li>
@@ -640,7 +669,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="wiring" class="level2">
 <h2 class="anchored" data-anchor-id="wiring">Wiring</h2>
-<p>Members get the tool from <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>, which gives a member the tools of the swarm’s channels. Call it inside a member builder registered with <code>@agent</code>, and pass the builder to <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#member">member()</a></span> without calling it. To hear about changes between turns, a member also needs <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_on_continue">swarm_on_continue()</a></span> as its agent’s <code>on_continue</code>, called in the same builder:</p>
+<p>Members get the tool from <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>, which gives a member the tools of the swarm’s channels. Call it inside a member builder registered with <code>@agent</code>, and pass the builder to <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#member">member()</a></span> without calling it:</p>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.agent <span class="im">import</span> Agent, agent, deepagent, react</span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.tool <span class="im">import</span> bash</span>
 <span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
@@ -649,30 +678,29 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>    member,</span>
 <span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>    shared_memory,</span>
 <span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>    swarm,</span>
-<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    swarm_on_continue,</span>
-<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    swarm_tools,</span>
-<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    swarm_tools,</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a><span class="at">@agent</span></span>
-<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> solver_member() <span class="op">-&gt;</span> Agent:</span>
-<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> react(tools<span class="op">=</span>[bash(), swarm_tools()], on_continue<span class="op">=</span>swarm_on_continue())</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a><span class="at">@agent</span></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> solver_member() <span class="op">-&gt;</span> Agent:</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> react(tools<span class="op">=</span>[bash(), swarm_tools()])</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a><span class="at">@agent</span></span>
-<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> reviewer_member() <span class="op">-&gt;</span> Agent:</span>
-<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> deepagent(tools<span class="op">=</span>[bash(), swarm_tools()], on_continue<span class="op">=</span>swarm_on_continue())</span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a><span class="at">@agent</span></span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> reviewer_member() <span class="op">-&gt;</span> Agent:</span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> deepagent(tools<span class="op">=</span>[bash(), swarm_tools()])</span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a>solver <span class="op">=</span> swarm(</span>
-<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>    members<span class="op">=</span>[</span>
-<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>        member(solver_member, name<span class="op">=</span><span class="st">"solver"</span>, count<span class="op">=</span><span class="dv">3</span>),</span>
-<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a>        member(reviewer_member, name<span class="op">=</span><span class="st">"reviewer"</span>),</span>
-<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>    ],</span>
-<span id="cb1-29"><a href="#cb1-29" aria-hidden="true" tabindex="-1"></a>    channels<span class="op">=</span>[filesystem(), shared_memory()],</span>
-<span id="cb1-30"><a href="#cb1-30" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>solver <span class="op">=</span> swarm(</span>
+<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a>    members<span class="op">=</span>[</span>
+<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>        member(solver_member, name<span class="op">=</span><span class="st">"solver"</span>, count<span class="op">=</span><span class="dv">3</span>),</span>
+<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>        member(reviewer_member, name<span class="op">=</span><span class="st">"reviewer"</span>),</span>
+<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a>    ],</span>
+<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>    channels<span class="op">=</span>[filesystem(), shared_memory()],</span>
+<span id="cb1-29"><a href="#cb1-29" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <ul>
-<li>The log records a builder by name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span> or <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_on_continue">swarm_on_continue()</a></span> passed in <code>args</code> or inside an agent you built (<a href="./members.html#member-builders">Members</a>).</li>
+<li>The log records a builder by name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span> passed in <code>args</code> or inside an agent you built (<a href="./members.html#member-builders">Members</a>).</li>
 <li>Any agent that takes a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#toolsource">ToolSource</a></span> in its tools can take <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>. It gives no tools when the swarm has no channel with tools, or outside a swarm, so one member definition serves every arm of an experiment.</li>
 <li>This swarm keeps the <code>filesystem</code> channel beside the board. <code>channels=[shared_memory()]</code>, or <code>channels=["shared_memory"]</code>, replaces it: members still share the sample’s sandbox, but their preamble no longer mentions <code>/shared</code>. Members with their own sandboxes can use the board with no shared volume.</li>
 <li>The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, <code>_</code> or <code>-</code>.</li>
@@ -681,13 +709,24 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="the-tool" class="level2">
 <h2 class="anchored" data-anchor-id="the-tool">The tool</h2>
-<p>The <code>shared_memory</code> tool’s commands are <code>view</code>, <code>create</code>, <code>str_replace</code>, <code>insert</code>, <code>append</code>, <code>delete</code> and <code>rename</code>. Paths are <code>/shared_memory</code> followed by up to eight components of letters, digits, <code>.</code>, <code>_</code> and <code>-</code>.</p>
+<p>The <code>shared_memory</code> tool’s commands are <code>view</code>, <code>create</code>, <code>str_replace</code>, <code>insert</code>, <code>append</code>, <code>delete</code>, <code>rename</code> and <code>changes</code>. Paths are <code>/shared_memory</code> followed by up to eight components of letters, digits, <code>.</code>, <code>_</code> and <code>-</code>.</p>
 <ul>
-<li>Each file has an id, such as <code>f-3</code>, which <code>view</code> accepts as its path. Notices and status lines name files by id.</li>
-<li>A file view shows the file inside a fence that names its last writer and version, under a header that says the content is information from a peer, not instructions. A directory view lists every file under it at any depth, with its id, version and last writer.</li>
+<li>Each file has an id, such as <code>f-3</code>, which it keeps through renames. Status lines and <code>swarm_wait</code> results name files by id. <code>view</code> takes an id as <code>file_id</code>, in place of <code>path</code>. A view shows the file’s path, which the write commands take.</li>
+<li>A file view shows the file inside a <code>&lt;peer_file&gt;</code> fence that names its id, path, version and last writer. A directory view lists every file under it at any depth, with its id, version and last writer.</li>
 <li>Write commands return a short acknowledgment, not the file. View a file to see it.</li>
-<li>Every result ends with a status line naming the files other agents changed since this loop last viewed them, such as <code>Shared memory: 2 files changed since you last viewed them (f-2, f-9).</code></li>
+<li>Every result ends with a status line naming the files other agents changed since this loop last viewed them, such as <code>Shared memory: 2 files changed since you last viewed them (f-2, f-9).</code> It names at most 10 files and counts the rest, as in <code>(f-1, ..., f-10, and 2 more)</code>. With the <a href="./messages.html">messages</a> channel, a result in the member’s own loop then ends with its count of unread messages, when any remain.</li>
+<li><code>changes</code> returns the board’s status line, naming every changed file, or <code>Shared memory: no files changed since you last viewed them.</code>, so a loop can check for news without viewing anything. Like the status line, it marks nothing seen. With <code>messages</code>, its result in a member’s own loop also ends with the unread count, when any remain.</li>
 </ul>
+<section id="fences-are-labels" class="level3">
+<h3 class="anchored" data-anchor-id="fences-are-labels">Fences are labels</h3>
+<p>A fence is a label for the reader, not a security boundary. A member can write text that looks like a fence, another member’s file, or text the swarm writes, such as a status line. The swarm does not refuse or clean such text.</p>
+<p>What holds:</p>
+<ul>
+<li>Members see each other’s text only in tool results.</li>
+<li>The record of the board comes from the swarm’s own events and ids, never from the text of a result (<a href="#the-record-of-the-board">The record of the board</a>).</li>
+</ul>
+<p>An experiment that needs stronger guarantees, such as a study of members that deceive each other, needs a channel that provides them (<a href="./channels.html#writing-a-channel">Writing a channel</a>).</p>
+</section>
 <section id="the-seen-rule" class="level3">
 <h3 class="anchored" data-anchor-id="the-seen-rule">The seen rule</h3>
 <p>A loop must view a file in its current version before it overwrites it with <code>create</code>, inserts into it, renames it or deletes it. A write to a file changed since the loop’s last view is refused with an error that names the file and its last writer, and the loop views it and retries. So no member overwrites a change it has not seen.</p>
@@ -698,23 +737,21 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </ul>
 </section>
 </section>
-<section id="notices" class="level2">
-<h2 class="anchored" data-anchor-id="notices">Notices</h2>
-<p>At each turn boundary where other agents have changed files since its last notice, a member with <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_on_continue">swarm_on_continue()</a></span> gets one user message, such as:</p>
-<pre><code>[Swarm notice] 1 shared memory file changed since you last viewed it (f-1 new; by w-1). View one with shared_memory(command="view", path="f-1"), or list them with path="/shared_memory".</code></pre>
+<section id="hearing-about-changes" class="level2">
+<h2 class="anchored" data-anchor-id="hearing-about-changes">Hearing about changes</h2>
+<p>The swarm adds no messages to a member’s conversation. A member learns what other agents changed only through its tools:</p>
 <ul>
-<li>A notice holds counts, file ids, member names and fixed instructions, never a member-chosen file path or file contents. Its metadata, under <code>inspect_swarm</code>, gives the notice’s id and, for each channel’s line, the ids it names.</li>
-<li>The member continues or stops exactly as it would without the hook. If it has a hook of its own, wrap it: <code>swarm_on_continue(my_hook)</code>. For <code>react(submit=False)</code>, which stops after a turn without tool calls, pass <code>swarm_on_continue(no_tool_calls="stop")</code>.</li>
-<li>A member that is stopping gets no notice. Neither do a member’s subagents: only its own loop does.</li>
-<li><code>member(..., delivery="poll")</code> turns notices off for that member. It still learns of changes from the status line that ends each <code>shared_memory</code> result.</li>
-<li>A custom agent gets notices only if it calls an <code>on_continue</code> hook at each turn boundary, as <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react">react()</a></span> and <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#deepagent">deepagent()</a></span> do. If it does not, give its member <code>delivery="poll"</code>, so the metrics do not list it in <code>notify_unwired</code> (<a href="./analysis.html#wiring-checks">Analysis</a>).</li>
+<li>The status line at the end of every <code>shared_memory</code> result. With the <a href="./messages.html">messages</a> channel, a result in the member’s own loop then ends with its count of unread messages.</li>
+<li><code>shared_memory(command="changes")</code>, which returns the board’s status line, naming every changed file, to check for changes without viewing anything.</li>
+<li><code>swarm_wait</code>, which blocks until a file the member watches changes (<a href="#waiting-for-other-members">Waiting for other members</a>).</li>
 </ul>
+<p>A changed file stays in the status line until the loop views it. A deleted file is listed only to a loop that previously viewed or wrote it, including a blind append. These lists hold counts, file ids and member names, never a file path or file contents.</p>
 </section>
 <section id="waiting-for-other-members" class="level2">
 <h2 class="anchored" data-anchor-id="waiting-for-other-members">Waiting for other members</h2>
 <p><code>swarm_wait</code> blocks until there is something for the member to look at:</p>
 <ul>
-<li>A file under the <code>path</code> it watches (the whole board without one) has a change that the waiting agent did not write and has not viewed. A subagent’s write counts, so a member can wait for its own subagents.</li>
+<li>A file it watches has a change that the waiting agent did not write and has not viewed. It watches one file with <code>file_id</code>, a file or directory with <code>path</code>, or the whole board with neither. A subagent’s write counts, so a member can wait for its own subagents.</li>
 <li>Another member has ended.</li>
 </ul>
 <p>It returns at once if that is already so, and keeps returning while such a file stays unviewed. Its result names the changed files by id and the ended members by name and status, never file content: the member views a file to read it.</p>
@@ -725,10 +762,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="subagents" class="level2">
 <h2 class="anchored" data-anchor-id="subagents">Subagents</h2>
 <p>A member’s subagents read and write the board as the member. deepagent’s <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#general">general()</a></span> subagents, synchronous and background, and any nested loop given <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>, get the <code>shared_memory</code> and <code>swarm_wait</code> tools.</p>
+<p>The member’s agent decides which subagents get <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>. deepagent’s <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#general">general()</a></span> inherits the member’s tools, so it gets the board. <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#research">research()</a></span> gets its own read-only tools instead, and has the board only when you pass <code>research(extra_tools=[swarm_tools()])</code>.</p>
 <ul>
 <li>Their writes are records from the member. The evidence also names the loop that made each write or read, and marks a subagent’s as <code>nested</code>.</li>
 <li>Each loop has its own view of the board: the seen rule and the status line apply to the loop that calls the tool.</li>
-<li>Subagents get no notices. They learn of changes from the status line.</li>
 <li>A member’s subagents share its write rate, so they cannot multiply its write volume.</li>
 <li>A subagent’s wait counts in the member’s <code>wait_time</code> but not its <code>idle_time</code>.</li>
 </ul>
@@ -736,7 +773,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="limits" class="level2">
 <h2 class="anchored" data-anchor-id="limits">Limits</h2>
-<p>The board is bounded, so every file fits whole in one view:</p>
+<p>The board is bounded:</p>
 <table class="caption-top table">
 <colgroup>
 <col style="width: 33%">
@@ -753,22 +790,22 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <tbody>
 <tr class="odd">
 <td><code>max_files</code></td>
-<td>100</td>
+<td>10,000</td>
 <td>Files on the board</td>
 </tr>
 <tr class="even">
 <td><code>max_file_bytes</code></td>
-<td>16,000</td>
+<td>1,000,000</td>
 <td>UTF-8 bytes in one file</td>
 </tr>
 <tr class="odd">
 <td><code>max_file_lines</code></td>
-<td>1,000</td>
+<td>100,000</td>
 <td>Lines in one file</td>
 </tr>
 <tr class="even">
 <td><code>max_board_bytes</code></td>
-<td>400,000</td>
+<td>100,000,000</td>
 <td>UTF-8 bytes in all files together</td>
 </tr>
 <tr class="odd">
@@ -783,16 +820,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </tr>
 </tbody>
 </table>
-<p>A write that would pass a limit is refused with an error that says which. Once the swarm begins to stop, writes are refused and views still work. A file cannot contain the fence tags the swarm uses (<code>&lt;peer_file</code>, <code>&lt;peer_listing</code>, <code>&lt;peer_message</code> and their closing tags), and a write that would leave one in a file is refused.</p>
+<p>A write that would pass a limit is refused with an error that says which. Once the swarm begins to stop, writes are refused and views still work.</p>
 </section>
 <section id="the-record-of-the-board" class="level2">
 <h2 class="anchored" data-anchor-id="the-record-of-the-board">The record of the board</h2>
-<p>The swarm logs the members’ writes, views, notices and waits as <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent">InfoEvent</a></span>s with source <code>inspect_swarm</code> and type <code>comm</code>. Each is in the span of the tool call that made it, except a notice’s, which is in the member’s own loop:</p>
+<p>The swarm logs the members’ writes, views and waits as <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent">InfoEvent</a></span>s with source <code>inspect_swarm</code> and type <code>comm</code>. Each is in the span of the tool call that made it:</p>
 <ul>
 <li><code>sent</code>: a write that reached the swarm, with its operation and payload, and why it was refused if it was.</li>
 <li><code>delivered</code>: a write applied to the board, with its commit sequence number and each file’s previous and new version. Replaying the delivered writes in sequence order rebuilds every version of the board.</li>
 <li><code>read</code>: a view, with each file’s version and the record that last wrote it, or a listing.</li>
-<li><code>notified</code>: a notice line the member got.</li>
 <li><code>waited</code>: a <code>swarm_wait</code> call, with what ended it and how long it took.</li>
 </ul>
 <p>Each event names the member and the loop that acted. The <a href="./analysis.html#communication">metrics</a> count these events for each member.</p>
@@ -800,46 +836,46 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="monitoring-with-inspect-sentinel" class="level2">
 <h2 class="anchored" data-anchor-id="monitoring-with-inspect-sentinel">Monitoring with Inspect Sentinel</h2>
 <p>A native member’s call to <code>shared_memory</code> is an ordinary tool call, so <a href="https://meridianlabs-ai.github.io/inspect_sentinel">Inspect Sentinel</a>’s tool stages see it with no swarm code. A protocol at <code>BeforeToolCall</code> can reject a write before it reaches the board, and one at <code>AfterToolCall</code> sees exactly what a view is about to show. For example, a rule that keeps credentials off the board:</p>
-<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_sentinel <span class="im">import</span> (</span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    BeforeToolCall,</span>
-<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    Context,</span>
-<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    Decision,</span>
-<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    Escalations,</span>
-<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    Protocol,</span>
-<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    call_text,</span>
-<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    find_words,</span>
-<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    protocol,</span>
-<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a><span class="at">@protocol</span></span>
-<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> no_secrets_on_board() <span class="op">-&gt;</span> Protocol:</span>
-<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""Reject shared_memory writes that mention a credential."""</span></span>
-<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>    <span class="cf">async</span> <span class="kw">def</span> decide(</span>
-<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>        context: Context, step: BeforeToolCall, escalations: Escalations</span>
-<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>    ) <span class="op">-&gt;</span> Decision <span class="op">|</span> <span class="va">None</span>:</span>
-<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> step.call.function <span class="op">!=</span> <span class="st">"shared_memory"</span>:</span>
-<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> <span class="va">None</span></span>
-<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> step.call.arguments.get(<span class="st">"command"</span>) <span class="op">==</span> <span class="st">"view"</span>:</span>
-<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> <span class="va">None</span></span>
-<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a>        used <span class="op">=</span> find_words(call_text(step.call), [<span class="st">"password"</span>, <span class="st">"api_key"</span>, <span class="st">"token"</span>])</span>
-<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> used:</span>
-<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> Decision.reject(</span>
-<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a>                <span class="ss">f"write mentions </span><span class="sc">{</span><span class="st">', '</span><span class="sc">.</span>join(used)<span class="sc">}</span><span class="ss">"</span>,</span>
-<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a>                message<span class="op">=</span><span class="st">"Credentials may not be written to shared memory."</span>,</span>
-<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>            )</span>
-<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> Decision.proceed()</span>
-<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> decide</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_sentinel <span class="im">import</span> (</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    BeforeToolCall,</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    Context,</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    Decision,</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    Escalations,</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>    Protocol,</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>    call_text,</span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>    find_words,</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>    protocol,</span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a><span class="at">@protocol</span></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> no_secrets_on_board() <span class="op">-&gt;</span> Protocol:</span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""Reject shared_memory writes that mention a credential."""</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>    <span class="cf">async</span> <span class="kw">def</span> decide(</span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>        context: Context, step: BeforeToolCall, escalations: Escalations</span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>    ) <span class="op">-&gt;</span> Decision <span class="op">|</span> <span class="va">None</span>:</span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> step.call.function <span class="op">!=</span> <span class="st">"shared_memory"</span>:</span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> <span class="va">None</span></span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> step.call.arguments.get(<span class="st">"command"</span>) <span class="op">==</span> <span class="st">"view"</span>:</span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> <span class="va">None</span></span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>        used <span class="op">=</span> find_words(call_text(step.call), [<span class="st">"password"</span>, <span class="st">"api_key"</span>, <span class="st">"token"</span>])</span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> used:</span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> Decision.reject(</span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>                <span class="ss">f"write mentions </span><span class="sc">{</span><span class="st">', '</span><span class="sc">.</span>join(used)<span class="sc">}</span><span class="ss">"</span>,</span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>                message<span class="op">=</span><span class="st">"Credentials may not be written to shared memory."</span>,</span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>            )</span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> Decision.proceed()</span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> decide</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <p>Pass it to the task as <code>Task(..., sentinel=no_secrets_on_board())</code>. The member gets the decision’s message as the tool call’s error. A step’s <code>conversation</code> is the agent span id of the loop that made the call, and each <code>comm</code> event names that loop beside its member, so the two can be joined. Sentinel does not run on bridged members’ tool calls, which is one reason bridged members cannot use the channel yet.</p>
 </section>
 <section id="migrating-from-memoryinstance" class="level2">
 <h2 class="anchored" data-anchor-id="migrating-from-memoryinstance">Migrating from <code>memory(instance=...)</code></h2>
-<p>Before this channel, a board shared on purpose was a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span> tool with an explicit instance in every member’s tools, <code>memory(instance="board")</code>, with the prompt saying it is shared. That still works, and it is a different channel: members’ <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent">ToolEvent</a></span>s record its use, with no sender, fence, notices, bounds or <code>comm</code> events. Nothing refuses using both; an arm that wants the board as its only channel gives no two members a shared instance.</p>
+<p>Before this channel, a board shared on purpose was a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span> tool with an explicit instance in every member’s tools, <code>memory(instance="board")</code>, with the prompt saying it is shared. That still works, and it is a different channel: members’ <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent">ToolEvent</a></span>s record its use, with no sender, fence, status line, bounds or <code>comm</code> events. Nothing refuses using both; an arm that wants the board as its only channel gives no two members a shared instance.</p>
 <p>To move a task to the channel:</p>
 <ol type="1">
-<li>In the member builder, replace <code>memory(instance="board")</code> with <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span> in the tools, and pass <code>on_continue=swarm_on_continue(inner)</code> for notices, where <code>inner</code> is the hook the member had. The builder stays a registered <code>@agent</code>.</li>
+<li>In the member builder, replace <code>memory(instance="board")</code> with <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span> in the tools. The builder stays a registered <code>@agent</code>.</li>
 <li>For a deepagent member, pass <code>memory=False</code> to keep one memory tool as before, or leave deepagent’s private <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span> as an extra notebook per member. These are different experimental conditions.</li>
 <li>Replace the instructions that described the board with <code>"shared_memory"</code> or <code>shared_memory(...)</code> in <code>channels=</code>. Its instructions go in each member’s preamble.</li>
 <li>Change the prompt’s tool and path names (<code>memory</code>, <code>/memories</code>) to <code>shared_memory</code> and <code>/shared_memory</code>.</li>
@@ -850,7 +886,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li>Writes return an acknowledgment, not a snippet of the file.</li>
 <li>A directory view lists every file under it at any depth, and there are no empty directories.</li>
 <li>Paths are narrower, files and the board are bounded, and tabs are kept.</li>
-<li>Views are fenced and name the last writer, and notices and status lines report changes.</li>
+<li>Views are fenced and name the last writer, and status lines report changes.</li>
 </ul>
 <p>An eval set comparing the two boards runs them as two arms: the channel list and the builder’s arguments differ, so their task identifiers do. <a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py"><code>examples/proof_swarm.py</code></a> is shaped like such a port: members with their own sandboxes whose only channel is the board.</p>
 
@@ -1377,8 +1413,8 @@ document.addEventListener("DOMContentLoaded", function () {
       </a>          
   </div>
   <div class="nav-page nav-page-next">
-      <a href="./budget.html" class="pagination-link" aria-label="Budgets">
-        <span class="nav-page-text">Budgets</span> <i class="bi bi-arrow-right-short"></i>
+      <a href="./messages.html" class="pagination-link" aria-label="Messages">
+        <span class="nav-page-text">Messages</span> <i class="bi bi-arrow-right-short"></i>
       </a>
   </div>
 </nav>

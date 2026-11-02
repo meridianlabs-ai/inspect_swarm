@@ -9,7 +9,7 @@ A swarm has one of two sandbox topologies:
 
 ## Shared
 
-With no `sandbox=` on any member, members share the sample’s sandbox. The default `filesystem` channel gives them a convention for it: `/shared` for shared files, `/shared/notes.md` for notes, and `/scratch/<member>` for each member’s own work ([Channels](./channels.html.md#the-filesystem-channel)). The channel does not create these directories, so create them in the sandbox image or with the sample’s `files`.
+With no `sandbox=` on any member, members share the sample’s sandbox. The default `filesystem` channel gives them a convention for it: `/shared` for shared files, `/shared/notes.md` for notes, and `/scratch/<member>` for each member’s own work ([Channels](./channels.html.md#the-filesystem-channel)). The channel does not create these directories, so create them in the sandbox image or with the sample’s `files`. When members choose their own names ([Members](./members.html.md#members-that-choose-their-names)), create `/shared` and `/scratch` but not the members’ directories in it: a directory named after a member would tell members the swarm’s names.
 
 [`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) runs [bash()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash) members in one container:
 

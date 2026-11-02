@@ -169,6 +169,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   </li>  
 </ul>
             <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="./CHANGELOG.html"> 
+<span class="menu-text">Changelog</span></a>
+  </li>  
   <li class="nav-item compact">
     <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm"> <i class="bi bi-github" role="img">
 </i> 
@@ -245,6 +249,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./shared-memory.html" class="sidebar-item-text sidebar-link">
  <span class="menu-text">Shared Memory</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./messages.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Messages</span></a>
   </div>
 </li>
       </ul>
@@ -490,14 +500,14 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_tools</span></a>
+  <a href="./reference/inspect_swarm.html#messages" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">messages</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_on_continue" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_on_continue</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_tools</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -544,14 +554,32 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#noticeline" class="sidebar-item-text sidebar-link">
- <span class="menu-text">NoticeLine</span></a>
+  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Record</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
- <span class="menu-text">Record</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_result" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_result</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarmresultrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">SwarmResultRecord</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#memberresult" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberResult</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#finalrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">FinalRecord</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -595,7 +623,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
    
   <ul>
   <li><a href="#overview" id="toc-overview" class="nav-link active" data-scroll-target="#overview">Overview</a></li>
-  <li><a href="#names" id="toc-names" class="nav-link" data-scroll-target="#names">Names</a></li>
+  <li><a href="#names" id="toc-names" class="nav-link" data-scroll-target="#names">Names</a>
+  <ul class="collapse">
+  <li><a href="#members-that-choose-their-names" id="toc-members-that-choose-their-names" class="nav-link" data-scroll-target="#members-that-choose-their-names">Members that choose their names</a></li>
+  </ul></li>
   <li><a href="#limits" id="toc-limits" class="nav-link" data-scroll-target="#limits">Limits</a></li>
   <li><a href="#member-builders" id="toc-member-builders" class="nav-link" data-scroll-target="#member-builders">Member builders</a></li>
   <li><a href="#tool-state" id="toc-tool-state" class="nav-link" data-scroll-target="#tool-state">Tool state</a></li>
@@ -685,6 +716,22 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>prompts <span class="op">=</span> [<span class="st">"Try algebra."</span>, <span class="st">"Try brute force."</span>, <span class="st">"Try a proof by cases."</span>]</span>
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>solver <span class="op">=</span> swarm(members<span class="op">=</span>[member(react, args<span class="op">=</span>{<span class="st">"prompt"</span>: p}) <span class="cf">for</span> p <span class="kw">in</span> prompts])</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <p>These are <code>react-1</code> to <code>react-3</code>. Names you give with <code>name</code> are not numbered across records, so give each record its own.</p>
+<section id="members-that-choose-their-names" class="level3">
+<h3 class="anchored" data-anchor-id="members-that-choose-their-names">Members that choose their names</h3>
+<p>With <code>choose_name=True</code> a member is not told its name. Its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.agent <span class="im">import</span> react</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.tool <span class="im">import</span> bash</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_swarm <span class="im">import</span> member, swarm</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>solver <span class="op">=</span> swarm(</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>    members<span class="op">=</span>member(react, args<span class="op">=</span>{<span class="st">"tools"</span>: [bash()]}, count<span class="op">=</span><span class="dv">4</span>, choose_name<span class="op">=</span><span class="va">True</span>),</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Each member starts with <code>You are one of 4 agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is.</code> Its role, if it has one, is still stated. The log still names the members <code>react-1</code> to <code>react-4</code>: the swarm’s timelines, spans, tool state, budget shares and result record use those names. The name a member chose is in its transcript, not in the swarm’s records.</p>
+<p>A roster can mix the two, for example a lead you name and workers that name themselves. The <code>filesystem</code> channel then tells every member that its scratch directory may be taken by another member (<a href="./channels.html#the-filesystem-channel">Channels</a>).</p>
+<p>A swarm in which any member chooses its name can use only the <code>filesystem</code> channel or no channel (<code>channels=[]</code>). Other channels, including <a href="./shared-memory.html">shared memory</a> and your own, show members to each other by name, so <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm">swarm()</a></span> refuses them.</p>
+<p>The swarm does not change text you give the member yourself: the sample input, a controller’s <code>start(input=...)</code>, the agent’s prompt, and the sandbox configuration.</p>
+</section>
 </section>
 <section id="limits" class="level2">
 <h2 class="anchored" data-anchor-id="limits">Limits</h2>
@@ -693,19 +740,19 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="member-builders" class="level2">
 <h2 class="anchored" data-anchor-id="member-builders">Member builders</h2>
 <p>A member builder is a function registered with <code>@agent</code> that builds the member’s agent. Pass it to <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#member">member()</a></span> without calling it, with its arguments in <code>args</code>:</p>
-<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.agent <span class="im">import</span> Agent, agent, react</span>
-<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.tool <span class="im">import</span> bash</span>
-<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_swarm <span class="im">import</span> member, shared_memory, swarm, swarm_on_continue, swarm_tools</span>
-<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a><span class="at">@agent</span></span>
-<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> worker() <span class="op">-&gt;</span> Agent:</span>
-<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> react(tools<span class="op">=</span>[bash(), swarm_tools()], on_continue<span class="op">=</span>swarm_on_continue())</span>
-<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>solver <span class="op">=</span> swarm(members<span class="op">=</span>member(worker, name<span class="op">=</span><span class="st">"w"</span>, count<span class="op">=</span><span class="dv">3</span>), channels<span class="op">=</span>[shared_memory()])</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<p>Use a builder for anything the swarm gives a member at run time: <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span> and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_on_continue">swarm_on_continue()</a></span> (<a href="./shared-memory.html">Shared Memory</a>). The log records a builder by its name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span> or <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_on_continue">swarm_on_continue()</a></span> passed in <code>args</code> or inside an agent you built.</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.agent <span class="im">import</span> Agent, agent, react</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.tool <span class="im">import</span> bash</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_swarm <span class="im">import</span> member, shared_memory, swarm, swarm_tools</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a><span class="at">@agent</span></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> worker() <span class="op">-&gt;</span> Agent:</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> react(tools<span class="op">=</span>[bash(), swarm_tools()])</span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>solver <span class="op">=</span> swarm(members<span class="op">=</span>member(worker, name<span class="op">=</span><span class="st">"w"</span>, count<span class="op">=</span><span class="dv">3</span>), channels<span class="op">=</span>[shared_memory()])</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Use a builder for anything the swarm gives a member at run time, such as <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span> (<a href="./shared-memory.html">Shared Memory</a>). The log records a builder by its name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span> passed in <code>args</code> or inside an agent you built.</p>
 <p>A builder is also the place for anything each member must have its own of. Every member built from one record gets the same objects from <code>args</code>, and two built agents given the same tool object share it, across members and samples. Inspect’s built-in tools keep their state in the sample store or the sandbox, so this matters only for a custom tool or helper that keeps state in its Python object (a counter, a cache, a client). The swarm calls a builder once for each member in each sample, so what the builder creates belongs to one member. <a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/stop_on_proof.py"><code>examples/stop_on_proof.py</code></a> keeps a per-member flag this way.</p>
 </section>
 <section id="tool-state" class="level2">

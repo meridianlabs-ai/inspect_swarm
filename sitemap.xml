@@ -2,58 +2,66 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://meridianlabs-ai.github.io/inspect_swarm/reference/inspect_swarm.configuration.html</loc>
-    <lastmod>2026-10-22T20:49:03.249Z</lastmod>
+    <lastmod>2026-10-22T20:47:30.766Z</lastmod>
   </url>
   <url>
     <loc>https://meridianlabs-ai.github.io/inspect_swarm/reference/index.html</loc>
-    <lastmod>2026-10-22T20:49:03.249Z</lastmod>
+    <lastmod>2026-11-02T14:09:44.807Z</lastmod>
   </url>
   <url>
     <loc>https://meridianlabs-ai.github.io/inspect_swarm/shared-memory.html</loc>
-    <lastmod>2026-10-23T13:19:05.647Z</lastmod>
+    <lastmod>2026-11-02T12:21:18.432Z</lastmod>
   </url>
   <url>
-    <loc>https://meridianlabs-ai.github.io/inspect_swarm/sandboxes.html</loc>
-    <lastmod>2026-10-23T13:19:05.647Z</lastmod>
-  </url>
-  <url>
-    <loc>https://meridianlabs-ai.github.io/inspect_swarm/analysis.html</loc>
-    <lastmod>2026-10-23T13:19:05.644Z</lastmod>
-  </url>
-  <url>
-    <loc>https://meridianlabs-ai.github.io/inspect_swarm/channels.html</loc>
-    <lastmod>2026-10-23T13:19:05.645Z</lastmod>
-  </url>
-  <url>
-    <loc>https://meridianlabs-ai.github.io/inspect_swarm/members.html</loc>
-    <lastmod>2026-10-23T13:19:05.646Z</lastmod>
-  </url>
-  <url>
-    <loc>https://meridianlabs-ai.github.io/inspect_swarm/scoring.html</loc>
-    <lastmod>2026-10-23T13:19:05.647Z</lastmod>
-  </url>
-  <url>
-    <loc>https://meridianlabs-ai.github.io/inspect_swarm/controllers.html</loc>
-    <lastmod>2026-10-23T13:19:05.646Z</lastmod>
-  </url>
-  <url>
-    <loc>https://meridianlabs-ai.github.io/inspect_swarm/index.html</loc>
-    <lastmod>2026-10-23T13:19:05.646Z</lastmod>
+    <loc>https://meridianlabs-ai.github.io/inspect_swarm/messages.html</loc>
+    <lastmod>2026-11-02T12:21:18.431Z</lastmod>
   </url>
   <url>
     <loc>https://meridianlabs-ai.github.io/inspect_swarm/restrictions.html</loc>
-    <lastmod>2026-10-23T13:19:05.646Z</lastmod>
+    <lastmod>2026-11-02T12:21:18.431Z</lastmod>
+  </url>
+  <url>
+    <loc>https://meridianlabs-ai.github.io/inspect_swarm/index.html</loc>
+    <lastmod>2026-11-02T12:21:18.430Z</lastmod>
+  </url>
+  <url>
+    <loc>https://meridianlabs-ai.github.io/inspect_swarm/channels.html</loc>
+    <lastmod>2026-11-02T12:21:18.430Z</lastmod>
+  </url>
+  <url>
+    <loc>https://meridianlabs-ai.github.io/inspect_swarm/members.html</loc>
+    <lastmod>2026-10-28T20:59:11.827Z</lastmod>
+  </url>
+  <url>
+    <loc>https://meridianlabs-ai.github.io/inspect_swarm/scoring.html</loc>
+    <lastmod>2026-11-02T12:21:18.432Z</lastmod>
+  </url>
+  <url>
+    <loc>https://meridianlabs-ai.github.io/inspect_swarm/controllers.html</loc>
+    <lastmod>2026-10-23T13:31:13.075Z</lastmod>
+  </url>
+  <url>
+    <loc>https://meridianlabs-ai.github.io/inspect_swarm/CHANGELOG.html</loc>
+    <lastmod>2026-11-02T12:21:18.415Z</lastmod>
+  </url>
+  <url>
+    <loc>https://meridianlabs-ai.github.io/inspect_swarm/analysis.html</loc>
+    <lastmod>2026-11-02T12:21:18.429Z</lastmod>
+  </url>
+  <url>
+    <loc>https://meridianlabs-ai.github.io/inspect_swarm/sandboxes.html</loc>
+    <lastmod>2026-10-28T20:59:11.827Z</lastmod>
   </url>
   <url>
     <loc>https://meridianlabs-ai.github.io/inspect_swarm/budget.html</loc>
-    <lastmod>2026-10-23T13:19:05.645Z</lastmod>
+    <lastmod>2026-10-23T13:31:13.074Z</lastmod>
   </url>
   <url>
     <loc>https://meridianlabs-ai.github.io/inspect_swarm/reference/inspect_swarm.html</loc>
-    <lastmod>2026-10-22T20:49:03.249Z</lastmod>
+    <lastmod>2026-11-02T12:21:18.431Z</lastmod>
   </url>
   <url>
     <loc>https://meridianlabs-ai.github.io/inspect_swarm/reference/inspect_swarm.analysis.html</loc>
-    <lastmod>2026-10-22T20:49:03.249Z</lastmod>
+    <lastmod>2026-10-22T20:47:30.766Z</lastmod>
   </url>
 </urlset>

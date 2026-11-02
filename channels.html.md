@@ -2,10 +2,11 @@
 
 ## Overview
 
-`channels=` decides how members share information. There are two built-in channels:
+`channels=` decides how members share information. There are three built-in channels:
 
 - `filesystem`, the default: a convention for sharing files in a sandbox, stated in each member’s preamble. It adds no tools.
 - `shared_memory`: a board of files that members read and write with a tool, with a record of every write and read. See [Shared Memory](./shared-memory.html.md).
+- `messages`: direct messages between members, with a record of every message and read. See [Messages](./messages.html.md).
 
 `channels=[]` gives members no channel instructions. Channels change what members are told and what tools they get, not what they can reach: members share the sample’s sandbox whatever the channels, unless they have their own ([Sandboxes](./sandboxes.html.md)).
 
@@ -26,6 +27,8 @@ solver = swarm(
 )
 ```
 
+A member that chooses its own name ([Members](./members.html.md#members-that-choose-their-names)) is told to keep its work in `/scratch/<your name>`, a directory named with the name it chose, and to check that no other member uses the same one. The members you named are still told `/scratch/<member>`, and, when any member chooses, that a member that chooses could pick the same directory, so they check that no other member uses it.
+
 When members have their own sandboxes and each sandbox mounts one shared volume, use `filesystem(shared_volume=True)`. Set `shared=` to the absolute path where the volume is mounted; `notes=` must be inside it. The preamble then says that `shared` and the notes file in it are the same in every member’s sandbox, and gives no scratch directory, since each sandbox is already private. The swarm cannot check that the volume is mounted, and it refuses `shared_volume=True` when members share the sample’s sandbox. See [Sandboxes](./sandboxes.html.md#a-shared-volume).
 
 [`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) runs [bash()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash) members in one container with this channel.
@@ -39,7 +42,7 @@ Those tool calls are evidence that members may have communicated through files, 
 The same holds for every other path between members that the swarm does not carry:
 
 - A built-in tool given the same explicit `instance` in several members, such as `memory(instance="board")`, shares its state through the sample store. Members’ [ToolEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent)s record its use, and nothing else does. See [Members](./members.html.md#tool-state).
-- A tool that reads the swarm’s result record gives members a view of each other’s state, status and time ([Scoring](./scoring.html.md#the-result-record)).
+- A tool that reads the transcript sees the other members’ model and tool calls ([Scoring](./scoring.html.md#the-record-belongs-to-the-swarm)).
 
 Channels limit what members are told, not what they can do. An arm meant to have one channel only, or none, needs members that cannot reach each other otherwise: their own sandboxes, and no shared tool instances.
 
@@ -69,4 +72,4 @@ def lead(name: str) -> Channel:
 
 `instructions()` returns text for the member’s preamble, or `None` to add nothing. `check()`, if overridden, is called with the roster when [swarm()](./reference/inspect_swarm.html.md#swarm) is called and raises `ValueError` for a roster the channel cannot serve. A [Channel](./reference/inspect_swarm.html.md#channel) holds configuration only: one object serves every sample. The factory’s arguments are logged with the channel.
 
-A channel with tools and records, as `shared_memory` is, also sets `name` and `prefix` and returns a [ChannelState](./reference/inspect_swarm.html.md#channelstate) from `open()` for each run of the swarm; its records go through the swarm’s bus. See the docstrings of [Channel](./reference/inspect_swarm.html.md#channel), [ChannelState](./reference/inspect_swarm.html.md#channelstate) and [WaitingState](./reference/inspect_swarm.html.md#waitingstate) in the [reference](./reference/index.html.md).
+A channel with tools and records, as `shared_memory` is, also sets `name` and `prefix` and returns a [ChannelState](./reference/inspect_swarm.html.md#channelstate) from `open()` for each run of the swarm; its records go through the swarm’s bus. Its `reach` decides which of a member’s loops get its tools from [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools): `"loop"` (the default), only the member’s own loop; `"member"`, also the nested loops the member’s agent gives [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). The agent decides which nested loops get [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools); `reach` filters the channel tools they get and which channels can wake their `swarm_wait`. A channel whose reads consume something for the member, such as an inbox that marks messages read, keeps `"loop"`, so that a subagent cannot read what the member’s own loop then never sees. `shared_memory` sets `"member"`: a view consumes nothing, and each loop keeps its own seen state. A channel’s tools are given to the member as they are: with the `messages` channel, their results do not count the member’s unread messages, as the swarm’s own tools do. A member learns of messages from those, or by calling `list_members`. See the docstrings of [Channel](./reference/inspect_swarm.html.md#channel), [ChannelState](./reference/inspect_swarm.html.md#channelstate) and [WaitingState](./reference/inspect_swarm.html.md#waitingstate) in the [reference](./reference/index.html.md).

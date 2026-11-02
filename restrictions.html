@@ -134,6 +134,10 @@ ul.task-list li input[type="checkbox"] {
   </li>  
 </ul>
             <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="./CHANGELOG.html"> 
+<span class="menu-text">Changelog</span></a>
+  </li>  
   <li class="nav-item compact">
     <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm"> <i class="bi bi-github" role="img">
 </i> 
@@ -210,6 +214,12 @@ ul.task-list li input[type="checkbox"] {
   <div class="sidebar-item-container"> 
   <a href="./shared-memory.html" class="sidebar-item-text sidebar-link">
  <span class="menu-text">Shared Memory</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./messages.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Messages</span></a>
   </div>
 </li>
       </ul>
@@ -455,14 +465,14 @@ ul.task-list li input[type="checkbox"] {
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_tools</span></a>
+  <a href="./reference/inspect_swarm.html#messages" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">messages</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_on_continue" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_on_continue</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_tools</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -509,14 +519,32 @@ ul.task-list li input[type="checkbox"] {
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#noticeline" class="sidebar-item-text sidebar-link">
- <span class="menu-text">NoticeLine</span></a>
+  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Record</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
- <span class="menu-text">Record</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_result" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_result</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarmresultrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">SwarmResultRecord</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#memberresult" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberResult</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#finalrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">FinalRecord</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -593,6 +621,7 @@ ul.task-list li input[type="checkbox"] {
 <ul>
 <li>No background work in bridged members. A member cannot combine background work with the agent bridge. <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background">background()</a></span> raises in a bridged member, and a member that uses the bridge after starting background work ends <code>errored</code>.</li>
 <li>No channels with tools for bridged members. A bridged member cannot use the <a href="./shared-memory.html">shared-memory channel</a> yet, and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm">swarm()</a></span> refuses one beside it.</li>
+<li>No checkpointing. Inspect’s sample checkpointing does not restore the swarm’s shared state or its caps, so a swarm raises an error before any member starts in a sample with checkpointing on. Turn checkpointing off for tasks that run a swarm: set <code>checkpoint=False</code> on <code>Task()</code> or <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.html#eval">eval()</a></span>, or remove every checkpoint setting, including <code>--checkpoint</code> and <code>INSPECT_EVAL_CHECKPOINT</code>.</li>
 <li>No ACP agents. ACP agents wait for their caller to drive them, so they are refused.</li>
 <li>No scorers that read a member’s tool state. Each member runs in its own tool-state scope, so built-in tools that keep state in the store (<span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span>, <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session">bash_session()</a></span>, <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#web_browser">web_browser()</a></span>, the skill tool) keep each member’s at keys inside its scope, which differ from the default ones. Tool state that a setup solver prepared at the default instance is not carried into the members either; they start with fresh state (<a href="./members.html#tool-state">Members</a>).</li>
 </ul>
@@ -606,14 +635,14 @@ ul.task-list li input[type="checkbox"] {
 <h2 class="anchored" data-anchor-id="what-the-log-records">What the log records</h2>
 <ul>
 <li>Members’ <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent">ToolEvent</a></span>s are the record of what they did, except for bridged members.</li>
-<li>The shared-memory channel’s writes, views, notices and waits are <code>comm</code> events (<a href="./shared-memory.html#the-record-of-the-board">Shared Memory</a>).</li>
-<li>Files members share in a sandbox, tool instances they share, and the result record read while the swarm runs are channels the swarm observes but does not record (<a href="./channels.html#shared-files-are-observed-not-recorded">Channels</a>).</li>
+<li>The shared-memory channel’s writes, views and waits are <code>comm</code> events (<a href="./shared-memory.html#the-record-of-the-board">Shared Memory</a>).</li>
+<li>Files members share in a sandbox, tool instances they share, and a tool that reads the transcript are channels the swarm observes but does not record (<a href="./channels.html#shared-files-are-observed-not-recorded">Channels</a>).</li>
 </ul>
 <p>Spans inside a swarm log no <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#storeevent">StoreEvent</a></span>s. The swarm’s span logs the net change to the store, which says what changed but not which member changed it. If an error, limit or cancellation escapes the swarm and ends the sample, the log may have no <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#storeevent">StoreEvent</a></span> for the swarm’s writes. <code>sample.store</code> is always the record of the final store.</p>
 </section>
 <section id="the-store-keys" class="level2">
 <h2 class="anchored" data-anchor-id="the-store-keys">The store keys</h2>
-<p>The swarm owns three keys in the sample store: <code>inspect_swarm:result</code>, <code>inspect_swarm:ledger</code> and <code>inspect_swarm:metrics</code>. Task code must not write them. A tool that reads <code>inspect_swarm:result</code> while the swarm runs gives members a view of each other’s state, status and time, a channel between members that the swarm records no evidence of (<a href="./scoring.html#the-record-belongs-to-the-swarm">Scoring</a>).</p>
+<p>The swarm owns three keys in the sample store, written when the swarm ends: <code>inspect_swarm:result_id</code>, <code>inspect_swarm:ledger</code> and <code>inspect_swarm:metrics</code>. Task code must not write them, or an event with source <code>inspect_swarm</code>. The result record itself is an event in the transcript (<a href="./scoring.html#the-result-record">Scoring</a>). A tool that reads the transcript sees every member’s model and tool calls, a channel between members that the swarm records no evidence of (<a href="./scoring.html#the-record-belongs-to-the-swarm">Scoring</a>).</p>
 
 
 </section>

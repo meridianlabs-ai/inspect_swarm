@@ -169,6 +169,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   </li>  
 </ul>
             <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="./CHANGELOG.html"> 
+<span class="menu-text">Changelog</span></a>
+  </li>  
   <li class="nav-item compact">
     <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm"> <i class="bi bi-github" role="img">
 </i> 
@@ -245,6 +249,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./shared-memory.html" class="sidebar-item-text sidebar-link">
  <span class="menu-text">Shared Memory</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./messages.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Messages</span></a>
   </div>
 </li>
       </ul>
@@ -490,14 +500,14 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_tools</span></a>
+  <a href="./reference/inspect_swarm.html#messages" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">messages</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_on_continue" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_on_continue</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_tools</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -544,14 +554,32 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#noticeline" class="sidebar-item-text sidebar-link">
- <span class="menu-text">NoticeLine</span></a>
+  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Record</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
- <span class="menu-text">Record</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_result" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_result</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarmresultrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">SwarmResultRecord</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#memberresult" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberResult</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#finalrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">FinalRecord</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -625,10 +653,11 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 
 <section id="overview" class="level2">
 <h2 class="anchored" data-anchor-id="overview">Overview</h2>
-<p><code>channels=</code> decides how members share information. There are two built-in channels:</p>
+<p><code>channels=</code> decides how members share information. There are three built-in channels:</p>
 <ul>
 <li><code>filesystem</code>, the default: a convention for sharing files in a sandbox, stated in each member’s preamble. It adds no tools.</li>
 <li><code>shared_memory</code>: a board of files that members read and write with a tool, with a record of every write and read. See <a href="./shared-memory.html">Shared Memory</a>.</li>
+<li><code>messages</code>: direct messages between members, with a record of every message and read. See <a href="./messages.html">Messages</a>.</li>
 </ul>
 <p><code>channels=[]</code> gives members no channel instructions. Channels change what members are told and what tools they get, not what they can reach: members share the sample’s sandbox whatever the channels, unless they have their own (<a href="./sandboxes.html">Sandboxes</a>).</p>
 <p>A channel is given as an object, <code>filesystem(...)</code>, or by its registered name with its default arguments, <code>"filesystem"</code>. Each channel can be given once.</p>
@@ -644,6 +673,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>    members<span class="op">=</span>member(react, count<span class="op">=</span><span class="dv">4</span>),</span>
 <span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>    channels<span class="op">=</span>[filesystem(shared<span class="op">=</span><span class="st">"/work/shared"</span>, scratch<span class="op">=</span><span class="st">"/work/</span><span class="sc">{member}</span><span class="st">"</span>)],</span>
 <span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>A member that chooses its own name (<a href="./members.html#members-that-choose-their-names">Members</a>) is told to keep its work in <code>/scratch/&lt;your name&gt;</code>, a directory named with the name it chose, and to check that no other member uses the same one. The members you named are still told <code>/scratch/&lt;member&gt;</code>, and, when any member chooses, that a member that chooses could pick the same directory, so they check that no other member uses it.</p>
 <p>When members have their own sandboxes and each sandbox mounts one shared volume, use <code>filesystem(shared_volume=True)</code>. Set <code>shared=</code> to the absolute path where the volume is mounted; <code>notes=</code> must be inside it. The preamble then says that <code>shared</code> and the notes file in it are the same in every member’s sandbox, and gives no scratch directory, since each sandbox is already private. The swarm cannot check that the volume is mounted, and it refuses <code>shared_volume=True</code> when members share the sample’s sandbox. See <a href="./sandboxes.html#a-shared-volume">Sandboxes</a>.</p>
 <p><a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py"><code>examples/shared_sandbox.py</code></a> runs <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash">bash()</a></span> members in one container with this channel.</p>
 </section>
@@ -654,7 +684,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <p>The same holds for every other path between members that the swarm does not carry:</p>
 <ul>
 <li>A built-in tool given the same explicit <code>instance</code> in several members, such as <code>memory(instance="board")</code>, shares its state through the sample store. Members’ <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent">ToolEvent</a></span>s record its use, and nothing else does. See <a href="./members.html#tool-state">Members</a>.</li>
-<li>A tool that reads the swarm’s result record gives members a view of each other’s state, status and time (<a href="./scoring.html#the-result-record">Scoring</a>).</li>
+<li>A tool that reads the transcript sees the other members’ model and tool calls (<a href="./scoring.html#the-record-belongs-to-the-swarm">Scoring</a>).</li>
 </ul>
 <p>Channels limit what members are told, not what they can do. An arm meant to have one channel only, or none, needs members that cannot reach each other otherwise: their own sandboxes, and no shared tool instances.</p>
 </section>
@@ -679,7 +709,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""Tell members that one of them writes a plan for the others."""</span></span>
 <span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> LeadChannel(name)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <p><code>instructions()</code> returns text for the member’s preamble, or <code>None</code> to add nothing. <code>check()</code>, if overridden, is called with the roster when <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm">swarm()</a></span> is called and raises <code>ValueError</code> for a roster the channel cannot serve. A <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channel">Channel</a></span> holds configuration only: one object serves every sample. The factory’s arguments are logged with the channel.</p>
-<p>A channel with tools and records, as <code>shared_memory</code> is, also sets <code>name</code> and <code>prefix</code> and returns a <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channelstate">ChannelState</a></span> from <code>open()</code> for each run of the swarm; its records go through the swarm’s bus. See the docstrings of <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channel">Channel</a></span>, <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channelstate">ChannelState</a></span> and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#waitingstate">WaitingState</a></span> in the <a href="./reference/index.html">reference</a>.</p>
+<p>A channel with tools and records, as <code>shared_memory</code> is, also sets <code>name</code> and <code>prefix</code> and returns a <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channelstate">ChannelState</a></span> from <code>open()</code> for each run of the swarm; its records go through the swarm’s bus. Its <code>reach</code> decides which of a member’s loops get its tools from <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>: <code>"loop"</code> (the default), only the member’s own loop; <code>"member"</code>, also the nested loops the member’s agent gives <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>. The agent decides which nested loops get <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>; <code>reach</code> filters the channel tools they get and which channels can wake their <code>swarm_wait</code>. A channel whose reads consume something for the member, such as an inbox that marks messages read, keeps <code>"loop"</code>, so that a subagent cannot read what the member’s own loop then never sees. <code>shared_memory</code> sets <code>"member"</code>: a view consumes nothing, and each loop keeps its own seen state. A channel’s tools are given to the member as they are: with the <code>messages</code> channel, their results do not count the member’s unread messages, as the swarm’s own tools do. A member learns of messages from those, or by calling <code>list_members</code>. See the docstrings of <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channel">Channel</a></span>, <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channelstate">ChannelState</a></span> and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#waitingstate">WaitingState</a></span> in the <a href="./reference/index.html">reference</a>.</p>
 
 
 </section>

@@ -10,7 +10,7 @@ A swarm member: a built agent, or a registered `@agent` factory and its argument
 
 Create one with [member()](../reference/inspect_swarm.html.md#member), which documents the fields and the member contract.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/3cd681e3033bd04f3ee457036c33169ad76fe786/src/inspect_swarm/_member.py#L87)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_member.py#L87)
 
 ``` python
 class Member(BaseModel)
@@ -33,6 +33,9 @@ The member’s name. `None` uses the agent’s or factory’s unqualified regist
 `role` str \| None  
 The member’s role, given to the controller and in the member’s preamble.
 
+`choose_name` bool  
+Whether the member chooses its own name. `True` leaves the member’s name out of its preamble, which asks it to choose a name and tell the other members; the swarm still uses `name` for everything it records.
+
 `count` int  
 How many members this record stands for. Above 1 needs the factory form.
 
@@ -41,9 +44,6 @@ The member’s own limits.
 
 `bridged` bool \| None  
 Whether the member’s agent is bridged. `None` counts agents in the `inspect_swe/` namespace as bridged.
-
-`delivery` Literal\['notify', 'poll'\] \| None  
-The member’s configured delivery mode: `notify` or `poll`. `None` selects `notify`. In `notify` mode, [swarm_on_continue()](../reference/inspect_swarm.html.md#swarm_on_continue) adds notices to the member’s conversation; in `poll` mode it adds none, and the member learns of changes from the status line that ends a shared memory result and from `swarm_wait` results.
 
 `sandbox` str \| None  
 The member’s own sandbox environment, where `{member}` stands for the member’s name. `None` shares the sample’s sandbox.
@@ -59,7 +59,7 @@ By default the swarm derives its caps from the sample’s cost, token and time l
 
 Every field is a plain value, so each can be a task parameter, and two budgets that differ in any field are logged as different arguments.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/3cd681e3033bd04f3ee457036c33169ad76fe786/src/inspect_swarm/_budget.py#L32)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_budget.py#L32)
 
 ``` python
 class Budget(BaseModel)

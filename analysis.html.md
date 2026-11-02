@@ -7,7 +7,7 @@ When the swarm ends it writes two entries to the sample store, each also logged 
 - `inspect_swarm:metrics`: tokens, cost and time for the swarm and each member, and counts of how each member acted, checked its work, communicated and waited ([Metrics](#metrics)).
 - `inspect_swarm:ledger`: the swarm’s accounting. Its budget, caps, the usage of each member, model calls that errored or reported no usage, unpriced models, and what stopped the swarm ([The ledger](#the-ledger)).
 
-The result record, `inspect_swarm:result`, is described in [Scoring](./scoring.html.md#the-result-record).
+The result record is an event in the transcript, which `swarm_result(sample)` reads from a sample. It is described in [Scoring](./scoring.html.md#the-result-record).
 
 ## Metrics
 
@@ -18,8 +18,9 @@ For the swarm:
 - `never_acted`: members with no completed model call.
 - `steps_to_answer`: completed model calls of the member whose output is the answer, `null` with no answer.
 - `longest_member_steps`: the largest number of completed model calls of any member.
+- `critical_steps_to_answer`: the number of completed model calls on the longest chain of calls the answer depended on, across members ([The critical path](#the-critical-path)).
 
-Step counts include cache replays and exclude failed or cancelled attempts. A member’s subagents’ calls count as the member’s.
+Step counts include cache replays and exclude failed or cancelled attempts. A member’s subagents’ calls count as the member’s. `steps_to_answer` and `longest_member_steps` bound each member’s own sequential depth from above, not the swarm’s: they do not see that one member waited for or read another’s work.
 
 For each member, in roster order:
 
@@ -27,17 +28,36 @@ For each member, in roster order:
 - `running_time`: seconds from its start to its end, `null` for a member never started.
 - `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member, whose tool calls leave no tool events.
 - `gate_checks`, `gate_passes`, `first_pass_time`: its in-loop checks ([Scoring](./scoring.html.md#checks-during-the-run)).
-- `delivery_effective`: `notify` or `poll`, the mode it ran in ([Shared Memory](./shared-memory.html.md#notices)).
 - `comm`, `waits`, `waits_by_outcome`, `wait_time`, `idle_time`: below.
+
+### The critical path
+
+`critical_steps_to_answer` is the measure to read latency by: how many model calls the answer took one after another, given that members work in parallel but wait on and build on each other. A member that waits for a peer’s file and then answers in three steps has `steps_to_answer` 3, but if the peer took ten steps to write that file, the answer took at least 11.
+
+Each member’s calls, its subagents’ and background work’s included, form one chain in the order they began. Chains link between members in two ways:
+
+- A view of a `shared_memory` file, or a `swarm_wait` result that names a file, follows the writes it showed. A view of a file follows every write in its history; a view of a deleted file follows the delete. Directory listings and the `changes` status line make no link.
+- A `swarm_wait` result that names a member’s end follows all of that member’s calls.
+
+A wait that also reached a custom waiting channel links no files, since its evidence does not say which channel named them. Its links to member ends count either way.
+
+The chain ends when the answering member ends, after its background work has finished, since that work can still change the member’s output.
+
+The number over-counts work inside a member. Parallel and background subagents, tool calls of one turn, and any other concurrent work count one after another, and the answering member’s background work after its agent returned, its reads included, counts whether or not it changed the answer. That excess reaches peers through the member’s later writes.
+
+The number also misses links. Only `shared_memory` and `swarm_wait` make them, so information that members share in other ways adds none: messages, a shared sandbox, a shared volume, a service, a custom channel and its wait results, a shared tool or store key, or a controller that passes one member’s result to another. A `swarm_wait` result that reports more than ten files names only the first ten in its evidence, so the rest make no link until the member views them. Missed links can only lower the number.
+
+With both effects it is not a bound on true causal depth in either direction. A nested swarm’s board makes no link for the outer swarm; its own metrics count it.
+
+It is `null` when there is no answer, when the answering member has no recorded end, when the board’s evidence is inconsistent (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.
 
 ### Communication
 
 Each member’s `comm` has an entry, by channel name, for each channel with records, such as `shared_memory`:
 
-- `records` and `record_bytes`: its writes delivered to the channel, and their size.
-- `rejections`: its writes the swarm refused, by the control that refused them, such as `rate`.
-- `reads` and `listings`: its views of files and of directories.
-- `notices`: the notices it got with a line for the channel.
+- `records` and `record_bytes`: its writes or messages delivered to the channel, and their size.
+- `rejections`: its writes or messages the swarm refused, by the control that refused them, such as `rate`.
+- `reads` and `listings`: its views of files and of directories, and its `read_messages` results that showed messages.
 
 A member’s subagents count as the member. Every member has an entry for every such channel the swarm opened, zeros included. A swarm with none (`filesystem` only, or `channels=[]`) has `comm` `{}` for every member: communication through files is observed, not recorded, so it is not reported as zero ([Channels](./channels.html.md#shared-files-are-observed-not-recorded)).
 
@@ -54,12 +74,7 @@ In a swarm with no `swarm_wait` (`filesystem` only, or `channels=[]`) the four a
 
 ### Wiring checks
 
-The metrics also check that members are wired to the channels:
-
-- `notify_unwired`: members in `notify` mode whose own loop, not a subagent’s, completed two or more model calls, to whose own loop a change was news, and whose own loop never ran [swarm_on_continue()](./reference/inspect_swarm.html.md#swarm_on_continue). It is a heuristic: two own calls usually mean the member reached a turn boundary. Any extra completed model call in the member’s own span before its first turn boundary can list a correctly wired member.
-- `tools_unwired`: in a swarm with a channel that has tools, members with a completed model call whose loops never resolved [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools).
-
-A member listed in either did not get what the channel offers, so it ran a different experiment from the one configured.
+The metrics also check that members are wired to the channels. `tools_unwired` lists, in a swarm with a channel that has tools, the members with a completed model call whose loops never resolved [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.
 
 ## Samples dataframe
 
@@ -88,7 +103,7 @@ The columns:
 - `swarm_cost`: the sample’s priced cost in dollars, from its `model_usage`, including scorer calls. Tokens are in [SampleSummary](https://inspect.aisi.org.uk/reference/inspect_ai.analysis.html#samplesummary)’s `total_tokens`.
 - `swarm_complete`: no call is known to be missing from `swarm_cost`. The ledger marks the swarm’s interval complete, and every model in the sample’s `model_usage` is priced. Calls outside the swarm, including scorer calls, are not checked. `False` for a sample with no ledger.
 - `swarm_members`: members in the roster.
-- `swarm_resumed`: the sample resumed from a checkpoint, so the swarm restarted its caps from zero. `False` for a sample with no ledger.
+- `swarm_resumed`: the sample resumed from a checkpoint, so the swarm restarted its caps from zero. Swarms now refuse checkpointing ([Restrictions](./restrictions.html.md)), so only logs from earlier versions can have it true. `False` for a sample with no ledger.
 - `swarm_cost_cap`, `swarm_token_cap`, `swarm_time_cap`: the swarm’s caps. The time cap is in seconds.
 - `swarm_errored`, `swarm_no_usage`, `swarm_unpriced`: model calls in the swarm that errored or were cancelled (retries included), that completed with no usage, and whose usage has no cost. Each makes the cost a lower bound.
 - `swarm_unpriced_models`: models with tokens and no cost, from the ledger and the sample’s `model_usage`, as a JSON list.

@@ -169,6 +169,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   </li>  
 </ul>
             <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="./CHANGELOG.html"> 
+<span class="menu-text">Changelog</span></a>
+  </li>  
   <li class="nav-item compact">
     <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm"> <i class="bi bi-github" role="img">
 </i> 
@@ -245,6 +249,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./shared-memory.html" class="sidebar-item-text sidebar-link">
  <span class="menu-text">Shared Memory</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./messages.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Messages</span></a>
   </div>
 </li>
       </ul>
@@ -490,14 +500,14 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_tools</span></a>
+  <a href="./reference/inspect_swarm.html#messages" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">messages</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_on_continue" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_on_continue</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_tools</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -544,14 +554,32 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#noticeline" class="sidebar-item-text sidebar-link">
- <span class="menu-text">NoticeLine</span></a>
+  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Record</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
- <span class="menu-text">Record</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_result" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_result</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarmresultrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">SwarmResultRecord</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#memberresult" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberResult</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#finalrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">FinalRecord</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -648,28 +676,30 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="the-result-record" class="level3">
 <h3 class="anchored" data-anchor-id="the-result-record">The result record</h3>
-<p>The swarm keeps a record of what it did in the sample store under <code>inspect_swarm:result</code>:</p>
+<p>When the swarm ends, it writes a record of what it did to the transcript, as an evidence event in the swarm’s span. Read it with <code>swarm_result(state)</code> in a scorer, or <code>swarm_result(sample)</code> for a sample read from a log, which needs the sample’s events and attachments. The record is:</p>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode json code-with-copy"><code class="sourceCode json"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">"version"</span><span class="fu">:</span> <span class="dv">1</span><span class="fu">,</span></span>
 <span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">"members"</span><span class="fu">:</span> <span class="ot">[</span></span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span><span class="dt">"name"</span><span class="fu">:</span> <span class="st">"react-1"</span><span class="fu">,</span> <span class="dt">"role"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"state"</span><span class="fu">:</span> <span class="st">"ended"</span><span class="fu">,</span> <span class="dt">"status"</span><span class="fu">:</span> <span class="st">"submitted"</span><span class="fu">,</span> <span class="dt">"submitted"</span><span class="fu">:</span> <span class="kw">true</span><span class="fu">,</span> <span class="dt">"time"</span><span class="fu">:</span> <span class="fl">41.2</span><span class="fu">,</span> <span class="dt">"sandbox"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"gate_checks"</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span> <span class="dt">"gate_passes"</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span> <span class="dt">"first_pass_time"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">}</span><span class="ot">,</span></span>
-<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span><span class="dt">"name"</span><span class="fu">:</span> <span class="st">"react-2"</span><span class="fu">,</span> <span class="dt">"role"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"state"</span><span class="fu">:</span> <span class="st">"ended"</span><span class="fu">,</span> <span class="dt">"status"</span><span class="fu">:</span> <span class="st">"swarm_cap"</span><span class="fu">,</span> <span class="dt">"submitted"</span><span class="fu">:</span> <span class="kw">false</span><span class="fu">,</span> <span class="dt">"time"</span><span class="fu">:</span> <span class="fl">57.9</span><span class="fu">,</span> <span class="dt">"sandbox"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"gate_checks"</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span> <span class="dt">"gate_passes"</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span> <span class="dt">"first_pass_time"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">}</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span><span class="dt">"name"</span><span class="fu">:</span> <span class="st">"react-1"</span><span class="fu">,</span> <span class="dt">"role"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"choose_name"</span><span class="fu">:</span> <span class="kw">false</span><span class="fu">,</span> <span class="dt">"state"</span><span class="fu">:</span> <span class="st">"ended"</span><span class="fu">,</span> <span class="dt">"status"</span><span class="fu">:</span> <span class="st">"submitted"</span><span class="fu">,</span> <span class="dt">"submitted"</span><span class="fu">:</span> <span class="kw">true</span><span class="fu">,</span> <span class="dt">"time"</span><span class="fu">:</span> <span class="fl">41.2</span><span class="fu">,</span> <span class="dt">"sandbox"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"gate_checks"</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span> <span class="dt">"gate_passes"</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span> <span class="dt">"first_pass_time"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">}</span><span class="ot">,</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span><span class="dt">"name"</span><span class="fu">:</span> <span class="st">"react-2"</span><span class="fu">,</span> <span class="dt">"role"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"choose_name"</span><span class="fu">:</span> <span class="kw">false</span><span class="fu">,</span> <span class="dt">"state"</span><span class="fu">:</span> <span class="st">"ended"</span><span class="fu">,</span> <span class="dt">"status"</span><span class="fu">:</span> <span class="st">"swarm_cap"</span><span class="fu">,</span> <span class="dt">"submitted"</span><span class="fu">:</span> <span class="kw">false</span><span class="fu">,</span> <span class="dt">"time"</span><span class="fu">:</span> <span class="fl">57.9</span><span class="fu">,</span> <span class="dt">"sandbox"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"gate_checks"</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span> <span class="dt">"gate_passes"</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span> <span class="dt">"first_pass_time"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">}</span></span>
 <span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>  <span class="ot">]</span><span class="fu">,</span></span>
 <span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>  <span class="dt">"final"</span><span class="fu">:</span> <span class="fu">{</span><span class="dt">"mode"</span><span class="fu">:</span> <span class="st">"first"</span><span class="fu">,</span> <span class="dt">"member"</span><span class="fu">:</span> <span class="st">"react-1"</span><span class="fu">,</span> <span class="dt">"reason"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"provisional"</span><span class="fu">:</span> <span class="kw">false</span><span class="fu">}</span></span>
 <span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <ul>
 <li>A member’s <code>state</code> is <code>pending</code> (never started), <code>running</code> or <code>ended</code>, and <code>status</code> says how it ended (<a href="./members.html#how-a-member-ends">Members</a>).</li>
 <li><code>time</code> is seconds from the swarm’s start to the member’s end.</li>
+<li><code>choose_name</code> is <code>true</code> for a member that chose its own name (<a href="./members.html#members-that-choose-their-names">Members</a>). <code>name</code> is still the swarm’s name for it; the name it chose is in its transcript.</li>
 <li><code>sandbox</code> is the member’s own sandbox, or <code>null</code> when it shares the sample’s.</li>
 <li><code>gate_checks</code>, <code>gate_passes</code> and <code>first_pass_time</code> count the member’s in-loop checks (<a href="#checks-during-the-run">Checks during the run</a>).</li>
 <li><code>final.mode</code> is <code>first</code>, <code>last</code> or <code>controller</code>, and <code>final.member</code> names the chosen member. Under <code>controller</code>, <code>final.reason</code> is the reason the controller gave. With no submission, <code>mode</code> and <code>member</code> are <code>null</code> and <code>final.reason</code> is <code>"no_submissions"</code>.</li>
 </ul>
-<p>The record is updated as members start and end. If a limit or error ends the sample before the swarm finishes, the record keeps the answer so far with <code>provisional: true</code>, and that submission is the sample’s output: the first submission so far, the latest under <code>last</code>, or the controller’s choice once it has made one.</p>
+<p>The event adds <code>"type": "result_record"</code> and an <code>"id"</code>, which the swarm also puts in the sample store under <code>inspect_swarm:result_id</code>, so that <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_result">swarm_result()</a></span> finds the record of the store it is given. If a limit, error or cancellation ends the swarm before it finalises its answer, the record has the answer so far with <code>provisional: true</code>, and that submission is the sample’s output: the first submission so far, the latest under <code>last</code>, or the controller’s choice once it has made one.</p>
+<p><span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_result">swarm_result()</a></span> returns <code>None</code> when no swarm ran in the sample. It raises <code>ValueError</code> for a sample it cannot read the record of: one read without its events or attachments, one written by an inspect_swarm that kept the record in the store under <code>inspect_swarm:result</code>, or one that holds a swarm’s events but whose store names no record, as for a sample recovered from a crashed eval.</p>
 </section>
 <section id="the-record-belongs-to-the-swarm" class="level3">
 <h3 class="anchored" data-anchor-id="the-record-belongs-to-the-swarm">The record belongs to the swarm</h3>
-<p>Only the swarm writes <code>inspect_swarm:result</code>. Task code (tools, member builders, controllers, scorers) must not write it.</p>
-<p>Any code can read it. A scorer that reads it after the swarm is how a task finds each member’s sandbox (<a href="#per-member-sandboxes">Per-member sandboxes</a>). But a tool that reads it while the swarm runs gives members a view of each other’s state, status and time. That is a channel between members outside the swarm’s channels, and the swarm records no evidence of it.</p>
+<p>Only the swarm writes the record and <code>inspect_swarm:result_id</code>. Task code (tools, member builders, controllers, scorers) must not write that key or an event with source <code>inspect_swarm</code>. Member names, roles and sandboxes, and a controller’s <code>choose_answer()</code> reason, must be text that a log keeps as it is: not beginning with <code>attachment://</code> or <code>tc://</code>, which a log reads as a reference to an attachment, not a base64 <code>data:</code> URI, which a log removes when images are not logged, and valid UTF-8. The swarm does not write a record that holds such text, and its end raises <code>ValueError</code>.</p>
+<p>There is no record while the swarm runs, so no member can read another’s results from it. A scorer that reads it after the swarm is how a task finds each member’s sandbox (<a href="#per-member-sandboxes">Per-member sandboxes</a>). A tool that reads the transcript sees every member’s model and tool calls anyway. That is a channel between members outside the swarm’s channels, and the swarm records no evidence of it.</p>
 </section>
 </section>
 <section id="scoring-what-members-leave" class="level2">
@@ -684,17 +714,21 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> tests_pass() <span class="op">-&gt;</span> Scorer:</span>
 <span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""Run the task's tests in each member's sandbox."""</span></span>
 <span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">async</span> <span class="kw">def</span> score(state: TaskState, target: Target) <span class="op">-&gt;</span> Score:</span>
-<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>        <span class="co"># the swarm's result record; task code reads it but never writes it</span></span>
-<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>        record: <span class="bu">dict</span>[<span class="bu">str</span>, Any] <span class="op">=</span> state.store.get(<span class="st">"inspect_swarm:result"</span>)</span>
-<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>        passed <span class="op">=</span> [</span>
-<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>            m[<span class="st">"name"</span>]</span>
-<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>            <span class="cf">for</span> m <span class="kw">in</span> record[<span class="st">"members"</span>]</span>
-<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> (<span class="cf">await</span> sandbox(m[<span class="st">"sandbox"</span>]).<span class="bu">exec</span>([<span class="st">"sh"</span>, <span class="st">"/tests/run.sh"</span>])).success</span>
-<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>        ]</span>
-<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> Score(value<span class="op">=</span>CORRECT <span class="cf">if</span> passed <span class="cf">else</span> INCORRECT, metadata<span class="op">=</span>{<span class="st">"passed"</span>: passed})</span>
-<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> score</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">async</span> <span class="kw">def</span> score(state: TaskState, target: Target) <span class="op">-&gt;</span> Score <span class="op">|</span> <span class="va">None</span>:</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>        <span class="co"># the record exists once the swarm has ended; a member's react(attempts=...)</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>        <span class="co"># or live control scoring calls this scorer during the solve</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="kw">not</span> state.completed:</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> <span class="va">None</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>        record <span class="op">=</span> swarm_result(state)</span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>        <span class="cf">assert</span> record <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span>, <span class="st">"the task's solver is a swarm"</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>        passed <span class="op">=</span> [</span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>            m.name</span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>            <span class="cf">for</span> m <span class="kw">in</span> record.members</span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> (<span class="cf">await</span> sandbox(m.sandbox).<span class="bu">exec</span>([<span class="st">"sh"</span>, <span class="st">"/tests/run.sh"</span>])).success</span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>        ]</span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> Score(value<span class="op">=</span>CORRECT <span class="cf">if</span> passed <span class="cf">else</span> INCORRECT, metadata<span class="op">=</span>{<span class="st">"passed"</span>: passed})</span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> score</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <p>A check can also run in a shared service rather than in each member’s sandbox. <a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/proof_swarm.py"><code>examples/proof_swarm.py</code></a> mounts each member’s <code>/workspace</code> read-only in a <code>comparator</code> service, at <code>/answers/&lt;member&gt;</code>, and checks an answer there with one command:</p>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> run_check(member_sandbox: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">tuple</span>[<span class="bu">bool</span>, <span class="bu">str</span>]:</span>
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""Check the answer a member left in its sandbox, with the comparator: whether it is a proof, and why."""</span></span>
@@ -714,6 +748,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li><code>first_pass_time</code>: the swarm time of the first pass.</li>
 </ul>
 <p>They are in the result record and the <a href="./analysis.html#metrics">metrics</a>. A member with its own <code>score_value</code> can pass its own gate where the count does not, since the count assumes the default converter. Inside a member, a scorer’s <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sandbox">sandbox()</a></span> is the member’s own.</p>
+<p>A scorer that runs during the solve, under <code>react(attempts=...)</code>, the other attempt loops or live control scoring, cannot read the result record: <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_result">swarm_result()</a></span> raises while a swarm in the sample runs. Such a scorer returns <code>None</code> until <code>state.completed</code> is <code>True</code>, as the <a href="#per-member-sandboxes">per-member sandboxes</a> example does. Inspect drops a <code>None</code> score, so the task also needs a scorer that returns a value during the solve, since an attempt loop fails when it gets no score. List that scorer first: the swarm counts checks from the task’s first scorer.</p>
 </section>
 <section id="comparisons" class="level2">
 <h2 class="anchored" data-anchor-id="comparisons">Comparisons</h2>

@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.10.19">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>changelog – Inspect Swarm</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: 1.5em;}
+div.column{flex: auto;}
+@media screen {
+div.columns{gap: min(4vw, 1.5em);}
+div.column{overflow-x: auto;}
+}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+</style>
+
+
+<script src="site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="site_libs/quarto-nav/headroom.min.js"></script>
+<script src="site_libs/clipboard/clipboard.min.js"></script>
+<script src="site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="site_libs/quarto-search/fuse.min.js"></script>
+<script src="site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="./">
+<script src="site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="site_libs/quarto-html/popper.min.js"></script>
+<script src="site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="site_libs/quarto-html/anchor.min.js"></script>
+<link href="site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="site_libs/quarto-html/quarto-syntax-highlighting-bf27225e3a48a9273f3daa8f8e829971.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="site_libs/bootstrap/bootstrap-6be907ae78873760d36834dbe5a66008.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "navbar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "end",
+  "type": "overlay",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<link rel="alternate" type="text/markdown" title="LLM-readable docs index" href="./llms.txt">
+<link rel="alternate" type="text/markdown" title="LLM-readable docs (full)" href="./llms-full.txt">
+<link rel="alternate" type="text/markdown" title="LLM-readable docs (user guide)" href="./llms-guide.txt">
+
+
+<meta property="og:title" content="Inspect Swarm">
+<meta property="og:description" content="Run a swarm of agents on one sample of an Inspect task.">
+<meta property="og:site_name" content="Inspect Swarm">
+<meta name="twitter:title" content="Inspect Swarm">
+<meta name="twitter:description" content="Run a swarm of agents on one sample of an Inspect task.">
+<meta name="twitter:card" content="summary">
+</head>
+
+<body class="nav-fixed quarto-light">
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+    <nav class="navbar navbar-expand-lg " data-bs-theme="dark">
+      <div class="navbar-container container-fluid">
+      <div class="navbar-brand-container mx-auto">
+    <a class="navbar-brand" href="./index.html">
+    <span class="navbar-title">Inspect Swarm</span>
+    </a>
+  </div>
+            <div id="quarto-search" class="" title="Search"></div>
+          <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarCollapse" aria-controls="navbarCollapse" role="menu" aria-expanded="false" aria-label="Toggle navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+  <span class="navbar-toggler-icon"></span>
+</button>
+          <div class="collapse navbar-collapse" id="navbarCollapse">
+            <ul class="navbar-nav navbar-nav-scroll me-auto">
+  <li class="nav-item dropdown ">
+    <a class="nav-link dropdown-toggle" href="#" id="nav-menu-user-guide" role="link" data-bs-toggle="dropdown" aria-expanded="false">
+ <span class="menu-text">User Guide</span>
+    </a>
+    <ul class="dropdown-menu" aria-labelledby="nav-menu-user-guide">    
+        <li>
+    <a class="dropdown-item" href="./index.html">
+ <span class="dropdown-text">Basics</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="./channels.html">
+ <span class="dropdown-text">Communication</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="./budget.html">
+ <span class="dropdown-text">Resources</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="./scoring.html">
+ <span class="dropdown-text">Results</span></a>
+  </li>  
+    </ul>
+  </li>
+  <li class="nav-item">
+    <a class="nav-link" href="./reference/index.html"> 
+<span class="menu-text">Reference</span></a>
+  </li>  
+</ul>
+            <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item">
+    <a class="nav-link active" href="./CHANGELOG.html" aria-current="page"> 
+<span class="menu-text">Changelog</span></a>
+  </li>  
+  <li class="nav-item compact">
+    <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm"> <i class="bi bi-github" role="img">
+</i> 
+<span class="menu-text"></span></a>
+  </li>  
+</ul>
+          </div> <!-- /navcollapse -->
+            <div class="quarto-navbar-tools">
+</div>
+      </div> <!-- /container-fluid -->
+    </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article page-navbar">
+<!-- sidebar -->
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active" data-toc-expanded="1">
+    <h2 id="toc-title">On this page</h2>
+   
+  <ul>
+  <li><a href="#section" id="toc-section" class="nav-link active" data-scroll-target="#section">0.3.0 (2026-10-30)</a>
+  <ul class="collapse">
+  <li><a href="#breaking-changes" id="toc-breaking-changes" class="nav-link" data-scroll-target="#breaking-changes">⚠ BREAKING CHANGES</a></li>
+  <li><a href="#features" id="toc-features" class="nav-link" data-scroll-target="#features">Features</a></li>
+  <li><a href="#bug-fixes" id="toc-bug-fixes" class="nav-link" data-scroll-target="#bug-fixes">Bug Fixes</a></li>
+  </ul></li>
+  <li><a href="#section-1" id="toc-section-1" class="nav-link" data-scroll-target="#section-1">0.2.1 (2026-10-28)</a>
+  <ul class="collapse">
+  <li><a href="#features-1" id="toc-features-1" class="nav-link" data-scroll-target="#features-1">Features</a></li>
+  </ul></li>
+  <li><a href="#section-2" id="toc-section-2" class="nav-link" data-scroll-target="#section-2">0.2.0 (2026-10-27)</a>
+  <ul class="collapse">
+  <li><a href="#breaking-changes-1" id="toc-breaking-changes-1" class="nav-link" data-scroll-target="#breaking-changes-1">⚠ BREAKING CHANGES</a></li>
+  <li><a href="#features-2" id="toc-features-2" class="nav-link" data-scroll-target="#features-2">Features</a></li>
+  <li><a href="#bug-fixes-1" id="toc-bug-fixes-1" class="nav-link" data-scroll-target="#bug-fixes-1">Bug Fixes</a></li>
+  </ul></li>
+  <li><a href="#section-3" id="toc-section-3" class="nav-link" data-scroll-target="#section-3">0.1.0 (2026-10-23)</a>
+  <ul class="collapse">
+  <li><a href="#features-3" id="toc-features-3" class="nav-link" data-scroll-target="#features-3">Features</a></li>
+  </ul></li>
+  </ul>
+</nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">Changelog</h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<section id="section" class="level2">
+<h2 class="anchored" data-anchor-id="section"><a href="https://github.com/meridianlabs-ai/inspect_swarm/compare/0.2.1...0.3.0">0.3.0</a> (2026-10-30)</h2>
+<section id="breaking-changes" class="level3">
+<h3 class="anchored" data-anchor-id="breaking-changes">⚠ BREAKING CHANGES</h3>
+<ul>
+<li>the swarm’s result record moves from the sample store to the transcript (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/135">#135</a>)</li>
+</ul>
+</section>
+<section id="features" class="level3">
+<h3 class="anchored" data-anchor-id="features">Features</h3>
+<ul>
+<li>direct messages between members, the messages channel (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/130">#130</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/fb7e2b1d0335d92c0f5f6e3a623d415a2dd0e7d7">fb7e2b1</a>)</li>
+<li>members that choose their own names (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/113">#113</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/a2270b0959369fa81a7bf36e6a122bb707980d3d">a2270b0</a>)</li>
+<li>the dependency-linked critical path, critical_steps_to_answer (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/127">#127</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/33bf17baea37b7793e96d9d983bff46da6e40005">33bf17b</a>)</li>
+<li>the swarm’s result record moves from the sample store to the transcript (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/135">#135</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/807e0cd2bb72d6e1c777bb8c1f463547afe14a5d">807e0cd</a>)</li>
+</ul>
+</section>
+<section id="bug-fixes" class="level3">
+<h3 class="anchored" data-anchor-id="bug-fixes">Bug Fixes</h3>
+<ul>
+<li>keep board-file links on waits that also reach messages (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/137">#137</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/3d979b455c2e9676f17db08c21e193c506867234">3d979b4</a>)</li>
+</ul>
+</section>
+</section>
+<section id="section-1" class="level2">
+<h2 class="anchored" data-anchor-id="section-1"><a href="https://github.com/meridianlabs-ai/inspect_swarm/compare/0.2.0...0.2.1">0.2.1</a> (2026-10-28)</h2>
+<section id="features-1" class="level3">
+<h3 class="anchored" data-anchor-id="features-1">Features</h3>
+<ul>
+<li>raise shared_memory’s default size limits (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/110">#110</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/114cf7a4c3574546da7d1bbbffd28bb029cadce5">114cf7a</a>)</li>
+<li>the changes command names every changed file (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/109">#109</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/f84ee01bc37ce52ee73a65f1903a851f06989e0d">f84ee01</a>)</li>
+<li>the shared memory preamble puts tool names, paths and ids in markdown backticks (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/99">#99</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/ab8bd2c008231a72351e60fd74f5530f32cab2d0">ab8bd2c</a>)</li>
+</ul>
+</section>
+</section>
+<section id="section-2" class="level2">
+<h2 class="anchored" data-anchor-id="section-2"><a href="https://github.com/meridianlabs-ai/inspect_swarm/compare/0.1.0...0.2.0">0.2.0</a> (2026-10-27)</h2>
+<section id="breaking-changes-1" class="level3">
+<h3 class="anchored" data-anchor-id="breaking-changes-1">⚠ BREAKING CHANGES</h3>
+<ul>
+<li>remove swarm notices; members learn of shared memory changes from tools (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/106">#106</a>)</li>
+</ul>
+</section>
+<section id="features-2" class="level3">
+<h3 class="anchored" data-anchor-id="features-2">Features</h3>
+<ul>
+<li>new <code>changes</code> command in <code>shared_memory</code> reports changed files without listing the board (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/96">#96</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/f56b83e10a7349ab923af3635ccc4d916949dc29">f56b83e</a>)</li>
+<li>remove swarm notices; members learn of shared memory changes from tools (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/106">#106</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/aa9ec882cbbb3eda8ef8c7923214bbde4eecac6c">aa9ec88</a>)</li>
+<li>shared memory accepts text that looks like a fence, and the docs say peer text has no protection (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/105">#105</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/b5ae470502e2356a5392e50deb5c052f97a56c14">b5ae470</a>)</li>
+<li>shared memory drops the repeated not-instructions headers (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/83">#83</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/ce481c6a781e7db4cf003eb4fbe76394f443fdbd">ce481c6</a>)</li>
+<li>shared memory fences drop the record and line-range attributes (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/86">#86</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/2d341afb55c6c5326301f305fc00c2a66250e190">2d341af</a>)</li>
+<li>shared memory fences name the last writer as last_writer (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/89">#89</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/2b8c7404a531f21eab2d040bacc37beeb81e4b42">2b8c740</a>)</li>
+<li>shared memory has no upper bounds, and Inspect truncates its tools’ results (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/93">#93</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/4f0657c8cdab41e3d4744728c79a043770a05a58">4f0657c</a>)</li>
+<li>shared memory views and waits take a file id as file_id (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/90">#90</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/d9092e50a67a4810875d25a7ceb6afe2a38eacba">d9092e5</a>)</li>
+<li>swarm notices put tool calls in markdown backticks (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/94">#94</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/070183577877dae13b254f7e280b2f46b92a210f">0701835</a>)</li>
+<li>swarm notices start with [Automatic swarm notice] (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/98">#98</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/cbe8b264b5486952cfdbc3a297fa03ee6b811c65">cbe8b26</a>)</li>
+</ul>
+</section>
+<section id="bug-fixes-1" class="level3">
+<h3 class="anchored" data-anchor-id="bug-fixes-1">Bug Fixes</h3>
+<ul>
+<li>shared memory listings line up their columns when file ids, versions or writers differ in length (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/97">#97</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/6345c82ea8ca1cca956ebc4612a610fddb59e491">6345c82</a>)</li>
+<li>validate member limit dicts (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/88">#88</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/fff3c7ee88be70a05b5d72531db072c7ac8b452b">fff3c7e</a>)</li>
+</ul>
+</section>
+</section>
+<section id="section-3" class="level2">
+<h2 class="anchored" data-anchor-id="section-3">0.1.0 (2026-10-23)</h2>
+<section id="features-3" class="level3">
+<h3 class="anchored" data-anchor-id="features-3">Features</h3>
+<ul>
+<li>an agent-raised custom limit ends only that member (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/44">#44</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/760deee5c4d423ef504679eba9761a5a5af18915">760deee</a>)</li>
+<li>an unsubmitted status for members that stop on a content filter or length limit (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/39">#39</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/a4748b4804e88c5687662fbe6015189c4d205d9c">a4748b4</a>)</li>
+<li>background deepagent members (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/50">#50</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/c707e4acbb18062deef9932ea49245485367ea1b">c707e4a</a>)</li>
+<li>bind swarm tools to a member’s loop, with channel reach for its subagents (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/42">#42</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/3d6614bde493ae12fe2036a30811db62fd4a59ac">3d6614b</a>)</li>
+<li>budget splits across swarm members (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/30">#30</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/dd7307bed580c523b879d6f8e6f2657111c673f2">dd7307b</a>)</li>
+<li>choose the swarm’s answer separately from when it stops: first, last or the controller’s choice (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/71">#71</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/80a18d688f0480689a6941f4bc27c746bcf51001">80a18d6</a>)</li>
+<li>export the swarm ledger’s models from inspect_swarm.analysis (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/55">#55</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/9da50f6e7110d66eeb02ad7c4855749524db187a">9da50f6</a>)</li>
+<li>filesystem(shared_volume=True) for per-member sandboxes (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/54">#54</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/5cfbbb5762cbb7eed3b4dc7cd24128ca4d70f44b">5cfbbb5</a>)</li>
+<li>finalise under the final meter and record what ended the swarm (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/38">#38</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/113f970465d65392ee8ddbbe204ddcc281fb1c69">113f970</a>)</li>
+<li>gate checks as per-member metrics (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/47">#47</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/36ff35ff01c308a7eb9557559e5a1232581328c8">36ff35f</a>)</li>
+<li>leaderless stops the other members at the first submission (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/65">#65</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/1fc0a5e6f18b475a4697e36b0bc717d75f91b397">1fc0a5e</a>)</li>
+<li>members can see the swarm budget that will stop them (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/45">#45</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/e80345f44e788d71f414715fd39ea6fb4383ff20">e80345f</a>)</li>
+<li>no store events inside the swarm (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/46">#46</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/657b1320b51c5a6e117a13abfaa5d49e7ee04cb6">657b132</a>)</li>
+<li>notices for swarm members (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/60">#60</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/bc6056e805c5b0176fb844ca12652f1e5c31261a">bc6056e</a>)</li>
+<li>per-member sandboxes (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/48">#48</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/6e5027b85e207478ecdd1ce5dfcd6b49811b2c15">6e5027b</a>)</li>
+<li>per-member timelines, swarm metrics and harness-validity checks (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/41">#41</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/1d1859bb0b93871dcdb7c5b2bfb9762bfa649ada">1d1859b</a>)</li>
+<li>shared_memory append command that needs no prior view (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/69">#69</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/78aaa714b72e4b64668eedb07b97dde9e27242ee">78aaa71</a>)</li>
+<li>steps-to-answer and longest-member-steps metrics for leaderless swarms (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/43">#43</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/f9eeb66fda5ccc5413037fad039eeae5d5a6c151">f9eeb66</a>)</li>
+<li>swarm budget and limit nodes (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/17">#17</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/89595846d0a901d53b540d4f94c8c425c9fa6227">8959584</a>)</li>
+<li>swarm controller and channel registry plumbing (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/19">#19</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/290f562f543d18754f1e92da6b417b29eef2dff5">290f562</a>)</li>
+<li>swarm runtime core: controller surface, members and stopping (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/27">#27</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/e44a671055cd263e1c92efde5271fdbf28c74271">e44a671</a>)</li>
+<li>swarm_wait, waiting for other members (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/62">#62</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/16ae04cd450d8969c338d3d231bf442e01b8b45d">16ae04c</a>)</li>
+<li>SwarmColumns, swarm cost and ledger columns for samples_df() (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/40">#40</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/a5d8f86c3f22f7b06e9a183f0e4ef320e767ad6a">a5d8f86</a>)</li>
+<li>the shared-memory channel (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/49">#49</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/0d3cdf4dc1f9b464ef77f0f31d920fb55943c7ec">0d3cdf4</a>)</li>
+<li>the swarm’s communication bus (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/33">#33</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/e00718dcf2f0aab82927c770216c8770d2acadea">e00718d</a>)</li>
+<li>the swarm’s result record and the <code>first</code> answer (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/31">#31</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/732ccc13cd1f510e8bc810eb022735912e05d727">732ccc1</a>)</li>
+<li>the swarm’s usage ledger (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/32">#32</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/0ac8d33f86dfa6b4550735eedd1051e221b34db4">0ac8d33</a>)</li>
+</ul>
+
+
+</section>
+</section>
+
+</main> <!-- /main -->
+<div id="copy-page-btn" class="btn-group" style="display:none;">
+  <button type="button" class="btn btn-sm btn-light" id="copy-page-action" title="Copy page as Markdown">
+    <i class="bi bi-clipboard"></i> Copy page
+  </button>
+  <button type="button" class="btn btn-sm btn-light dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false">
+    <span class="visually-hidden">Toggle Dropdown</span>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><a class="dropdown-item" href="#" id="copy-page-md">
+      <i class="bi bi-clipboard"></i> Copy page as Markdown
+    </a></li>
+    <li><a class="dropdown-item" href="#" id="open-page-md">
+      <i class="bi bi-box-arrow-up-right"></i> Open Markdown
+    </a></li>
+  </ul>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  var path = window.location.pathname;
+  var mdUrl = path.endsWith("/")
+    ? path + "index.html.md"
+    : path.replace(/\.html$/, ".html.md");
+  var btn = document.getElementById("copy-page-btn");
+  var cachedMarkdown = null;
+
+  // Pre-fetch the .html.md content
+  fetch(mdUrl)
+    .then(function (res) {
+      if (!res.ok) throw new Error(res.status);
+      return res.text();
+    })
+    .then(function (text) {
+      cachedMarkdown = text;
+
+      // Relocate button into the .quarto-title div
+      var titleDiv = document.querySelector(".quarto-title");
+      if (titleDiv) {
+        titleDiv.appendChild(btn);
+        btn.style.display = "";
+      }
+    })
+    .catch(function () {
+      // No .html.md available — remove button entirely
+      btn.remove();
+    });
+
+  function copyMarkdown(e) {
+    e.preventDefault();
+    if (!cachedMarkdown) return;
+    navigator.clipboard.writeText(cachedMarkdown).then(function () {
+      // Brief visual feedback — lock width to prevent layout shift
+      var actionBtn = document.getElementById("copy-page-action");
+      var original = actionBtn.innerHTML;
+      actionBtn.style.minWidth = actionBtn.offsetWidth + "px";
+      actionBtn.innerHTML = '<i class="bi bi-check2"></i> Copied!';
+      setTimeout(function () {
+        actionBtn.innerHTML = original;
+        actionBtn.style.minWidth = "";
+      }, 1500);
+    });
+  }
+
+  document.getElementById("copy-page-action").addEventListener("click", copyMarkdown);
+  document.getElementById("copy-page-md").addEventListener("click", copyMarkdown);
+  document.getElementById("open-page-md").addEventListener("click", function (e) {
+    e.preventDefault();
+    window.open(mdUrl, "_blank");
+  });
+});
+</script>
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/meridianlabs-ai\.github\.io\/inspect_swarm");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        const annoteTargets = window.document.querySelectorAll('.code-annotation-anchor');
+        for (let i=0; i<annoteTargets.length; i++) {
+          const annoteTarget = annoteTargets[i];
+          const targetCell = annoteTarget.getAttribute("data-target-cell");
+          const targetAnnotation = annoteTarget.getAttribute("data-target-annotation");
+          const contentFn = () => {
+            const content = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+            if (content) {
+              const tipContent = content.cloneNode(true);
+              tipContent.classList.add("code-annotation-tip-content");
+              return tipContent.outerHTML;
+            }
+          }
+          const config = {
+            allowHTML: true,
+            content: contentFn,
+            onShow: (instance) => {
+              selectCodeLines(instance.reference);
+              instance.reference.classList.add('code-annotation-active');
+              window.tippy.hideAll();
+            },
+            onHide: (instance) => {
+              unselectCodeLines();
+              instance.reference.classList.remove('code-annotation-active');
+            },
+            maxWidth: 300,
+            delay: [50, 0],
+            duration: [200, 0],
+            offset: [5, 10],
+            arrow: true,
+            trigger: 'click',
+            appendTo: function(el) {
+              return el.parentElement.parentElement.parentElement;
+            },
+            interactive: true,
+            interactiveBorder: 10,
+            theme: 'quarto',
+            placement: 'right',
+            positionFixed: true,
+            popperOptions: {
+              modifiers: [
+              {
+                name: 'flip',
+                options: {
+                  flipVariations: false, // true by default
+                  allowedAutoPlacements: ['right'],
+                  fallbackPlacements: ['right', 'top', 'top-start', 'top-end', 'bottom', 'bottom-start', 'bottom-end', 'left'],
+                },
+              },
+              {
+                name: 'preventOverflow',
+                options: {
+                  mainAxis: false,
+                  altAxis: false
+                }
+              }
+              ]        
+            }      
+          };
+          window.tippy(annoteTarget, config); 
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+<footer class="footer">
+  <div class="nav-footer">
+    <div class="nav-footer-left">
+      <ul class="footer-items list-unstyled">
+    <li class="nav-item">
+    <a class="nav-link" href="https://github.com/meridianlabs-ai">
+<p>Meridian Labs</p>
+</a>
+  </li>  
+</ul>
+    </div>   
+    <div class="nav-footer-center">
+      <ul class="footer-items list-unstyled">
+    <li class="nav-item">
+    <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm">
+<p>Code</p>
+</a>
+  </li>  
+    <li class="nav-item">
+    <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm/blob/main/CHANGELOG.md">
+<p>Changelog</p>
+</a>
+  </li>  
+    <li class="nav-item">
+    <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm/blob/main/LICENSE">
+<p>License</p>
+</a>
+  </li>  
+    <li class="nav-item">
+    <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm/issues">
+<p>Issues</p>
+</a>
+  </li>  
+</ul>
+    </div>
+    <div class="nav-footer-right">
+      <ul class="footer-items list-unstyled">
+    <li class="nav-item compact">
+    <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm/">
+      <i class="bi bi-github" role="img" aria-label="Inspect Swarm on GitHub">
+</i> 
+    </a>
+  </li>  
+</ul>
+    </div>
+  </div>
+</footer>
+
+
+
+
+</body></html>

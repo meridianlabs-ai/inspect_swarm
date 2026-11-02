@@ -169,6 +169,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   </li>  
 </ul>
             <ul class="navbar-nav navbar-nav-scroll ms-auto">
+  <li class="nav-item">
+    <a class="nav-link" href="./CHANGELOG.html"> 
+<span class="menu-text">Changelog</span></a>
+  </li>  
   <li class="nav-item compact">
     <a class="nav-link" href="https://github.com/meridianlabs-ai/inspect_swarm"> <i class="bi bi-github" role="img">
 </i> 
@@ -245,6 +249,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./shared-memory.html" class="sidebar-item-text sidebar-link">
  <span class="menu-text">Shared Memory</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./messages.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Messages</span></a>
   </div>
 </li>
       </ul>
@@ -490,14 +500,14 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_tools</span></a>
+  <a href="./reference/inspect_swarm.html#messages" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">messages</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarm_on_continue" class="sidebar-item-text sidebar-link">
- <span class="menu-text">swarm_on_continue</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_tools</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -544,14 +554,32 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#noticeline" class="sidebar-item-text sidebar-link">
- <span class="menu-text">NoticeLine</span></a>
+  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Record</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#record" class="sidebar-item-text sidebar-link">
- <span class="menu-text">Record</span></a>
+  <a href="./reference/inspect_swarm.html#swarm_result" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_result</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarmresultrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">SwarmResultRecord</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#memberresult" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberResult</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#finalrecord" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">FinalRecord</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -597,6 +625,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <li><a href="#overview" id="toc-overview" class="nav-link active" data-scroll-target="#overview">Overview</a></li>
   <li><a href="#metrics" id="toc-metrics" class="nav-link" data-scroll-target="#metrics">Metrics</a>
   <ul class="collapse">
+  <li><a href="#the-critical-path" id="toc-the-critical-path" class="nav-link" data-scroll-target="#the-critical-path">The critical path</a></li>
   <li><a href="#communication" id="toc-communication" class="nav-link" data-scroll-target="#communication">Communication</a></li>
   <li><a href="#waits" id="toc-waits" class="nav-link" data-scroll-target="#waits">Waits</a></li>
   <li><a href="#wiring-checks" id="toc-wiring-checks" class="nav-link" data-scroll-target="#wiring-checks">Wiring checks</a></li>
@@ -635,7 +664,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li><code>inspect_swarm:metrics</code>: tokens, cost and time for the swarm and each member, and counts of how each member acted, checked its work, communicated and waited (<a href="#metrics">Metrics</a>).</li>
 <li><code>inspect_swarm:ledger</code>: the swarm’s accounting. Its budget, caps, the usage of each member, model calls that errored or reported no usage, unpriced models, and what stopped the swarm (<a href="#the-ledger">The ledger</a>).</li>
 </ul>
-<p>The result record, <code>inspect_swarm:result</code>, is described in <a href="./scoring.html#the-result-record">Scoring</a>.</p>
+<p>The result record is an event in the transcript, which <code>swarm_result(sample)</code> reads from a sample. It is described in <a href="./scoring.html#the-result-record">Scoring</a>.</p>
 </section>
 <section id="metrics" class="level2">
 <h2 class="anchored" data-anchor-id="metrics">Metrics</h2>
@@ -646,25 +675,39 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li><code>never_acted</code>: members with no completed model call.</li>
 <li><code>steps_to_answer</code>: completed model calls of the member whose output is the answer, <code>null</code> with no answer.</li>
 <li><code>longest_member_steps</code>: the largest number of completed model calls of any member.</li>
+<li><code>critical_steps_to_answer</code>: the number of completed model calls on the longest chain of calls the answer depended on, across members (<a href="#the-critical-path">The critical path</a>).</li>
 </ul>
-<p>Step counts include cache replays and exclude failed or cancelled attempts. A member’s subagents’ calls count as the member’s.</p>
+<p>Step counts include cache replays and exclude failed or cancelled attempts. A member’s subagents’ calls count as the member’s. <code>steps_to_answer</code> and <code>longest_member_steps</code> bound each member’s own sequential depth from above, not the swarm’s: they do not see that one member waited for or read another’s work.</p>
 <p>For each member, in roster order:</p>
 <ul>
 <li><code>tokens</code>, <code>cost</code>: its usage, its subagents’ and background work’s included.</li>
 <li><code>running_time</code>: seconds from its start to its end, <code>null</code> for a member never started.</li>
 <li><code>longest_identical_tool_run</code>: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. <code>null</code> for a bridged member, whose tool calls leave no tool events.</li>
 <li><code>gate_checks</code>, <code>gate_passes</code>, <code>first_pass_time</code>: its in-loop checks (<a href="./scoring.html#checks-during-the-run">Scoring</a>).</li>
-<li><code>delivery_effective</code>: <code>notify</code> or <code>poll</code>, the mode it ran in (<a href="./shared-memory.html#notices">Shared Memory</a>).</li>
 <li><code>comm</code>, <code>waits</code>, <code>waits_by_outcome</code>, <code>wait_time</code>, <code>idle_time</code>: below.</li>
 </ul>
+<section id="the-critical-path" class="level3">
+<h3 class="anchored" data-anchor-id="the-critical-path">The critical path</h3>
+<p><code>critical_steps_to_answer</code> is the measure to read latency by: how many model calls the answer took one after another, given that members work in parallel but wait on and build on each other. A member that waits for a peer’s file and then answers in three steps has <code>steps_to_answer</code> 3, but if the peer took ten steps to write that file, the answer took at least 11.</p>
+<p>Each member’s calls, its subagents’ and background work’s included, form one chain in the order they began. Chains link between members in two ways:</p>
+<ul>
+<li>A view of a <code>shared_memory</code> file, or a <code>swarm_wait</code> result that names a file, follows the writes it showed. A view of a file follows every write in its history; a view of a deleted file follows the delete. Directory listings and the <code>changes</code> status line make no link.</li>
+<li>A <code>swarm_wait</code> result that names a member’s end follows all of that member’s calls.</li>
+</ul>
+<p>A wait that also reached a custom waiting channel links no files, since its evidence does not say which channel named them. Its links to member ends count either way.</p>
+<p>The chain ends when the answering member ends, after its background work has finished, since that work can still change the member’s output.</p>
+<p>The number over-counts work inside a member. Parallel and background subagents, tool calls of one turn, and any other concurrent work count one after another, and the answering member’s background work after its agent returned, its reads included, counts whether or not it changed the answer. That excess reaches peers through the member’s later writes.</p>
+<p>The number also misses links. Only <code>shared_memory</code> and <code>swarm_wait</code> make them, so information that members share in other ways adds none: messages, a shared sandbox, a shared volume, a service, a custom channel and its wait results, a shared tool or store key, or a controller that passes one member’s result to another. A <code>swarm_wait</code> result that reports more than ten files names only the first ten in its evidence, so the rest make no link until the member views them. Missed links can only lower the number.</p>
+<p>With both effects it is not a bound on true causal depth in either direction. A nested swarm’s board makes no link for the outer swarm; its own metrics count it.</p>
+<p>It is <code>null</code> when there is no answer, when the answering member has no recorded end, when the board’s evidence is inconsistent (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.</p>
+</section>
 <section id="communication" class="level3">
 <h3 class="anchored" data-anchor-id="communication">Communication</h3>
 <p>Each member’s <code>comm</code> has an entry, by channel name, for each channel with records, such as <code>shared_memory</code>:</p>
 <ul>
-<li><code>records</code> and <code>record_bytes</code>: its writes delivered to the channel, and their size.</li>
-<li><code>rejections</code>: its writes the swarm refused, by the control that refused them, such as <code>rate</code>.</li>
-<li><code>reads</code> and <code>listings</code>: its views of files and of directories.</li>
-<li><code>notices</code>: the notices it got with a line for the channel.</li>
+<li><code>records</code> and <code>record_bytes</code>: its writes or messages delivered to the channel, and their size.</li>
+<li><code>rejections</code>: its writes or messages the swarm refused, by the control that refused them, such as <code>rate</code>.</li>
+<li><code>reads</code> and <code>listings</code>: its views of files and of directories, and its <code>read_messages</code> results that showed messages.</li>
 </ul>
 <p>A member’s subagents count as the member. Every member has an entry for every such channel the swarm opened, zeros included. A swarm with none (<code>filesystem</code> only, or <code>channels=[]</code>) has <code>comm</code> <code>{}</code> for every member: communication through files is observed, not recorded, so it is not reported as zero (<a href="./channels.html#shared-files-are-observed-not-recorded">Channels</a>).</p>
 </section>
@@ -681,12 +724,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="wiring-checks" class="level3">
 <h3 class="anchored" data-anchor-id="wiring-checks">Wiring checks</h3>
-<p>The metrics also check that members are wired to the channels:</p>
-<ul>
-<li><code>notify_unwired</code>: members in <code>notify</code> mode whose own loop, not a subagent’s, completed two or more model calls, to whose own loop a change was news, and whose own loop never ran <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_on_continue">swarm_on_continue()</a></span>. It is a heuristic: two own calls usually mean the member reached a turn boundary. Any extra completed model call in the member’s own span before its first turn boundary can list a correctly wired member.</li>
-<li><code>tools_unwired</code>: in a swarm with a channel that has tools, members with a completed model call whose loops never resolved <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>.</li>
-</ul>
-<p>A member listed in either did not get what the channel offers, so it ran a different experiment from the one configured.</p>
+<p>The metrics also check that members are wired to the channels. <code>tools_unwired</code> lists, in a swarm with a channel that has tools, the members with a completed model call whose loops never resolved <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>. A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.</p>
 </section>
 </section>
 <section id="samples-dataframe" class="level2">
@@ -708,7 +746,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li><code>swarm_cost</code>: the sample’s priced cost in dollars, from its <code>model_usage</code>, including scorer calls. Tokens are in <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.analysis.html#samplesummary">SampleSummary</a></span>’s <code>total_tokens</code>.</li>
 <li><code>swarm_complete</code>: no call is known to be missing from <code>swarm_cost</code>. The ledger marks the swarm’s interval complete, and every model in the sample’s <code>model_usage</code> is priced. Calls outside the swarm, including scorer calls, are not checked. <code>False</code> for a sample with no ledger.</li>
 <li><code>swarm_members</code>: members in the roster.</li>
-<li><code>swarm_resumed</code>: the sample resumed from a checkpoint, so the swarm restarted its caps from zero. <code>False</code> for a sample with no ledger.</li>
+<li><code>swarm_resumed</code>: the sample resumed from a checkpoint, so the swarm restarted its caps from zero. Swarms now refuse checkpointing (<a href="./restrictions.html">Restrictions</a>), so only logs from earlier versions can have it true. <code>False</code> for a sample with no ledger.</li>
 <li><code>swarm_cost_cap</code>, <code>swarm_token_cap</code>, <code>swarm_time_cap</code>: the swarm’s caps. The time cap is in seconds.</li>
 <li><code>swarm_errored</code>, <code>swarm_no_usage</code>, <code>swarm_unpriced</code>: model calls in the swarm that errored or were cancelled (retries included), that completed with no usage, and whose usage has no cost. Each makes the cost a lower bound.</li>
 <li><code>swarm_unpriced_models</code>: models with tokens and no cost, from the ledger and the sample’s <code>model_usage</code>, as a JSON list.</li>

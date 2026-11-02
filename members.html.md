@@ -71,6 +71,29 @@ solver = swarm(members=[member(react, args={"prompt": p}) for p in prompts])
 
 These are `react-1` to `react-3`. Names you give with `name` are not numbered across records, so give each record its own.
 
+### Members that choose their names
+
+With `choose_name=True` a member is not told its name. Its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:
+
+``` python
+from inspect_ai.agent import react
+from inspect_ai.tool import bash
+
+from inspect_swarm import member, swarm
+
+solver = swarm(
+    members=member(react, args={"tools": [bash()]}, count=4, choose_name=True),
+)
+```
+
+Each member starts with `You are one of 4 agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is.` Its role, if it has one, is still stated. The log still names the members `react-1` to `react-4`: the swarm’s timelines, spans, tool state, budget shares and result record use those names. The name a member chose is in its transcript, not in the swarm’s records.
+
+A roster can mix the two, for example a lead you name and workers that name themselves. The `filesystem` channel then tells every member that its scratch directory may be taken by another member ([Channels](./channels.html.md#the-filesystem-channel)).
+
+A swarm in which any member chooses its name can use only the `filesystem` channel or no channel (`channels=[]`). Other channels, including [shared memory](./shared-memory.html.md) and your own, show members to each other by name, so [swarm()](./reference/inspect_swarm.html.md#swarm) refuses them.
+
+The swarm does not change text you give the member yourself: the sample input, a controller’s `start(input=...)`, the agent’s prompt, and the sandbox configuration.
+
 ## Limits
 
 `limits` takes token, cost, turn, message and time limits for that member alone. Working limits are refused. A member that reaches one ends with status `member_limit:<type>`, and the others continue. The swarm’s own caps are set with `budget=` ([Budgets](./budget.html.md)).
@@ -83,18 +106,18 @@ A member builder is a function registered with `@agent` that builds the member�
 from inspect_ai.agent import Agent, agent, react
 from inspect_ai.tool import bash
 
-from inspect_swarm import member, shared_memory, swarm, swarm_on_continue, swarm_tools
+from inspect_swarm import member, shared_memory, swarm, swarm_tools
 
 
 @agent
 def worker() -> Agent:
-    return react(tools=[bash(), swarm_tools()], on_continue=swarm_on_continue())
+    return react(tools=[bash(), swarm_tools()])
 
 
 solver = swarm(members=member(worker, name="w", count=3), channels=[shared_memory()])
 ```
 
-Use a builder for anything the swarm gives a member at run time: [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools) and [swarm_on_continue()](./reference/inspect_swarm.html.md#swarm_on_continue) ([Shared Memory](./shared-memory.html.md)). The log records a builder by its name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools) or [swarm_on_continue()](./reference/inspect_swarm.html.md#swarm_on_continue) passed in `args` or inside an agent you built.
+Use a builder for anything the swarm gives a member at run time, such as [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools) ([Shared Memory](./shared-memory.html.md)). The log records a builder by its name and arguments, so the swarm can be rebuilt from the log. It cannot rebuild [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools) passed in `args` or inside an agent you built.
 
 A builder is also the place for anything each member must have its own of. Every member built from one record gets the same objects from `args`, and two built agents given the same tool object share it, across members and samples. Inspect’s built-in tools keep their state in the sample store or the sandbox, so this matters only for a custom tool or helper that keeps state in its Python object (a counter, a cache, a client). The swarm calls a builder once for each member in each sample, so what the builder creates belongs to one member. [`examples/stop_on_proof.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/stop_on_proof.py) keeps a per-member flag this way.
 
