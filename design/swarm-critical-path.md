@@ -50,7 +50,7 @@ There is one other way an event reaches subscribers: events restored from a chec
 
 ### The evidence
 
-Each is a `CommunicationEvent` with source `inspect_swarm`, written in the tool span of the call that acted, with `agent`, the acting member, and `loop_span_id`, the acting loop's agent span. Below, `member` is `agent`, `loop` is `loop_span_id`, a wait's `channels` are in its `wait`, and the other fields are in `data` ([swarm-event-types.md](swarm-event-types.md#how-inspect_swarm-writes-them)):
+Each is a `CommunicationEvent` with source `inspect_swarm`, written in the tool span of the call that acted, with `agent`, the acting member, and `loop_span_id`, the acting loop's agent span. Below, `member` means `event.agent`, `loop` means `event.loop_span_id`, and `channel` means `event.channel`. A wait's channels are in `event.wait.channels`; `result`, `files`, `listing` and `ended` are in `event.data` ([swarm-event-types.md](swarm-event-types.md#how-inspect_swarm-writes-them)):
 
 | Kind | Written | Fields the metric reads |
 |---|---|---|
