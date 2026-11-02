@@ -5,7 +5,7 @@ from typing import Literal, get_args
 from inspect_ai.agent import AgentState
 from inspect_ai.model import ChatMessage, ModelOutput
 
-from ._evidence import evidence
+from ._evidence import swarm_event
 from ._record import FinalRecord, MemberResult
 
 FinalName = Literal["first", "last"]
@@ -107,8 +107,7 @@ def finalise(
         input, answer(members, final, pick, provisional=False), outputs
     )
     chosen = settle(state, members, outputs, final, pick, provisional=False)
-    evidence(
-        "result",
+    swarm_event(
         "final",
         member=chosen.member,
         span_id=span_id,

@@ -11,7 +11,7 @@ from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.exception import TerminateSampleError
 from inspect_ai.agent import Agent, AgentState, agent, react
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent
+from inspect_ai.event import SwarmEvent
 from inspect_ai.log import EvalSample
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import (
@@ -904,12 +904,7 @@ def test_a_sample_limit_leaves_the_ledger_and_the_provisional_answer(
         "busy": "errored" if limit == "message" else "cancelled",
     }
     assert [
-        e
-        for e in sample.events
-        if isinstance(e, InfoEvent)
-        and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "ledger"
+        e for e in sample.events if isinstance(e, SwarmEvent) and e.kind == "ledger"
     ]
 
 
@@ -1085,13 +1080,7 @@ def test_the_swarms_messages_stay_within_a_small_sample_message_limit(
 async def test_the_ledger_is_written_after_the_final_step() -> None:
     # so that the final meter it reports covers the final step
     stop = await run_swarm(swarm(generator(scripted_model()), channels=[]))
-    kinds = [
-        e.data.get("kind", e.data.get("type"))
-        for e in stop.transcript.events
-        if isinstance(e, InfoEvent)
-        and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-    ]
+    kinds = [e.kind for e in stop.transcript.events if isinstance(e, SwarmEvent)]
     assert kinds[-4:] == ["final", "result_record", "ledger", "metrics"]
 
 

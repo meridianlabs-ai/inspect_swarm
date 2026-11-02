@@ -11,7 +11,7 @@ from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariable
 from inspect_ai.agent import Agent, AgentState, agent, react
 from inspect_ai.agent._channel import agent_channel, current_agent_channel
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent, ToolEvent
+from inspect_ai.event import CommunicationEvent, ToolEvent
 from inspect_ai.log import EvalSample
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import (
@@ -44,13 +44,17 @@ from inspect_swarm._fence import utf8_bytes
 
 from .swarm_runtime import (
     Script,
+    comm_events,
     controller,
-    evidence,
     run_swarm,
     sample,
     scripted_model,
     sleeper,
 )
+from .swarm_runtime import (
+    data as data_of,
+)
+from .swarm_runtime import wait as wait_of
 from .test_messages import run as messages_run
 from .test_shared_memory import _Member  # pyright: ignore[reportPrivateUsage]
 
@@ -147,8 +151,8 @@ async def start(
     return pending
 
 
-def waited(transcript: Transcript) -> list[dict[str, Any]]:
-    return evidence(transcript, "waited")
+def waited(transcript: Transcript) -> list[CommunicationEvent]:
+    return comm_events(transcript, "waited")
 
 
 def changed(labels: str, writers: str, first: str, count: int = 1) -> str:
@@ -179,7 +183,11 @@ async def test_a_peer_write_under_path_ends_the_wait() -> None:
             await r.sm("w-2", "create", path=_p("results/a.md"), file_text="secret")
             assert await pending.value() == changed("f-3 new", "w-2", "f-3")
         [record] = waited(transcript)
-        assert (record["outcome"], record["woken_by"], record["files"]) == (
+        assert (
+            wait_of(record).outcome,
+            data_of(record)["woken_by"],
+            data_of(record)["files"],
+        ) == (
             "news",
             [3],
             [{"file": "f-3", "version": 1, "deleted": False}],
@@ -232,7 +240,7 @@ async def test_a_file_id_follows_the_file_through_a_rename() -> None:
             await r.sm("w-2", "rename", old_path=_p("a.md"), new_path=_p("b/a.md"))
             assert await pending.value() == changed("f-1", "w-2", "f-1")
         [record] = waited(transcript)
-        assert (record["path"], record["file_id"]) == (None, "f-1")
+        assert (data_of(record)["path"], data_of(record)["file_id"]) == (None, "f-1")
 
 
 @pytest.mark.anyio
@@ -249,7 +257,7 @@ async def test_an_unviewed_change_returns_every_wait_at_once_until_it_is_viewed(
             assert pending.result is None
             r.bus.close()
             assert await pending.value() == STOPPING
-        assert [w["outcome"] for w in waited(transcript)] == [
+        assert [wait_of(w).outcome for w in waited(transcript)] == [
             "news",
             "news",
             "stopping",
@@ -293,7 +301,8 @@ async def test_eleven_files_are_named_ten_and_one_more_by_each_wait() -> None:
         assert await r.wait("w-1") == expected
         # every file's write, once for the loop
         assert [
-            (len(w["files"]), len(w["depends_on"])) for w in waited(transcript)
+            (len(data_of(w)["files"]), len(data_of(w)["depends_on"]))
+            for w in waited(transcript)
         ] == [
             (10, 11),
             (10, 0),
@@ -332,10 +341,10 @@ async def test_a_release_whose_news_is_gone_at_resume_sleeps_again(gone: str) ->
             assert await pending.value() == "Nothing you waited for happened in 1 s."
         [record] = waited(transcript)
         assert (
-            record["outcome"],
-            record["woken_by"],
-            record["files"],
-            record["depends_on"],
+            wait_of(record).outcome,
+            data_of(record)["woken_by"],
+            data_of(record)["files"],
+            data_of(record)["depends_on"],
         ) == ("timeout", [1], [], [])
 
 
@@ -355,7 +364,7 @@ async def test_an_end_wakes_every_other_members_waits_and_is_reported_once_per_l
             line = "w-3 ended (member_limit:cost)."
             for pending in (top, child, peer):
                 assert await pending.value() == line
-        assert [w["ended"] for w in waited(transcript)] == [
+        assert [data_of(w)["ended"] for w in waited(transcript)] == [
             [{"member": "w-3", "status": "member_limit:cost"}]
         ] * 3
         # reported once to each loop; a loop whose wait has not named it gets it at once
@@ -400,24 +409,24 @@ async def test_a_waking_message_ends_its_recipients_own_wait_until_it_is_read() 
         first, second, *_ = waited(transcript)
         # the quiet m-1 too: the news counts it
         assert (
-            first["outcome"],
-            first["woken_by"],
-            first["files"],
-            first["depends_on"],
+            wait_of(first).outcome,
+            data_of(first)["woken_by"],
+            data_of(first)["files"],
+            data_of(first)["depends_on"],
         ) == (
             "news",
             [2],
             [{"record": "m-1", "from": "w-1"}, {"record": "m-2", "from": "w-1"}],
             ["m-1", "m-2"],
         )
-        assert (second["outcome"], second["woken_by"], second["depends_on"]) == (
-            "news",
-            [],
-            [],
-        )
+        assert (
+            wait_of(second).outcome,
+            data_of(second)["woken_by"],
+            data_of(second)["depends_on"],
+        ) == ("news", [], [])
         # the read concerns both, and depends on nothing the loop's waits had not
-        [read] = evidence(transcript, "read")
-        assert (read["records"], read["depends_on"]) == (["m-1", "m-2"], [])
+        [read] = comm_events(transcript, "read")
+        assert (read.record_ids, data_of(read)["depends_on"]) == (["m-1", "m-2"], [])
 
 
 @pytest.mark.anyio
@@ -488,8 +497,8 @@ async def test_a_wait_without_message_news_depends_on_no_message(
                 case _:
                     pass
         assert results[0].endswith("You have 1 unread message.")
-        [data] = waited(transcript)
-        assert (data["outcome"], data["depends_on"]) == (
+        [record] = waited(transcript)
+        assert (wait_of(record).outcome, data_of(record)["depends_on"]) == (
             outcome,
             ["w-1"] if release in ("write", "at_once") else [],
         )
@@ -563,7 +572,11 @@ async def test_a_cancelled_wait_names_nothing_and_marks_no_end() -> None:
             # cancelled after its release, before it returns
             tg.cancel_scope.cancel()
         [record] = waited(transcript)
-        assert (record["outcome"], record["files"], record["ended"]) == (
+        assert (
+            wait_of(record).outcome,
+            data_of(record)["files"],
+            data_of(record)["ended"],
+        ) == (
             "cancelled",
             [],
             [],
@@ -593,7 +606,7 @@ async def test_no_member_active_releases_every_wait(others: dict[str, str]) -> N
                 waits.append(await start(tg, r, "w-2"))
             for pending in waits:
                 assert await pending.value() == ALL_WAITING
-        assert {w["outcome"] for w in waited(transcript)} == {"all_waiting"}
+        assert {wait_of(w).outcome for w in waited(transcript)} == {"all_waiting"}
         if "running" not in others.values():
             # a wait called in that state returns at once
             assert await r.wait("w-1") == ALL_WAITING
@@ -612,7 +625,7 @@ async def test_an_active_member_or_a_subagents_wait_keeps_the_others_waiting() -
             top = await start(tg, r, "w-2")
             for pending in (first, child, top):
                 assert await pending.value() == ALL_WAITING
-        assert sorted(w["nested"] for w in waited(transcript)) == [False, False, True]
+        assert sorted(w.nested for w in waited(transcript)) == [False, False, True]
 
 
 @pytest.mark.anyio
@@ -645,7 +658,11 @@ async def test_a_stop_before_the_waiter_resumes_keeps_what_released_it(
                 lines.append("w-3 ended (submitted).")
             assert await pending.value() == "\n".join([*lines, STOPPING])
         [record] = waited(transcript)
-        assert (record["outcome"], record["woken_by"], record["files"]) == (
+        assert (
+            wait_of(record).outcome,
+            data_of(record)["woken_by"],
+            data_of(record)["files"],
+        ) == (
             "stopping",
             [1],
             [{"file": "f-1", "version": 1, "deleted": False}],
@@ -668,9 +685,9 @@ async def test_the_drain_releases_its_members_waits_and_later_ones_at_once() -> 
         assert await r.wait("w-1", "child") == drained
         # the child's waits, in order
         assert [
-            (w["outcome"], w["ended"])
+            (wait_of(w).outcome, data_of(w)["ended"])
             for w in waited(transcript)
-            if w["member"] == "w-1"
+            if w.agent == "w-1"
         ] == [
             ("member_ending", [{"member": "w-3", "status": "submitted"}]),
             ("member_ending", []),
@@ -685,8 +702,8 @@ async def test_the_timeout_is_clamped_to_one_and_max_wait(timeout: int | None) -
         result = await r.wait("w-1", **args)
         assert result == "Nothing you waited for happened in 1 s."
         [record] = waited(transcript)
-        assert record["timeout"] == {"requested": timeout, "effective": 1}
-        assert record["duration"] >= 1
+        assert data_of(record)["timeout"] == {"requested": timeout, "effective": 1}
+        assert wait_of(record).duration >= 1
 
 
 @pytest.mark.anyio
@@ -696,7 +713,7 @@ async def test_a_cancelled_wait_no_longer_counts_its_member_as_waiting() -> None
             async with anyio.create_task_group() as tg:
                 await start(tg, r, "w-1")
                 scope.cancel()
-        assert [w["outcome"] for w in waited(transcript)] == ["cancelled"]
+        assert [wait_of(w).outcome for w in waited(transcript)] == ["cancelled"]
         # w-1 is running and not waiting, so w-2's wait is not released
         async with anyio.create_task_group() as tg:
             pending = await start(tg, r, "w-2")
@@ -720,7 +737,11 @@ async def test_a_wait_called_with_a_cancellation_pending_names_nothing(
             scope.cancel()
             await r.wait("w-1")
         [record] = waited(transcript)
-        assert (record["outcome"], record["files"], record["ended"]) == (
+        assert (
+            wait_of(record).outcome,
+            data_of(record)["files"],
+            data_of(record)["ended"],
+        ) == (
             "cancelled",
             [],
             [],
@@ -752,7 +773,11 @@ async def test_a_wait_called_with_its_task_cancelled_names_nothing(
         with pytest.raises(asyncio.CancelledError):
             await asyncio.create_task(cancelled())
         [record] = waited(transcript)
-        assert (record["outcome"], record["files"], record["ended"]) == (
+        assert (
+            wait_of(record).outcome,
+            data_of(record)["files"],
+            data_of(record)["ended"],
+        ) == (
             "cancelled",
             [],
             [],
@@ -829,7 +854,8 @@ async def test_a_members_own_loop_waits_once_at_a_time() -> None:
             await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
         # sorted: the released waits resume in any order
         assert sorted(
-            (d["wait"], d["loop"], d["outcome"]) for d in waited(transcript)
+            (wait_of(d).id, d.loop_span_id, wait_of(d).outcome)
+            for d in waited(transcript)
         ) == [
             ("x-1", "w-1/top", "news"),
             ("x-2", "w-1/child-1", "news"),
@@ -862,8 +888,8 @@ async def test_a_wait_that_found_news_counts_as_the_own_loops_wait(
             await anyio.wait_all_tasks_blocked()
             await r.sm("w-2", "create", path=_p("b.md"), file_text="x")
             assert "f-2 new" in await first.value()
-        [data] = waited(transcript)
-        assert (data["wait"], data["woken_by"]) == ("x-1", [2])
+        [record] = waited(transcript)
+        assert (wait_of(record).id, data_of(record)["woken_by"]) == ("x-1", [2])
 
 
 @pytest.mark.anyio
@@ -999,13 +1025,11 @@ async def _sample(solver: Agent, tmp_path: Path, **config: Any) -> EvalSample:
     return log.samples[0]
 
 
-def _waited(sample: EvalSample) -> list[dict[str, Any]]:
+def _waited(sample: EvalSample) -> list[CommunicationEvent]:
     return [
-        e.data
+        e
         for e in sample.events
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("kind") == "waited"
+        if isinstance(e, CommunicationEvent) and e.kind == "waited"
     ]
 
 
@@ -1093,8 +1117,8 @@ async def test_the_time_cap_releases_a_wait(tmp_path: Path) -> None:
         tmp_path,
     )
     [record] = _waited(sample)
-    assert record["outcome"] == "stopping"
-    assert record["duration"] < 1
+    assert wait_of(record).outcome == "stopping"
+    assert wait_of(record).duration < 1
     assert _results(sample.events, "swarm_wait") == [STOPPING]
 
 
@@ -1111,7 +1135,7 @@ async def test_a_member_time_limit_cancels_its_wait(tmp_path: Path) -> None:
         tmp_path,
     )
     [record] = _waited(sample)
-    assert (record["member"], record["outcome"], record["files"]) == (
+    assert (record.agent, wait_of(record).outcome, data_of(record)["files"]) == (
         "p",
         "cancelled",
         [],

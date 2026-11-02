@@ -74,7 +74,7 @@ class MemberMetrics(BaseModel):
     idle_time: float | None = None
 
 
-# The swarm's metrics for one run, written once, when the swarm ends, as an InfoEvent
+# The swarm's metrics for one run, written once, when the swarm ends, as a SwarmEvent
 # and a store entry. Tokens and cost are the ledger's; its claims say whether they
 # are complete.
 class SwarmMetrics(BaseModel):
