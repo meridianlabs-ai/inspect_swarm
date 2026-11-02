@@ -29,8 +29,8 @@ class PathRead:
 
 
 # A wait's result (`waited`): the file versions it named, kept only when the built-in
-# board was the only channel the wait reached, and the roster members whose ends it
-# named.
+# board was among the channels the wait reached and the built-in messages channel the
+# only other, and the roster members whose ends it named.
 @dataclass(frozen=True)
 class PathWait:
     position: int
@@ -42,12 +42,16 @@ class PathWait:
 
 # What the critical path reads from the transcript, by position (the transcript's
 # event count when the event was first reported). Filled by EventLog, live only.
-# `board` is the built-in board's record name, or None; `roster` this swarm's members.
-# Evidence naming another member, as a nested swarm's does, is dropped before anything
-# else in it is read; the board's payloads are read only from the board's events.
+# `board` and `messages` are the built-in board's and messages channel's record names,
+# or None; `roster` this swarm's members. Evidence naming another member, as a nested
+# swarm's does, is dropped before anything else in it is read; the board's payloads are
+# read only from the board's events.
 class PathLog:
-    def __init__(self, board: str | None, roster: Collection[str]) -> None:
+    def __init__(
+        self, board: str | None, messages: str | None, roster: Collection[str]
+    ) -> None:
         self.board = board
+        self.messages = messages
         self.roster = frozenset(roster)
         # model event uuid -> (span id, position)
         self.steps: dict[str, tuple[str | None, int]] = {}
@@ -86,10 +90,13 @@ class PathLog:
             return
         elif kind == "waited":
             files: list[tuple[str, int]] = []
-            if self.board is not None and data.get("channels") == [self.board]:
+            reached = set(cast(list[str], data["channels"]))
+            if self.board in reached and reached <= {self.board, self.messages}:
                 files = [
                     (cast(str, e["file"]), cast(int, e["version"]))
                     for e in _entries(data["files"])
+                    # the messages channel's entries name the unread messages
+                    if "record" not in e
                 ]
             ended = [cast(str, e["member"]) for e in _entries(data["ended"])]
             self.waits.append(

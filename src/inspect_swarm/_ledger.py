@@ -371,14 +371,18 @@ def _comm_record(data: dict[str, JsonValue]) -> CommRecord:
 
 # The ledger's view of the swarm's interval: what it reads when the swarm starts, and
 # the ledger it builds from that and the runtime's state when the swarm ends. `board`
-# is the built-in board's record name, or None, and `roster` the swarm's members, for
-# the critical path; a resumed sample records none, since its transcript receives the
-# earlier attempt's events, counted before they are notified and about a board this run
-# does not have.
+# and `messages` are the built-in board's and messages channel's record names, or None,
+# and `roster` the swarm's members, for the critical path; a resumed sample records
+# none, since its transcript receives the earlier attempt's events, counted before they
+# are notified and about a board this run does not have.
 class LedgerInterval:
-    def __init__(self, *, board: str | None, roster: Collection[str]) -> None:
+    def __init__(
+        self, *, board: str | None, messages: str | None, roster: Collection[str]
+    ) -> None:
         self._resumed = sample_resumed()
-        self._events = EventLog(None if self._resumed else PathLog(board, roster))
+        self._events = EventLog(
+            None if self._resumed else PathLog(board, messages, roster)
+        )
         self._unsubscribe = transcript()._subscribe(  # pyright: ignore[reportPrivateUsage]
             self._events
         )
@@ -400,6 +404,11 @@ class LedgerInterval:
     def events(self) -> EventLog:
         return self._events
 
+    # stops observing the transcript; idempotent, so that the swarm's end calls it
+    # however the swarm ends
+    def close(self) -> None:
+        self._unsubscribe()
+
     # where the spans of the interval lie, given the spans of the members that entered one
     def places(self, member_spans: Mapping[str, str]) -> "SpanPlaces":
         return SpanPlaces(self._events.parents, self._span_id, member_spans)
@@ -420,7 +429,7 @@ class LedgerInterval:
         final_cancelled: bool,
     ) -> SwarmLedger:
         # synchronous, so that it runs under cancellation too
-        self._unsubscribe()
+        self.close()
         calls, member_calls = count_calls(
             self._events,
             self.places({m.name: m.span_id for m in members if m.span_id is not None}),

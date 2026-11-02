@@ -11,7 +11,7 @@ Its shape follows a port of Epoch AI's LeanOpenProblems swarm, with a toy proble
 Needs Docker. `proof_swarm.yaml` has a container for each of `agent-1` to `agent-3`, so `k` is from 1 to 3.
 """
 
-from typing import Any, Literal
+from typing import Literal
 
 from inspect_ai import Task, task
 from inspect_ai.agent import Agent, AgentState, agent, react
@@ -35,6 +35,7 @@ from inspect_swarm import (
     member,
     shared_memory,
     swarm,
+    swarm_result,
     swarm_tools,
 )
 
@@ -119,14 +120,16 @@ def any_member_proved() -> Scorer:
     """Check every member's answer again, with the comparator."""
 
     async def score(state: TaskState, target: Target) -> Score:
-        # the swarm's result record; task code reads it but never writes it
-        record: dict[str, Any] = state.store.get("inspect_swarm:result")
+        # the swarm's result record, written when the swarm ends
+        record = swarm_result(state)
+        assert record is not None, "the task's solver is a swarm"
         checks: dict[str, str] = {}
         proved: list[str] = []
-        for m in record["members"]:
-            passed, checks[m["name"]] = await run_check(m["sandbox"])
+        for m in record.members:
+            assert m.sandbox is not None, "each member has its own sandbox"
+            passed, checks[m.name] = await run_check(m.sandbox)
             if passed:
-                proved.append(m["name"])
+                proved.append(m.name)
         return Score(
             value=CORRECT if proved else INCORRECT,
             answer=state.output.completion,

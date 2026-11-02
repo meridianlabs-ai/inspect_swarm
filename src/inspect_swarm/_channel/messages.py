@@ -1,14 +1,12 @@
 from collections.abc import Mapping, Sequence
 
 from inspect_ai.tool import Tool, ToolDef, ToolError, ToolParams
-from inspect_ai.util._span import current_agent_span_id, current_span_id
 from pydantic import JsonValue
 
 from .._bus._address import MEMBER_NAME, RESERVED
 from .._bus._record import Draft, Record
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
-from .._evidence import comm_read
 from .._fence import fence, utf8_bytes, with_lines
 from ._channel import (
     Channel,
@@ -264,6 +262,8 @@ class MessagesState:
                 f"{_count(len(unread))} (from {senders}). Call read_messages() to read them."
             ],
             files=[{"record": r.id, "from": r.sender} for r in unread],
+            # the line counts every unread message and names every sender
+            depends_on=[r.id for r in unread],
         )
 
     # the tools
@@ -373,20 +373,7 @@ class MessagesState:
         read = unread[: len(shown)]
         del unread[: len(shown)]
         self._known[name].update(r.id for r in read)
-        context = self._bus.member()
-        assert context is not None
-        comm_read(
-            context.span_id,
-            name,
-            CHANNEL,
-            self._bus.read_id(),
-            current_agent_span_id(),
-            False,
-            current_span_id(),
-            None,
-            False,
-            records=[r.id for r in read],
-        )
+        self._bus.read(CHANNEL, [r.id for r in read])
         text = _header(len(read)) + "\n\n" + "\n".join(shown)
         if unread:
             text += "\n" + _trailer(len(unread))
@@ -396,6 +383,15 @@ class MessagesState:
         # the status line: a count, never a payload
         count = len(self._unread[member])
         return f"You have {_count(count)}." if count else None
+
+
+# The record name of the built-in messages channel among a run's open channel states, by
+# its state's type rather than its name, which a custom channel may take; None without
+# one.
+def builtin_messages(states: Mapping[str, ChannelState]) -> str | None:
+    return next(
+        (name for name, s in states.items() if isinstance(s, MessagesState)), None
+    )
 
 
 def _fenced(record: Record) -> str:

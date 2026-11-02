@@ -6,7 +6,7 @@ from inspect_ai.agent import AgentState
 from inspect_ai.model import ChatMessage, ModelOutput
 
 from ._evidence import evidence
-from ._record import FinalRecord, MemberResult, SwarmResultRecord, write_record
+from ._record import FinalRecord, MemberResult
 
 FinalName = Literal["first", "last"]
 """How the swarm chooses its answer from the submissions: `first`, the earliest, or `last`, the latest. A tie goes to the member listed first in the roster."""
@@ -67,10 +67,10 @@ def answer(
     )
 
 
-# Applies answer() to the members' results so far, sets the chosen member's output
-# (from `outputs`, the ended members' outputs by name) as the swarm state's output and
-# writes the record: the provisional answer until finalisation. as_solver() copies the
-# output to the task state however the swarm ends.
+# Applies answer() to the members' results so far and sets the chosen member's output
+# (from `outputs`, the ended members' outputs by name) as the swarm state's output: the
+# provisional answer until finalisation. as_solver() copies the output to the task
+# state however the swarm ends. The record is written only when the swarm ends.
 def settle(
     state: AgentState,
     members: Sequence[MemberResult],
@@ -79,19 +79,16 @@ def settle(
     pick: Pick | None,
     *,
     provisional: bool,
-) -> SwarmResultRecord:
-    record = SwarmResultRecord(
-        members=list(members),
-        final=answer(members, final, pick, provisional=provisional),
+) -> FinalRecord:
+    chosen = answer(members, final, pick, provisional=provisional)
+    state.output = (
+        outputs[chosen.member] if chosen.member is not None else ModelOutput()
     )
-    chosen = record.final.member
-    state.output = outputs[chosen] if chosen is not None else ModelOutput()
-    write_record(record)
-    return record
+    return chosen
 
 
-# After the stop procedure: the final answer, the final record and the final event,
-# written in the swarm's span.
+# After the stop procedure: the final answer and the final event, written in the
+# swarm's span.
 def finalise(
     state: AgentState,
     input: Sequence[ChatMessage],
@@ -105,11 +102,11 @@ def finalise(
 ) -> None:
     # the conversation only now, since the sample's message limit applies to it: an
     # answer it does not fit ends the sample on that limit, with the answer as its
-    # output and the record still provisional
+    # output and the record provisional
     state.messages = _conversation(
         input, answer(members, final, pick, provisional=False), outputs
     )
-    chosen = settle(state, members, outputs, final, pick, provisional=False).final
+    chosen = settle(state, members, outputs, final, pick, provisional=False)
     evidence(
         "result",
         "final",

@@ -9,6 +9,7 @@ from uuid import uuid4
 import anyio
 from inspect_ai.agent import Agent, AgentState, agent, run
 from inspect_ai.event import InfoEvent
+from inspect_ai.log import transcript as current_transcript
 from inspect_ai.log._transcript import Transcript, _transcript
 from inspect_ai.model import (
     ChatMessage,
@@ -36,7 +37,7 @@ from inspect_ai.util._concurrency import init_concurrency
 from inspect_ai.util._store import Store, init_subtask_store, store
 
 from inspect_swarm import Controller, swarm_controller
-from inspect_swarm._record import RECORD_KEY, SwarmResultRecord
+from inspect_swarm._record import SwarmResultRecord, _transcript_result
 
 TOKENS_PER_CALL = 50
 
@@ -133,12 +134,14 @@ def sleeper(seconds: float = 3600.0) -> Agent:
 
 @agent
 def after(names: list[str], inner: Agent) -> Agent:
-    """Wait, making no model call, until the named members have ended in the result record, then run `inner`."""
+    """Wait, making no model call, until the named members' `member_result` evidence is in the transcript, then run `inner`."""
 
     async def execute(state: AgentState) -> AgentState:
         while True:
-            record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
-            if all(m.state == "ended" for m in record.members if m.name in names):
+            ended = {
+                d["member"] for d in evidence(current_transcript(), "member_result")
+            }
+            if ended >= set(names):
                 return await inner(state)
             await anyio.sleep(0.01)
 
@@ -209,7 +212,8 @@ async def run_swarm(
     ) as transcript:
         # in its own agent span, as as_solver() and run() give it
         state = await run(swarm, [ChatMessageUser(content=input)])
-        record = SwarmResultRecord.model_validate(store().get(RECORD_KEY))
+        record = _transcript_result(store())
+        assert record is not None
     return Outcome(final(transcript)["stop_reason"], record, state, transcript)
 
 

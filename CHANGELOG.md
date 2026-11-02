@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.2.1...0.3.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* the swarm's result record moves from the sample store to the transcript ([#135](https://github.com/meridianlabs-ai/inspect_swarm/issues/135))
+
+### Features
+
+* direct messages between members, the messages channel ([#130](https://github.com/meridianlabs-ai/inspect_swarm/issues/130)) ([fb7e2b1](https://github.com/meridianlabs-ai/inspect_swarm/commit/fb7e2b1d0335d92c0f5f6e3a623d415a2dd0e7d7))
+* members that choose their own names ([#113](https://github.com/meridianlabs-ai/inspect_swarm/issues/113)) ([a2270b0](https://github.com/meridianlabs-ai/inspect_swarm/commit/a2270b0959369fa81a7bf36e6a122bb707980d3d))
+* the dependency-linked critical path, critical_steps_to_answer ([#127](https://github.com/meridianlabs-ai/inspect_swarm/issues/127)) ([33bf17b](https://github.com/meridianlabs-ai/inspect_swarm/commit/33bf17baea37b7793e96d9d983bff46da6e40005))
+* the swarm's result record moves from the sample store to the transcript ([#135](https://github.com/meridianlabs-ai/inspect_swarm/issues/135)) ([807e0cd](https://github.com/meridianlabs-ai/inspect_swarm/commit/807e0cd2bb72d6e1c777bb8c1f463547afe14a5d))
+
+
+### Bug Fixes
+
+* keep board-file links on waits that also reach messages ([#137](https://github.com/meridianlabs-ai/inspect_swarm/issues/137)) ([3d979b4](https://github.com/meridianlabs-ai/inspect_swarm/commit/3d979b455c2e9676f17db08c21e193c506867234))
+
 ## [0.2.1](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.2.0...0.2.1) (2026-10-28)
 
 

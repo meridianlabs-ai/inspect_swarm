@@ -24,7 +24,7 @@ jobs:
       - uses: meridianlabs-ai/actions/slack-approval-ping@v1
         with:
           webhook: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
-          approvers: "jjallaire dragonstyle epatey"
+          approvers: "jjallaire dragonstyle ransomr"
           message: ":rocket: *${{ github.repository }}* ${{ github.event.release.tag_name }} — PyPI publish is *awaiting approval*."
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 

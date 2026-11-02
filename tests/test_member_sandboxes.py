@@ -18,7 +18,6 @@ from inspect_ai.util import (
     sandbox,
     sandbox_with,
     sandboxenv,
-    store,
 )
 from inspect_ai.util._sandbox.context import (
     sandbox_default_context_var,
@@ -27,9 +26,8 @@ from inspect_ai.util._sandbox.context import (
 )
 from pydantic import BaseModel
 
-from inspect_swarm import Member, filesystem, leaderless, member, swarm
+from inspect_swarm import Member, filesystem, leaderless, member, swarm, swarm_result
 from inspect_swarm._budget import current_member
-from inspect_swarm._record import RECORD_KEY
 
 from .swarm_runtime import evidence, run_swarm
 
@@ -445,9 +443,11 @@ def members_work() -> Scorer:
     """Read each member's work from the sandbox the result record names for it."""
 
     async def score(state: TaskState, target: Target) -> Score:
+        record = swarm_result(state)
+        assert record is not None
         work = {
-            m["name"]: await sandbox(m["sandbox"]).read_file("work.txt")
-            for m in store().get(RECORD_KEY)["members"]
+            m.name: await sandbox(m.sandbox).read_file("work.txt")
+            for m in record.members
         }
         return Score(value=1, metadata={"default": _name(sandbox()), "work": work})
 
