@@ -273,6 +273,59 @@ def test_members_cannot_reach_each_others_homes_and_share_the_shares(
 
 
 @pytest.mark.slow
+def test_acl_entries_and_files_already_in_a_share_are_kept_out_of_the_way(
+    tmp_path: Path,
+) -> None:
+    # read-only named-user entries for every id setup might choose, on a file and as
+    # a default on a directory, which would beat the group's grant for that uid; and
+    # files at the names the self-test's probes once had
+    ids = "$(seq 61002 61020)"
+    sentinels = "/shared/.swarm-probe-swarm-w-1 /shared/.swarm-probe-swarm-w-1.moved"
+    setup = (
+        f"mkdir -p /shared/inherited && touch /shared/existing"
+        f" && for i in {ids}; do setfacl -m u:$i:r-- /shared/existing"
+        f" && setfacl -d -m u:$i:r-- /shared/inherited; done"
+        f" && for f in {sentinels}; do echo sentinel > $f; done"
+    )
+    cases = {
+        "acl": Case(
+            runs=[
+                Run(
+                    {"shared": [{"path": "/shared", "access": "rw"}]},
+                    {
+                        "w-1": [
+                            (
+                                "bash",
+                                "echo a >> /shared/existing && echo b > /shared/inherited/new",
+                            )
+                        ],
+                        "w-2": [
+                            (
+                                "bash",
+                                "echo c >> /shared/existing && echo d >> /shared/inherited/new && cat /shared/existing /shared/inherited/new",
+                            ),
+                            ("bash", f"cat {sentinels} && ls -a /shared"),
+                        ],
+                    },
+                )
+            ],
+            setup=setup,
+        )
+    }
+    samples = _eval(tmp_path, cases)
+    edits, listing = cases["acl"].results["w-2"]
+    assert _ok(edits).split() == ["a", "c", "b", "d"]
+    lines = _ok(listing).splitlines()
+    assert lines[:2] == ["sentinel", "sentinel"]
+    assert [n for n in lines[2:] if n.startswith(".swarm-probe")] == [
+        ".swarm-probe-swarm-w-1",
+        ".swarm-probe-swarm-w-1.moved",
+    ]
+    record = samples["acl"].store["inspect_swarm:isolation"]["default"]
+    assert all(uid > 61020 for uid in [record["gid"], *record["users"].values()])
+
+
+@pytest.mark.slow
 def test_a_second_run_takes_over_the_first_runs_share(tmp_path: Path) -> None:
     first = Run(
         {"shared": [{"path": "/shared", "access": "rw"}]},

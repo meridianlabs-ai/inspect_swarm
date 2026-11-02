@@ -1,3 +1,4 @@
+import re
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -36,11 +37,17 @@ _ROOT_PROBE = "Uid:\t0\t0\t0\t0\nCapEff:\t00000000a80425fb\nsetgroups: allow\n"
 class IsolationStub(SandboxEnvironment):
     """A sandbox environment whose commands succeed, with root that can switch users; it records each command's user and script."""
 
-    def __init__(self, uid: str = "0", fail: ExecResult[str] | None = None) -> None:
+    def __init__(
+        self,
+        uid: str = "0",
+        fail: ExecResult[str] | None = None,
+        fail_on: str = "add_users()",
+    ) -> None:
         super().__init__()
         self.calls: list[tuple[str | None, str, list[str]]] = []
         self.uid = uid
         self.fail = fail
+        self.fail_on = fail_on
 
     async def exec(
         self,
@@ -60,7 +67,7 @@ class IsolationStub(SandboxEnvironment):
             return ExecResult(
                 True, 0, _ROOT_PROBE.replace("Uid:\t0", f"Uid:\t{self.uid}"), ""
             )
-        if self.fail is not None and "add_users()" in cmd[2]:
+        if self.fail is not None and self.fail_on in cmd[2]:
             return self.fail
         return ExecResult(True, 0, "", "")
 
@@ -133,6 +140,52 @@ def scoped(seen: dict[str, dict[str, str | None]]) -> Agent:
 
 def _scoped(seen: dict[str, dict[str, str | None]], count: int = 2) -> Any:
     return member(scoped, args={"seen": seen}, name="w", count=count)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_the_self_test_creates_and_removes_only_fresh_probe_files(
+    fails: bool,
+) -> None:
+    seen: dict[str, dict[str, str | None]] = {}
+    stubs = [
+        IsolationStub(
+            fail=ExecResult(False, 3, "", "the member cannot read /shared\n")
+            if fails
+            else None,
+            fail_on="probe files are created only",
+        )
+        for _ in range(2)
+    ]
+    probes: list[str] = []
+    for stub in stubs:
+        with environments(default=stub):
+            if fails:
+                with pytest.raises(RuntimeError, match="the member cannot read"):
+                    await run_swarm(
+                        swarm(_scoped(seen), channels=[], isolation="users")
+                    )
+            else:
+                await run_swarm(swarm(_scoped(seen), channels=[], isolation="users"))
+        # the self-test's arguments: uid, home, probe file name, shares
+        names = {args[2].rsplit("-swarm-", 1)[0] for _, _, args in stub.calls[3:5]}
+        assert len(names) == 1
+        [probe] = names
+        assert re.fullmatch(r"\.swarm-probe-[0-9a-f]{16}", probe)
+        probes.append(probe)
+        # the cleanup removes the names this run made up, and nothing else
+        user, script, removed = stub.calls[-1]
+        assert user == "root" and script.endswith('\nrm -f -- "$@"')
+        assert removed == [
+            f"/scratch/w-1/{probe}-swarm-w-1",
+            f"/scratch/w-2/{probe}-swarm-w-2",
+            *(
+                f"/shared/{probe}-swarm-w-{i}{moved}"
+                for i in (1, 2)
+                for moved in ["", ".moved"]
+            ),
+        ]
+    assert probes[0] != probes[1]
 
 
 @pytest.mark.anyio

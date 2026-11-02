@@ -1,5 +1,6 @@
 import posixpath
 import re
+import secrets
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -280,8 +281,11 @@ fail() { printf '%s\n' "$*" >&2; exit 3; }
 
 # Whether the image has what setup needs, which users and group exist, and which ids in
 # the window are taken, by a passwd or group entry or by the owner or group of a file
-# on any filesystem the homes, shares or world-writable directories are on.
-# $1 group, $2 first id, $3 last id, $4 1 when there are shares, then the roots.
+# on any filesystem the homes, shares or world-writable directories are on, or by a
+# named entry in an access or default ACL in a rw share, which would take precedence
+# over the group's grant there.
+# $1 group, $2 first id, $3 last id, $4 1 when there are shares, then the roots, `--`,
+# and the rw shares.
 _PROBE = (
     _PRELUDE
     + r"""
@@ -297,12 +301,21 @@ fi
 awk -F: -v g="$group" '$1 == g { print "groupname", $3 }' /etc/group
 awk -F: '$1 ~ /^swarm-/ { print "username", $1 }' /etc/passwd
 awk -F: '{ print "id", $3 }' /etc/passwd /etc/group
-for root in "$@"; do
+while [ "$1" != -- ]; do
+  root=$1
+  shift
   [ -d "$root" ] || continue
   # the ids go to stdout, the traversal's errors to $errors: an incomplete scan could
   # miss an id a file takes
   { errors=$(find -P "$root" -xdev \( \( -uid +$((lo - 1)) -uid -$((hi + 1)) \) -o \( -gid +$((lo - 1)) -gid -$((hi + 1)) \) \) -printf 'id %U\nid %G\n' 2>&1 1>&3); } 3>&1 \
     || fail "users isolation could not scan all of $root for the user ids its files take, so it cannot choose ids that own nothing: $(printf '%s' "$errors" | head -n 1)"
+done
+shift
+for share in "$@"; do
+  [ -d "$share" ] || continue
+  acls=$(getfacl -R -P -n -p --skip-base -- "$share" 2>&1) \
+    || fail "users isolation could not read the ACLs in $share: $(printf '%s' "$acls" | grep -v '^#' | head -n 1)"
+  printf '%s\n' "$acls" | sed -nE 's/^(default:)?(user|group):([0-9]+):.*/id \3/p'
 done
 exit 0
 """
@@ -469,14 +482,19 @@ actual=$(id -u)
 if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   fail "the member can become root with sudo; remove its sudoers entry from the image"
 fi
-printf probe >"$home/$probe" || fail "the member could not write its home, $home"
+# probe files are created only where nothing exists, so that no existing file is changed
+set -C
+printf probe >"$home/$probe" || fail "the member could not create $home/$probe in its home"
 while [ $# -gt 0 ]; do
   # every entry readable and every directory, the share's ancestors included, searchable
   unreadable=$(find -P "$2" -xdev ! -type l \( ! -readable -o -type d ! -executable \) -printf '%p\n' -quit 2>&1) \
     || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$unreadable" | head -n 1)"
   [ -z "$unreadable" ] || fail "the member cannot read $unreadable in the shared directory $2"
   if [ "$1" = rw ]; then
-    printf probe >"$2/$probe" || fail "the member could not write the shared directory $2"
+    w=$(find -P "$2" -xdev ! -type l ! -writable -printf '%p\n' -quit 2>&1) \
+      || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$w" | head -n 1)"
+    [ -z "$w" ] || fail "the member cannot write $w in the read-write shared directory $2"
+    printf probe >"$2/$probe" || fail "the member could not create $2/$probe in the shared directory $2"
   else
     w=$(find -P "$2" -xdev -writable -print -quit 2>&1) \
       || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$w" | head -n 1)"
@@ -514,7 +532,7 @@ fi
 for s in "$@"; do
   f="$s/${file##*/}"
   (printf x >>"$f") 2>/dev/null || fail "a member could not change a file another member created in the shared directory $s; its filesystem may not keep ACLs"
-  { mv -- "$f" "$f.moved" && mv -- "$f.moved" "$f"; } 2>/dev/null || fail "a member could not rename a file another member created in the shared directory $s"
+  { [ ! -e "$f.moved" ] && [ ! -L "$f.moved" ] && mv -- "$f" "$f.moved" && mv -- "$f.moved" "$f"; } 2>/dev/null || fail "a member could not rename a file another member created in the shared directory $s"
 done
 """
 )
@@ -561,6 +579,8 @@ async def setup_isolation(
         str(_LAST_ID),
         "1" if isolation.shared else "0",
         *dict.fromkeys(roots),
+        "--",
+        *(share.path for share in isolation.shared if share.access == "rw"),
     )
     taken: set[int] = set(recorded_users.values())
     if recorded_gid is not None:
@@ -633,7 +653,8 @@ async def _self_test(
     isolation: UserIsolation,
     identities: list[MemberIdentity],
 ) -> None:
-    probe = ".swarm-probe"
+    # a fresh name, so that no file the probes create or remove existed before
+    probe = f".swarm-probe-{secrets.token_hex(8)}"
     shares: list[str] = []
     for share in isolation.shared:
         shares += [share.access, share.path]
@@ -645,6 +666,7 @@ async def _self_test(
             for path in rw
             for i in identities
             for moved in ("", ".moved")
+            if moved == "" or len(identities) > 1
         ),
     ]
     try:
