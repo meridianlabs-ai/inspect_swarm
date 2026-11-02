@@ -7,8 +7,8 @@ import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent, ModelEvent
-from inspect_ai.log import EvalSample
+from inspect_ai.event import InfoEvent, ModelEvent, ToolEvent
+from inspect_ai.log import EvalSample, transcript
 from inspect_ai.model import ChatMessageTool, ChatMessageUser
 from inspect_ai.tool import ToolDef
 
@@ -54,7 +54,7 @@ CODEX_REPLY = 'Call send_message with to="w-1" and the code word as the message.
 
 @agent
 def collector(cli: str, delay: float = DELAY) -> Agent:
-    """Wait for the CLI's hello, give it its code word after `delay`, and wait for the word back."""
+    """Wait for the CLI's hello, give it its code word `delay` seconds after the CLI's wait begins, and wait for the word back."""
 
     async def execute(state: AgentState) -> AgentState:
         tools = {ToolDef(t).name: t for t in await swarm_tools().tools()}
@@ -69,6 +69,15 @@ def collector(cli: str, delay: float = DELAY) -> Agent:
                 heard += str(await tools["read_messages"]())
 
         await until(lambda text: f'from="{cli}"' in text)
+        # the delay runs from the start of the CLI's wait, whose host call the bridge
+        # records as it begins, however long the CLI takes to call it
+        while not any(
+            isinstance(e, ToolEvent)
+            and e.function == "swarm_wait"
+            and "bridge" in (e.metadata or {})
+            for e in transcript().events
+        ):
+            await anyio.sleep(0.5)
         await anyio.sleep(delay)
         await tools["send_message"](to=cli, message=f"The code word is {WORDS[cli]}.")
         await until(lambda text: WORDS[cli] in text)
