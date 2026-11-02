@@ -262,7 +262,7 @@ def critical_steps_to_answer(
 ## Compatibility
 
 - **`SwarmMetrics.critical_steps_to_answer`** is optional with a `None` default, so metrics written before it load with `None`; the metrics `version` stays 1.
-- **Evidence.** `read`'s `depends_on` and the board's `read` `record_ids`, and `waited`'s `depends_on`, are additive fields of payload version 1. A log written before them lacks them, and a reader treats an absent key as "not reported"; the metric reads only the live run, so it never reads old logs.
+- **Evidence.** A read's provenance is the typed `CommunicationEvent.record_ids` field; read and wait dependencies are in `data.depends_on`. Evidence compatibility is defined in [swarm-event-types.md](swarm-event-types.md#compatibility-and-migration). The metric reads only the live run and does not recompute older logs.
 - **Public API.** `WaitNews.depends_on` defaults to empty, so `WaitNews(lines, files)` stays valid. `Bus.read()` is reached through `ChannelRun.bus`; `Bus` and `Draft` are not exported. No other name is added.
 
 ## Security
