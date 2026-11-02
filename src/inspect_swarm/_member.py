@@ -64,6 +64,7 @@ from ._budget import (
     SwarmTurnNode,
     current_member,
 )
+from ._isolation import MemberIdentity, member_identity
 
 AgentFactory = Callable[..., Agent]
 """A registered `@agent` factory, such as `deepagent`."""
@@ -425,7 +426,8 @@ class MemberOutcome:
 
 
 # The member wrapper. Runs the member on `state` with `input` as its conversation, in
-# its tool-state scope, cancel scope and agent span, under its nodes and the swarm's
+# its tool-state scope, its sandbox identity scope under users isolation, cancel scope
+# and agent span, under its nodes and the swarm's
 # caps, with its background work owned by the member; drains that work once the agent
 # has returned; then calls `end` with its status and the state the agent returned,
 # inside the member's span when the span was entered. The caller keeps `state`, as
@@ -447,6 +449,7 @@ async def run_member(
     grace: Callable[[], float],
     outcome: MemberOutcome,
     end: Callable[[str, AgentState], None],
+    identity: MemberIdentity | None = None,
 ) -> None:
     status = "cancelled"
     # holds the member's span open after its limits and cancel scope have exited, so
@@ -465,6 +468,7 @@ async def run_member(
                 grace,
                 outcome,
                 member_span,
+                identity,
             )
         except Exception:
             status = "errored"
@@ -486,6 +490,7 @@ async def _run_member(
     grace: Callable[[], float],
     outcome: MemberOutcome,
     member_span: AsyncExitStack,
+    identity: MemberIdentity | None,
 ) -> str:
     token = current_member.set(context)
     status: str | None = None
@@ -493,6 +498,7 @@ async def _run_member(
         with (
             tool_state_scope(name),
             _member_sandboxes(member_sandbox(record, name), record.visible_sandboxes),
+            member_identity(identity),
             context.scope,
         ):
             # inside the member's scopes, so the hard stop cancels its background work

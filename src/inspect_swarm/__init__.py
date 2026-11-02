@@ -33,6 +33,7 @@ from ._controller._controller import (
 )
 from ._controller.leaderless import leaderless
 from ._final import FinalName
+from ._isolation import Share, UserIsolation, users
 from ._member import Member, member
 from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
 from ._swarm import swarm
@@ -60,11 +61,13 @@ __all__ = [
     "MemberResult",
     "MemberState",
     "Record",
+    "Share",
     "StopReason",
     "SwarmBudget",
     "SwarmControl",
     "SwarmEvent",
     "SwarmResultRecord",
+    "UserIsolation",
     "WaitNews",
     "WaitSpec",
     "WaitingState",
@@ -81,4 +84,5 @@ __all__ = [
     "swarm_resources",
     "swarm_result",
     "swarm_tools",
+    "users",
 ]
