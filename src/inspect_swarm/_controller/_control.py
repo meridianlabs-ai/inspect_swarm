@@ -841,14 +841,11 @@ class SwarmRun:
         explanation = cast(object, verdict.explanation)
         if not (
             isinstance(passed, bool)
-            and (
-                value is None
-                or (isinstance(value, int | float) and not isinstance(value, bool))
-            )
+            and (value is None or _exact_float(value))
             and (explanation is None or isinstance(explanation, str))
         ):
             raise TypeError(
-                f"The result contract's verifier must return a Verdict whose passed is a bool, value a float or None and explanation a str or None, got {verdict!r} for member {m.name!r}."
+                f"The result contract's verifier must return a Verdict whose passed is a bool, value a float (or an int a float holds exactly) or None and explanation a str or None, got {verdict!r} for member {m.name!r}."
             )
         m.verified = verdict
         m.verified_time = anyio.current_time() - self._start
@@ -996,3 +993,15 @@ def _sample_cause() -> str | None:
     if time.limit is not None and time.usage >= time.limit:
         return "sample_limit:time"
     return None
+
+
+# A number the record's float field holds exactly: a float, or an int a float equals.
+def _exact_float(value: object) -> bool:
+    if isinstance(value, float):
+        return True
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    try:
+        return float(value) == value
+    except OverflowError:
+        return False

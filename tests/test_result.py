@@ -589,35 +589,67 @@ def _nested(depth: int) -> list[Any]:
         pytest.param(
             lambda: _with_metadata({"diagnostic": object()}), id="object-in-metadata"
         ),
-        pytest.param(lambda: _with_metadata({"value": b"\xff"}), id="bytes"),
+        pytest.param(lambda: _with_metadata({"value": b"abc"}), id="bytes"),
+        # a key JSON would turn into a string, replacing the entry with that key
+        pytest.param(
+            lambda: _with_metadata({"value": {1: "first", "1": "second"}}),
+            id="non-string-key",
+        ),
         pytest.param(lambda: _with_metadata(_cycle()), id="cycle"),
         # text that is not valid UTF-8 in a dict's key, which JSON would replace
         pytest.param(
             lambda: _tool_call_output({"bad \ud800 key": "value"}),
             id="surrogate-in-tool-argument-key",
         ),
-        # fits on its own, but not at its depth in the record
-        pytest.param(lambda: _with_metadata({"value": _nested(195)}), id="too-deep"),
     ],
 )
 async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> None:
+    stop = await run_swarm(_plain_then(odd, "result_test_left_out"))
+    _assert_left_out(stop.record)
+
+
+def test_an_output_too_deep_for_a_json_log_is_left_out(tmp_path: Path) -> None:
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=_plain_then(
+            lambda: _with_metadata({"value": _nested(194)}), "result_test_too_deep"
+        ),
+    )
+    [log] = eval(
+        task,
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+        log_format="json",
+        display="none",
+    )
+    assert log.status == "success"
+    samples = read_eval_log(log.location).samples
+    assert samples is not None
+    record = swarm_result(samples[0])
+    assert record is not None
+    _assert_left_out(record)
+
+
+# A swarm whose plain member's submission comes first, so that it is the answer, and
+# whose odd member then returns what `odd` builds.
+def _plain_then(odd: Callable[[], ModelOutput], name: str) -> Agent:
     async def run(control: SwarmControl) -> StopReason:
-        # the plain member's submission first, so that it is the answer
-        for name in ("plain", "odd"):
-            control.start(name)
+        for member_name in ("plain", "odd"):
+            control.start(member_name)
             async for _ in control.events():
                 pass
         return "all_done"
 
-    stop = await run_swarm(
-        swarm(
-            [member(answers("42"), name="plain"), member(returns(odd), name="odd")],
-            controller=controller(run, "result_test_left_out"),
-            channels=[],
-        )
+    return swarm(
+        [member(answers("42"), name="plain"), member(returns(odd), name="odd")],
+        controller=controller(run, name),
+        channels=[],
     )
-    plain, left = stop.record.members
-    assert stop.record.final.member == "plain"
+
+
+def _assert_left_out(record: SwarmResultRecord) -> None:
+    plain, left = record.members
+    assert record.final.member == "plain"
     assert plain.left_out == [] and plain.output is not None
     assert plain.output.completion == "42"
     assert (left.status, left.output, left.left_out) == ("submitted", None, ["output"])
@@ -634,8 +666,19 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
         ),
         pytest.param(
             answer_result(verifier=lambda answer, metadata: _verdict(value="high")),
-            "a Verdict whose passed is a bool, value a float or None",
+            "a Verdict whose passed is a bool, value a float",
             id="verdict-value-not-a-float",
+        ),
+        # a float cannot hold them: one would be rounded, the other overflows
+        pytest.param(
+            answer_result(verifier=lambda answer, metadata: _verdict(value=2**53 + 1)),
+            "an int a float holds exactly",
+            id="verdict-value-rounded-as-a-float",
+        ),
+        pytest.param(
+            answer_result(verifier=lambda answer, metadata: _verdict(value=10**400)),
+            "an int a float holds exactly",
+            id="verdict-value-too-large-for-a-float",
         ),
     ],
 )

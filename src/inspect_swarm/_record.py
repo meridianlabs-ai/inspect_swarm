@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from typing import Any, Literal, TypeGuard, cast
 from uuid import uuid4
@@ -13,6 +13,7 @@ from inspect_ai.log._condense import (
     resolve_events_attachments,
 )
 from inspect_ai.model import ModelOutput
+from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
 from inspect_ai.solver import TaskState
 from inspect_ai.util import Store, store
 from pydantic import BaseModel, JsonValue, ValidationError
@@ -82,7 +83,7 @@ class MemberResult(BaseModel):
     """Swarm time when the verdict was taken; `None` without one."""
 
     left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8, and an output the record cannot hold as JSON, such as one with an object or bytes in its metadata, or one nested too deep. Empty when nothing was left out."""
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8, and an output the record cannot hold as JSON, such as one with an object, bytes or a key that is not a string in its metadata, or one nested too deep. Empty when nothing was left out."""
 
 
 class FinalRecord(BaseModel):
@@ -171,14 +172,15 @@ def _logged_member(m: MemberResult) -> MemberResult:
     return m.model_copy(update={**update, "left_out": left_out})
 
 
-# Whether an output reads back from the log as it is, judged where the record holds it,
-# so that nesting too deep for the record fails here. Its JSON form replaces text that
-# is not valid UTF-8 in a dict's keys, so its own strings are checked first. An output
-# none of this can take (an object or bytes in its metadata, a cycle) raises, and is
-# left out like one the log would change.
+# Whether an output reads back from the log as it is. Its own values must be JSON data
+# first, since its JSON form would change any other value (bytes become text, a
+# non-string key is turned into one and can replace another, text that is not valid
+# UTF-8 in a key is replaced), and nested no deeper than `_MAX_OUTPUT_DEPTH`. It is then
+# judged where the record holds it. An output any step cannot take raises, and is left
+# out like one the log would change.
 def _logged_output(output: ModelOutput) -> bool:
     try:
-        if not _valid_text(output.model_dump()):
+        if not _json_data(output.model_dump(), 1):
             return False
         data = output.model_dump(mode="json")
         return not _changed_by_logging({"members": [{"output": data}]})
@@ -186,22 +188,33 @@ def _logged_output(output: ModelOutput) -> bool:
         return False
 
 
-# Whether every string in `value`, dict keys included, is valid UTF-8.
-def _valid_text(value: object) -> bool:
+# An output's own nesting, which holds tool arguments as deep as Inspect accepts within
+# the output's containers, well below the depth at which the record inside its sample
+# no longer reads from a JSON log; a cycle exceeds it too.
+_MAX_OUTPUT_DEPTH = MAX_TOOL_CALL_ARGUMENTS_DEPTH + 20
+
+
+# Whether `value` is JSON data: dicts with string keys, lists, valid UTF-8 text, numbers,
+# booleans and None, nested no deeper than `_MAX_OUTPUT_DEPTH`, counting it as `depth`.
+def _json_data(value: object, depth: int) -> bool:
+    if value is None or isinstance(value, bool | int | float):
+        return True
     if isinstance(value, str):
         try:
             value.encode("utf-8")
         except UnicodeEncodeError:
             return False
         return True
+    if depth > _MAX_OUTPUT_DEPTH:
+        return False
     if isinstance(value, dict):
         return all(
-            _valid_text(k) and _valid_text(v)
+            isinstance(k, str) and _json_data(k, depth) and _json_data(v, depth + 1)
             for k, v in cast(dict[object, object], value).items()
         )
-    if isinstance(value, list | tuple):
-        return all(_valid_text(v) for v in cast(Sequence[object], value))
-    return True
+    if isinstance(value, list):
+        return all(_json_data(v, depth + 1) for v in cast(list[object], value))
+    return False
 
 
 # Removes the store's record id, so that a swarm that leaves no record never leaves an
