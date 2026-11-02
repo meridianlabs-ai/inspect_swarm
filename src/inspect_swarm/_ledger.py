@@ -207,9 +207,9 @@ class MemberAccount:
     cancelled: bool
     background_started: int
     background_cancelled: int
-    # for each boundary callback chain a stop or an end cancelled, the number of model
-    # events the interval had seen when it began
-    cancelled_chains: Sequence[int] = ()
+    # the model calls in flight when a stop or an end cancelled one of the member's
+    # boundary callback chains, by event id
+    cancelled_calls: Sequence[str] = ()
 
 
 # A model event as it last stood, with its live usage object.
@@ -404,9 +404,9 @@ class LedgerInterval:
     def events(self) -> EventLog:
         return self._events
 
-    # the number of model events seen so far, in the order they began
-    def call_count(self) -> int:
-        return len(self._events.calls)
+    # the model calls in flight now, by event id
+    def pending_calls(self) -> list[str]:
+        return [uuid for uuid, call in self._events.calls.items() if call.pending]
 
     # stops observing the transcript; idempotent, so that the swarm's end calls it
     # however the swarm ends
@@ -509,14 +509,16 @@ class LedgerInterval:
             attribution_complete=attribution_complete,
         )
 
-    # Whether a boundary callback chain of the member that a stop or an end cancelled
-    # had a model call of its own in flight: a model event begun in the member's spans
-    # during the chain that did not complete, whose usage is then unknown. Nothing else
-    # of the member's starts after such a chain, which ends the member.
+    # Whether a stop or an end that cancelled one of the member's boundary callback
+    # chains interrupted a model call of the member's: one in flight at the
+    # cancellation, in the member's spans, that did not then complete, so its usage is
+    # unknown. A call that had already ended, a handled failure included, is not one.
     def _in_flight(self, member: MemberAccount, places: "SpanPlaces") -> bool:
-        if not member.cancelled_chains:
-            return False
-        calls = list(self._events.calls.values())[min(member.cancelled_chains) :]
+        calls = [
+            self._events.calls[uuid]
+            for uuid in member.cancelled_calls
+            if uuid in self._events.calls
+        ]
         return any(
             (call.pending or call.errored) and places(call.span_id)[1] == member.name
             for call in calls

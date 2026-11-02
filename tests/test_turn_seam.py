@@ -13,6 +13,7 @@ import pytest
 from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import (
     Agent,
+    AgentChannel,
     AgentState,
     AgentSubmit,
     agent,
@@ -20,9 +21,18 @@ from inspect_ai.agent import (
     as_tool,
     deepagent,
     react,
+    research,
 )
+from inspect_ai.agent._channel import Cancel, UserMessage, current_agent_channel
 from inspect_ai.dataset import Sample
-from inspect_ai.event import CommunicationEvent, Event, ModelEvent, SwarmEvent
+from inspect_ai.event import (
+    CommunicationEvent,
+    CompactionEvent,
+    Event,
+    ModelEvent,
+    SwarmEvent,
+    ToolEvent,
+)
 from inspect_ai.log import EvalSample
 from inspect_ai.model import (
     ChatMessage,
@@ -30,12 +40,23 @@ from inspect_ai.model import (
     ChatMessageSystem,
     ChatMessageTool,
     ChatMessageUser,
+    CompactionAuto,
+    CompactionSummary,
     GenerateConfig,
     Model,
     ModelOutput,
     ModelUsage,
+    get_model,
 )
-from inspect_ai.tool import Tool, ToolChoice, ToolDef, ToolInfo, ToolSource, tool
+from inspect_ai.tool import (
+    MCPServer,
+    Tool,
+    ToolChoice,
+    ToolDef,
+    ToolInfo,
+    ToolSource,
+    tool,
+)
 from inspect_ai.util import (
     background,
     message_limit,
@@ -73,6 +94,7 @@ from .swarm_runtime import (
     sleeper,
     wait,
 )
+from .test_binding import binding_test_loop, binding_test_member
 
 Result = list[ChatMessage] | Literal["end"] | None
 
@@ -129,7 +151,10 @@ def work() -> Tool:
 
 
 def _react(
-    script: Script, *, tools: Sequence[Tool | ToolSource] = (), **kwargs: Any
+    script: Script,
+    *,
+    tools: Sequence[Tool | ToolDef | ToolSource] = (),
+    **kwargs: Any,
 ) -> Agent:
     return react(model=scripted_model(script), tools=[work(), *tools], **kwargs)
 
@@ -854,19 +879,34 @@ async def test_a_stop_ends_a_member_at_its_boundary_with_no_further_generation(
         assert _boundaries(outcome)[-1]["outcome"] == "stop"
 
 
+def _failing(input: list[ChatMessage]) -> ModelOutput:
+    raise ValueError("the judge failed")
+
+
 @pytest.mark.anyio
-@pytest.mark.parametrize("in_flight", [True, False])
-async def test_a_callback_model_call_in_flight_at_the_stop_marks_the_ledger_line_cancelled(
-    in_flight: bool,
+@pytest.mark.parametrize("call", ["in-flight", "completed", "failed", "none"])
+@pytest.mark.parametrize("ending", ["stop", "end"])
+async def test_only_a_callback_model_call_in_flight_at_the_cancellation_marks_the_ledger_line_cancelled(
+    call: str, ending: str
 ) -> None:
     script = _Recording([_submit()])
-    judge = scripted_model(Script(gate=anyio.Event()))
+    judges = {
+        "in-flight": Script(gate=anyio.Event()),
+        "completed": Script(),
+        "failed": Script(respond=_failing),
+    }
+    judge = scripted_model(judges.get(call))
 
     async def callback(b: Boundary) -> Result:
-        if in_flight:
+        if call == "in-flight":
             await judge.generate("judge")
-        else:
-            await anyio.sleep_forever()
+        elif call == "completed":
+            await judge.generate("judge")
+        elif call == "failed":
+            # a failure the callback handles
+            with pytest.raises(ValueError):
+                await judge.generate("judge")
+        await anyio.sleep_forever()
         return None
 
     async def run_controller(control: SwarmControl) -> StopReason:
@@ -875,13 +915,89 @@ async def test_a_callback_model_call_in_flight_at_the_stop_marks_the_ledger_line
         while not control.member("a").held:
             await anyio.sleep(0.01)
         await anyio.sleep(0.05)
-        return "done"
+        if ending == "stop":
+            return "done"
+        control.member("a").end(origin="operator")
+        return await _drain(control)
 
     outcome = await _run(
         [member(_react(script), name="a")], run_controller, budget=Budget(grace=5)
     )
     assert _statuses(outcome) == {"a": "stopped"}
-    assert _ledger(outcome).members[0].cancelled is in_flight
+    [line] = _ledger(outcome).members
+    assert line.cancelled is (call == "in-flight")
+    # the handled failure is still counted as a call whose cost is missing
+    assert line.calls.errored == (1 if call in ("in-flight", "failed") else 0)
+
+
+@agent
+def slow_cleanup(inner: Agent, seconds: float) -> Agent:
+    """Run `inner`, then take `seconds` to clean up, however it ended."""
+
+    async def execute(state: AgentState) -> AgentState:
+        try:
+            return await inner(state)
+        finally:
+            await anyio.sleep(seconds)
+
+    return execute
+
+
+class _Server(MCPServer):
+    """An MCP server with no tools, whose connection takes `opening` seconds to open and `closing` seconds to close."""
+
+    def __init__(self, opening: float = 0, closing: float = 0) -> None:
+        self.opening = opening
+        self.closing = closing
+        self.opened = False
+
+    async def tools(self) -> list[Tool]:
+        return []
+
+    async def __aenter__(self) -> "_Server":
+        await anyio.sleep(self.opening)
+        self.opened = True
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await anyio.sleep(self.closing)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ending", ["end()", "callback"])
+@pytest.mark.parametrize("cleanup", ["finally", "mcp"])
+@pytest.mark.parametrize("seconds,status", [(5.0, "cancelled"), (0.05, "stopped")])
+async def test_ending_a_held_member_gives_its_cleanup_the_grace(
+    ending: str, cleanup: str, seconds: float, status: str
+) -> None:
+    script = _Recording([_submit()])
+
+    async def callback(b: Boundary) -> Result:
+        if ending == "callback":
+            return "end"
+        await anyio.sleep_forever()
+        return None
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        control.member("a").on_boundary(callback, origin="test")
+        control.start("a")
+        if ending == "end()":
+            while not control.member("a").held:
+                await anyio.sleep(0.01)
+            control.member("a").end(origin="operator")
+        return await _drain(control)
+
+    if cleanup == "finally":
+        agent = slow_cleanup(_react(script), seconds)
+    else:
+        agent = _react(script, tools=[_Server(closing=seconds)])
+    with anyio.fail_after(3):
+        outcome = await _run(
+            [member(agent, name="a")], run_controller, budget=Budget(grace=0.3)
+        )
+    assert _statuses(outcome) == {"a": status}
+    assert script.started == 0
+    assert _ledger(outcome).members[0].cancelled is (status == "cancelled")
 
 
 @pytest.mark.anyio
@@ -905,6 +1021,178 @@ async def test_a_stop_with_no_grace_ends_a_parked_member_with_no_generation() ->
     # the hard stop may reach it before its wrapper records the end
     assert _statuses(outcome)["a"] in ("stopped", "cancelled")
     assert script.started == 0
+
+
+def _cached_model(script: Script) -> Model:
+    return get_model(
+        f"mockllm/m-{uuid4().hex}",
+        memoize=False,
+        custom_outputs=script,
+        config=GenerateConfig(cache=True),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("where", ["held", "mid-turn", "callback"])
+@pytest.mark.parametrize("ending", ["stop", "end"])
+@pytest.mark.parametrize("waiting", ["reply", "tools"])
+async def test_no_cached_reply_or_tool_call_runs_after_a_stop_or_end(
+    where: str,
+    ending: str,
+    waiting: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("INSPECT_CACHE_DIR", str(tmp_path))
+    second = output("not yet") if waiting == "reply" else _call("work")
+    script = Script([_call("work", seconds=0.5), second, _submit()])
+    model = _cached_model(script)
+    control_ref: list[SwarmControl] = []
+
+    def request(control: SwarmControl) -> None:
+        if ending == "stop":
+            cast(SwarmRun, control).stop("controller:test")
+        else:
+            control.member("a").end(origin="operator")
+
+    async def callback(b: Boundary) -> Result:
+        if b.index == 1:
+            if where == "callback":
+                request(control_ref[0])
+            else:
+                await anyio.sleep_forever()
+        return None
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        control_ref.append(control)
+        if where != "mid-turn":
+            control.member("a").on_boundary(callback, origin="test")
+        control.start("a")
+        if where == "held":
+            while not control.member("a").held:
+                await anyio.sleep(0.01)
+            request(control)
+        elif where == "mid-turn":
+            # the cached first reply has returned, and its tool call is running
+            await anyio.sleep(0.2)
+            request(control)
+        return await _drain(control)
+
+    # warm the cache: the whole conversation, every reply cached
+    warm = await _run(
+        [member(react(model=model, tools=[work()]), name="a")], _starting({})
+    )
+    assert _statuses(warm) == {"a": "submitted"}
+    assert script.started == 3
+
+    outcome = await _run(
+        [member(react(model=model, tools=[work()]), name="a")],
+        run_controller,
+        budget=Budget(grace=5),
+    )
+    assert _statuses(outcome) == {"a": "stopped"}
+    calls = [e for e in outcome.events if isinstance(e, ModelEvent)]
+    # only the first reply, read from the cache
+    assert [e.cache for e in calls] == ["read"]
+    assert script.started == 3
+    tools = [e for e in outcome.events if isinstance(e, ToolEvent)]
+    assert [e.function for e in tools] == ["work"]
+    assert _ledger(outcome).members[0].cancelled is False
+
+
+# ---------------------------------------------------------------------------
+# Interrupts
+
+
+def stall(interrupted: anyio.Event, channels: list[AgentChannel]) -> ToolDef:
+    # a tool that interrupts its own turn, as an operator's interrupt does
+    async def execute() -> str:
+        """Wait until interrupted."""
+        channel = current_agent_channel()
+        channels.append(channel)
+        channel._interrupt(Cancel())
+        interrupted.set()
+        await anyio.sleep_forever()
+        return "never"
+
+    return ToolDef(execute, name="stall")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("then", ["redirect", "end", "stop", "time"])
+@pytest.mark.parametrize("loop", ["submit", "reply"])
+async def test_a_member_waiting_for_a_redirect_is_mid_turn_not_held(
+    then: str, loop: str
+) -> None:
+    interrupted = anyio.Event()
+    channels: list[AgentChannel] = []
+    final = _submit() if loop == "submit" else output("answer")
+    script = _Recording([_call("stall"), final])
+    waiter = _Recording([_call("swarm_wait", timeout=1), _submit("waiter's")])
+    ran: list[tuple[int, str, str]] = []
+
+    async def callback(b: Boundary) -> Result:
+        ran.append((b.index, b.after, b.messages[-1].text))
+        return None
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        handle = control.member("a")
+        handle.on_boundary(callback, origin="test")
+        control.start("a")
+        await interrupted.wait()
+        # in after_cancel(), waiting for the redirect
+        await anyio.sleep(0.05)
+        assert not handle.held
+        if then == "stop":
+            return "done"
+        if then == "end":
+            handle.end(origin="operator")
+        elif then == "redirect":
+            # a wait in another member does not see it as waiting
+            control.start("waiter")
+            while control.member("waiter").state != "ended":
+                await anyio.sleep(0.01)
+            assert not handle.held
+            channels[0]._post(UserMessage(message=ChatMessageUser(content="REDIRECT")))
+        return await _drain(control)
+
+    outcome = await _run(
+        [
+            member(
+                _react(
+                    script,
+                    tools=[stall(interrupted, channels)],
+                    submit=loop == "submit",
+                ),
+                name="a",
+                limits=[time_limit(0.3)] if then == "time" else [],
+            ),
+            member(_react(waiter, tools=[swarm_tools()]), name="waiter"),
+        ],
+        run_controller,
+        channels=[shared_memory()],
+        budget=Budget(grace=0.1),
+    )
+    status = {
+        "redirect": "submitted",
+        "end": "cancelled",
+        "stop": "cancelled",
+        "time": "member_limit:time",
+    }[then]
+    assert _statuses(outcome)["a"] == status
+    if then == "redirect":
+        [waited] = [
+            e
+            for e in outcome.events
+            if isinstance(e, CommunicationEvent) and e.kind == "waited"
+        ]
+        assert wait(waited).outcome == "timeout"
+        # the redirect continued it to a boundary where the callback ran
+        assert [r[:2] for r in ran] == [(0, "start"), (1, "user")]
+        assert ran[1][2] == "REDIRECT"
+    else:
+        assert [r[:2] for r in ran] == [(0, "start")]
+    assert _metrics(outcome).members[0].holds == len(ran)
 
 
 # ---------------------------------------------------------------------------
@@ -1348,6 +1636,92 @@ async def test_a_callback_cannot_start_background_work_while_the_member_is_held(
     )
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "ending,opening,status",
+    [
+        ("stop", 5.0, "cancelled"),
+        ("stop", 0.1, "stopped"),
+        ("end", 5.0, "cancelled"),
+        ("end", 0.1, "stopped"),
+    ],
+)
+@pytest.mark.parametrize("with_callback", [True, False])
+async def test_ending_a_member_still_opening_its_mcp_server_is_as_without_the_seam(
+    ending: str, opening: float, status: str, with_callback: bool
+) -> None:
+    server = _Server(opening=opening)
+    script = _Recording([_submit()])
+    ran: list[int] = []
+
+    async def callback(b: Boundary) -> Result:
+        ran.append(b.index)
+        return None
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        if with_callback:
+            control.member("a").on_boundary(callback, origin="test")
+        control.start("a")
+        await anyio.sleep(0.05)
+        # before boundary 0
+        assert not server.opened
+        if ending == "stop":
+            return "done"
+        control.member("a").end(origin="operator")
+        return await _drain(control)
+
+    with anyio.fail_after(3):
+        outcome = await _run(
+            [member(_react(script, tools=[server]), name="a")],
+            run_controller,
+            budget=Budget(grace=0.5),
+        )
+    # no RuntimeError for callbacks that never ran
+    assert _statuses(outcome) == {"a": status}
+    assert server.opened is (status == "stopped")
+    assert script.started == 0
+    assert ran == [] and _boundaries(outcome) == []
+
+
+@agent
+def cancelled_after(inner: Agent, seconds: float, caught: list[bool]) -> Agent:
+    """Run `inner`, cancelled from outside after `seconds`."""
+
+    async def execute(state: AgentState) -> AgentState:
+        with anyio.move_on_after(seconds) as scope:
+            state = await inner(state)
+        caught.append(scope.cancelled_caught)
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("with_callback", [True, False])
+async def test_a_cancellation_from_outside_the_swarm_reaches_a_member_in_setup(
+    with_callback: bool,
+) -> None:
+    server = _Server(opening=30)
+    callbacks: dict[str, list[tuple[str, BoundaryCallback]]] = {}
+
+    async def callback(b: Boundary) -> Result:
+        return None
+
+    if with_callback:
+        callbacks["a"] = [("test", callback)]
+    caught: list[bool] = []
+    swarm_ = _swarm(
+        [member(_react(_Recording([_submit()]), tools=[server]), name="a")],
+        _starting(callbacks),
+    )
+    with anyio.fail_after(5):
+        sample = await _eval(cancelled_after(swarm_, 0.2, caught))
+    # it propagated to the scope outside the swarm, with no RuntimeError
+    assert sample.error is None
+    assert caught == [True]
+    assert not server.opened
+
+
 # ---------------------------------------------------------------------------
 # Stale compaction summaries
 
@@ -1435,22 +1809,160 @@ async def test_a_rewrite_whose_only_user_message_is_a_stale_summary_ends_errored
     assert boundary["outcome"] == "error" and boundary["origin"] == "swarm"
 
 
+class _Summarizing(_Recording):
+    """A script that answers each summary request with the next of `summaries` and keeps its input."""
+
+    def __init__(
+        self, outputs: Sequence[ModelOutput], summaries: Sequence[str]
+    ) -> None:
+        super().__init__(outputs)
+        self.summaries = list(summaries)
+        self.summarized: list[list[ChatMessage]] = []
+
+    async def __call__(
+        self,
+        input: list[ChatMessage],
+        tools: list[ToolInfo],
+        tool_choice: ToolChoice,
+        config: GenerateConfig,
+    ) -> ModelOutput:
+        if input and "tasked with summarizing" in input[-1].text:
+            self.summarized.append(list(input))
+            return output(self.summaries.pop(0))
+        return await super().__call__(input, tools, tool_choice, config)
+
+
+def _overflow() -> ModelOutput:
+    return ModelOutput.from_content("mockllm", "overflow", stop_reason="model_length")
+
+
+@tool
+def big() -> Tool:
+    async def execute() -> str:
+        """Return a long result."""
+        return "filler " * 4000
+
+    return execute
+
+
+def _text(messages: Sequence[ChatMessage]) -> str:
+    return "\n".join(m.text for m in messages)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["summary", "auto"])
+@pytest.mark.parametrize("loop", ["submit", "reply"])
+@pytest.mark.parametrize("change", ["edit", "delete"])
+@pytest.mark.parametrize("trigger", ["overflow", "threshold"])
+async def test_a_rewrite_before_a_real_summary_removes_it_and_the_next_compaction_sees_the_rewrite(
+    strategy: str, loop: str, change: str, trigger: str
+) -> None:
+    note = _user("NOTE ORIGINAL")
+    final = _submit() if loop == "submit" else output("answer")
+    # the overflow forces the first compaction; the second is forced by another
+    # overflow, or comes over the threshold after a long tool result
+    second = _overflow() if trigger == "overflow" else _call("big")
+    script = _Summarizing(
+        [_overflow(), second, final],
+        summaries=["SUMMARY ONE: NOTE ORIGINAL", "SUMMARY TWO"],
+    )
+    compaction = (
+        CompactionSummary(threshold=1500)
+        if strategy == "summary"
+        else CompactionAuto(threshold=1500)
+    )
+    summaries: list[str] = []
+
+    async def callback(b: Boundary) -> Result:
+        if b.index == 0:
+            return [*b.messages, note]
+        summary = [m for m in b.messages if "summary" in (m.metadata or {})]
+        if not summary or summaries:
+            return None
+        # the first boundary after the first compaction
+        assert summary[0].id is not None
+        summaries.append(summary[0].id)
+        if change == "edit":
+            return [
+                m.model_copy(update={"content": "NOTE EDITED"})
+                if m.id == note.id
+                else m
+                for m in b.messages
+            ]
+        return [m for m in b.messages if m.id != note.id]
+
+    outcome = await _run(
+        [
+            member(
+                _react(
+                    script,
+                    tools=[big()],
+                    submit=loop == "submit",
+                    compaction=compaction,
+                ),
+                name="a",
+            )
+        ],
+        _starting({"a": [("test", callback)]}),
+    )
+    assert _statuses(outcome) == {"a": "submitted"}
+    triggers = [
+        (e.metadata or {}).get("trigger")
+        for e in outcome.events
+        if isinstance(e, CompactionEvent)
+    ]
+    assert triggers == ["forced", "forced" if trigger == "overflow" else "threshold"]
+    # the summary made from the history the callback changed is removed, as the
+    # runtime's change
+    assert [c["removed"] for c in _changes(outcome) if c["origin"] == "swarm"] == [
+        summaries
+    ]
+    first, second_summary = script.summarized
+    assert "NOTE ORIGINAL" in _text(first)
+    edited = "NOTE EDITED" if change == "edit" else None
+    # the model's next input, and the next summarizer's, have the rewrite and neither
+    # the original note nor the summary made from it
+    for input in (script.inputs[1], second_summary):
+        text = _text(input)
+        assert "NOTE ORIGINAL" not in text
+        if edited is not None:
+            assert edited in text
+
+
 # ---------------------------------------------------------------------------
 # Binding
 
 
 @pytest.mark.anyio
-async def test_a_nested_loop_is_never_held_and_a_child_with_swarm_tools_stays_the_bus_loop() -> (
-    None
-):
-    child_script = _Recording([_call("work"), _submit("child's")])
-    child = react(
-        name="helper",
-        description="A helper.",
-        model=scripted_model(child_script),
-        tools=[work(), swarm_tools()],
+@pytest.mark.parametrize("kind", ["as_tool", "deepagent"])
+@pytest.mark.parametrize("with_callback", [True, False])
+async def test_a_nested_loop_is_never_held_and_a_child_with_swarm_tools_stays_the_bus_loop(
+    kind: str, with_callback: bool
+) -> None:
+    child_script = _Recording(
+        [_call("swarm_wait", timeout=5), _call("work"), _submit("child's")]
     )
-    parent_script = _Recording([_call("helper", input="help"), _submit()])
+    child_model = scripted_model(child_script)
+    if kind == "as_tool":
+        child = react(
+            name="helper",
+            description="A helper.",
+            model=child_model,
+            tools=[work(), swarm_tools()],
+        )
+        parent_script = _Recording([_call("helper", input="help"), _submit()])
+        agent_ = react(model=scripted_model(parent_script), tools=[as_tool(child)])
+    else:
+        # a synchronous subagent, whose research child has the swarm's tools
+        parent_script = _Recording([_call("agent", prompt="help"), _submit()])
+        agent_ = deepagent(
+            model=scripted_model(parent_script),
+            subagents=[
+                research(tools=[work()], extra_tools=[swarm_tools()], model=child_model)
+            ],
+            memory=False,
+            todo_write=False,
+        )
     ran: list[tuple[int, int]] = []
 
     async def callback(b: Boundary) -> Result:
@@ -1458,7 +1970,8 @@ async def test_a_nested_loop_is_never_held_and_a_child_with_swarm_tools_stays_th
         return None
 
     async def run_controller(control: SwarmControl) -> StopReason:
-        control.member("a").on_boundary(callback, origin="test")
+        if with_callback:
+            control.member("a").on_boundary(callback, origin="test")
         control.start("a")
         result = await _drain(control)
         context = cast(SwarmRun, control)._lookup("a").context
@@ -1468,18 +1981,26 @@ async def test_a_nested_loop_is_never_held_and_a_child_with_swarm_tools_stays_th
         return result
 
     outcome = await _run(
-        [
-            member(
-                react(model=scripted_model(parent_script), tools=[as_tool(child)]),
-                name="a",
-            )
-        ],
+        [member(agent_, name="a")],
         run_controller,
-        channels=[shared_memory()],
+        channels=[shared_memory(), binding_test_loop(), binding_test_member()],
     )
     assert _statuses(outcome) == {"a": "submitted"}
-    # the parent's two boundaries; the child's two ran inside its turn
-    assert ran == [(0, 0), (1, 2)]
+    # the child keeps its loop-reach tools, and its wait sees the member waiting
+    offered = [
+        {t.name for t in e.tools} & {"loop_write", "member_write"}
+        for e in outcome.events
+        if isinstance(e, ModelEvent) and e.model.endswith(child_model.name)
+    ]
+    assert offered == [{"loop_write", "member_write"}] * 3
+    [waited] = [
+        e
+        for e in outcome.events
+        if isinstance(e, CommunicationEvent) and e.kind == "waited"
+    ]
+    assert wait(waited).outcome == "all_waiting"
+    # the parent's two boundaries; the child's three ran inside its turn
+    assert ran == ([(0, 0), (1, 3)] if with_callback else [])
     assert _metrics(outcome).tools_unwired == []
 
 

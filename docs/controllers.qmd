@@ -165,7 +165,7 @@ async def run(swarm: SwarmControl) -> StopReason:
 
 Several callbacks run in the order they were registered, each receiving the conversation as the ones before it left it. So callers compose: a pause registered after a scheduler holds the member after the scheduler lets it go.
 
-`handle.end(origin=...)` ends a member from outside the chain, `stopped`, with the reason `ended by <origin>`. A held member ends at once: the waiting callback is cancelled and no change from that boundary is applied. A member in the middle of a turn ends at its next boundary, and its next model call is refused; if it is still running after the swarm's grace period, it is cancelled. A member whose agent returns after `end()` ends `stopped`, whatever its output.
+`handle.end(origin=...)` ends a member from outside the chain, `stopped`, with the reason `ended by <origin>`. A held member ends at once: the waiting callback is cancelled and no change from that boundary is applied. A member in the middle of a turn ends at its next boundary, and its next model call is refused. If the member is still running after the swarm's grace period, its cleanup included, it is cancelled and ends `cancelled`. The same deadline applies when a callback returns `"end"`. A member whose agent returns after `end()` ends `stopped`, whatever its output.
 
 A swarm stop ends every member at its next boundary, and a held member at once.
 

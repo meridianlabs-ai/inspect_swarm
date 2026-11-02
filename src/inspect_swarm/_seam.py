@@ -97,10 +97,12 @@ class MemberGate:
     # the member's time limits, which pause while it is held
     time_nodes: list[SwarmTimeNode] = field(default_factory=list[SwarmTimeNode])
     # set by the runtime: the swarm's stop reason once it is stopping, the bus's
-    # all-waiting check, and the number of model events the ledger has seen
+    # all-waiting check, the model calls in flight now (the ledger's event ids), and
+    # what an end request starts (the grace timer that bounds the member's ending)
     stopping: Callable[[], str | None] = lambda: None
     recheck: Callable[[], None] = lambda: None
-    call_mark: Callable[[], int] = lambda: 0
+    in_flight: Callable[[], list[str]] = lambda: []
+    ending: Callable[[], None] = lambda: None
     # the member's own task, set by the member wrapper
     task: int | None = None
     # a callback was registered for this run, unregistered since or not
@@ -114,9 +116,9 @@ class MemberGate:
     end_origin: str | None = None
     holds: int = 0
     held_time: float = 0.0
-    # for each chain a stop or an end cancelled, the ledger's model-event count when it
-    # began, so the ledger can find calls the chain left in flight
-    cancelled_chains: list[int] = field(default_factory=list[int])
+    # the model calls in flight when a stop or an end cancelled a chain, so the ledger
+    # can find the member's calls the cancellation interrupted
+    cancelled_calls: list[str] = field(default_factory=list[str])
     _callbacks: list[_Registration] = field(default_factory=list[_Registration])
     _turn_closed: bool = False
     _index: int = 0
@@ -149,15 +151,18 @@ class MemberGate:
 
     def request_end(self, origin: str) -> None:
         # the first request wins; it closes the lever, so the member's next model call
-        # is refused, and cancels the chain if the member is held
+        # is refused, cancels the chain if the member is held, and starts the grace that
+        # bounds the rest of its ending
         if self.end_origin is not None:
             return
         self.end_origin = origin
         self.lever.close(ended_reason(origin))
         self.cancel_chain()
+        self.ending()
 
     def cancel_chain(self) -> None:
-        if self._chain is not None:
+        if self._chain is not None and not self._chain.cancel_called:
+            self.cancelled_calls.extend(self.in_flight())
             self._chain.cancel()
 
     # TurnGate
@@ -264,7 +269,6 @@ class MemberGate:
             for node in self.time_nodes:
                 node.pause()
             self.recheck()
-            mark = self.call_mark()
             ended: str | None = None
             try:
                 with anyio.CancelScope() as chain:
@@ -313,8 +317,6 @@ class MemberGate:
                 self.recheck()
             pending = self._pending()
             if pending is not None:
-                if chain.cancel_called:
-                    self.cancelled_chains.append(mark)
                 outcome = pending
                 if pending == "end":
                     assert self.end_origin is not None

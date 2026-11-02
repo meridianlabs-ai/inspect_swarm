@@ -1,4 +1,5 @@
 import contextvars
+import functools
 from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
@@ -128,7 +129,7 @@ class MemberHandle(Protocol):
     def end(self, *, origin: str) -> None:
         """End the member `stopped`, with the reason `ended by <origin>`.
 
-        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary; if it is still running when the swarm's grace period has passed, it is cancelled and ends `cancelled`. A pending member ends at its first boundary once started. A member whose agent returns after the request ends `stopped`, whatever its output. A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
+        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary. A pending member ends at its first boundary once started. If the member is still running when the swarm's grace period has passed since the request (or since a pending member started), its turn or its cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output. A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
 
         Args:
             origin: Names the caller in the evidence, as for `on_boundary()`.
@@ -273,8 +274,6 @@ class MemberRun:
             self.lever,
             time_nodes=[n for n in self.nodes if isinstance(n, SwarmTimeNode)],
         )
-        # set by the runtime: starts the grace timer of an end requested mid-turn
-        self.end_timer: Callable[["MemberRun"], None] = lambda _: None
 
     @property
     def submitted(self) -> bool:
@@ -305,13 +304,9 @@ class MemberRun:
 
     def end(self, *, origin: str) -> None:
         check_origin(origin, f"end({self.name!r})")
-        if self.state == "ended" or self.gate.end_origin is not None:
+        if self.state == "ended":
             return
-        held = self.gate.held
         self.gate.request_end(origin)
-        if self.state == "running" and not held:
-            # a turn may not reach its next boundary soon
-            self.end_timer(self)
 
     @property
     def cancelled(self) -> bool:
@@ -374,8 +369,8 @@ class SwarmRun:
         for m in self._members:
             m.gate.stopping = lambda: self.stop_reason
             m.gate.recheck = self.bus.recheck
-            m.gate.call_mark = self._call_mark
-            m.end_timer = self._end_timer
+            m.gate.in_flight = self._in_flight
+            m.gate.ending = functools.partial(self._ending, m)
         for node in caps:
             if isinstance(node, SwarmNode):
                 node.stop_swarm = self.stop
@@ -667,7 +662,7 @@ class SwarmRun:
                         cancelled=m.cancelled,
                         background_started=m.outcome.background_started,
                         background_cancelled=m.outcome.background_cancelled,
-                        cancelled_chains=list(m.gate.cancelled_chains),
+                        cancelled_calls=list(m.gate.cancelled_calls),
                     )
                     for m in self._members
                 ],
@@ -842,8 +837,16 @@ class SwarmRun:
             m.name: m.agent_state.output for m in self._members if m.state == "ended"
         }
 
-    # end()'s grace for a member it reached mid-turn: the member is cancelled, as the
-    # hard stop cancels one, if it is still running when the effective grace has passed
+    # An end request, from end() or a callback's "end", for a running member: a turn may
+    # not reach its next boundary soon, and the agent's cleanup after the gate ends it
+    # (a wrapper's `finally`, react's MCP teardown) may run long, so either way it gets
+    # the effective grace. A pending member's starts when it is started.
+    def _ending(self, m: MemberRun) -> None:
+        if m.state == "running":
+            self._end_timer(m)
+
+    # end()'s grace: the member is cancelled, as the hard stop cancels one, if it is
+    # still running when the effective grace has passed
     def _end_timer(self, m: MemberRun) -> None:
         assert self._runtime_tg is not None
         self._runtime_tg.start_soon(self._end_grace, m)
@@ -855,10 +858,9 @@ class SwarmRun:
         if m.state == "running":
             m.context.scope.cancel()
 
-    # the number of model events the ledger has seen, for the turn gate's cancelled
-    # chains
-    def _call_mark(self) -> int:
-        return 0 if self._interval is None else self._interval.call_count()
+    # the model calls in flight now, for the turn gate's cancelled chains
+    def _in_flight(self) -> list[str]:
+        return [] if self._interval is None else self._interval.pending_calls()
 
     async def _time_cap(self, seconds: float) -> None:
         await anyio.sleep(seconds)
