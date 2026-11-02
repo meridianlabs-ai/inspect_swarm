@@ -3,7 +3,7 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import cast
 
-from inspect_ai.event import Event, InfoEvent, ModelEvent
+from inspect_ai.event import CommunicationEvent, Event, ModelEvent, SwarmEvent
 from pydantic import JsonValue
 
 logger = logging.getLogger(__name__)
@@ -70,27 +70,22 @@ class PathLog:
             if event.uuid not in self.steps:
                 self.steps[event.uuid] = (event.span_id, position)
             return
+        if isinstance(event, SwarmEvent):
+            if event.kind == "member_result" and self._take(event, event.member):
+                assert event.member is not None
+                self.ends.setdefault(event.member, position)
+            return
         if not (
-            isinstance(event, InfoEvent)
+            isinstance(event, CommunicationEvent)
             and event.source == "inspect_swarm"
-            and isinstance(event.data, dict)
+            and self._take(event, event.agent)
         ):
             return
+        member = event.agent
         data = event.data
-        member = data.get("member")
-        if not isinstance(member, str) or member not in self.roster:
-            return
-        if event.uuid in self._taken:
-            return
-        self._taken.add(event.uuid)
-        kind = data.get("kind")
-        if data.get("type") == "result" and kind == "member_result":
-            self.ends.setdefault(member, position)
-        elif data.get("type") != "comm":
-            return
-        elif kind == "waited":
+        if event.wait is not None:
             files: list[tuple[str, int]] = []
-            reached = set(cast(list[str], data["channels"]))
+            reached = set(event.wait.channels)
             if self.board in reached and reached <= {self.board, self.messages}:
                 files = [
                     (cast(str, e["file"]), cast(int, e["version"]))
@@ -103,27 +98,35 @@ class PathLog:
                 PathWait(
                     position,
                     member,
-                    cast(str | None, data["loop"]),
+                    event.loop_span_id,
                     files,
                     [m for m in ended if m in self.roster],
                 )
             )
-        elif self.board is None or data.get("channel") != self.board:
+        elif self.board is None or event.channel != self.board:
             return
-        elif kind == "delivered":
+        elif event.kind == "delivered":
             result = cast(dict[str, JsonValue], data["result"])
             self.writes.append(
                 PathWrite(
                     position,
                     member,
-                    cast(str | None, data["loop"]),
+                    event.loop_span_id,
                     _versions(_entries(result["files"])),
                 )
             )
-        elif kind == "read" and data.get("listing") is not True:
+        elif event.kind == "read" and data.get("listing") is not True:
             self.reads.append(
                 PathRead(position, member, _versions(_entries(data["files"])))
             )
+
+    # Whether to take an evidence event: one naming a roster member, not taken before.
+    def _take(self, event: Event, member: str | None) -> bool:
+        assert event.uuid is not None
+        if member not in self.roster or event.uuid in self._taken:
+            return False
+        self._taken.add(event.uuid)
+        return True
 
 
 # A version of a board file as a write left it: the writing loop, the writer's value

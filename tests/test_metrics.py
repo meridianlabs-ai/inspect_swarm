@@ -18,9 +18,11 @@ from inspect_ai.agent import (
 )
 from inspect_ai.dataset import Sample
 from inspect_ai.event import (
-    InfoEvent,
+    CommunicationEvent,
+    Event,
     ModelEvent,
     SpanBeginEvent,
+    SwarmEvent,
     Timeline,
     TimelineEvent,
     TimelineSpan,
@@ -82,32 +84,27 @@ from .swarm_runtime import (
     TOKENS_PER_CALL,
     Script,
     after,
+    comm_events,
     controller,
-    evidence,
+    data,
     generator,
     output,
     run_swarm,
     sample,
     scripted_model,
     sleeper,
+    swarm_events,
 )
+from .swarm_runtime import wait as wait_of
 from .test_wait import _p, nested_loop, resolve  # pyright: ignore[reportPrivateUsage]
 
 
 def _metrics(transcript: Transcript) -> SwarmMetrics:
-    [data] = [
-        e.data
-        for e in transcript.events
-        if isinstance(e, InfoEvent)
-        and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "metrics"
-    ]
-    assert isinstance(data, dict)
-    record = {k: v for k, v in data.items() if k != "type"}
+    [event] = swarm_events(transcript, "metrics")
     # the store entry is the same record
-    assert store().get(METRICS_KEY) == record
-    return SwarmMetrics.model_validate(record)
+    assert event.member is None
+    assert store().get(METRICS_KEY) == event.data
+    return SwarmMetrics.model_validate(event.data)
 
 
 def _by_name(metrics: SwarmMetrics) -> dict[str, Any]:
@@ -611,6 +608,39 @@ def test_each_member_has_a_timeline_of_its_spans(
 
 
 @pytest.mark.anyio
+async def test_a_member_timeline_holds_its_communication_and_result_events() -> None:
+    outcome = await run_swarm(
+        swarm(
+            [member(notes(scripted_model(), 1), name=name) for name in ("a", "b")],
+            channels=["metrics_test_impostor"],
+            controller=_answered_by("b"),
+        )
+    )
+    timelines = {t.name: t for t in outcome.transcript.timelines}
+    for name in ("a", "b"):
+        events = _events(timelines[name].root)
+        comms = [e for e in events if isinstance(e, CommunicationEvent)]
+        assert [(e.kind, e.agent) for e in comms] == [
+            ("sent", name),
+            ("delivered", name),
+            ("read", name),
+        ]
+        assert [(e.kind, e.member) for e in events if isinstance(e, SwarmEvent)] == [
+            ("member_result", name)
+        ]
+
+
+def _events(span: TimelineSpan) -> list[Event]:
+    found: list[Event] = []
+    for item in span.content:
+        if isinstance(item, TimelineEvent):
+            found.append(item.event)
+        else:
+            found.extend(_events(item))
+    return found
+
+
+@pytest.mark.anyio
 async def test_timelines_and_metrics_are_written_when_a_cancellation_ends_the_swarm() -> (
     None
 ):
@@ -970,12 +1000,7 @@ def _answered_by(name: str) -> Controller:
 def _all_metrics(transcript: Transcript) -> list[SwarmMetrics]:
     # every swarm's metrics in a sample, in the order the swarms ended
     return [
-        SwarmMetrics.model_validate({k: v for k, v in e.data.items() if k != "type"})
-        for e in transcript.events
-        if isinstance(e, InfoEvent)
-        and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "metrics"
+        SwarmMetrics.model_validate(e.data) for e in swarm_events(transcript, "metrics")
     ]
 
 
@@ -1127,8 +1152,8 @@ async def test_a_wait_for_an_end_follows_the_members_drained_work() -> None:
             controller=_answered_by("w"),
         )
     )
-    [wait] = evidence(outcome.transcript, "waited")
-    assert wait["ended"] == [{"member": "q", "status": "submitted"}]
+    [wait] = comm_events(outcome.transcript, "waited")
+    assert data(wait)["ended"] == [{"member": "q", "status": "submitted"}]
     metrics = _metrics(outcome.transcript)
     assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 5)
 
@@ -1234,10 +1259,10 @@ async def test_a_wait_that_also_reaches_messages_links_the_files_it_names() -> N
             controller=_answered_by("w"),
         )
     )
-    [wait] = evidence(outcome.transcript, "waited")
-    assert sorted(wait["channels"]) == ["messages", "shared_memory"]
-    assert [f["version"] for f in wait["files"]] == [1]
-    assert wait["ended"] == []
+    [wait] = comm_events(outcome.transcript, "waited")
+    assert sorted(wait_of(wait).channels) == ["messages", "shared_memory"]
+    assert [f["version"] for f in data(wait)["files"]] == [1]
+    assert data(wait)["ended"] == []
     metrics = _metrics(outcome.transcript)
     assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 11)
 
@@ -1372,13 +1397,13 @@ async def test_a_custom_channel_named_like_a_builtin_makes_no_file_edge(
             controller=_answered_by("w"),
         )
     )
-    [wait] = evidence(outcome.transcript, "waited")
-    assert sorted(wait["channels"]) == sorted({named, "shared_memory"})
-    assert wait["files"] == [
+    [wait] = comm_events(outcome.transcript, "waited")
+    assert sorted(wait_of(wait).channels) == sorted({named, "shared_memory"})
+    assert data(wait)["files"] == [
         {"foreign_record": "x-1"},
         {"file": "f-99", "version": 7},
     ]
-    assert wait["ended"] == [{"member": "p", "status": "submitted"}]
+    assert data(wait)["ended"] == [{"member": "p", "status": "submitted"}]
     metrics = _metrics(outcome.transcript)
     assert (metrics.steps_to_answer, metrics.critical_steps_to_answer) == (2, 11)
     assert not _warnings(caplog)

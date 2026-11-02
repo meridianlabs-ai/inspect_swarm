@@ -115,7 +115,7 @@ class Boundary:        # the seam's, plus:
     after: Literal["start", "tools", "reply", "user", "wake"]
 ```
 
-`ControlEvent` is the controller event alias, called `SwarmEvent` until the evidence switch renames it ([swarm-event-types.md](swarm-event-types.md#swarmevent)), as in the seam.
+`ControlEvent` is the controller event alias ([swarm-event-types.md](swarm-event-types.md#swarmevent)), as in the seam.
 
 ### Declaring a persistent member
 

@@ -10,7 +10,7 @@ from inspect_ai._control.scoring import TaskScoring, _score_live_sample
 from inspect_ai._util.hash import mm3_hash
 from inspect_ai.agent import Agent, AgentState, agent, as_solver, react, run
 from inspect_ai.dataset import Sample
-from inspect_ai.event import Event, InfoEvent, SpanBeginEvent
+from inspect_ai.event import Event, InfoEvent, SpanBeginEvent, SwarmEvent
 from inspect_ai.log import EvalLog, EvalSample, read_eval_log, transcript
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import GenerateConfig, ModelOutput, get_model
@@ -39,7 +39,6 @@ from inspect_swarm._record import (
     RECORD_TYPE,
     RESULT_ID_KEY,
     START_TYPE,
-    _is_record,
     _transcript_result,
     write_start,
 )
@@ -204,8 +203,8 @@ def _names(read: Read) -> list[str]:
     return [m.name for m in _record(read).members]
 
 
-def _record_events(events: list[Event]) -> list[InfoEvent]:
-    return [e for e in events if _is_record(e)]
+def _record_events(events: list[Event]) -> list[SwarmEvent]:
+    return [e for e in events if isinstance(e, SwarmEvent) and e.kind == RECORD_TYPE]
 
 
 @agent
@@ -442,14 +441,21 @@ def test_a_sample_read_without_its_events_is_refused(tmp_path: Path) -> None:
 
 
 @solver
-def forge(payload: dict[str, Any], id: bool = True, point: bool = True) -> Solver:
-    """Write a record event by hand, with an id in its payload unless `id` is false, and the id in the store if `point`."""
+def forge(
+    payload: dict[str, Any], id: bool = True, point: bool = True, legacy: bool = False
+) -> Solver:
+    """Write a record event by hand, with an id in its payload unless `id` is false, and the id in the store if `point`; as the `InfoEvent` an earlier inspect_swarm wrote if `legacy`."""
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
-        data: dict[str, Any] = {"type": RECORD_TYPE, **payload}
+        data: dict[str, Any] = dict(payload)
         if id:
             data["id"] = "forged"
-        transcript().info(data, source="inspect_swarm")
+        if legacy:
+            transcript().info({"type": RECORD_TYPE, **data}, source="inspect_swarm")
+        else:
+            transcript()._event(  # pyright: ignore[reportPrivateUsage]
+                SwarmEvent(kind=RECORD_TYPE, data=data)
+            )
         if point:
             store().set(RESULT_ID_KEY, "forged")
         return state
@@ -457,34 +463,37 @@ def forge(payload: dict[str, Any], id: bool = True, point: bool = True) -> Solve
     return solve
 
 
+_VERSION_2: dict[str, Any] = {
+    "version": 2,
+    "members": [],
+    "final": {
+        "mode": None,
+        "member": None,
+        "reason": "no_submissions",
+        "provisional": False,
+    },
+}
+
+
 @pytest.mark.parametrize(
-    "payload",
+    "payload,legacy",
     [
+        pytest.param(_VERSION_2, False, id="version-2"),
+        pytest.param(_VERSION_2, True, id="version-2-info-event"),
         pytest.param(
-            {
-                "version": 2,
-                "members": [],
-                "final": {
-                    "mode": None,
-                    "member": None,
-                    "reason": "no_submissions",
-                    "provisional": False,
-                },
-            },
-            id="version-2",
+            {"version": 1, "members": "a, b", "final": {}}, False, id="malformed"
         ),
-        pytest.param({"version": 1, "members": "a, b", "final": {}}, id="malformed"),
     ],
 )
 def test_a_record_this_inspect_swarm_cannot_read_is_refused(
-    tmp_path: Path, payload: dict[str, Any]
+    tmp_path: Path, payload: dict[str, Any], legacy: bool
 ) -> None:
-    sample = _eval(tmp_path, forge(payload), [reads()])
+    sample = _eval(tmp_path, forge(payload, legacy=legacy), [reads()])
     # final scoring fails with the reader's error
     assert sample.error is not None
     assert SAMPLE in sample.error.message and "can read" in sample.error.message
     _value_error(_read(sample), "can read")
-    log = _log(tmp_path / "rescore", forge(payload))
+    log = _log(tmp_path / "rescore", forge(payload, legacy=legacy))
     assert log.samples is not None
     _value_error(_rescore(log, log.samples[0]), "can read")
 
@@ -564,6 +573,29 @@ def test_a_log_from_before_the_record_moved_is_refused(tmp_path: Path) -> None:
     _value_error(_rescore(log, log.samples[0]), "inspect_swarm:result")
 
 
+def test_a_record_reads_the_same_as_a_swarm_event_and_as_an_info_event(
+    tmp_path: Path,
+) -> None:
+    log = _log(tmp_path, _pair())
+    assert log.samples is not None
+    [logged] = log.samples
+    [event] = _record_events(logged.events)
+    assert event.member is None
+    record = _payload_record(event)
+    assert _record(_read(logged)) == record
+    # as an earlier inspect_swarm wrote it, which logs from before the switch hold
+    legacy = InfoEvent(
+        source="inspect_swarm",
+        data={"type": RECORD_TYPE, "id": event.data["id"], **record.model_dump()},
+        span_id=event.span_id,
+    )
+    before = logged.model_copy(
+        update={"events": [legacy if e is event else e for e in logged.events]}
+    )
+    assert not _record_events(before.events)
+    assert _record(_read(before)) == record
+
+
 def test_a_sample_whose_store_lost_the_id_is_refused(tmp_path: Path) -> None:
     log = _log(tmp_path, _pair())
     assert log.samples is not None
@@ -637,13 +669,7 @@ def test_a_swarm_interrupted_before_any_member_ended_is_refused(
     assert not _record_events(events)
     snapshot = EvalSample(id="s1", epoch=1, input="task", target="", events=events)
     without_start = snapshot.model_copy(
-        update={
-            "events": [
-                e
-                for e in events
-                if not (isinstance(e, InfoEvent) and e.source == "inspect_swarm")
-            ]
-        }
+        update={"events": [e for e in events if not isinstance(e, SwarmEvent)]}
     )
     assert len(without_start.events) == len(events) - 1
     log = _log(tmp_path, plain())
@@ -685,15 +711,8 @@ async def test_the_start_event_precedes_every_member(later: bool) -> None:
     async with sample() as t:
         await run(_starts_later() if later else _pair(), "task")
     events = list(t.events)
-    [start] = [
-        e
-        for e in events
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("type") == START_TYPE
-    ]
-    assert start.source == "inspect_swarm"
-    assert start.data == {"type": START_TYPE, "version": 1}
+    [start] = [e for e in events if isinstance(e, SwarmEvent) and e.kind == START_TYPE]
+    assert (start.member, start.data) == (None, {"version": 1})
     # in the swarm's span, where the record is written
     [record] = _record_events(events)
     assert start.span_id == record.span_id
@@ -870,10 +889,9 @@ def reads_after(inner: Agent, ending: str, seen: list[tuple[bool, Read]]) -> Sol
 
 def _early_ended(event: Event) -> bool:
     return (
-        isinstance(event, InfoEvent)
-        and isinstance(event.data, dict)
-        and event.data.get("kind") == "member_result"
-        and event.data.get("member") == "early"
+        isinstance(event, SwarmEvent)
+        and event.kind == "member_result"
+        and event.member == "early"
     )
 
 
@@ -1174,9 +1192,8 @@ def test_each_forked_branch_reads_its_own_record(tmp_path: Path) -> None:
     assert _names(b_read) == ["Ba", "Bb"]
 
 
-def _payload_record(event: InfoEvent) -> SwarmResultRecord:
-    assert isinstance(event.data, dict)
-    data = {k: v for k, v in event.data.items() if k not in ("type", "id")}
+def _payload_record(event: SwarmEvent) -> SwarmResultRecord:
+    data = {k: v for k, v in event.data.items() if k != "id"}
     return SwarmResultRecord.model_validate(data)
 
 

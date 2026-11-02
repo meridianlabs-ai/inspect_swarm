@@ -3,7 +3,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import anyio
 import pytest
@@ -11,7 +11,16 @@ from anyio.abc import TaskGroup
 from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, deepagent, general, react
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent, SpanBeginEvent
+from inspect_ai.event import (
+    CommunicationDelivery,
+    CommunicationEvent,
+    CommunicationRecord,
+    CommunicationSend,
+    CommunicationWait,
+    InfoEvent,
+    SpanBeginEvent,
+    SwarmEvent,
+)
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import ModelOutput
 
@@ -26,7 +35,7 @@ from inspect_swarm._background import MemberBackground
 from inspect_swarm._bus._bus import current_bus
 from inspect_swarm._metrics import CommMetrics, MemberMetrics, SwarmMetrics
 
-from .swarm_runtime import Script, evidence, scripted_model
+from .swarm_runtime import Script, comm_events, data, scripted_model, send, wait
 from .test_wait import (  # pyright: ignore[reportPrivateUsage]
     _p,
     _Run,
@@ -46,17 +55,17 @@ async def _members(swarm: Agent, tmp_path: Path) -> list[MemberMetrics]:
     )
     assert log.status == "success", log.error
     assert log.samples is not None
-    [data] = [
-        e.data
-        for e in log.samples[0].events
-        if isinstance(e, InfoEvent)
-        and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "metrics"
+    events = log.samples[0].events
+    # the swarm writes its evidence only as these two types, each with format version 1
+    assert not [
+        e for e in events if isinstance(e, InfoEvent) and e.source == "inspect_swarm"
     ]
-    assert isinstance(data, dict)
-    record = {k: v for k, v in data.items() if k != "type"}
-    return SwarmMetrics.model_validate(record).members
+    evidence = [e for e in events if isinstance(e, CommunicationEvent | SwarmEvent)]
+    assert evidence and all(e.data["version"] == 1 for e in evidence)
+    [metrics] = [
+        e for e in evidence if isinstance(e, SwarmEvent) and e.kind == "metrics"
+    ]
+    return SwarmMetrics.model_validate(metrics.data).members
 
 
 def _member(name: str, *calls: dict[str, Any]) -> Any:
@@ -196,38 +205,129 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
             await start(tg, r, "w-1", path=_p("r"))
             await anyio.sleep(0.05)
             await r.sm("w-2", "create", path=_p("r/a.md"), file_text="x")
-        [event] = [
-            e
-            for e in transcript.events
-            if isinstance(e, InfoEvent)
-            and isinstance(e.data, dict)
-            and e.data.get("kind") == "waited"
-        ]
+        [event] = comm_events(transcript, "waited")
         [span] = _tool_spans(transcript, "swarm_wait")
         assert event.span_id == span
-        data = cast(dict[str, Any], event.data)
-        # the idle clock's rows below check `idle`
-        timing = {k: data.pop(k) for k in ("started", "duration", "idle")}
-        assert data == {
-            "version": 1,
-            "type": "comm",
-            "kind": "waited",
-            "member": "w-1",
-            "span_id": None,
-            "loop": "w-1/top",
+        assert _typed(event) == {
+            "agent": "w-1",
+            "agent_span_id": None,
+            "loop_span_id": "w-1/top",
             "nested": False,
-            "wait": "x-1",
-            "channels": ["shared_memory"],
+            "channel": None,
+            "record_ids": [],
+            "send": None,
+            "delivery": None,
+        }
+        duration = wait(event).duration
+        assert wait(event) == CommunicationWait(
+            id="x-1", channels=["shared_memory"], outcome="news", duration=duration
+        )
+        assert duration >= 0.04
+        fields = data(event)
+        # the idle clock's rows below check `idle`
+        timing = {k: fields.pop(k) for k in ("started", "idle")}
+        assert fields == {
+            "version": 1,
             "path": _p("r"),
             "file_id": None,
             "timeout": {"requested": None, "effective": 600},
-            "outcome": "news",
             "woken_by": [1],
             "files": [{"file": "f-1", "version": 1, "deleted": False}],
             "ended": [],
         }
         assert timing["started"] >= 0
-        assert timing["duration"] >= 0.04
+
+
+@pytest.mark.anyio
+async def test_a_write_and_a_view_are_written_with_their_typed_fields() -> None:
+    # the sent, delivered and read events of a write and a view, with the fields the
+    # swarm's evidence maps to typed fields and to `data`
+    async with run() as (r, transcript):
+        await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
+        await r.sm("w-1", "view", path=_p("a.md"))
+        [write, view] = _tool_spans(transcript, "shared_memory")
+        [sent] = comm_events(transcript, "sent")
+        [delivered] = comm_events(transcript, "delivered")
+        [read] = comm_events(transcript, "read")
+    files = [{"file": "f-1", "path": _p("a.md"), "base": None, "version": 1}]
+    writer = {
+        "agent": "w-2",
+        "agent_span_id": None,
+        "loop_span_id": "w-2/top",
+        "nested": False,
+        "channel": "shared_memory",
+        "record_ids": ["w-1"],
+    }
+    assert (sent.span_id, delivered.span_id, read.span_id) == (write, write, view)
+    assert _typed(sent) == {**writer, "delivery": None, "wait": None}
+    assert send(sent) == CommunicationSend(
+        record=CommunicationRecord(
+            id="w-1", kind="create", sender="w-2", content="x", reply_to=None
+        ),
+        rejected=None,
+    )
+    assert sent.data == {
+        "version": 1,
+        "record": {
+            "routed_out": [],
+            "op": {"command": "create", "path": _p("a.md"), "files": files},
+            "wake": True,
+            "sender_span_id": "w-2/top",
+            "tool_span_id": write,
+        },
+    }
+    assert _typed(delivered) == {**writer, "send": None, "wait": None}
+    assert delivered.delivery == CommunicationDelivery(recipients=[], seq=1)
+    assert delivered.data == {
+        "version": 1,
+        "notify": ["w-1"],
+        "result": {"files": files},
+    }
+    assert _typed(read) == {
+        "agent": "w-1",
+        "agent_span_id": None,
+        "loop_span_id": "w-1/top",
+        "nested": False,
+        "channel": "shared_memory",
+        "record_ids": ["w-1"],
+        "send": None,
+        "delivery": None,
+        "wait": None,
+    }
+    assert read.data == {
+        "version": 1,
+        "read": "r-1",
+        "tool_span_id": view,
+        "files": [
+            {
+                "file": "f-1",
+                "version": 1,
+                "record": "w-1",
+                "lines": None,
+                "deleted": False,
+            }
+        ],
+        "listing": False,
+    }
+
+
+# A communication event's typed fields other than its kind's own object, as JSON.
+def _typed(event: CommunicationEvent) -> dict[str, Any]:
+    own = {"sent": "send", "delivered": "delivery", "waited": "wait"}.get(event.kind)
+    return event.model_dump(
+        include={
+            "agent",
+            "agent_span_id",
+            "loop_span_id",
+            "nested",
+            "channel",
+            "record_ids",
+            "send",
+            "delivery",
+            "wait",
+        }
+        - {own}
+    )
 
 
 @pytest.mark.anyio
@@ -237,9 +337,9 @@ async def test_a_nested_waits_evidence_names_its_loop() -> None:
             await start(tg, r, "w-1", "child")
             await anyio.sleep(0.05)
             await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
-        [data] = waited(transcript)
-        assert (data["loop"], data["nested"]) == ("w-1/child", True)
-        assert data["duration"] >= 0.04
+        [event] = waited(transcript)
+        assert (event.loop_span_id, event.nested) == ("w-1/child", True)
+        assert wait(event).duration >= 0.04
 
 
 # The idle clock, a row per clause of its contract in design/swarm-wait.md (Metrics): w-1
@@ -361,14 +461,18 @@ async def test_the_idle_clock(row: _Clock) -> None:
     async with run() as (r, transcript), _owner(r) as owner:
         async with anyio.create_task_group() as tg:
             await row.steps(r, tg, owner)
-        [data] = waited(transcript)
-        assert (data["outcome"], data["woken_by"]) == (row.outcome, list(row.woken_by))
+        [event] = waited(transcript)
+        idle = data(event)["idle"]
+        assert (wait(event).outcome, data(event)["woken_by"]) == (
+            row.outcome,
+            list(row.woken_by),
+        )
         if row.idle == 0:
-            assert data["idle"] == 0
+            assert idle == 0
         else:
-            assert data["idle"] >= row.idle
+            assert idle >= row.idle
         # 5. a wait's idle is part of its duration
-        assert data["duration"] - data["idle"] >= row.not_idle
+        assert wait(event).duration - idle >= row.not_idle
 
 
 @pytest.mark.anyio
@@ -378,8 +482,14 @@ async def test_a_wait_released_then_cancelled_names_nothing() -> None:
             await start(tg, r, "w-1")
             await r.sm("w-2", "create", path=_p("a.md"), file_text="x")
             tg.cancel_scope.cancel()
-        [data] = waited(transcript)
-        assert (data["outcome"], data["woken_by"], data["files"], data["ended"]) == (
+        [event] = waited(transcript)
+        fields = data(event)
+        assert (
+            wait(event).outcome,
+            fields["woken_by"],
+            fields["files"],
+            fields["ended"],
+        ) == (
             "cancelled",
             [1],
             [],
@@ -397,5 +507,5 @@ async def test_writes_wake_and_a_wait_shows_no_content_or_peer_path() -> None:
         assert result == "\n".join(
             [changed("f-1 new", "w-2", "f-1"), "w-2 ended (submitted)."]
         )
-        [sent] = evidence(transcript, "sent")
-        assert sent["record"]["wake"] is True
+        [sent] = comm_events(transcript, "sent")
+        assert data(sent)["record"]["wake"] is True

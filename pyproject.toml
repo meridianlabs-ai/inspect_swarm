@@ -15,7 +15,12 @@ classifiers = [
     "Development Status :: 3 - Alpha",
 ]
 dependencies = [
-    "inspect-ai>=0.3.286",
+    # Temporarily a git reference, to unblock work: the swarm writes its evidence as
+    # CommunicationEvent and SwarmEvent (UKGovernmentBEIS/inspect_ai#6164), which no
+    # release has yet, so this tracks inspect_ai's `main`. PyPI rejects git
+    # dependencies, so go back to a released `inspect-ai>=X` floor before
+    # inspect_swarm is published.
+    "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",
     # imported directly; inspect-ai depends on them too, but a transitive
     # dependency is not a promise
     "anyio>=4.0",
@@ -77,6 +82,11 @@ version-file = "src/inspect_swarm/_version.py"
 
 [tool.hatch.version.raw-options]
 local_scheme = "no-local-version" # Important for PyPI compatibility
+
+# hatchling rejects PEP 508 direct references (the inspect-ai git ref above)
+# without this
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.uv]
 managed = true

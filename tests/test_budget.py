@@ -24,7 +24,7 @@ from inspect_ai.agent._bridge.util import (
     in_bridge_model_generate,
 )
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent, ModelEvent, SampleLimitEvent, ToolEvent
+from inspect_ai.event import ModelEvent, SampleLimitEvent, SwarmEvent, ToolEvent
 from inspect_ai.log._samples import (
     _sample_active,  # pyright: ignore[reportPrivateUsage]
 )
@@ -1339,19 +1339,13 @@ def _failing() -> Agent:
 
 
 def _written_ledger(transcript: Transcript) -> SwarmLedger:
-    [data] = [
-        e.data
-        for e in transcript.events
-        if isinstance(e, InfoEvent)
-        and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "ledger"
+    [event] = [
+        e for e in transcript.events if isinstance(e, SwarmEvent) and e.kind == "ledger"
     ]
-    assert isinstance(data, dict)
-    record = {k: v for k, v in data.items() if k != "type"}
     # the store entry is the same record
-    assert store().get(LEDGER_KEY) == record
-    return SwarmLedger.model_validate(record)
+    assert event.member is None
+    assert store().get(LEDGER_KEY) == event.data
+    return SwarmLedger.model_validate(event.data)
 
 
 async def _ledger(

@@ -2,7 +2,19 @@ import copy
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from inspect_ai.event import Event, Timeline, timeline_build
+from inspect_ai.event import (
+    CommunicationDelivery,
+    CommunicationEvent,
+    CommunicationKind,
+    CommunicationRecord,
+    CommunicationRejection,
+    CommunicationSend,
+    CommunicationWait,
+    Event,
+    SwarmEvent,
+    Timeline,
+    timeline_build,
+)
 from inspect_ai.log import transcript
 from inspect_ai.util import store
 from pydantic import JsonValue
@@ -18,37 +30,60 @@ LEDGER_KEY = "inspect_swarm:ledger"
 METRICS_KEY = "inspect_swarm:metrics"
 
 
-# The swarm's evidence: an InfoEvent with source "inspect_swarm" whose payload has the
-# format version, the evidence type and kind, a member and a span id. A member's result
-# names the member and is written in its span; the final event names the chosen member
-# (None without one) and is written in the swarm's span. Never member text.
-def evidence(
-    type: str,
+# The swarm's evidence other than communication: a `SwarmEvent` whose `data` has the
+# format version and the kind's fields. A member's result names the member and is
+# written in its span; the final event names the chosen member (None without one) and
+# is written in the swarm's span. Never member text.
+def swarm_event(
     kind: str,
     *,
     member: str | None,
-    span_id: str | None,
-    **fields: JsonValue,
+    version: int = 1,
+    **data: JsonValue,
 ) -> None:
-    transcript().info(
-        {
-            "version": 1,
-            "type": type,
-            "kind": kind,
-            "member": member,
-            "span_id": span_id,
-            **fields,
-        },
-        source="inspect_swarm",
+    # synchronous, so that the writes in `finally` blocks run under cancellation too
+    transcript()._event(  # pyright: ignore[reportPrivateUsage]
+        SwarmEvent(kind=kind, member=member, data={"version": version, **data})
     )
 
 
-# Communication evidence: a `comm` event for each record that reached the bus (`sent`),
-# for each one it delivered (`delivered`), for each read of a channel's content
-# (`read`) and for each wait (`waited`), written in the span the channel's tool runs
-# in. Its `member` and `span_id` are the acting member and its member span, even from a
-# member's descendant; `loop` is the agent span of the loop that acted, and `nested`
-# whether that loop is not the member's own.
+# Communication evidence: a `CommunicationEvent` with source "inspect_swarm" for each
+# record that reached the bus (`sent`), for each one it delivered (`delivered`), for
+# each read of a channel's content (`read`) and for each wait (`waited`), written in the
+# span the channel's tool runs in. Its `agent` and `agent_span_id` are the acting member
+# and its member span, even from a member's descendant; `loop_span_id` is the agent span
+# of the loop that acted, and `nested` whether that loop is not the member's own. What
+# the typed fields do not hold is in `data`, with the format version.
+def _comm(
+    kind: CommunicationKind,
+    *,
+    agent: str,
+    agent_span_id: str | None,
+    loop: str | None,
+    nested: bool,
+    channel: str | None,
+    data: dict[str, JsonValue],
+    record_ids: list[str],
+    send: CommunicationSend | None = None,
+    delivery: CommunicationDelivery | None = None,
+    wait: CommunicationWait | None = None,
+) -> None:
+    transcript()._event(  # pyright: ignore[reportPrivateUsage]
+        CommunicationEvent(
+            kind=kind,
+            source="inspect_swarm",
+            agent=agent,
+            agent_span_id=agent_span_id,
+            loop_span_id=loop,
+            nested=nested,
+            channel=channel,
+            record_ids=record_ids,
+            send=send,
+            delivery=delivery,
+            wait=wait,
+            data={"version": 1, **data},
+        )
+    )
 
 
 def comm_sent(
@@ -59,18 +94,37 @@ def comm_sent(
 ) -> None:
     # every attempt that reached the bus, rejected or not; `rejected` is the control
     # that refused it and the reason the sender got
-    evidence(
-        "comm",
+    _comm(
         "sent",
-        member=record.sender,
-        span_id=span_id,
+        agent=record.sender,
+        agent_span_id=span_id,
         loop=record.sender_span_id,
         nested=nested,
         channel=record.channel,
-        record=_record(record),
-        rejected=None
-        if rejected is None
-        else {"control": rejected[0], "reason": rejected[1]},
+        record_ids=[record.id],
+        send=CommunicationSend(
+            record=CommunicationRecord(
+                id=record.id,
+                kind=record.kind,
+                sender=record.sender,
+                to=list(record.to),
+                recipients=list(record.recipients),
+                content=record.payload,
+                reply_to=record.reply_to,
+            ),
+            rejected=None
+            if rejected is None
+            else CommunicationRejection(control=rejected[0], reason=rejected[1]),
+        ),
+        data={
+            "record": {
+                "routed_out": list(record.routed_out),
+                "op": None if record.op is None else thaw_json(record.op),
+                "wake": record.wake,
+                "sender_span_id": record.sender_span_id,
+                "tool_span_id": record.tool_span_id,
+            }
+        },
     )
 
 
@@ -82,20 +136,20 @@ def comm_delivered(
     notify: list[str],
     result: Mapping[str, JsonValue] | None,
 ) -> None:
-    evidence(
-        "comm",
+    _comm(
         "delivered",
-        member=record.sender,
-        span_id=span_id,
+        agent=record.sender,
+        agent_span_id=span_id,
         loop=record.sender_span_id,
         nested=nested,
         channel=record.channel,
-        record=record.id,
-        recipients=list(record.recipients),
-        seq=seq,
-        notify=list(notify),
-        # a copy: the channel keeps its own
-        result=None if result is None else copy.deepcopy(dict(result)),
+        record_ids=[record.id],
+        delivery=CommunicationDelivery(recipients=list(record.recipients), seq=seq),
+        data={
+            "notify": list(notify),
+            # a copy: the channel keeps its own
+            "result": None if result is None else copy.deepcopy(dict(result)),
+        },
     )
 
 
@@ -109,26 +163,33 @@ def comm_read(
     tool_span_id: str | None,
     files: list[JsonValue] | None,
     listing: bool,
-    records: list[JsonValue] | None = None,
+    records: list[str] | None = None,
 ) -> None:
     # a loop's tool was shown peer content: the shared memory's `files` or the messages
     # channel's `records` name what it was shown, from the channel's state, never from
-    # the content
-    shown: dict[str, JsonValue] = (
-        {"files": files} if files is not None else {"records": records}
-    )
-    evidence(
-        "comm",
+    # the content. The record ids are the messages shown, or each file's last write at
+    # the version shown, whether the read listed the file, showed part of it or showed
+    # its tombstone.
+    if files is not None:
+        record_ids = _file_records(files)
+        shown: dict[str, JsonValue] = {"files": files}
+    else:
+        record_ids = list(records or [])
+        shown = {}
+    _comm(
         "read",
-        member=member,
-        span_id=span_id,
+        agent=member,
+        agent_span_id=span_id,
         loop=loop,
         nested=nested,
         channel=channel,
-        read=read,
-        tool_span_id=tool_span_id,
-        **shown,
-        listing=listing,
+        record_ids=record_ids,
+        data={
+            "read": read,
+            "tool_span_id": tool_span_id,
+            **shown,
+            "listing": listing,
+        },
     )
 
 
@@ -148,60 +209,64 @@ def comm_waited(
     ended: list[JsonValue],
 ) -> None:
     # one swarm_wait, when it returns or is cancelled: what ended it, the commits that
-    # released it for news (`delivered.seq`), and the files and ends its result named;
-    # `idle` is the seconds of it during which its member counted as waiting
-    evidence(
-        "comm",
+    # released it for news (`delivered`'s `delivery.seq`), and the files and ends its
+    # result named; `idle` is the seconds of it during which its member counted as
+    # waiting
+    _comm(
         "waited",
-        member=spec.member,
-        span_id=span_id,
+        agent=spec.member,
+        agent_span_id=span_id,
         loop=spec.loop,
         nested=nested,
-        wait=spec.id,
-        channels=list(channels),
-        path=spec.path,
-        file_id=spec.file_id,
-        timeout=timeout,
-        started=started,
-        duration=duration,
-        idle=idle,
-        outcome=outcome,
-        woken_by=list(woken_by),
-        files=files,
-        ended=ended,
+        channel=None,
+        record_ids=[],
+        wait=CommunicationWait(
+            id=spec.id, channels=list(channels), outcome=outcome, duration=duration
+        ),
+        data={
+            "path": spec.path,
+            "file_id": spec.file_id,
+            "timeout": timeout,
+            "started": started,
+            "idle": idle,
+            "woken_by": list(woken_by),
+            "files": files,
+            "ended": ended,
+        },
     )
 
 
-def _record(record: Record) -> dict[str, JsonValue]:
-    return {
-        "id": record.id,
-        "channel": record.channel,
-        "kind": record.kind,
-        "sender": record.sender,
-        "to": list(record.to),
-        "recipients": list(record.recipients),
-        "routed_out": list(record.routed_out),
-        "payload": record.payload,
-        "op": None if record.op is None else thaw_json(record.op),
-        "wake": record.wake,
-        "reply_to": record.reply_to,
-        "sender_span_id": record.sender_span_id,
-        "tool_span_id": record.tool_span_id,
-    }
+# The distinct records that last wrote the files read, at the versions read, in order.
+def _file_records(files: list[JsonValue]) -> list[str]:
+    ids: list[str] = []
+    for entry in files:
+        assert isinstance(entry, dict)
+        record = entry.get("record")
+        if isinstance(record, str) and record not in ids:
+            ids.append(record)
+    return ids
 
 
+# The ledger and the metrics: a `SwarmEvent` whose `data` is the store entry, the
+# model's dump with its own `version`.
 def write_ledger(ledger: SwarmLedger) -> None:
     # synchronous, so that it runs under cancellation too; scorers read the store entry
     data = ledger.model_dump(mode="json")
-    transcript().info({"type": "ledger", **data}, source="inspect_swarm")
+    _write_dump("ledger", data)
     store().set(LEDGER_KEY, data)
 
 
 def write_metrics(metrics: SwarmMetrics) -> None:
     # synchronous, as the ledger is
     data = metrics.model_dump(mode="json")
-    transcript().info({"type": "metrics", **data}, source="inspect_swarm")
+    _write_dump("metrics", data)
     store().set(METRICS_KEY, data)
+
+
+def _write_dump(kind: str, data: dict[str, JsonValue]) -> None:
+    transcript()._event(  # pyright: ignore[reportPrivateUsage]
+        SwarmEvent(kind=kind, member=None, data=data)
+    )
 
 
 # A timeline named after each member, of the events in its spans, so that the viewer can

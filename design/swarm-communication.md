@@ -361,7 +361,7 @@ Native and bridged members learn of changes the same way, so there is no deliver
 
 **With the messages channel** (later), the member's own loop's wait returns while it has unread `wake=True` messages, and its result counts them and names their senders; reading them is the acknowledgment; a `wake=False` message is delivered and counted in the status line, but does not end a wait. Nested loops' waits never consider messages, since they cannot read them. `read_messages` itself no longer waits. Time spent waiting is wall-clock time inside a tool call, which counts towards time limits as any tool call does ([swarm-limits.md](swarm-limits.md#interactions)). The idle-time metric in swarm.md is the time a member does nothing but wait, defined exactly in [swarm-wait.md Metrics](swarm-wait.md#metrics).
 
-**Wake later.** For persistent members (coordinator topologies), the bus reports each step-4 delivery to an idle member to the runtime, which queues a `SwarmEvent` for the controller (swarm-api.md reserves idle and woken members as later event kinds). The event carries the member's name, the record id, the channel and `record.wake`, never the payload, because a controller sees no member text ([swarm-api.md](swarm-api.md#controllers)). The controller decides whether to wake the member, through the wake operation persistent members add to `SwarmControl`; a `wake=False` record waits for the next activation. The bus does not run members.
+**Wake later.** For persistent members (coordinator topologies), the bus reports each step-4 delivery to an idle member to the runtime, which queues a `ControlEvent` for the controller (swarm-api.md reserves idle and woken members as later event kinds). The event carries the member's name, the record id, the channel and `record.wake`, never the payload, because a controller sees no member text ([swarm-api.md](swarm-api.md#controllers)). The controller decides whether to wake the member, through the wake operation persistent members add to `SwarmControl`; a `wake=False` record waits for the next activation. The bus does not run members.
 
 ### The binder and ACP
 
@@ -513,7 +513,7 @@ class ChannelState(Protocol):                                       # per run
 - **Mutable state** follows swarm.md's rules: append-only notes, compare-and-swap as above, TTL leases that report conflicts.
 - **Reads** use the shared envelope, with a channel-specific tag, and write `read` events.
 - **Names a member chooses** (a board thread title, a task title) are payload: fenced in reads, never in status lines, which refer to the swarm-assigned id.
-- **`quiescent()`** lets the runtime's quiescence check (persistent members, later) ask whether a channel has open or claimed work; the runtime then reports quiescence to the controller as the later `SwarmEvent` kind swarm-api.md reserves.
+- **`quiescent()`** lets the runtime's quiescence check (persistent members, later) ask whether a channel has open or claimed work; the runtime then reports quiescence to the controller as the later `ControlEvent` kind swarm-api.md reserves.
 
 `swarm_tools()` returns the tools of every opened channel state in the member's bound loop, and those of `"member"`-reach channels in its other loops, so members stay identical across channel ablations.
 

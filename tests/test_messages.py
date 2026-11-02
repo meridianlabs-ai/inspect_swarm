@@ -8,6 +8,7 @@ from typing import Any, cast
 import anyio
 import pytest
 from inspect_ai.agent._channel import agent_channel, current_agent_channel
+from inspect_ai.event import CommunicationRejection
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import (
     ChatMessageTool,
@@ -36,7 +37,7 @@ from inspect_swarm._fence import utf8_bytes
 from inspect_swarm._ledger import EventLog
 from inspect_swarm._metrics import _comm_metrics  # pyright: ignore[reportPrivateUsage]
 
-from .swarm_runtime import evidence, sample
+from .swarm_runtime import comm_events, data, sample, send
 from .test_shared_memory import _Member  # pyright: ignore[reportPrivateUsage]
 
 
@@ -130,7 +131,8 @@ async def run(
 
 def _rejected(transcript: Transcript) -> list[str | None]:
     return [
-        s["rejected"] and s["rejected"]["control"] for s in evidence(transcript, "sent")
+        (rejected := send(s).rejected) and rejected.control
+        for s in comm_events(transcript, "sent")
     ]
 
 
@@ -149,20 +151,25 @@ async def test_a_message_is_read_once_fenced_with_its_bound_sender() -> None:
             '<peer_message id="m-2" from="w-3" to="w-2, w-1">\nhi\n</peer_message>'
         )
         assert await r.read("w-2") == "You have no unread messages."
-        sent = evidence(transcript, "sent")[0]
-        assert (sent["member"], sent["record"]["sender"], sent["loop"]) == (
+        sent = comm_events(transcript, "sent")[0]
+        assert (sent.agent, send(sent).record.sender, sent.loop_span_id) == (
             "w-1",
             "w-1",
             "w-1/top",
         )
-        [read] = evidence(transcript, "read")
-        assert {k: read[k] for k in ("member", "channel", "read", "records")} == {
-            "member": "w-2",
-            "channel": "messages",
-            "read": "r-1",
-            "records": ["m-1", "m-2"],
-        }
-        assert (read["loop"], read["tool_span_id"], read["listing"]) == (
+        [read] = comm_events(transcript, "read")
+        assert (read.agent, read.channel, data(read)["read"], read.record_ids) == (
+            "w-2",
+            "messages",
+            "r-1",
+            ["m-1", "m-2"],
+        )
+        assert "records" not in read.data and "files" not in read.data
+        assert (
+            read.loop_span_id,
+            data(read)["tool_span_id"],
+            data(read)["listing"],
+        ) == (
             "w-2/top",
             "w-2/read_messages",
             False,
@@ -217,7 +224,7 @@ async def test_an_address_that_is_not_a_running_peer_is_refused_with_no_record(
         with pytest.raises(ToolError) as raised:
             await r.send("w-1", to, "x")
         assert raised.value.message == error
-        assert evidence(transcript, "sent") == []
+        assert comm_events(transcript, "sent") == []
 
 
 @pytest.mark.anyio
@@ -240,7 +247,7 @@ async def test_reply_to_names_a_message_the_sender_sent_or_read() -> None:
         assert '<peer_message id="m-3" from="w-2" to="w-1" reply_to="m-1">' in (
             await r.read("w-1")
         )
-        assert [s["record"]["reply_to"] for s in evidence(transcript, "sent")] == [
+        assert [send(s).record.reply_to for s in comm_events(transcript, "sent")] == [
             None,
             None,
             "m-1",
@@ -375,8 +382,8 @@ async def test_a_subagent_cannot_use_its_members_inbox() -> None:
         ):
             with pytest.raises(ToolError, match="a subagent cannot use it"):
                 await r.call("w-2", name, "child", **args)
-        assert len(evidence(transcript, "sent")) == 1
-        assert evidence(transcript, "read") == []
+        assert len(comm_events(transcript, "sent")) == 1
+        assert comm_events(transcript, "read") == []
         assert "x" in await r.read("w-2")
 
 
@@ -458,10 +465,9 @@ async def test_an_error_in_the_own_loop_has_no_unread_count(
         assert message.startswith(error) and "unread" not in message
         if tool == "send_message":
             assert message == error
-            assert evidence(transcript, "sent")[-1]["rejected"] == {
-                "control": "max_bytes",
-                "reason": error,
-            }
+            assert send(comm_events(transcript, "sent")[-1]).rejected == (
+                CommunicationRejection(control="max_bytes", reason=error)
+            )
 
 
 @pytest.mark.anyio
@@ -475,9 +481,11 @@ async def test_a_send_from_an_ended_sender_is_refused_with_evidence() -> None:
             await r.send("w-1", "w-2", "late")
         reason = "w-1 has ended, so its message was not delivered."
         assert raised.value.message == reason
-        [sent] = evidence(transcript, "sent")
-        assert sent["rejected"] == {"control": "liveness", "reason": reason}
-        assert evidence(transcript, "delivered") == []
+        [sent] = comm_events(transcript, "sent")
+        assert send(sent).rejected == CommunicationRejection(
+            control="liveness", reason=reason
+        )
+        assert comm_events(transcript, "delivered") == []
         comm = _comm_metrics(events, ["w-1", "w-2"], ["messages"])
         assert comm["w-1"]["messages"].rejections == {"liveness": 1}
         # its reads and roster queries are refused as before
