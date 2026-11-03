@@ -223,7 +223,7 @@ Swarm nodes differ from Inspect's in three more ways:
 
 - `member(agent_or_factory, bridged=None)` takes an explicit `bridged: bool | None`, a field of the `Member` record.
 - With `None` (the default), the member counts as bridged when its agent's or factory's registry name is in the `inspect_swe/` namespace (`registry_info(...).name`, read from the record before any agent is built; extension packages register as `package/name`, `src/inspect_ai/_util/registry.py:252-259`). That covers all of inspect_swe's agents, headless and interactive. Every other agent counts as native.
-- The ledger records it, the metrics give a bridged member no tool-call run, since its CLI's tool calls leave no tool events, and `swarm()` refuses a bridged member beside a channel with records ([swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 2).
+- The ledger records it, the metrics give a bridged member no tool-call run, since its CLI's tool calls leave no tool events, and `swarm()` refuses a bridged member beside a custom channel that has records ([swarm-communication.md Bridged members](swarm-communication.md#bridged-members)).
 
 The wrapper sets a `current_member` ContextVar so the member's tools and `swarm_budget()` know which member they act for.
 
