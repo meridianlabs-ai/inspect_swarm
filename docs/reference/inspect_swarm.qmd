@@ -20,6 +20,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### MemberEnded
 ### VerdictSummary
 ### MemberIdle
+### MemberNews
 ### ControlEvent
 ### MemberInfo
 ### MemberState

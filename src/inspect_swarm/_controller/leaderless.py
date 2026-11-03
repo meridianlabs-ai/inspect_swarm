@@ -1,7 +1,7 @@
 from contextlib import aclosing
 
 from .._final import FinalName
-from ._control import MemberIdle, SwarmControl
+from ._control import MemberEnded, MemberIdle, SwarmControl
 from ._controller import Controller, StopReason, swarm_controller
 
 
@@ -39,7 +39,8 @@ def leaderless(
             async for event in events:
                 # a persistent member's answer is a submission
                 if stop_on_submission and (
-                    isinstance(event, MemberIdle) or event.submitted
+                    isinstance(event, MemberIdle)
+                    or (isinstance(event, MemberEnded) and event.submitted)
                 ):
                     return "submitted"
         if any(m.state == "idle" for m in swarm.members):
