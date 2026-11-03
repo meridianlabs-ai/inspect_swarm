@@ -8,6 +8,10 @@ from uuid import uuid4
 
 import anyio
 from inspect_ai.agent import Agent, AgentState, agent, run
+from inspect_ai.agent._bridge._errors import PROVIDER_ERROR_KEY
+from inspect_ai.agent._bridge.sandbox.bridge import _error_after_unwind
+from inspect_ai.agent._bridge.sandbox.service import _forward_provider_errors
+from inspect_ai.agent._bridge.sandbox.types import SandboxAgentBridge
 from inspect_ai.agent._bridge.types import AgentBridge
 from inspect_ai.agent._bridge.util import bridge_generate
 from inspect_ai.event import (
@@ -35,7 +39,6 @@ from inspect_ai.model import (
 from inspect_ai.model._model import init_sample_model_usage
 from inspect_ai.tool import ToolChoice, ToolInfo
 from inspect_ai.util import (
-    LimitExceededError,
     cost_limit,
     message_limit,
     time_limit,
@@ -45,6 +48,7 @@ from inspect_ai.util import (
 )
 from inspect_ai.util._concurrency import init_concurrency
 from inspect_ai.util._store import Store, init_subtask_store, store
+from pydantic import JsonValue
 
 from inspect_swarm import Controller, swarm_controller
 from inspect_swarm._record import SwarmResultRecord, _transcript_result
@@ -146,22 +150,51 @@ async def bridged_generate(model: Model, messages: list[ChatMessage]) -> ModelOu
 
 
 @agent
-def cli(model: Model, calls: int | None = 1) -> Agent:
-    """A CLI agent run as inspect_ai's sandbox bridge runs one: `calls` bridged generations (`None`: until stopped); a limit one reaches is answered with an error reply, on which the CLI exits, and the bridge then raises that limit."""
+def cli(model: Model, calls: int | None = 1, requests: int = 1) -> Agent:
+    """A CLI agent run as inspect_ai's sandbox bridge runs one: `calls` turns (`None`: until stopped) of `requests` overlapping generations, each served through the bridge service's error forwarding. A limit a generation reaches is answered with an error reply, on which the CLI exits, and the bridge then raises the limit it kept."""
 
     async def execute(state: AgentState) -> AgentState:
-        reached: LimitExceededError | None = None
+        bridge = SandboxAgentBridge(
+            state=state,
+            filter=None,
+            retry_refusals=None,
+            compaction=None,
+            port=13131,
+            model=None,
+        )
+
+        async def generate(
+            json_data: dict[str, JsonValue], headers: dict[str, str] | None = None
+        ) -> dict[str, JsonValue]:
+            state.output, _ = await bridge_generate(
+                bridge,
+                model,
+                state.messages,
+                [],
+                None,
+                GenerateConfig(),
+                requested_model=None,
+            )
+            return {}
+
+        forward = _forward_provider_errors(generate, bridge)
+        replies: list[dict[str, JsonValue]] = []
+
+        async def request() -> None:
+            replies.append(await forward({}))
+
         n = 0
         while calls is None or n < calls:
-            try:
-                state.output = await bridged_generate(model, state.messages)
-            except LimitExceededError as ex:
-                reached = ex
+            async with anyio.create_task_group() as tg:
+                for _ in range(requests):
+                    tg.start_soon(request)
+            if any(PROVIDER_ERROR_KEY in reply for reply in replies):
                 break
             state.messages.append(state.output.message)
             n += 1
-        if reached is not None:
-            raise reached
+        error = await _error_after_unwind(bridge, None)
+        if error is not None:
+            raise error
         return state
 
     return execute

@@ -1490,3 +1490,41 @@ async def test_a_bridged_members_call_in_flight_at_a_soft_stop_completes() -> No
     assert not line.cancelled
     assert (line.calls.calls, line.calls.errored) == (1, 0)
     assert line.meter.usage.total_tokens == TOKENS_PER_CALL
+
+
+@pytest.mark.anyio
+async def test_overlapping_bridged_calls_keep_a_sample_limit_after_a_cap() -> None:
+    gate = anyio.Event()
+    script = Script(gate=gate)
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("cli")
+        while script.started < 2:
+            await anyio.sleep(0)
+        # both calls are in flight: the first reply reaches the cap, the second the
+        # sample's token limit
+        gate.set()
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    async with sample(tokens=TOKENS_PER_CALL * 3 // 2):
+        with pytest.raises(LimitExceededError) as raised:
+            await swarm(
+                member(
+                    cli(scripted_model(script), requests=2), name="cli", bridged=True
+                ),
+                controller=_controller(run, "limits_test_bridged_overlap"),
+                channels=[],
+                budget=Budget(tokens=TOKENS_PER_CALL // 2),
+            )(AgentState(messages=[ChatMessageUser(content="task")]))
+        ledger = _ledger()
+    assert script.calls == 2
+    assert (raised.value.type, raised.value.limit) == (
+        "token",
+        TOKENS_PER_CALL * 3 // 2,
+    )
+    assert (ledger.stop_reason, ledger.ended_by) == ("swarm_cap", "sample_limit:token")
+    [line] = ledger.members
+    # the sample limit it raised is a foreign error, as for a native member
+    assert line.bridged and line.status == "errored"
