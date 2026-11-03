@@ -1,5 +1,6 @@
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -575,6 +576,20 @@ def _tool_call(arguments: dict[str, Any]) -> ModelOutput:
     return output
 
 
+# A tool call whose arguments hold the call itself.
+def _cyclic_tool_call() -> ModelOutput:
+    output = _tool_call({})
+    [call] = output.message.tool_calls or []
+    call.arguments["call"] = call
+    return output
+
+
+# A dataclass, which Inspect's log writer serializes as a dict of its fields.
+@dataclass
+class _Wrapper:
+    value: Any
+
+
 def _cycle() -> dict[str, Any]:
     cycle: dict[str, Any] = {}
     cycle["self"] = cycle
@@ -603,6 +618,11 @@ def _aliased(depth: int) -> list[Any]:
         pytest.param(lambda: _with_metadata(_cycle()), id="cycle"),
         # within the depth limit, refused before it is serialized
         pytest.param(lambda: _with_metadata({"value": _aliased(60)}), id="aliased"),
+        pytest.param(
+            lambda: _with_metadata({"value": _Wrapper(_aliased(60))}),
+            id="aliased-in-a-dataclass",
+        ),
+        pytest.param(_cyclic_tool_call, id="cyclic-tool-call"),
     ],
 )
 async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> None:
@@ -615,6 +635,9 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
     [
         pytest.param(lambda: _with_metadata({"value": _nested(194)}), id="metadata"),
         pytest.param(lambda: _tool_call({"value": _nested(194)}), id="tool-arguments"),
+        pytest.param(
+            lambda: _with_metadata({"value": _Wrapper(_nested(194))}), id="dataclass"
+        ),
     ],
 )
 def test_an_output_too_deep_for_a_json_log_is_left_out(
@@ -686,6 +709,12 @@ def _odd_metadata(value: Any) -> Callable[[], ModelOutput]:
         ),
         pytest.param(
             _odd_metadata(object()), _odd_metadata(None), id="object-in-metadata"
+        ),
+        # and a dataclass as a dict of its fields
+        pytest.param(
+            _odd_metadata(_Wrapper([1])),
+            _odd_metadata({"value": [1]}),
+            id="dataclass-in-metadata",
         ),
     ],
 )
