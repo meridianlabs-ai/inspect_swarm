@@ -18,6 +18,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### Boundary
 ### BoundaryCallback
 ### MemberEnded
+### MemberIdle
 ### ControlEvent
 ### MemberInfo
 ### MemberState

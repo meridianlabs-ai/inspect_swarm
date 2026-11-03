@@ -16,7 +16,7 @@ The controller's `final` rule chooses the swarm's answer from the members' submi
 - `first`, the default: the member that submitted earliest, by the swarm's clock, with ties broken by roster order.
 - `last`: the latest submission, again with ties broken by roster order. `leaderless(stop_on_submission=False, final="last")` gives it, for a team whose members build on each other's work ([Controllers](controllers.qmd#leaderless)).
 
-A controller of your own can also choose the answer itself, with `choose_answer()`, in place of the rule ([Controllers](controllers.qmd#choosing-the-answer)). A member that ended any other way than submitting is never chosen ([Members](members.qmd#how-a-member-ends)). When no member submitted, the answer is empty.
+A controller of your own can also choose the answer itself, with `choose_answer()`, in place of the rule ([Controllers](controllers.qmd#choosing-the-answer)). A member that ended any other way than submitting is never chosen ([Members](members.qmd#how-a-member-ends)). When no member submitted, the answer is empty. Each answer of a [persistent member](members.qmd#persistent-members) is a submission for these rules, whatever the member's status later, and ties between two answers of one member go to the earlier one.
 
 The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the mode and the chosen member. Each member's own conversation is in its timeline.
 
