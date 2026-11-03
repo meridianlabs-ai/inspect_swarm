@@ -1,6 +1,6 @@
 import json
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import replace
+from dataclasses import is_dataclass, replace
 from datetime import date, datetime
 from functools import cache
 from typing import Any, Literal, cast, get_args, get_type_hints
@@ -18,7 +18,6 @@ from inspect_ai.log._condense import (
 from inspect_ai.model import ModelOutput
 from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
 from inspect_ai.solver import TaskState
-from inspect_ai.tool import ToolCall
 from inspect_ai.util import Store, store
 from pydantic import (
     BaseModel,
@@ -318,7 +317,7 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
         if len(steps) > 20:
             steps = [*steps[:10], f"...({len(steps) - 15} steps)...", *steps[-5:]]
         return TypeError(
-            f"The swarm's result record cannot be written: the output of member {member!r} holds a value of type {type(value).__name__} at output{''.join(steps)}. A member's output must be built from Inspect's own classes, and its metadata and tool arguments must hold data a model can return: dicts, lists, strings, numbers, booleans and None, or the dates, times, bytes and sets YAML gives."
+            f"The swarm's result record cannot be written: the output of member {member!r} holds a value of type {_class_name(type(value))} at output{''.join(steps)}. A member's output must be built from Inspect's own classes, and its metadata and tool arguments must hold data a model can return: dicts, lists, strings, numbers, booleans and None, or the dates, times, bytes and sets YAML gives."
         )
 
     def push(
@@ -333,7 +332,7 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
         if model and data:
             raise refuse(value, at)
         if not model and not _container(value):
-            if type(value) not in _DATA:
+            if not _one_of(type(value), _DATA):
                 raise refuse(value, at)
             continue
         if (id(value), data) in seen:
@@ -347,7 +346,7 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
                 push(child, True, at, f".{name}")
         elif isinstance(value, dict):
             for key, child in cast(dict[object, object], value).items():
-                if type(key) not in _DATA:
+                if not _one_of(type(key), _DATA):
                     raise refuse(key, at)
                 push(child, data, at, None, key)
         else:
@@ -404,20 +403,55 @@ def _key_step(key: object) -> str:
 
 # What JSON and YAML parsers give inside a container, which `to_json_safe()` writes as
 # JSON; YAML also gives dates and times, bytes, sets, and keys that are not strings
-# (decision: Ransom, 2026-11-03). Matched by exact class, as are the containers, so
-# that a subclass from task code is refused before any method of it runs.
-_DATA = frozenset({str, int, float, bool, type(None), bytes, date, datetime})
+# (decision: Ransom, 2026-11-03).
+_DATA = (str, int, float, bool, type(None), bytes, date, datetime)
 
 
 def _container(value: object) -> bool:
-    return type(value) in (dict, list, tuple, set)
+    return _one_of(type(value), (dict, list, tuple, set))
 
 
-# One of Inspect's own models, by its class's module: a subclass from task code is not.
+# One of Inspect's own output models, the classes a `ModelOutput` is built from.
 def _inspect_model(value: object) -> bool:
-    return isinstance(value, BaseModel | ToolCall) and type(
-        value
-    ).__module__.startswith("inspect_ai.")
+    return _one_of(type(value), _inspect_models())
+
+
+# Whether `cls`, a value's actual class from `type()`, is one of `classes`. Compared by
+# identity, so that a value is approved without calling isinstance(), reading any of
+# its attributes or running any method of a class from task code (a `__class__`
+# property, `__instancecheck__`, a metaclass's `__eq__` or `__hash__`), and a subclass
+# is never approved.
+def _one_of(cls: type, classes: tuple[type, ...]) -> bool:
+    return any(cls is approved for approved in classes)
+
+
+# A class's name, read from the class itself: a metaclass from task code may give
+# `__name__` a property of its own.
+def _class_name(cls: type) -> str:
+    return cast(str, type.__dict__["__name__"].__get__(cls, type))
+
+
+# The classes, all Inspect's, that a `ModelOutput` is built from: its own and those its
+# fields' types name, found from the type hints.
+@cache
+def _inspect_models() -> tuple[type, ...]:
+    found: list[type] = []
+    pending: list[object] = [ModelOutput]
+    while pending:
+        hint = pending.pop()
+        if not isinstance(hint, type):
+            pending.extend(get_args(hint))
+            continue
+        cls: type[object] = hint
+        if _model_class(cls) and cls.__module__.startswith("inspect_ai."):
+            if cls not in found:
+                found.append(cls)
+                pending.extend(get_type_hints(cls).values())
+    return tuple(found)
+
+
+def _model_class(cls: type[object]) -> bool:
+    return issubclass(cls, BaseModel) or is_dataclass(cls)
 
 
 # A Pydantic model's extra fields, which are free-form data.

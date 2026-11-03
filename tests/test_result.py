@@ -30,7 +30,7 @@ from inspect_ai.model import (
 from inspect_ai.model._call_tools import parse_tool_call
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import TaskState
-from inspect_ai.tool import ToolInfo, ToolParam, ToolParams
+from inspect_ai.tool import ToolCall, ToolInfo, ToolParam, ToolParams
 from inspect_ai.util import store, token_limit
 
 from inspect_swarm import (
@@ -667,48 +667,81 @@ _HUGE_KEY = "? 0x" + "f" * 4000 + "\n: value"
 
 # Subclasses of the data classes, as task code might define, whose methods must never
 # run: each raises.
-def _ran() -> AssertionError:
-    return AssertionError("a method of the task's class ran")
+# Classes as task code might define, each with a `__class__` property and methods that
+# record that they ran and raise: none of them must run before the refusal.
+_hook_calls: list[str] = []
 
 
-class _List(list[Any]):
+def _ran(hook: str) -> AssertionError:
+    _hook_calls.append(hook)
+    return AssertionError(f"{hook} of the task's class ran")
+
+
+class _Hooked:
+    @property
+    def __class__(self) -> type:  # pyright: ignore[reportIncompatibleMethodOverride]
+        raise _ran("__class__")
+
+
+class _List(_Hooked, list[Any]):
     def __iter__(self) -> Iterator[Any]:
-        raise _ran()
+        raise _ran("__iter__")
 
     def __repr__(self) -> str:
-        raise _ran()
+        raise _ran("__repr__")
 
 
-class _Tuple(tuple[Any, ...]):
+class _Tuple(_Hooked, tuple[Any, ...]):
     def __iter__(self) -> Iterator[Any]:
-        raise _ran()
+        raise _ran("__iter__")
 
 
-class _Set(set[Any]):
+class _Set(_Hooked, set[Any]):
     def __iter__(self) -> Iterator[Any]:
-        raise _ran()
+        raise _ran("__iter__")
 
 
-class _Dict(dict[str, Any]):
+class _Dict(_Hooked, dict[str, Any]):
     def __iter__(self) -> Iterator[str]:
-        raise _ran()
+        raise _ran("__iter__")
 
     def items(self) -> Any:
-        raise _ran()
+        raise _ran("items")
 
     def keys(self) -> Any:
-        raise _ran()
+        raise _ran("keys")
 
     def values(self) -> Any:
-        raise _ran()
+        raise _ran("values")
 
 
-class _Str(str):
+class _Str(_Hooked, str):
     def __repr__(self) -> str:
-        raise _ran()
+        raise _ran("__repr__")
 
     def __str__(self) -> str:
-        raise _ran()
+        raise _ran("__str__")
+
+
+class _Int(_Hooked, int):
+    pass
+
+
+class _Opaque(_Hooked):
+    pass
+
+
+class _ToolCall(_Hooked, ToolCall):
+    pass
+
+
+def _with_tool_call_subtype() -> ModelOutput:
+    output = _tool_call({})
+    [call] = output.message.tool_calls or []
+    output.message.tool_calls = [
+        _ToolCall(id=call.id, function=call.function, arguments={})
+    ]
+    return output
 
 
 def _with_message_metadata(metadata: dict[Any, Any]) -> ModelOutput:
@@ -842,6 +875,21 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
             id="structural-list-subclass",
         ),
         pytest.param(
+            lambda: _with_metadata({"count": _Int(3)}),
+            r"type _Int at output\.metadata\['count'\]",
+            id="scalar-subclass",
+        ),
+        pytest.param(
+            lambda: _with_metadata({"diagnostic": _Opaque()}),
+            r"type _Opaque at output\.metadata\['diagnostic'\]",
+            id="opaque-object",
+        ),
+        pytest.param(
+            _with_tool_call_subtype,
+            r"type _ToolCall at output\.choices\[0\]\.message\.tool_calls\[0\]\. ",
+            id="tool-call-subtype",
+        ),
+        pytest.param(
             _tool_call_in_its_arguments,
             r"type ToolCall at output\.choices\[0\]\.message\.tool_calls\[0\]\.arguments\['call'\]",
             id="tool-call-in-arguments",
@@ -851,11 +899,14 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
 async def test_an_object_the_task_put_in_an_output_fails_the_sample(
     odd: Callable[[], ModelOutput], where: str
 ) -> None:
+    _hook_calls.clear()
     async with sample():
         with pytest.raises(
             TypeError, match=f"output of member 'odd' holds a value of {where}"
         ):
             await run_agent(_plain_then(odd, "result_test_author_object"), "task")
+    # no method or property of the task's classes ran, `__class__` included
+    assert _hook_calls == []
 
 
 class _TaskOutput(ModelOutput):
