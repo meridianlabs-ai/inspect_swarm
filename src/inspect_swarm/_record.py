@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import replace
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -16,6 +16,7 @@ from inspect_ai.log._condense import (
 from inspect_ai.model import ModelOutput
 from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
 from inspect_ai.solver import TaskState
+from inspect_ai.tool import ToolCall
 from inspect_ai.util import Store, store
 from pydantic import (
     BaseModel,
@@ -90,7 +91,7 @@ class MemberResult(BaseModel):
     """Swarm time when the verdict was taken; `None` without one."""
 
     left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that begins with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and an output nested too deep for a JSON log, with a cycle, or that Inspect cannot write to a log. Empty when nothing was left out."""
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that begins with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and an output nested too deep for a JSON log, with a cycle, that reuses the same lists, dicts or models so often that writing it would expand it past 10,000 copies, or that Inspect cannot write to a log. Empty when nothing was left out."""
 
     # Validating a `ModelOutput` fills an empty completion from its message, both when
     # the record is made and when it is read; the record keeps the completion the
@@ -201,12 +202,11 @@ def _logged_member(m: MemberResult) -> MemberResult:
 
 
 # An output in the form Inspect's log writer gives a sample's output (`to_json_safe()`),
-# read back as a log is read, or None when the record cannot hold it: one nested deeper
-# than `_MAX_OUTPUT_DEPTH` or with a cycle, measured before it is serialized by
-# Inspect's own guard, which never expands a container shared across paths; one Inspect
-# cannot serialize; or one with text that reads as an attachment reference.
+# read back as a log is read, or None when the record cannot hold it: one whose
+# serialization is not bounded (`_bounded()`), one Inspect cannot serialize, or one
+# with text that reads as an attachment reference.
 def _logged_output(output: ModelOutput) -> ModelOutput | None:
-    if exceeds_max_depth(output, _MAX_OUTPUT_DEPTH):
+    if not _bounded(output):
         return None
     try:
         data = json.loads(to_json_safe(output))
@@ -220,6 +220,50 @@ def _logged_output(output: ModelOutput) -> ModelOutput | None:
     return logged
 
 
+# Whether serializing an output is bounded, measured without serializing it: nested no
+# deeper than `_MAX_OUTPUT_DEPTH`, with no cycle, and with containers reached by more
+# than one path (as YAML aliases in tool arguments give) adding at most
+# `_MAX_SHARED_EXPANSION` containers, since serializing writes a container once for
+# each path. Inspect's `exceeds_max_depth()` measures the depth without expanding
+# shared containers, but skips a tool call, a dataclass, so a tool call's arguments are
+# measured at their own depth; it does not bound the expansion, which is counted here
+# by identity.
+def _bounded(output: ModelOutput) -> bool:
+    if exceeds_max_depth(output, _MAX_OUTPUT_DEPTH):
+        return False
+    calls = [c for choice in output.choices for c in choice.message.tool_calls or []]
+    if any(
+        exceeds_max_depth(c.arguments, _MAX_OUTPUT_DEPTH - _ABOVE_TOOL_ARGUMENTS)
+        for c in calls
+    ):
+        return False
+    sizes: dict[int, int] = {}
+
+    # the containers serializing `value` writes, each shared one counted once
+    def written(value: object) -> int:
+        children = _children(value)
+        if children is None:
+            return 0
+        if id(value) not in sizes:
+            sizes[id(value)] = 1 + sum(written(child) for child in children)
+        return sizes[id(value)]
+
+    return written(output) - len(sizes) <= _MAX_SHARED_EXPANSION
+
+
+# The values `exceeds_max_depth()` descends into, and a tool call's arguments.
+def _children(value: object) -> Iterable[object] | None:
+    if isinstance(value, dict):
+        return cast(dict[object, object], value).values()
+    if isinstance(value, list | tuple | set | frozenset):
+        return cast(Iterable[object], value)
+    if isinstance(value, BaseModel):
+        return [*value.__dict__.values(), *(value.__pydantic_extra__ or {}).values()]
+    if isinstance(value, ToolCall):
+        return [value.arguments]
+    return None
+
+
 # Text as the log writer gives it back (text that is not valid UTF-8 escaped), or None
 # when it reads as an attachment reference.
 def _logged_text(text: str) -> str | None:
@@ -231,6 +275,13 @@ def _logged_text(text: str) -> str | None:
 # the output's containers, well below the depth at which the record inside its sample
 # no longer reads from a JSON log.
 _MAX_OUTPUT_DEPTH = MAX_TOOL_CALL_ARGUMENTS_DEPTH + 20
+
+# The output, its choices, a choice, its message, its tool calls and a tool call.
+_ABOVE_TOOL_ARGUMENTS = 6
+
+# Far more containers than an output repeats, and far fewer than an aliased graph
+# expands to.
+_MAX_SHARED_EXPANSION = 10_000
 
 
 # Removes the store's record id, so that a swarm that leaves no record never leaves an

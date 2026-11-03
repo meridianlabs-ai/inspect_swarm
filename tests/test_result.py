@@ -567,6 +567,14 @@ def _with_metadata(metadata: dict[str, Any]) -> ModelOutput:
     return output
 
 
+def _tool_call(arguments: dict[str, Any]) -> ModelOutput:
+    output = ModelOutput.for_tool_call(
+        "mockllm", "submit", arguments, tool_call_id="call"
+    )
+    output.message.id = "odd"
+    return output
+
+
 def _cycle() -> dict[str, Any]:
     cycle: dict[str, Any] = {}
     cycle["self"] = cycle
@@ -593,8 +601,8 @@ def _aliased(depth: int) -> list[Any]:
     "odd",
     [
         pytest.param(lambda: _with_metadata(_cycle()), id="cycle"),
-        # refused before it is serialized
-        pytest.param(lambda: _with_metadata({"value": _aliased(130)}), id="aliased"),
+        # within the depth limit, refused before it is serialized
+        pytest.param(lambda: _with_metadata({"value": _aliased(60)}), id="aliased"),
     ],
 )
 async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> None:
@@ -602,12 +610,19 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
     _assert_left_out(stop.record)
 
 
-def test_an_output_too_deep_for_a_json_log_is_left_out(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "deep",
+    [
+        pytest.param(lambda: _with_metadata({"value": _nested(194)}), id="metadata"),
+        pytest.param(lambda: _tool_call({"value": _nested(194)}), id="tool-arguments"),
+    ],
+)
+def test_an_output_too_deep_for_a_json_log_is_left_out(
+    tmp_path: Path, deep: Callable[[], ModelOutput]
+) -> None:
     task = Task(
         dataset=[Sample(input="task")],
-        solver=_plain_then(
-            lambda: _with_metadata({"value": _nested(194)}), "result_test_too_deep"
-        ),
+        solver=_plain_then(deep, "result_test_too_deep"),
     )
     [log] = eval(
         task,
@@ -659,6 +674,12 @@ def _odd_metadata(value: Any) -> Callable[[], ModelOutput]:
         pytest.param(_cited_range, _cited_range, id="cited-range"),
         # a float field keeps an infinite number in JSON
         pytest.param(_infinite_logprob, _infinite_logprob, id="infinite-logprob"),
+        # tool arguments as deep as Inspect accepts them
+        pytest.param(
+            lambda: _tool_call({"value": _nested(98)}),
+            lambda: _tool_call({"value": _nested(98)}),
+            id="deepest-tool-arguments",
+        ),
         # the log writes them as null in a sample's own output
         pytest.param(
             _odd_metadata(float("inf")), _odd_metadata(None), id="infinity-in-metadata"

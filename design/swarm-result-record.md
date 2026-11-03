@@ -122,7 +122,8 @@ def write_record(record: SwarmResultRecord) -> None:
     forget_record()
     id = uuid4().hex
     logged = _logged_members(record)
-    if _changed_by_logging(logged.model_dump(mode="json", exclude=_MODEL_TEXT)):
+    authored = logged.model_dump(mode="json", exclude=_MODEL_TEXT)
+    if _changed_by_logging(SwarmEvent(kind=RECORD_TYPE, member=None, data=authored)):
         raise ValueError("...")  # see Text a log would change
     data = {"type": RECORD_TYPE, "id": id, **logged.model_dump(mode="json")}
     transcript().info(data, source="inspect_swarm")
