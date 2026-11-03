@@ -207,6 +207,9 @@ class MemberAccount:
     cancelled: bool
     background_started: int
     background_cancelled: int
+    # the model calls in flight when a stop or an end cancelled one of the member's
+    # boundary callback chains, by event id
+    cancelled_calls: Sequence[str] = ()
 
 
 # A model event as it last stood, with its live usage object.
@@ -396,6 +399,10 @@ class LedgerInterval:
     def events(self) -> EventLog:
         return self._events
 
+    # the model calls in flight now, by event id
+    def pending_calls(self) -> list[str]:
+        return [uuid for uuid, call in self._events.calls.items() if call.pending]
+
     # stops observing the transcript; idempotent, so that the swarm's end calls it
     # however the swarm ends
     def close(self) -> None:
@@ -422,10 +429,10 @@ class LedgerInterval:
     ) -> SwarmLedger:
         # synchronous, so that it runs under cancellation too
         self.close()
-        calls, member_calls = count_calls(
-            self._events,
-            self.places({m.name: m.span_id for m in members if m.span_id is not None}),
+        places = self.places(
+            {m.name: m.span_id for m in members if m.span_id is not None}
         )
+        calls, member_calls = count_calls(self._events, places)
         delta, unpriced_models, cost_scale = _usage_delta(
             self._start_usage, _usage_snapshot()
         )
@@ -448,7 +455,7 @@ class LedgerInterval:
                 bridged=m.bridged,
                 meter=_meter(m.lever),
                 calls=member_calls.get(m.name, Calls()),
-                cancelled=m.cancelled,
+                cancelled=m.cancelled or self._in_flight(m, places),
                 background_started=m.background_started,
                 background_cancelled=m.background_cancelled,
             )
@@ -457,7 +464,7 @@ class LedgerInterval:
         total_complete = (
             # a cancelled agent loop, background ones included, may have had work in
             # flight that left no trace
-            not any(m.cancelled or m.background_cancelled for m in members)
+            not any(m.cancelled or m.background_cancelled for m in member_ledgers)
             and not interrupted
             and not final_cancelled
             and calls.errored == 0
@@ -495,6 +502,21 @@ class LedgerInterval:
             resumed=self._resumed,
             total_complete=total_complete,
             attribution_complete=attribution_complete,
+        )
+
+    # Whether a stop or an end that cancelled one of the member's boundary callback
+    # chains interrupted a model call of the member's: one in flight at the
+    # cancellation, in the member's spans, that did not then complete, so its usage is
+    # unknown. A call that had already ended, a handled failure included, is not one.
+    def _in_flight(self, member: MemberAccount, places: "SpanPlaces") -> bool:
+        calls = [
+            self._events.calls[uuid]
+            for uuid in member.cancelled_calls
+            if uuid in self._events.calls
+        ]
+        return any(
+            (call.pending or call.errored) and places(call.span_id)[1] == member.name
+            for call in calls
         )
 
 

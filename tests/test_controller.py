@@ -30,6 +30,7 @@ from inspect_ai.util._checkpoint.config import ResolvedCheckpointConfig
 
 from inspect_swarm import (
     Budget,
+    ControlEvent,
     Controller,
     MemberEnded,
     MemberHandle,
@@ -225,7 +226,7 @@ async def test_a_woken_iterator_keeps_the_event_that_woke_it() -> None:
         )
         [m] = run._members
         m.state = "running"
-        received: list[MemberEnded] = []
+        received: list[ControlEvent] = []
 
         async def first() -> None:
             async for event in run.events():

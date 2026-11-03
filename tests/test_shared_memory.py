@@ -1,5 +1,5 @@
 import re
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -20,6 +20,7 @@ from inspect_swarm._channel.shared_memory import (
     _SharedMemoryState,  # pyright: ignore[reportPrivateUsage]
 )
 from inspect_swarm._fence import utf8_bytes
+from inspect_swarm._seam import BoundaryCallback
 
 from .swarm_runtime import comm_events, data, delivery, sample, send
 
@@ -42,6 +43,26 @@ class _Member:
     @property
     def submitted(self) -> bool:
         return self.status == "submitted"
+
+    @property
+    def held(self) -> bool:
+        return False
+
+    @property
+    def persistent(self) -> bool:
+        return False
+
+    @property
+    def answers(self) -> int:
+        return 0
+
+    def on_boundary(
+        self, callback: BoundaryCallback, *, origin: str
+    ) -> Callable[[], None]:
+        raise NotImplementedError
+
+    def end(self, *, origin: str) -> None:
+        raise NotImplementedError
 
 
 class _Board:

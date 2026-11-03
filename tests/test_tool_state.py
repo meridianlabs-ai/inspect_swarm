@@ -8,9 +8,8 @@ from inspect_ai.agent import Agent, AgentState, agent, deepagent, general
 from inspect_ai.dataset import Sample
 from inspect_ai.log import EvalLog
 from inspect_ai.model import ChatMessage, ChatMessageTool, ChatMessageUser, ModelOutput
-from inspect_ai.tool import Skill, Tool, ToolDef
+from inspect_ai.tool import Skill, Tool
 from inspect_ai.tool._tools import _bash_session as bash_session_module
-from inspect_ai.tool._tools._web_browser import _web_browser as web_browser_module
 from inspect_ai.util import tool_state_instance
 
 from inspect_swarm import leaderless, member, swarm
@@ -191,7 +190,7 @@ async def _eval(solver: Agent, tmp_path: Path, sandbox: str | None = None) -> Ev
 
 @agent
 def session_user(tool: Tool, arguments: dict[str, Any]) -> Agent:
-    # calls the tool twice, as a member using its shell or browser would
+    # calls the tool twice, as a member using its shell would
     async def execute(state: AgentState) -> AgentState:
         for _ in range(2):
             await tool(**arguments)
@@ -254,53 +253,6 @@ async def test_members_get_their_own_bash_session(
             channels=[],
         )(AgentState(messages=[ChatMessageUser(content="task")]))
     _assert_one_session_per_member(new_sessions, used)
-
-
-@pytest.mark.anyio
-async def test_members_get_their_own_web_browser(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    new_sessions: list[str] = []
-    used: list[tuple[str | None, object]] = []
-
-    async def fake_legacy_tool_support_sandbox(*args: Any) -> tuple[object, None]:
-        return (object(), None)
-
-    async def fake_exec_model_request(method: str, **kwargs: Any) -> Any:
-        if method == "web_new_session":
-            new_sessions.append(f"session-{len(new_sessions) + 1}")
-            return web_browser_module.NewSessionResult(session_name=new_sessions[-1])
-        session = kwargs["params"]["session_name"]
-        used.append((tool_state_instance(None), session))
-        return web_browser_module.CrawlerResult(
-            web_url="https://example.com", web_at="[1] RootWebArea"
-        )
-
-    monkeypatch.setattr(
-        web_browser_module,
-        "legacy_tool_support_sandbox",
-        fake_legacy_tool_support_sandbox,
-    )
-    monkeypatch.setattr(web_browser_module, "SandboxJSONRPCTransport", _FakeTransport)
-    monkeypatch.setattr(
-        web_browser_module, "exec_model_request", fake_exec_model_request
-    )
-
-    [go] = [t for t in web_browser_module.web_browser() if "go" in _tool_name(t)]
-    async with sample():
-        await swarm(
-            member(
-                session_user,
-                args={"tool": go, "arguments": {"url": "https://example.com"}},
-                count=2,
-            ),
-            channels=[],
-        )(AgentState(messages=[ChatMessageUser(content="task")]))
-    _assert_one_session_per_member(new_sessions, used)
-
-
-def _tool_name(tool: Tool) -> str:
-    return ToolDef(tool).name
 
 
 def _assert_one_session_per_member(

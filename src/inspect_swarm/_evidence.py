@@ -19,7 +19,7 @@ from inspect_ai.log import transcript
 from inspect_ai.util import store
 from pydantic import JsonValue
 
-from ._bus._record import Record, thaw_json
+from ._bus._record import Record, current_via, thaw_json
 from ._ledger import SpanPlaces, SwarmLedger
 from ._metrics import SwarmMetrics
 
@@ -47,13 +47,69 @@ def swarm_event(
     )
 
 
+# The turn seam's evidence, in the member's span, at a boundary where its callbacks ran:
+# one `boundary` event, with what ended the chain, and one `changed` event for each
+# callback whose result differed from what it received (origin `swarm` for the stale
+# summaries the runtime removed), with message ids and hashes, never text. `applied` says
+# whether the change is in the member's live conversation.
+def seam_boundary(
+    member: str,
+    *,
+    boundary: int,
+    after: str,
+    origins: list[str],
+    held_for: float,
+    outcome: str,
+    messages: tuple[int, int],
+    detail: Mapping[str, JsonValue],
+) -> None:
+    # `detail` is the origin and the error's type, for the outcomes that have them
+    _seam_event(
+        "boundary",
+        member,
+        {
+            "boundary": boundary,
+            "after": after,
+            "origins": list[JsonValue](origins),
+            "held_for": held_for,
+            "outcome": outcome,
+            "messages": {"before": messages[0], "after": messages[1]},
+            **detail,
+        },
+    )
+
+
+def seam_changed(
+    member: str,
+    *,
+    boundary: int,
+    origin: str,
+    change: Mapping[str, JsonValue],
+    applied: bool,
+) -> None:
+    _seam_event(
+        "changed",
+        member,
+        {"boundary": boundary, "origin": origin, **change, "applied": applied},
+    )
+
+
+def _seam_event(kind: str, member: str, data: dict[str, JsonValue]) -> None:
+    # synchronous, so that it is written however the chain ends
+    transcript()._event(  # pyright: ignore[reportPrivateUsage]
+        SwarmEvent(kind=kind, member=member, data={"version": 1, **data})
+    )
+
+
 # Communication evidence: a `CommunicationEvent` with source "inspect_swarm" for each
 # record that reached the bus (`sent`), for each one it delivered (`delivered`), for
 # each read of a channel's content (`read`) and for each wait (`waited`), written in the
 # span the channel's tool runs in. Its `agent` and `agent_span_id` are the acting member
 # and its member span, even from a member's descendant; `loop_span_id` is the agent span
 # of the loop that acted, and `nested` whether that loop is not the member's own. What
-# the typed fields do not hold is in `data`, with the format version.
+# the typed fields do not hold is in `data`, with the format version. A read or wait's
+# `data.via`, and a send's `data.record.via`, is "bridge" for a bridged member's call
+# through swarm_bridged_tools(), whose CLI is one loop.
 def _comm(
     kind: CommunicationKind,
     *,
@@ -123,6 +179,7 @@ def comm_sent(
                 "wake": record.wake,
                 "sender_span_id": record.sender_span_id,
                 "tool_span_id": record.tool_span_id,
+                "via": record.via,
             }
         },
     )
@@ -185,6 +242,7 @@ def comm_read(
             "depends_on": list(depends_on),
             **shown,
             "listing": listing,
+            "via": current_via.get(),
         },
     )
 
@@ -230,6 +288,7 @@ def comm_waited(
             "files": files,
             "depends_on": list(depends_on),
             "ended": ended,
+            "via": current_via.get(),
         },
     )
 

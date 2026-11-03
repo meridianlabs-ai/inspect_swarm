@@ -15,8 +15,8 @@ from inspect_ai.solver import TaskState
 from inspect_ai.util import Store, store
 from pydantic import BaseModel, JsonValue, ValidationError
 
-MemberState = Literal["pending", "running", "ended"]
-"""A member's lifecycle: not started, running, or ended."""
+MemberState = Literal["pending", "running", "idle", "ending", "ended"]
+"""A member's lifecycle: not started, running, idle, ending, or ended. Only persistent members are ever `idle` (answered and waiting for `SwarmControl.wake()`) or `ending` (their ending has begun, and the member has not yet ended)."""
 
 RECORD_TYPE = "result_record"
 RESULT_ID_KEY = "inspect_swarm:result_id"
@@ -62,6 +62,12 @@ class MemberResult(BaseModel):
     first_pass_time: float | None = None
     """Swarm time of the member's first passing check; `None` without one. A pass assumes the default `value_to_float()` converter, as for `gate_passes`."""
 
+    persistent: bool = False
+    """Whether the member is persistent (`member(..., persistent=True)`)."""
+
+    answer_times: list[float] = []
+    """The swarm times of a persistent member's answers, in order. Empty for other members, whose answer is their submission at `time`."""
+
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
@@ -77,6 +83,9 @@ class FinalRecord(BaseModel):
 
     provisional: bool
     """`True` when the swarm ended without finalising its answer: a limit, error or cancellation ended it first, or the answer did not fit the sample's message limit."""
+
+    answer: int | None = None
+    """Which of a persistent member's answers is the swarm's answer, from 0. `None` for other members, and when there is no answer."""
 
 
 class SwarmResultRecord(BaseModel):

@@ -1,0 +1,172 @@
+from collections.abc import Callable, Sequence
+from typing import Any
+
+from inspect_ai.agent import BridgedToolsSpec
+from inspect_ai.model._call_tools import tool_params
+from inspect_ai.tool import Tool, ToolDef, ToolError
+
+from .._channel._channel import ToolDeclaration
+from .._channel._params import check_bound
+from .._channel.messages import builtin_messages
+from .._channel.messages import declarations as messages_declarations
+from .._channel.shared_memory import builtin_board
+from .._channel.shared_memory import declarations as board_declarations
+from ._bus import Bus, current_bus
+from ._record import current_via
+from ._wait import wait_tool
+
+SERVER = "swarm"
+
+_CHANNELS: dict[str, Callable[[], list[ToolDeclaration]]] = {
+    "messages": messages_declarations,
+    "shared_memory": board_declarations,
+}
+
+
+def swarm_bridged_tools(
+    channels: Sequence[str], max_wait: int = 280
+) -> BridgedToolsSpec:
+    """The tools of the swarm's channels, for a bridged member's agent.
+
+    Pass it in the agent's bridged tools, `claude_code(bridged_tools=[swarm_bridged_tools(["messages"])])`. A bridged agent's tools are fixed when it is built, so name the channels it uses: `"messages"` gives `send_message`, `read_messages` and `list_members`, and `"shared_memory"` gives `shared_memory`. Both also give `swarm_wait`. The tools are served as the MCP server `swarm`.
+
+    Each tool acts as the member whose agent calls it, and finds the swarm's channel when it is called; a tool whose channel the swarm does not have returns an error saying so. The CLI is one loop of the member, whichever of its conversations calls: its subagents read the member's messages, and a message any of them reads is read for all; they share what the member has viewed in the shared memory; and their sends and writes are the member's. The member's evidence records these calls with `via` set to `"bridge"`.
+
+    A bridged member never counts as waiting, since one call in `swarm_wait` does not show that its CLI is idle: its waits end on news, a member's end, the swarm's stop or their timeout, never because every member is waiting. A bridged wait lasts at most `max_wait` seconds, or the longest wait of the swarm's channels if that is shorter, because the CLI gives up on a tool call that runs too long: Claude Code and Codex both stop one after 300 seconds by default, and the shared memory's waits last up to 600. Claude Code's limit cannot be raised for bridged tools, so keep the default of 280 for it. A Codex member whose timeout is raised with `codex_cli(config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"})` can take a matching `max_wait`.
+
+    A swarm with the messages channel needs `"messages"` here too: other members can send to the member, and without the messages tools it could never read what they send, so the tools of a bridge given only `"shared_memory"` return an error saying to add it. A member uses these tools or `swarm_tools()`, never both, in either order: each would be a reader of its inbox.
+
+    Args:
+        channels: The channels whose tools to give: `"messages"`, `"shared_memory"` or both.
+        max_wait: The longest `swarm_wait` in seconds, at least 1. Keep it below the CLI's MCP tool timeout.
+
+    Returns:
+        The tools, as an MCP server named `swarm`.
+
+    Raises:
+        ValueError: If `channels` is empty, names a channel twice, or names one other than `"messages"` and `"shared_memory"`, or `max_wait` is below 1.
+    """
+    names = list(channels)
+    unknown = [name for name in names if name not in _CHANNELS]
+    if not names or unknown or len(set(names)) < len(names):
+        raise ValueError(
+            f"swarm_bridged_tools(): channels must name {' or '.join(repr(c) for c in _CHANNELS)}, or both, each once; got {names!r}."
+        )
+    check_bound("swarm_bridged_tools", "max_wait", max_wait, 1)
+    tools = [
+        _relay(name, declaration, names)
+        for name in names
+        for declaration in _CHANNELS[name]()
+    ]
+    tools.append(_wait(names, max_wait))
+    return BridgedToolsSpec(name=SERVER, tools=tools)
+
+
+# A channel's tool for a bridged member: the run's tool of that name, called through the
+# bridge as the member.
+def _relay(channel: str, declaration: ToolDeclaration, channels: Sequence[str]) -> Tool:
+    async def execute(**arguments: Any) -> str:
+        bus = _bus(declaration.name, channels)
+        state = _state(bus, channel)
+        if state is None:
+            raise ToolError(
+                f"The swarm has no {channel} channel, so {declaration.name} cannot be used."
+            )
+        tool = next(
+            t for t in bus.states[state].tools() if ToolDef(t).name == declaration.name
+        )
+        token = current_via.set("bridge")
+        try:
+            return await _call(tool, arguments)
+        finally:
+            current_via.reset(token)
+
+    return ToolDef(
+        execute,
+        name=declaration.name,
+        description=declaration.description,
+        parameters=declaration.parameters,
+        max_output=declaration.max_output,
+    ).as_tool()
+
+
+# swarm_wait for a bridged member, waiting on the given channels the swarm has, for at
+# most `max_wait` seconds
+def _wait(channels: Sequence[str], max_wait: int) -> Tool:
+    async def wait(path: str | None, file_id: str | None, timeout: int | None) -> str:
+        bus = _bus("swarm_wait", channels)
+        states = [s for s in (_state(bus, c) for c in channels) if s is not None]
+        if not states:
+            raise ToolError(
+                f"The swarm has no {' or '.join(channels)} channel, so swarm_wait cannot be used."
+            )
+        # the filters are the shared memory's, which would check them; without it they
+        # would be ignored
+        if (path is not None or file_id is not None) and _state(
+            bus, "shared_memory"
+        ) not in states:
+            raise ToolError(
+                "The swarm has no shared_memory channel, so swarm_wait takes no path or file_id; call it without them to wait for messages."
+            )
+        token = current_via.set("bridge")
+        try:
+            return await bus.wait(path, file_id, timeout, states, max_wait)
+        finally:
+            current_via.reset(token)
+
+    tool = ToolDef(
+        wait_tool(
+            wait,
+            messages="messages" in channels,
+            board="shared_memory" in channels,
+            bridged=True,
+            timeout=f"Seconds to wait at most (default and maximum: {max_wait}, or less if the swarm's channels wait less).",
+        )
+    )
+
+    async def execute(**arguments: Any) -> str:
+        return await _call(tool.tool, arguments)
+
+    return ToolDef(
+        execute,
+        name=tool.name,
+        description=tool.description,
+        parameters=tool.parameters,
+        parallel=tool.parallel,
+    ).as_tool()
+
+
+# Calls `tool` with the arguments converted to its parameters' types, as Inspect
+# converts a native call's: the bridge only validates them against the schema, which
+# takes 1.0 as an integer.
+async def _call(tool: Callable[..., Any], arguments: dict[str, Any]) -> str:
+    return str(await tool(**tool_params(arguments, tool)))
+
+
+# the run's bus, for a call of a bridged tool given with `channels`
+def _bus(tool: str, channels: Sequence[str]) -> Bus:
+    bus = current_bus.get()
+    context = bus.member() if bus is not None else None
+    if bus is None or context is None:
+        raise ToolError(f"{tool} can only be used by a member of a swarm.")
+    # a native member's bridged subagent would be a second reader of its inbox
+    if context.loop is not None:
+        raise ToolError(
+            f"{tool} is for a bridged member; {context.name} uses the swarm's tools from swarm_tools()."
+        )
+    # peers can send to the member, and without the messages tools it could never read
+    if "messages" not in channels and _state(bus, "messages") is not None:
+        raise ToolError(
+            f'{tool} cannot be used: the swarm has a messages channel, which {context.name}\'s swarm tools leave out, so it could never read the messages other members send it. Add "messages" to swarm_bridged_tools().'
+        )
+    # so that the member cannot then bind a loop with swarm_tools()
+    context.bridge_used = True
+    return bus
+
+
+# the name of the run's state of a built-in channel, by its state's type, which a
+# custom channel cannot take; None when the swarm does not have it
+def _state(bus: Bus, channel: str) -> str | None:
+    if channel == "shared_memory":
+        return builtin_board(bus.states)
+    return builtin_messages(bus.states)

@@ -4,6 +4,7 @@ Everything in this package is experimental and may change in any release without
 """
 
 from ._budget import Budget, BudgetUsage, SwarmBudget, swarm_budget
+from ._bus._bridged import swarm_bridged_tools
 from ._bus._record import Record
 from ._bus._tools import swarm_tools
 from ._channel._channel import (
@@ -22,6 +23,8 @@ from ._controller._control import (
     ControlEvent,
     MemberEnded,
     MemberHandle,
+    MemberIdle,
+    MemberNews,
     MemberState,
     SwarmControl,
 )
@@ -36,6 +39,7 @@ from ._final import FinalName
 from ._isolation import Share, UserIsolation, users
 from ._member import Member, member
 from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
+from ._seam import Boundary, BoundaryCallback
 from ._swarm import swarm
 from ._tools import swarm_resources
 
@@ -46,6 +50,8 @@ except ImportError:
 
 
 __all__ = [
+    "Boundary",
+    "BoundaryCallback",
     "Budget",
     "BudgetUsage",
     "Channel",
@@ -58,7 +64,9 @@ __all__ = [
     "Member",
     "MemberEnded",
     "MemberHandle",
+    "MemberIdle",
     "MemberInfo",
+    "MemberNews",
     "MemberResult",
     "MemberState",
     "Record",
@@ -78,6 +86,7 @@ __all__ = [
     "messages",
     "shared_memory",
     "swarm",
+    "swarm_bridged_tools",
     "swarm_budget",
     "swarm_channel",
     "swarm_controller",

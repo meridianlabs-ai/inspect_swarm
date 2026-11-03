@@ -239,6 +239,7 @@ async def test_no_submissions_give_an_empty_output_though_members_have_outputs()
         "member": None,
         "reason": "no_submissions",
         "provisional": False,
+        "answer": None,
     }
 
 
@@ -416,6 +417,7 @@ async def test_a_submission_during_grace_is_chosen_only_without_an_earlier_one(
         "member": expected,
         "reason": None,
         "provisional": False,
+        "answer": None,
     }
     assert stop.state.output.completion == expected
     assert final(stop.transcript).member == expected
@@ -496,6 +498,8 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "gate_checks",
         "gate_passes",
         "first_pass_time",
+        "persistent",
+        "answer_times",
     }
     started, never = record.members
     assert (started.state, started.status, started.submitted, started.role) == (
@@ -512,6 +516,7 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "member": "started",
         "reason": "the only one",
         "provisional": False,
+        "answer": None,
     }
 
 
@@ -626,6 +631,7 @@ async def test_evidence_names_members_and_spans_and_holds_no_member_text() -> No
             "mode": "first",
             "reason": None,
             "stop_reason": "controller:enough",
+            "answer": None,
         },
     )
     assert event.span_id == spans["swarm"]
@@ -728,6 +734,7 @@ async def test_a_team_swarm_answers_with_its_last_submission() -> None:
         "member": "b",
         "reason": None,
         "provisional": False,
+        "answer": None,
     }
     assert (final(stop.transcript).data["mode"], final(stop.transcript).member) == (
         "last",
@@ -839,6 +846,7 @@ async def test_a_controller_chooses_the_answer_in_place_of_its_final_rule() -> N
         "member": "b",
         "reason": "most complete",
         "provisional": False,
+        "answer": None,
     }
     event = final(transcript)
     assert (event.data["mode"], event.member, event.data["reason"]) == (
@@ -914,6 +922,7 @@ async def test_a_controllers_choice_is_the_provisional_answer_at_once() -> None:
         "member": "a",
         "reason": "earlier",
         "provisional": True,
+        "answer": None,
     }
     assert seen == {"chosen": "a", "later": "a"}
     # the sample's limit ended the swarm before finalisation

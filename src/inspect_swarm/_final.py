@@ -9,14 +9,25 @@ from ._evidence import swarm_event
 from ._record import FinalRecord, MemberResult
 
 FinalName = Literal["first", "last"]
-"""How the swarm chooses its answer from the submissions: `first`, the earliest, or `last`, the latest. A tie goes to the member listed first in the roster."""
+"""How the swarm chooses its answer from the submissions: `first`, the earliest, or `last`, the latest. A tie goes to the member listed first in the roster, then to its earlier answer."""
 
 
-# A controller's choice of the answer, made with `SwarmControl.choose_answer()`.
+# A controller's choice of the answer, made with `SwarmControl.choose_answer()`: for a
+# persistent member, which of its answers.
 @dataclass(frozen=True)
 class Pick:
     member: str
     reason: str | None
+    answer: int | None = None
+
+
+# One answer that can be the swarm's: a non-persistent member's submission (`answer`
+# None), at its end, or one of a persistent member's answers, by index.
+@dataclass(frozen=True)
+class Candidate:
+    name: str
+    answer: int | None
+    time: float
 
 
 # Refuses a final rule the runtime does not have.
@@ -26,22 +37,38 @@ def check_final(final: object) -> None:
         raise ValueError(f"final= must be one of {names} or None, got {final!r}.")
 
 
-# The submission with the earliest swarm time, then roster order; None without one.
-def first(members: Sequence[MemberResult]) -> MemberResult | None:
-    submissions = [m for m in members if m.submitted]
-    # min() keeps the first of equal keys, which is roster order
-    return min(submissions, key=_time, default=None)
+# Every candidate, in roster order and, within a persistent member, answer order: each
+# answer of a persistent member, whatever its status, and the submission of any other
+# member that ended with one.
+def candidates(members: Sequence[MemberResult]) -> list[Candidate]:
+    found: list[Candidate] = []
+    for m in members:
+        if m.persistent:
+            found.extend(
+                Candidate(m.name, i, time) for i, time in enumerate(m.answer_times)
+            )
+        elif m.submitted:
+            assert m.time is not None
+            found.append(Candidate(m.name, None, m.time))
+    return found
 
 
-# The submission with the latest swarm time, then roster order; None without one.
-def last(members: Sequence[MemberResult]) -> MemberResult | None:
-    submissions = [m for m in members if m.submitted]
-    # max() keeps the first of equal keys, which is roster order
-    return max(submissions, key=_time, default=None)
+# The candidate with the earliest swarm time, then roster and answer order; None
+# without one.
+def first(members: Sequence[MemberResult]) -> Candidate | None:
+    # min() keeps the first of equal keys, which is roster and answer order
+    return min(candidates(members), key=_time, default=None)
+
+
+# The candidate with the latest swarm time, then roster and answer order; None without
+# one.
+def last(members: Sequence[MemberResult]) -> Candidate | None:
+    # max() keeps the first of equal keys, which is roster and answer order
+    return max(candidates(members), key=_time, default=None)
 
 
 # The answer from the members' results so far: the controller's pick when it made one,
-# else `final`'s rule over the submissions. `final=None` is the default, `first`.
+# else `final`'s rule over the candidates. `final=None` is the default, `first`.
 def answer(
     members: Sequence[MemberResult],
     final: FinalName | None,
@@ -55,6 +82,7 @@ def answer(
             member=pick.member,
             reason=pick.reason,
             provisional=provisional,
+            answer=pick.answer,
         )
     mode: FinalName = final or "first"
     chosen = last(members) if mode == "last" else first(members)
@@ -63,14 +91,19 @@ def answer(
             mode=None, member=None, reason="no_submissions", provisional=provisional
         )
     return FinalRecord(
-        mode=mode, member=chosen.name, reason=None, provisional=provisional
+        mode=mode,
+        member=chosen.name,
+        reason=None,
+        provisional=provisional,
+        answer=chosen.answer,
     )
 
 
-# Applies answer() to the members' results so far and sets the chosen member's output
-# (from `outputs`, the ended members' outputs by name) as the swarm state's output: the
-# provisional answer until finalisation. as_solver() copies the output to the task
-# state however the swarm ends. The record is written only when the swarm ends.
+# Applies answer() to the members' results so far and sets the chosen output as the
+# swarm state's output: the provisional answer until finalisation. `outputs` are the
+# ended non-persistent members' outputs by name, and `answers` the persistent members'
+# answers by name, in order. as_solver() copies the output to the task state however
+# the swarm ends. The record is written only when the swarm ends.
 def settle(
     state: AgentState,
     members: Sequence[MemberResult],
@@ -79,11 +112,10 @@ def settle(
     pick: Pick | None,
     *,
     provisional: bool,
+    answers: Mapping[str, Sequence[ModelOutput]] | None = None,
 ) -> FinalRecord:
     chosen = answer(members, final, pick, provisional=provisional)
-    state.output = (
-        outputs[chosen.member] if chosen.member is not None else ModelOutput()
-    )
+    state.output = _output(chosen, outputs, answers or {})
     return chosen
 
 
@@ -99,14 +131,18 @@ def finalise(
     *,
     span_id: str | None,
     stop_reason: str | None,
+    answers: Mapping[str, Sequence[ModelOutput]] | None = None,
 ) -> None:
+    answers = answers or {}
     # the conversation only now, since the sample's message limit applies to it: an
     # answer it does not fit ends the sample on that limit, with the answer as its
     # output and the record provisional
     state.messages = _conversation(
-        input, answer(members, final, pick, provisional=False), outputs
+        input, answer(members, final, pick, provisional=False), outputs, answers
     )
-    chosen = settle(state, members, outputs, final, pick, provisional=False)
+    chosen = settle(
+        state, members, outputs, final, pick, provisional=False, answers=answers
+    )
     swarm_event(
         "final",
         member=chosen.member,
@@ -114,7 +150,21 @@ def finalise(
         mode=chosen.mode,
         reason=chosen.reason,
         stop_reason=stop_reason,
+        answer=chosen.answer,
     )
+
+
+# The chosen answer's output; an empty output when there is no answer.
+def _output(
+    chosen: FinalRecord,
+    outputs: Mapping[str, ModelOutput],
+    answers: Mapping[str, Sequence[ModelOutput]],
+) -> ModelOutput:
+    if chosen.member is None:
+        return ModelOutput()
+    if chosen.answer is not None:
+        return answers[chosen.member][chosen.answer]
+    return outputs[chosen.member]
 
 
 # The input, then the answer's message marked with the mode and member it came from.
@@ -122,10 +172,12 @@ def _conversation(
     input: Sequence[ChatMessage],
     final: FinalRecord,
     outputs: Mapping[str, ModelOutput],
+    answers: Mapping[str, Sequence[ModelOutput]],
 ) -> list[ChatMessage]:
-    if final.member is None or outputs[final.member].empty:
+    output = _output(final, outputs, answers)
+    if final.member is None or output.empty:
         return list(input)
-    message = outputs[final.member].message
+    message = output.message
     metadata = {
         **(message.metadata or {}),
         "inspect_swarm": {"final": {"mode": final.mode, "member": final.member}},
@@ -133,6 +185,5 @@ def _conversation(
     return [*input, message.model_copy(update={"metadata": metadata})]
 
 
-def _time(member: MemberResult) -> float:
-    assert member.time is not None
-    return member.time
+def _time(candidate: Candidate) -> float:
+    return candidate.time

@@ -16,6 +16,7 @@ from questions import QUESTIONS
 
 from inspect_swarm import (
     Controller,
+    MemberEnded,
     StopReason,
     SwarmControl,
     leaderless,
@@ -68,7 +69,7 @@ def until_proved() -> Controller:
             swarm.start(m)
         async with aclosing(swarm.events()) as events:
             async for event in events:
-                if event.submitted:
+                if isinstance(event, MemberEnded) and event.submitted:
                     return "proved"
         return "all_done"
 

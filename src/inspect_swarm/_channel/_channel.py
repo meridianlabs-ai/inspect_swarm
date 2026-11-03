@@ -10,7 +10,7 @@ from typing import (
     overload,
 )
 
-from inspect_ai.tool import Tool
+from inspect_ai.tool import Tool, ToolParams
 from pydantic import JsonValue
 
 from .._bus._record import Record
@@ -139,12 +139,22 @@ class ChannelState(Protocol):
         ...
 
 
+# A channel tool as a run declares it, without the run: what swarm_bridged_tools()
+# declares for it, since a bridged member's tools are fixed when its agent is built.
+@dataclass(frozen=True)
+class ToolDeclaration:
+    name: str
+    description: str
+    parameters: ToolParams
+    max_output: int | None = None
+
+
 @dataclass(frozen=True)
 class WaitSpec:
-    """One call of `swarm_wait`, as the bus asks a `WaitingState` about it."""
+    """A loop and filters checked by a waiting channel, for a `swarm_wait` call or an idle member."""
 
     id: str
-    """The wait's id (`"x-4"`), numbered per run."""
+    """A numbered wait id, or `idle-<member>` for an idle-member query."""
 
     member: str
     """The waiting member's name."""
@@ -180,6 +190,8 @@ class WaitingState(ChannelState, Protocol):
     """The state of a channel whose records wake waits (one that sets `Channel.max_wait`).
 
     The bus calls these methods with no `await` around them. None of them marks anything: a loop acknowledges what a wait names by reading it with the channel's own tool.
+
+    The bus also calls `wakes()` and `news()` for idle persistent members, with `own=True` and no filters. These queries have no `swarm_wait` call. Use `spec.member` and `spec.loop`; the caller may be another member.
     """
 
     def wait_check(self, spec: WaitSpec) -> None:

@@ -2,6 +2,7 @@ from inspect_ai.agent import AgentChannel
 from inspect_ai.agent._channel import current_agent_channel
 from inspect_ai.log._samples import sample_active
 from inspect_ai.tool import Tool, ToolSource
+from inspect_ai.util._span import current_agent_span_id
 
 from ._bus import Bus, current_bus
 
@@ -17,8 +18,13 @@ class _SwarmTools(ToolSource):
         loop = current_agent_channel()
         # no await from here to the binding, so two loops resolving at once cannot both
         # bind; the member's own loop resolves its tools before it can start a subagent
+        if context.bridge_used:
+            raise RuntimeError(
+                f"swarm_tools() was resolved in {context.name}, which has used swarm_bridged_tools(). A member uses one or the other: a bridged member's CLI is its own loop, and a second one would read its inbox too."
+            )
         if context.loop is None:
             context.loop = loop
+            context.loop_span = current_agent_span_id()
             context.acp_bound = _acp_bound(loop)
         return loop_tools(bus, context.loop is loop)
 
