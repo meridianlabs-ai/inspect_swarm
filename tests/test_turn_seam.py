@@ -1076,6 +1076,76 @@ async def test_an_end_request_does_not_change_an_agents_own_stop(
         assert _statuses(outcome) == {"a": "member_limit:custom"}
 
 
+@agent
+def fresh_loop(model: Model, how: str) -> Agent:
+    """A custom loop on a fresh state: one generation, then at its next boundary it stops itself (`bare` or `grouped`) or returns (`return`); `early` stops itself before any boundary, with an output on the state it was given."""
+
+    def stop() -> LimitExceededError:
+        return LimitExceededError("custom", value=1, limit=1, message="done")
+
+    async def execute(state: AgentState) -> AgentState:
+        if how == "early":
+            state.output = ModelOutput.from_content("mockllm", "given")
+            raise stop()
+        loop = AgentState(messages=list(state.messages))
+        async with agent_channel() as ch:
+            for _ in range(2):
+                loop.messages.extend(await ch.before_turn(loop.messages, state=loop))
+                if not loop.output.empty:
+                    break
+                loop.output = await model.generate(loop.messages)
+                loop.messages.append(loop.output.message)
+        if how == "return":
+            return loop
+        if how == "bare":
+            raise stop()
+        raise ExceptionGroup("stopped", [stop(), stop()])
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("how", ["bare", "grouped", "return", "early"])
+async def test_an_agent_that_stops_itself_keeps_its_loops_last_boundary_state(
+    how: str,
+) -> None:
+    reply = ModelOutput.from_content("mockllm", "last output")
+    reply.usage = ModelUsage(input_tokens=1, output_tokens=7, total_tokens=8)
+    seen: list[ModelOutput] = []
+    runs: list[SwarmRun] = []
+
+    async def callback(b: Boundary) -> Result:
+        seen.append(b.output)
+        return None
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        runs.append(cast(SwarmRun, control))
+        if how != "early":
+            control.member("a").on_boundary(callback, origin="test")
+        control.start("a")
+        return await _drain(control)
+
+    outcome = await _run(
+        [member(fresh_loop(scripted_model(Script([reply])), how), name="a")],
+        run_controller,
+    )
+    kept = runs[0]._lookup("a").agent_state
+    if how == "early":
+        assert _statuses(outcome) == {"a": "member_limit:custom"}
+        assert kept.output.completion == "given"
+        return
+    assert _statuses(outcome) == {
+        "a": "submitted" if how == "return" else "member_limit:custom"
+    }
+    assert [o.completion for o in seen] == ["", "last output"]
+    assert [m.text for m in kept.messages][-1] == "last output"
+    assert kept.messages[-1].role == "assistant"
+    assert kept.output.completion == "last output"
+    assert kept.output.stop_reason == "stop"
+    assert kept.output.usage is not None
+    assert kept.output.usage.output_tokens == 7
+
+
 @pytest.mark.anyio
 async def test_a_stop_with_no_grace_ends_a_parked_member_with_no_generation() -> None:
     script = _Recording([_submit()])

@@ -576,9 +576,13 @@ async def _run_member(
                             context.span_id = current_span_id()
                             gate.task = anyio.get_current_task().id
                             with turn_gate(gate):
-                                outcome.state, stopped = await _call_agent(agent, state)
+                                result, stopped = await _call_agent(agent, state)
+                        if not stopped:
+                            # a self-stop is a raise: the loop's state at its last
+                            # boundary is kept, as for any other raise
+                            outcome.state = result
                         returned = True
-                        status = _returned(context, gate, outcome.state, stopped)
+                        status = _returned(context, gate, result, stopped)
                     except Exception as ex:
                         cap, owned, foreign = classify_errors(ex, caps, nodes)
                         if foreign is None and cap:
