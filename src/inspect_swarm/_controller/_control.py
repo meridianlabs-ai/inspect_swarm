@@ -1076,13 +1076,15 @@ class SwarmRun:
         passed = cast(object, verdict.passed)
         value = cast(object, verdict.value)
         explanation = cast(object, verdict.explanation)
+        # the values themselves are not printed: an int too long to print, or a repr()
+        # that raises, would replace this error
         if not (
             isinstance(passed, bool)
             and (value is None or _exact_float(value))
             and (explanation is None or isinstance(explanation, str))
         ):
             raise TypeError(
-                f"The result contract's verifier must return a Verdict whose passed is a bool, value a float (or an int a float holds exactly) or None and explanation a str or None, got {verdict!r} for member {m.name!r}."
+                f"The result contract's verifier must return a Verdict whose passed is a bool, value a float (or an int a float holds exactly) or None and explanation a str or None, got passed of type {type(passed).__name__}, value of type {type(value).__name__} and explanation of type {type(explanation).__name__} for member {m.name!r}."
             )
         m.verified = verdict
         m.verified_time = anyio.current_time() - self._start

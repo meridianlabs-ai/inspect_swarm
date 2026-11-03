@@ -1,7 +1,7 @@
 import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from functools import cache
 from typing import Any, Literal, cast, get_args, get_type_hints
 from uuid import uuid4
@@ -295,10 +295,11 @@ def _as_logged(
 # JSON and YAML parsers give; anything else there, one of Inspect's models included,
 # was put there by the task's code, and is refused as the record's other values from
 # the task's author are. So is any value elsewhere that is neither one of Inspect's
-# models nor such data, such as a subclass of one of them defined by task code. The whole output is checked, each container once in each
-# position, without recursion, so that a refusal never depends on what else the
-# output holds, shared data is checked once and a cycle ends; nothing is serialized,
-# and no iterator is advanced.
+# models nor such data, such as a subclass defined by task code of one of Inspect's
+# models, or of a list, dict or str. The whole output is checked, each container once
+# in each position, without recursion, so that a refusal never depends on what else
+# the output holds, shared data is checked once and a cycle ends; nothing is
+# serialized, no iterator is advanced, and no method of a task's class runs.
 def _refuse_author_objects(output: ModelOutput, member: str) -> None:
     seen: set[tuple[int, bool]] = set()
     # for each value reached: the index of its container's entry, and its step, an
@@ -332,7 +333,7 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
         if model and data:
             raise refuse(value, at)
         if not model and not _container(value):
-            if not isinstance(value, _DATA):
+            if type(value) not in _DATA:
                 raise refuse(value, at)
             continue
         if (id(value), data) in seen:
@@ -346,7 +347,7 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
                 push(child, True, at, f".{name}")
         elif isinstance(value, dict):
             for key, child in cast(dict[object, object], value).items():
-                if data and not isinstance(key, _DATA):
+                if type(key) not in _DATA:
                     raise refuse(key, at)
                 push(child, data, at, None, key)
         else:
@@ -403,12 +404,13 @@ def _key_step(key: object) -> str:
 
 # What JSON and YAML parsers give inside a container, which `to_json_safe()` writes as
 # JSON; YAML also gives dates and times, bytes, sets, and keys that are not strings
-# (decision: Ransom, 2026-11-03).
-_DATA = (str, int, float, bool, type(None), bytes, date)
+# (decision: Ransom, 2026-11-03). Matched by exact class, as are the containers, so
+# that a subclass from task code is refused before any method of it runs.
+_DATA = frozenset({str, int, float, bool, type(None), bytes, date, datetime})
 
 
 def _container(value: object) -> bool:
-    return isinstance(value, dict | list | tuple | set)
+    return type(value) in (dict, list, tuple, set)
 
 
 # One of Inspect's own models, by its class's module: a subclass from task code is not.

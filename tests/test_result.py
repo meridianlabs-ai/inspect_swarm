@@ -1,6 +1,6 @@
 import math
-from collections.abc import Callable
-from datetime import date
+from collections.abc import Callable, Iterator
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -665,6 +665,71 @@ def _parsed_tool_call(arguments: str) -> ModelOutput:
 _HUGE_KEY = "? 0x" + "f" * 4000 + "\n: value"
 
 
+# Subclasses of the data classes, as task code might define, whose methods must never
+# run: each raises.
+def _ran() -> AssertionError:
+    return AssertionError("a method of the task's class ran")
+
+
+class _List(list[Any]):
+    def __iter__(self) -> Iterator[Any]:
+        raise _ran()
+
+    def __repr__(self) -> str:
+        raise _ran()
+
+
+class _Tuple(tuple[Any, ...]):
+    def __iter__(self) -> Iterator[Any]:
+        raise _ran()
+
+
+class _Set(set[Any]):
+    def __iter__(self) -> Iterator[Any]:
+        raise _ran()
+
+
+class _Dict(dict[str, Any]):
+    def __iter__(self) -> Iterator[str]:
+        raise _ran()
+
+    def items(self) -> Any:
+        raise _ran()
+
+    def keys(self) -> Any:
+        raise _ran()
+
+    def values(self) -> Any:
+        raise _ran()
+
+
+class _Str(str):
+    def __repr__(self) -> str:
+        raise _ran()
+
+    def __str__(self) -> str:
+        raise _ran()
+
+
+def _with_message_metadata(metadata: dict[Any, Any]) -> ModelOutput:
+    output = ModelOutput.from_content("mockllm", "41")
+    output.message.metadata = metadata
+    return output
+
+
+def _in_arguments(value: object) -> ModelOutput:
+    output = _tool_call({})
+    [call] = output.message.tool_calls or []
+    call.arguments["value"] = value
+    return output
+
+
+def _choices_in_a_list_subclass() -> ModelOutput:
+    output = ModelOutput.from_content("mockllm", "41")
+    output.choices = _List(output.choices)
+    return output
+
+
 def _list_cycle() -> list[Any]:
     cycle: list[Any] = []
     cycle.append(cycle)
@@ -739,6 +804,42 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
             lambda: _with_metadata({16**4000: {"x": object()}}),
             r"type object at output\.metadata\[<int key>\]\['x'\]",
             id="under-a-huge-key",
+        ),
+        # subclasses of the data classes, refused before any of their methods runs
+        pytest.param(
+            lambda: _with_metadata({"rows": _List([1])}),
+            r"type _List at output\.metadata\['rows'\]",
+            id="list-subclass",
+        ),
+        pytest.param(
+            lambda: _in_arguments(_Dict(a=1)),
+            r"type _Dict at output\.choices\[0\]\.message\.tool_calls\[0\]\.arguments\['value'\]",
+            id="dict-subclass",
+        ),
+        pytest.param(
+            lambda: _with_message_metadata({"pair": _Tuple((1, 2))}),
+            r"type _Tuple at output\.choices\[0\]\.message\.metadata\['pair'\]",
+            id="tuple-subclass",
+        ),
+        pytest.param(
+            lambda: _with_metadata({"tags": _Set({1})}),
+            r"type _Set at output\.metadata\['tags'\]",
+            id="set-subclass",
+        ),
+        pytest.param(
+            lambda: _with_metadata({"note": _Str("x")}),
+            r"type _Str at output\.metadata\['note'\]",
+            id="str-subclass",
+        ),
+        pytest.param(
+            lambda: _with_metadata({_Str("key"): 1}),
+            r"type _Str at output\.metadata\. ",
+            id="str-subclass-key",
+        ),
+        pytest.param(
+            _choices_in_a_list_subclass,
+            r"type _List at output\.choices\. ",
+            id="structural-list-subclass",
         ),
         pytest.param(
             _tool_call_in_its_arguments,
@@ -860,6 +961,17 @@ def _odd_metadata(value: Any) -> Callable[[], ModelOutput]:
             lambda: _tool_call({"when": date(2024, 1, 2)}),
             lambda: _tool_call({"when": "2024-01-02"}),
             id="date-in-tool-arguments",
+        ),
+        # YAML's other types, of their own classes, which the log writes as JSON
+        pytest.param(
+            _odd_metadata(
+                {"at": datetime(2024, 1, 2, 3, 4, 5), "raw": b"hi", "tags": {1}}
+            ),
+            _odd_metadata({"at": "2024-01-02T03:04:05", "raw": "hi", "tags": [1]}),
+            id="yaml-types-in-metadata",
+        ),
+        pytest.param(
+            _odd_metadata((1, 2)), _odd_metadata([1, 2]), id="tuple-in-metadata"
         ),
     ],
 )
@@ -1002,6 +1114,12 @@ def _assert_left_out(record: SwarmResultRecord) -> None:
             answer_result(verifier=lambda answer, metadata: _verdict(value=10**400)),
             "an int a float holds exactly",
             id="verdict-value-too-large-for-a-float",
+        ),
+        # too long to print, so the error names its type, not its value
+        pytest.param(
+            answer_result(verifier=lambda answer, metadata: _verdict(value=16**4000)),
+            "value of type int and explanation of type NoneType for member",
+            id="verdict-value-too-long-to-print",
         ),
     ],
 )
