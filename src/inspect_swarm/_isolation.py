@@ -75,7 +75,7 @@ def users(
 
     - The sandbox must let commands run as root and as other users: Docker, or Kubernetes with a root container. The `local` sandbox is refused.
     - The image needs `useradd` and `groupadd` (package `passwd`) and GNU `find`; with any share, also `setfacl` and `getfacl` (package `acl`), which the default Inspect image and `python:3.12-bookworm` lack.
-    - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, and mounts inside a share or under the homes' parent are refused.
+    - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, hard-linked files in a share, and mounts inside a share or under the homes' parent are refused.
     - Members are not root: they cannot install system packages or write system directories. Tasks that need root while the members work are unsuitable.
     - Custom tools that call `sandbox().exec()` directly run as the sandbox's default user, usually root, unless they pass the member's user themselves. `computer()`, `web_browser()` and `skill()` raise inside the scope, and so do tools built with another `user`.
     - Bridged members (inspect_swe agents) need inspect_ai and inspect_swe versions with bridge support for users isolation, which they do not have yet.
@@ -91,7 +91,7 @@ def users(
         The isolation, for `swarm(isolation=...)`.
 
     Raises:
-        ValueError: If a path is not absolute and normalised, or holds a newline, NUL or backslash; `home` does not have `{member}` once, in its last component; or two shares, or a share and the homes' parent directory, are the same or one is inside the other.
+        ValueError: If a path is not absolute and normalised, or holds a backslash or a character that is not printable (a control character or a line separator); `home` does not have `{member}` once, in its last component; or two shares, or a share and the homes' parent directory, are the same or one is inside the other.
     """
     isolation = UserIsolation(
         sandbox=sandbox,
@@ -134,10 +134,12 @@ def check_isolation(isolation: UserIsolation, where: str) -> None:
             not posixpath.isabs(path)
             or path.startswith("//")
             or posixpath.normpath(path) != path
-            or any(c in path for c in "\n\0\\")
+            # setup reads paths back line by line and passes them to awk -v, which
+            # reads a backslash as an escape
+            or any(c == "\\" or not c.isprintable() for c in path)
         ):
             raise ValueError(
-                f"{where}: {field} must be an absolute, normalised path with no '..', '.', repeated or trailing '/', newline, NUL or backslash, got {path!r}."
+                f"{where}: {field} must be an absolute, normalised path with no '..', '.', repeated or trailing '/', backslash, or character that is not printable (such as a newline, tab or other control character, or a line separator), got {path!r}."
             )
     home = isolation.home
     last = posixpath.basename(home)
@@ -282,8 +284,9 @@ fail() { printf '%s\n' "$*" >&2; exit 3; }
 # exist, and which ids in the window are taken, by a passwd or group entry or by the
 # owner or group of a file on any filesystem the homes, shares or world-writable
 # directories are on. Setup does not reconcile permission state it did not make, so it
-# refuses ACL entries other than its own in a share or on the homes' parent, and a
-# mount inside a share or under the homes' parent, whose files it would not reach.
+# refuses ACL entries other than its own in a share or on the homes' parent, a hard-
+# linked file in a share, and a mount inside a share or under the homes' parent, whose
+# files it would not reach.
 # $1 group, $2 first id, $3 last id, $4 1 when there are shares, $5 the homes' parent,
 # then the roots, `--`, and each share's access and path.
 _PROBE = (
@@ -303,7 +306,8 @@ dir=$(mktemp -d) || fail "users isolation could not create a temporary directory
 trap 'rm -rf "$dir"' EXIT
 
 # a mount point strictly inside $1, as /proc/self/mountinfo writes it (\040 for a space;
-# configured paths have no backslash, which awk -v would read as an escape)
+# configured paths have no backslash, which awk -v would read as an escape, and no tab
+# or other control character)
 mount_inside() {
   awk -v p="$1" '
     function esc(s,  r, i, c) {
@@ -311,7 +315,6 @@ mount_inside() {
       for (i = 1; i <= length(s); i++) {
         c = substr(s, i, 1)
         if (c == " ") r = r "\\040"
-        else if (c == "\t") r = r "\\011"
         else r = r c
       }
       return r
@@ -391,6 +394,10 @@ while [ $# -gt 0 ]; do
     || fail "users isolation could not read the ACLs in $share: $(printf '%s' "$acls" | grep -v '^#' | head -n 1)"
   bad=$(printf '%s\n' "$acls" | foreign_acl "$gid")
   [ -z "$bad" ] || fail "users isolation does not support ACL entries it did not set in a shared directory: $bad; remove them (setfacl -b)"
+  # setup changes each entry's inode, which a hard link shares with a name outside
+  linked=$(find -P "$share" -xdev ! -type d -links +1 -printf '%p has %n links' -quit 2>&1) \
+    || fail "users isolation could not scan the files in $share: $(printf '%s' "$linked" | head -n 1)"
+  [ -z "$linked" ] || fail "users isolation does not support a hard-linked file in a shared directory: $linked; setup's changes to its mode, group and ACLs would reach its other names"
   if [ "$access" = rw ]; then
     # the default ACL setup writes takes its owner entry from the directory's owner
     # bits, and an owner entry beats the group's grant, so a member could not edit
@@ -777,11 +784,18 @@ async def _self_test(
         await _check_members(env, env_name, isolation, identities, reserved)
     except BaseException:
         # the self-test's own error is the one to report
-        with anyio.CancelScope(shield=True), suppress(Exception):
+        with anyio.move_on_after(_CLEANUP_BOUND, shield=True), suppress(Exception):
             await _remove_probes(env, env_name, reserved)
         raise
-    with anyio.CancelScope(shield=True):
+    with anyio.move_on_after(_CLEANUP_BOUND, shield=True):
         await _remove_probes(env, env_name, reserved)
+
+
+# The probes' cleanup is shielded from cancellation, so it has bounds of its own: its
+# exec's timeout, and a wall-clock bound past that for a provider that overruns it.
+# Past the bound the probes are left in place.
+_CLEANUP_TIMEOUT = 30
+_CLEANUP_BOUND = 40.0
 
 
 # removes the probe directories the self-test reserved, and nothing else
@@ -790,7 +804,7 @@ async def _remove_probes(
 ) -> None:
     dirs = [d for by_parent in reserved.values() for d in by_parent.values()]
     if dirs:
-        await _run(env, env_name, 'rm -rf -- "$@"', *dirs)
+        await _run(env, env_name, 'rm -rf -- "$@"', *dirs, timeout=_CLEANUP_TIMEOUT)
 
 
 _PROBE_DIR = re.compile(r"\.swarm-probe-[A-Za-z0-9]{8}")
@@ -873,9 +887,13 @@ def _check_result(
 
 
 async def _run(
-    env: SandboxEnvironment, env_name: str, script: str, *args: str
+    env: SandboxEnvironment,
+    env_name: str,
+    script: str,
+    *args: str,
+    timeout: int | None = None,
 ) -> ExecResult[str]:
-    result = await privileged_shell(env, script, *args, user="root")
+    result = await privileged_shell(env, script, *args, user="root", timeout=timeout)
     if not result.success:
         raise RuntimeError(
             f"users isolation could not set up sandbox {env_name!r}: {_message(result)}"

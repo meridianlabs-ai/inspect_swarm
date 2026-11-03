@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, overload
 
+import anyio
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent
@@ -42,8 +43,11 @@ class IsolationStub(SandboxEnvironment):
         fail: ExecResult[str] | None = None,
         fail_on: str = "add_users()",
         probe: str = "begin\nend\n",
+        stall_on: str | None = None,
     ) -> None:
         super().__init__()
+        self.stall_on = stall_on
+        self.stall_timeouts: list[int | None] = []
         self.calls: list[tuple[str | None, str, list[str]]] = []
         self.uid = uid
         self.fail = fail
@@ -64,6 +68,10 @@ class IsolationStub(SandboxEnvironment):
         # privileged_shell(): [sh, -c, script, sh, *args]
         assert cmd[0] == SHELL_PATH
         self.calls.append((user, cmd[2], cmd[4:]))
+        if self.stall_on is not None and self.stall_on in cmd[2]:
+            # a provider that does not answer, for longer than a test waits
+            self.stall_timeouts.append(timeout)
+            await anyio.sleep(5)
         if "/proc/self/status" in cmd[2]:
             return ExecResult(
                 True, 0, _ROOT_PROBE.replace("Uid:\t0", f"Uid:\t{self.uid}"), ""
@@ -205,6 +213,35 @@ async def test_the_self_test_removes_only_the_directories_it_reserved(
             "/shared/.swarm-probe-10000000",
             "/shared/.swarm-probe-20000000",
         ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_a_stalled_probe_cleanup_does_not_hold_up_cancellation(
+    fails: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("inspect_swarm._isolation._CLEANUP_BOUND", 0.2)
+    seen: dict[str, dict[str, str | None]] = {}
+    stub = IsolationStub(
+        fail=ExecResult(False, 3, "", "the member cannot read /shared\n")
+        if fails
+        else None,
+        fail_on="reserve()",
+        stall_on='rm -rf -- "$@"',
+    )
+    start = anyio.current_time()
+    with environments(default=stub):
+        # cancelled while the cleanup waits on the provider
+        with anyio.move_on_after(0.1):
+            if fails:
+                with pytest.raises(RuntimeError, match="the member cannot read"):
+                    await run_swarm(
+                        swarm(_scoped(seen), channels=[], isolation="users")
+                    )
+            else:
+                await run_swarm(swarm(_scoped(seen), channels=[], isolation="users"))
+    assert anyio.current_time() - start < 2
+    assert stub.stall_timeouts == [30]
 
 
 @pytest.mark.anyio
@@ -400,6 +437,16 @@ async def test_the_preamble_ends_with_the_members_user_and_directories(
             {"shared": [Share(path="/sh\0ared", access="rw")]},
             "users(): shared must be an absolute, normalised path",
             id="nul",
+        ),
+        pytest.param(
+            {"shared": [Share(path="/shared\rdata", access="rw")]},
+            "users(): shared must be an absolute, normalised path",
+            id="carriage-return",
+        ),
+        pytest.param(
+            {"home": "/scratch\u2028x/{member}"},
+            "users(): home must be an absolute, normalised path",
+            id="line-separator",
         ),
         pytest.param(
             {"home": "/scr\\tatch/{member}"},

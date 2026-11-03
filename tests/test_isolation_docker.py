@@ -577,6 +577,16 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             setup="mkdir -p /shared/nested && chmod 555 /shared/nested",
             error=f"{refused}users isolation does not support a directory without owner rwx in a read-write shared directory: /shared/nested is mode 555",
         ),
+        "hard-link-in-rw-share": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir /shared && ln /etc/profile /shared/profile",
+            error=f"{refused}users isolation does not support a hard-linked file in a shared directory: /shared/profile has 2 links",
+        ),
+        "hard-link-in-ro-share": Case(
+            runs=[Run({"shared": [{"path": "/data", "access": "ro"}]}, idle)],
+            setup="mkdir /outside /data && touch /outside/file && chmod 666 /outside/file && ln /outside/file /data/file",
+            error=f"{refused}users isolation does not support a hard-linked file in a shared directory: /data/file has 2 links",
+        ),
         "unreadable-ro-share": Case(
             runs=[Run({"shared": [{"path": "/inputs/data", "access": "ro"}]}, idle)],
             setup="mkdir -m 700 /inputs && mkdir /inputs/data && echo x > /inputs/data/f",
