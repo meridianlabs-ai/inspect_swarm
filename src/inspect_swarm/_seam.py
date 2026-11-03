@@ -124,6 +124,9 @@ class MemberGate:
     cancelled_calls: list[str] = field(default_factory=list[str])
     _callbacks: list[_Registration] = field(default_factory=list[_Registration])
     _turn_closed: bool = False
+    # the top-level loop open after the own loop closed, whose own nested loops pass
+    # through as the own loop's do
+    _successor: AgentChannel | None = None
     _index: int = 0
     _chain: anyio.CancelScope | None = None
 
@@ -173,6 +176,8 @@ class MemberGate:
     def closed(self, channel: AgentChannel) -> None:
         if channel is self.context.turn_loop:
             self._turn_closed = True
+        elif channel is self._successor:
+            self._successor = None
 
     async def before_turn(
         self,
@@ -190,6 +195,11 @@ class MemberGate:
         elif loop is not channel:
             if not self._turn_closed:
                 # a nested loop inside one of the own loop's turns
+                return False
+            if self._successor is None:
+                self._successor = channel
+            elif channel is not self._successor:
+                # a nested loop inside one of the successor's turns
                 return False
             # a second top-level loop, which the seam does not hold
             if self._callbacks:

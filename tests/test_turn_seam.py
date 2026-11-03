@@ -1263,7 +1263,7 @@ async def test_an_agent_that_stops_itself_keeps_its_loops_last_boundary_state(
 def shaped_loops(
     shape: str, given: bool, ending: str, trigger: Callable[[], None]
 ) -> Agent:
-    """Custom loops on fresh states, each with one generation between two boundaries: the member's own loop alone (`own`), a state-aware warmup loop then a `main` successor (`successor`), or an own loop with a loop nested in its turn (`nested`). The last loop (the nested one for `nested`) passes its state to before_turn() when `given`, and after its generation stops itself, calls `trigger` (an end or a stop), or goes on to return."""
+    """Custom loops on fresh states, each with one generation between two boundaries: the member's own loop alone (`own`), a state-aware warmup loop then a `main` successor (`successor`), an own loop with a loop nested in its turn (`nested`), a warmup then a `main` successor with a loop nested in its turn (`successor-nested`), or that successor and its nested loop followed by a `final` top-level loop (`third`). The last loop (the nested one for `nested` and `successor-nested`) passes its state to before_turn() when `given`, and after its generation stops itself, calls `trigger` (an end or a stop), or goes on to return."""
 
     def stop() -> LimitExceededError:
         return LimitExceededError("custom", value=1, limit=1, message="done")
@@ -1302,6 +1302,25 @@ def shaped_loops(
         if shape == "successor":
             await run_loop(state.messages, "warmup", True, False)
             return await run_loop(state.messages, "main", given, True)
+        if shape == "successor-nested":
+            await run_loop(state.messages, "warmup", True, False)
+            return await run_loop(
+                state.messages,
+                "main",
+                True,
+                False,
+                lambda: run_loop(state.messages, "nested", given, True),
+            )
+        if shape == "third":
+            await run_loop(state.messages, "warmup", True, False)
+            await run_loop(
+                state.messages,
+                "main",
+                True,
+                False,
+                lambda: run_loop(state.messages, "nested", True, False),
+            )
+            return await run_loop(state.messages, "final", given, True)
         return await run_loop(
             state.messages,
             "own",
@@ -1314,7 +1333,9 @@ def shaped_loops(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("shape", ["own", "successor", "nested"])
+@pytest.mark.parametrize(
+    "shape", ["own", "successor", "nested", "successor-nested", "third"]
+)
 @pytest.mark.parametrize("given", [True, False])
 @pytest.mark.parametrize("ending", ["return", "self-stop", "end", "stop"])
 async def test_the_member_keeps_the_state_of_its_own_or_successor_loops_last_boundary(
@@ -1350,8 +1371,14 @@ async def test_the_member_keeps_the_state_of_its_own_or_successor_loops_last_bou
     # a nested loop's state is never kept; a raise keeps the own or successor loop's
     # state at its last boundary, or the state the agent was called with when that
     # loop passed none, never an earlier loop's
-    label = {"own": "own", "successor": "main", "nested": "own"}[shape]
-    if shape != "nested" and not given and ending != "return":
+    label = {
+        "own": "own",
+        "successor": "main",
+        "nested": "own",
+        "successor-nested": "main",
+        "third": "final",
+    }[shape]
+    if "nested" not in shape and not given and ending != "return":
         label = ""
     assert kept.output.completion == label
     replies = [m.text for m in kept.messages if isinstance(m, ChatMessageAssistant)]
