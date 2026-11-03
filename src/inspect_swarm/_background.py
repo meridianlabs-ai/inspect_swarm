@@ -92,6 +92,11 @@ class MemberBackground:
             )
         if self._member.bridged:
             raise bridged_background_error(self._member.name)
+        if self._member.held:
+            # a held member does nothing, so its callbacks start no work for it
+            raise RuntimeError(
+                f"background(): member {self._member.name!r} is held at a turn boundary, so no background work can start for it."
+            )
         # bridge use found from now on is refused
         self._member.background = True
         self._tg.start_soon(self._run, func, args)

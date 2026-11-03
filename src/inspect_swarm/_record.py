@@ -30,8 +30,8 @@ from pydantic import (
 
 from ._result import ResultKind, Verdict
 
-MemberState = Literal["pending", "running", "ended"]
-"""A member's lifecycle: not started, running, or ended."""
+MemberState = Literal["pending", "running", "idle", "ending", "ended"]
+"""A member's lifecycle: not started, running, idle, ending, or ended. Only persistent members are ever `idle` (answered and waiting for `SwarmControl.wake()`) or `ending` (their ending has begun, and the member has not yet ended)."""
 
 LeftOut = Literal["output", "answer_key", "explanation"]
 """A member's value that the record leaves out, because the record cannot hold it: its output, its answer key, or its verdict's explanation."""
@@ -79,6 +79,12 @@ class MemberResult(BaseModel):
 
     first_pass_time: float | None = None
     """Swarm time of the member's first passing check; `None` without one. A pass assumes the default `value_to_float()` converter, as for `gate_passes`."""
+
+    persistent: bool = False
+    """Whether the member is persistent (`member(..., persistent=True)`)."""
+
+    answer_times: list[float] = []
+    """The swarm times of a persistent member's answers, in order. Empty for other members, whose answer is their submission at `time`."""
 
     output: ModelOutput | None = None
     """The member's output when it ended, however it ended, as Inspect's log keeps a sample's output; `None` until then."""
@@ -129,6 +135,9 @@ class FinalRecord(BaseModel):
 
     provisional: bool
     """`True` when the swarm ended without finalising its answer: a limit, error or cancellation ended it first, or the answer did not fit the sample's message limit."""
+
+    answer: int | None = None
+    """Which of a persistent member's answers is the swarm's answer, from 0. `None` for other members, and when there is no answer."""
 
 
 class SwarmResultRecord(BaseModel):

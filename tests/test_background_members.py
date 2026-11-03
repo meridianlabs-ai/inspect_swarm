@@ -41,6 +41,7 @@ from inspect_ai.util import (
 
 from inspect_swarm import (
     Budget,
+    MemberEnded,
     SwarmControl,
     leaderless,
     member,
@@ -194,7 +195,11 @@ async def test_a_controller_sees_a_member_end_after_its_drain() -> None:
         control.start("prover")
         control.start("other")
         async for event in control.events():
-            if event.member == "prover" and event.submitted:
+            if (
+                isinstance(event, MemberEnded)
+                and event.member == "prover"
+                and event.submitted
+            ):
                 seen.append(list(log))
                 break
         return "verified"
@@ -1023,10 +1028,10 @@ async def test_a_cap_reached_in_a_childs_tool_call_stops_the_swarm_while_the_par
     assert nested_event.error is not None and nested_event.error.type == "limit"
     [line] = ledger.members
     if released == "within_grace":
-        # each child was refused its next call and ended alone; the parent then met
-        # the cap
+        # each child was refused its next call and ended alone; the parent then
+        # ended at its next turn boundary, as the swarm's stop ends a member there
         assert sorted(log) == ["capper finished", "other finished"]
-        assert line.status == "swarm_cap"
+        assert line.status == "stopped"
         assert line.background_cancelled == 0
         assert ledger.calls.errored == 0
     else:

@@ -42,7 +42,7 @@ The channel creates no directories. A sandbox image that pre-creates a directory
 
 - **`channels=[]`**: no channel instructions. Members without `sandbox=` share the sample's sandbox; members with their own sandboxes keep the own-sandbox sentence and routing.
 - **Per-member sandboxes with `filesystem(shared_volume=True)`**: accepted, and no name appears. `sandbox="{member}"` still names the environment after the swarm's name, which the swarm never shows the member, though the sample's sandbox configuration could (a compose `hostname:`, an environment variable).
-- **Bridged members**: accepted with the filesystem channel or none, as for any member; bridged members cannot use channels with records anyway.
+- **Bridged members**: accepted with the filesystem channel or none, as for any member that chooses its name.
 - **A controller's `start(member, input=...)`**: the eval author's text, used as given. A controller sees the flag in `MemberInfo` in its `check` and in `MemberHandle.choose_name` in its `run`, so one that writes a member's input can leave names out for that member.
 
 Text the eval author gives the member is not changed and not checked: the sample input, a controller's `start(input=...)`, the member agent and its prompt, and the sample's sandbox configuration.

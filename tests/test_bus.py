@@ -46,6 +46,7 @@ from inspect_swarm._budget import MemberContext, current_member
 from inspect_swarm._bus._bus import Bus, Delivery, current_bus
 from inspect_swarm._bus._record import Draft, thaw_json
 from inspect_swarm._bus._storm import StormControls
+from inspect_swarm._seam import BoundaryCallback
 
 from .swarm_runtime import data, run_swarm, sample, send, swarm_events
 
@@ -166,6 +167,26 @@ class _Member:
     @property
     def submitted(self) -> bool:
         return self.status == "submitted"
+
+    @property
+    def held(self) -> bool:
+        return False
+
+    @property
+    def persistent(self) -> bool:
+        return False
+
+    @property
+    def answers(self) -> int:
+        return 0
+
+    def on_boundary(
+        self, callback: BoundaryCallback, *, origin: str
+    ) -> Callable[[], None]:
+        raise NotImplementedError
+
+    def end(self, *, origin: str) -> None:
+        raise NotImplementedError
 
 
 MEMBERS = ("w-1", "w-2", "w-3")
@@ -933,6 +954,7 @@ async def test_a_read_names_its_records_and_writes_each_dependency_once_per_loop
         "tool_span_id": "w-2/top/tool",
         "depends_on": ["b-1", "b-2"],
         "listing": False,
+        "via": "tool",
     }
     assert [
         (r.agent, r.loop_span_id, r.record_ids, data(r)["depends_on"]) for r in reads
@@ -1063,15 +1085,26 @@ def bus_test_native() -> Agent:
         ),
     ],
 )
-def test_a_bridged_member_is_refused_beside_a_channel_with_records(
-    bridged: Callable[[], Any],
+@pytest.mark.parametrize(
+    "channels,refused",
+    [
+        pytest.param(["filesystem", bus_test_board()], True, id="custom-records"),
+        pytest.param(["messages", "shared_memory"], False, id="built-ins"),
+        pytest.param(["filesystem", bus_test_locks()], False, id="instructions-only"),
+        pytest.param([], False, id="none"),
+    ],
+)
+def test_a_bridged_member_is_refused_only_beside_a_custom_channel_with_records(
+    bridged: Callable[[], Any], channels: list[Any], refused: bool
 ) -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"member 'cli' is bridged, and bridged members cannot use bus channels such as bus_test_board yet",
-    ):
-        swarm([bridged(), bus_test_native()], channels=["filesystem", bus_test_board()])
-    for channels in (["filesystem"], []):
+    # swarm_bridged_tools() serves only the built-in channels with records
+    if refused:
+        with pytest.raises(
+            ValueError,
+            match=r"member 'cli' is bridged, and swarm_bridged_tools\(\) serves only the messages and shared_memory channels, not bus_test_board",
+        ):
+            swarm([bridged(), bus_test_native()], channels=channels)
+    else:
         swarm([bridged(), bus_test_native()], channels=channels)
 
 

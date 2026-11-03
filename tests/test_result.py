@@ -236,6 +236,7 @@ async def test_submissions_are_keyed_and_verified_before_their_events() -> None:
         for m in control.members:
             control.start(m)
         async for event in control.events():
+            assert isinstance(event, MemberEnded)
             seen.append(event)
             handles[event.member] = control.member(event.member).verdict
         return "all_done"

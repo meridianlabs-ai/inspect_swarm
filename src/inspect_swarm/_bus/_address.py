@@ -52,6 +52,8 @@ def resolve(
                 raise ToolError(f"{address} is you; you cannot send to yourself.")
             if m.state == "pending":
                 raise ToolError(f"{address} has not started.")
+            if m.state == "ending":
+                raise ToolError(f"{address} is ending.")
             if m.state == "ended":
                 raise ToolError(f"{address} has ended.")
             names = [address]
