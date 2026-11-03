@@ -19,7 +19,7 @@ from inspect_ai.log import transcript
 from inspect_ai.util import store
 from pydantic import JsonValue
 
-from ._bus._record import Record, thaw_json
+from ._bus._record import Record, current_via, thaw_json
 from ._ledger import SpanPlaces, SwarmLedger
 from ._metrics import SwarmMetrics
 
@@ -53,7 +53,9 @@ def swarm_event(
 # span the channel's tool runs in. Its `agent` and `agent_span_id` are the acting member
 # and its member span, even from a member's descendant; `loop_span_id` is the agent span
 # of the loop that acted, and `nested` whether that loop is not the member's own. What
-# the typed fields do not hold is in `data`, with the format version.
+# the typed fields do not hold is in `data`, with the format version. A read or wait's
+# `data.via`, and a send's `data.record.via`, is "bridge" for a bridged member's call
+# through swarm_bridged_tools(), whose CLI is one loop.
 def _comm(
     kind: CommunicationKind,
     *,
@@ -123,6 +125,7 @@ def comm_sent(
                 "wake": record.wake,
                 "sender_span_id": record.sender_span_id,
                 "tool_span_id": record.tool_span_id,
+                "via": record.via,
             }
         },
     )
@@ -185,6 +188,7 @@ def comm_read(
             "depends_on": list(depends_on),
             **shown,
             "listing": listing,
+            "via": current_via.get(),
         },
     )
 
@@ -230,6 +234,7 @@ def comm_waited(
             "files": files,
             "depends_on": list(depends_on),
             "ended": ended,
+            "via": current_via.get(),
         },
     )
 

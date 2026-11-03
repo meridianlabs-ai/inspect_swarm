@@ -166,4 +166,4 @@ A normal return counts as a submission for any agent other than `react()`'s two 
 ## Agents the swarm refuses
 
 - ACP agents wait for their caller to drive them, so they are refused.
-- Bridged members, which run a CLI agent in the sandbox through Inspect's agent bridge, cannot have background work and cannot use channels with tools yet. See [Restrictions](restrictions.qmd).
+- Bridged members, which run a CLI agent in the sandbox through Inspect's agent bridge, cannot have background work. See [Restrictions](restrictions.qmd).

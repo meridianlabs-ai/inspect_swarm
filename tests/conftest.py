@@ -1,4 +1,13 @@
 import pytest
+from inspect_ai.model import get_model_info
+from inspect_ai.model._tokens import count_text_tokens
+
+
+@pytest.fixture(scope="session")
+def warm_inspect_caches() -> None:
+    """Load what inspect_ai loads on a process's first model call, once per test process: its model-info database and the token counter's encoding, which a fresh runner downloads. Use it in a test whose member time limit is shorter than that load, which would otherwise be cancelled before it reaches what it tests if it is the first in its process to call a model. Tests that use it need the encoding cached or the network."""
+    get_model_info("mockllm/model")
+    count_text_tokens("")
 
 
 @pytest.fixture(params=["asyncio", "trio"])

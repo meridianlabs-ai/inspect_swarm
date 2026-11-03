@@ -29,7 +29,7 @@ For each member, in roster order:
 
 - `tokens`, `cost`: its usage, its subagents' and background work's included.
 - `running_time`: seconds from its start to its end, `null` for a member never started.
-- `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member, whose tool calls leave no tool events.
+- `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member: the CLI's own tool calls are not recorded; bridged host tool calls, such as the swarm's tools, are.
 - `gate_checks`, `gate_passes`, `first_pass_time`: its in-loop checks ([Scoring](scoring.qmd#checks-during-the-run)).
 - `comm`, `waits`, `waits_by_outcome`, `wait_time`, `idle_time`: below.
 
@@ -75,7 +75,7 @@ In a swarm with no `swarm_wait` (`filesystem` only, or `channels=[]`) the four a
 
 ### Wiring checks
 
-The metrics also check that members are wired to the channels. `tools_unwired` lists, in a swarm with a channel that has tools, the members with a completed model call whose loops never resolved `swarm_tools()`. A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.
+The metrics also check that members are wired to the channels. `tools_unwired` lists, in a swarm with a channel that has tools, the native members with a completed model call whose loops never resolved `swarm_tools()`. Bridged members are exempt, so this metric does not detect a CLI built without `swarm_bridged_tools()`. A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.
 
 ## Samples dataframe
 
