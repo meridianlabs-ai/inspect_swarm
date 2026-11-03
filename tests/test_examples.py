@@ -252,7 +252,9 @@ def _viewed(messages: list[ChatMessage], fence: str) -> str:
     )
 
 
-def test_lead_and_workers(tmp_path: Path) -> None:
+@pytest.mark.parametrize("k", [1, 2])
+def test_lead_and_workers(k: int, tmp_path: Path) -> None:
+    workers = [f"worker-{i}" for i in range(1, k + 1)]
     ranges = [
         (1, 500),
         (501, 1000),
@@ -282,7 +284,11 @@ def test_lead_and_workers(tmp_path: Path) -> None:
         given = {int(t[1]) for t in tasks}
         free = [n for n in range(1, len(ranges) + 1) if n not in given]
         lines: list[str] = []
-        for worker in ("worker-1", "worker-2"):
+        # the workers its prompt names, so that a roster that differs leaves tasks
+        # nobody does
+        named = re.search(r"You lead these workers: (.*)\. ", messages[0].text)
+        assert named is not None
+        for worker in named.group(1).split(", "):
             mine = [int(t[1]) for t in tasks if t[0] == worker]
             if free and all((worker, n) in results for n in mine):
                 n = free.pop(0)
@@ -341,6 +347,7 @@ def test_lead_and_workers(tmp_path: Path) -> None:
         "lead_and_workers.py@lead_and_workers_count",
         _model(policy, delays={"lead": 0.2}),
         tmp_path,
+        k=k,
     )
     assert sample.scores is not None
     assert [s.value for s in sample.scores.values()] == ["C"]
@@ -354,11 +361,23 @@ def test_lead_and_workers(tmp_path: Path) -> None:
     }
     # the lead's appends to the task list
     writes = metrics["lead"].comm["shared_memory"].records
-    for name in ("worker-1", "worker-2"):
+    # the lead's prompt names the roster's workers
+    assert [m.name for m in record.members] == ["lead", *workers]
+    for name in workers:
         # the controller woke the worker for the lead's writes, never again for a
         # write it had already read
         assert 3 <= metrics[name].activations <= writes + 1
         assert metrics[name].answers == metrics[name].activations
+
+
+def test_lead_and_workers_needs_a_worker(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="k must be at least 1"):
+        _run(
+            "lead_and_workers.py@lead_and_workers_count",
+            _model(_answers),
+            tmp_path,
+            k=0,
+        )
 
 
 @pytest.mark.slow

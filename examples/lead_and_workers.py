@@ -33,7 +33,7 @@ from inspect_swarm import (
 QUESTION = "How many prime numbers are there below 3000? Answer with the number only."
 
 LEAD_PROMPT = """\
-You lead {workers} workers, named worker-1 to worker-{workers}. You do not count primes yourself.
+You lead these workers: {workers}. You do not count primes yourself.
 
 Split the numbers from 1 to 2999 into {tasks} ranges of about the same size, numbered 1 to {tasks}. Give each worker one range at a time: append a line `<worker>: <task number>: count the primes from <first> to <last>` to /shared_memory/tasks.md. A worker appends `<worker>: <task number>: <count>` to /shared_memory/results.md when it is done. Wait for results with swarm_wait on /shared_memory/results.md, view the file, and give each worker that has finished its task the next range. When all {tasks} results are in, add them up and submit the total as a number only.
 """
@@ -52,10 +52,10 @@ WAKE = "The lead wrote to the shared memory. Check for a new task."
 
 
 @agent
-def lead_member(workers: int = 2, tasks: int = 6) -> Agent:
-    """The lead: splits the count into tasks, hands them out and adds up the results."""
+def lead_member(workers: list[str], tasks: int = 6) -> Agent:
+    """The lead: splits the count into tasks, hands them out to `workers` and adds up the results."""
     return react(
-        prompt=LEAD_PROMPT.format(workers=workers, tasks=tasks),
+        prompt=LEAD_PROMPT.format(workers=", ".join(workers), tasks=tasks),
         tools=[swarm_tools()],
     )
 
@@ -99,12 +99,21 @@ def lead_and_workers(lead: str = "lead") -> Controller:
 
 @task
 def lead_and_workers_count(k: int = 2, tasks: int = 6) -> Task:
+    if k < 1:
+        raise ValueError(f"lead_and_workers_count: k must be at least 1, got {k}.")
+    # named here, so that the lead's prompt names the members the roster has
+    workers = [f"worker-{i}" for i in range(1, k + 1)]
     return Task(
         dataset=[Sample(input=QUESTION, target="430")],
         solver=swarm(
             members=[
-                member(lead_member, name="lead", args={"workers": k, "tasks": tasks}),
-                member(worker_member, name="worker", count=k, persistent=True),
+                member(
+                    lead_member, name="lead", args={"workers": workers, "tasks": tasks}
+                ),
+                *(
+                    member(worker_member, name=name, persistent=True)
+                    for name in workers
+                ),
             ],
             controller=lead_and_workers(),
             channels=[shared_memory()],
