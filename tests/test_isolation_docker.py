@@ -56,6 +56,8 @@ class Run:
     members: dict[str, list[Step]]
     before: str | None = None
     """A root command run before the swarm."""
+    after: str | None = None
+    """A root command run after the swarm, even one that failed; its output is the case's `after` result, and the swarm's error its `error` result."""
 
 
 @dataclass
@@ -137,7 +139,16 @@ def case_solver() -> Solver:
                 channels=[],
                 isolation=users(**run.isolation),
             )
-            state = await as_solver(team)(state, generate)
+            if run.after is None:
+                state = await as_solver(team)(state, generate)
+                continue
+            results = _CASES[case].results
+            try:
+                state = await as_solver(team)(state, generate)
+            except Exception as ex:
+                results["error"] = [str(ex)]
+            result = await sandbox().exec(["sh", "-c", run.after], user="root")
+            results["after"] = [result.stdout + result.stderr]
         return state
 
     return solve
@@ -229,6 +240,50 @@ def test_members_run_as_their_users_with_ids_that_own_no_file(tmp_path: Path) ->
 
 
 @pytest.mark.slow
+def test_members_get_their_own_home_when_the_image_sets_another(
+    tmp_path: Path,
+) -> None:
+    # the container's HOME is root's, which commands run as another user keep unless
+    # the tool sets it
+    steps: list[Step] = [
+        ("bash", "echo $HOME $TMPDIR"),
+        ("python", "import os; print(os.environ['HOME'], os.environ['TMPDIR'])"),
+        ("session", "echo $HOME $TMPDIR"),
+    ]
+    cases = {"home": Case(runs=[Run({"shared": []}, {"w-1": steps})])}
+    _eval(tmp_path, cases, compose_extra="    environment:\n      HOME: /root\n")
+    bash_out, python_out, session_out = cases["home"].results["w-1"]
+    # nothing on stderr either, such as bash failing to read /root/.bash_profile
+    assert _ok(bash_out) == "/scratch/w-1 /scratch/w-1/tmp"
+    assert _ok(python_out) == "/scratch/w-1 /scratch/w-1/tmp"
+    assert "/scratch/w-1 /scratch/w-1/tmp" in _ok(session_out)
+
+
+@pytest.mark.slow
+def test_homes_start_without_the_images_skeleton(tmp_path: Path) -> None:
+    # with peers="read", a skeleton entry open to everyone would let every member
+    # write it in every other member's home
+    cases = {
+        "skeleton": Case(
+            runs=[
+                Run(
+                    {"shared": [], "peers": "read"},
+                    {
+                        "w-1": [("bash", "ls -A ~")],
+                        "w-2": [("bash", "ls -A /scratch/w-1")],
+                    },
+                )
+            ],
+            setup="mkdir -p /etc/skel && echo x > /etc/skel/open-file && chmod 666 /etc/skel/open-file && mkdir -m 777 /etc/skel/open-dir",
+        )
+    }
+    _eval(tmp_path, cases)
+    for name in ("w-1", "w-2"):
+        [listing] = cases["skeleton"].results[name]
+        assert _ok(listing).split() == [".bashrc", ".profile", "tmp"]
+
+
+@pytest.mark.slow
 def test_members_cannot_reach_each_others_homes_and_share_the_shares(
     tmp_path: Path,
 ) -> None:
@@ -276,13 +331,8 @@ def test_members_cannot_reach_each_others_homes_and_share_the_shares(
 def test_files_already_in_a_share_are_kept_and_members_edit_them(
     tmp_path: Path,
 ) -> None:
-    # files at the names the self-test's probes once had, which it must not touch; and
     # a directory that was there before setup, in which a member creates and edits a file
-    sentinels = "/shared/.swarm-probe-swarm-w-1 /shared/.swarm-probe-swarm-w-1.moved"
-    setup = (
-        "mkdir -p /shared/inherited && touch /shared/existing"
-        f" && for f in {sentinels}; do echo sentinel > $f; done"
-    )
+    setup = "mkdir -p /shared/inherited && touch /shared/existing"
     cases = {
         "existing": Case(
             runs=[
@@ -300,7 +350,6 @@ def test_files_already_in_a_share_are_kept_and_members_edit_them(
                                 "bash",
                                 "echo d >> /shared/existing && echo e >> /shared/inherited/new && cat /shared/existing /shared/inherited/new",
                             ),
-                            ("bash", f"cat {sentinels} && ls -a /shared"),
                         ],
                     },
                 )
@@ -309,14 +358,58 @@ def test_files_already_in_a_share_are_kept_and_members_edit_them(
         )
     }
     _eval(tmp_path, cases)
-    edits, listing = cases["existing"].results["w-2"]
+    [edits] = cases["existing"].results["w-2"]
     assert _ok(edits).split() == ["a", "d", "b", "c", "e"]
-    lines = _ok(listing).splitlines()
-    assert lines[:2] == ["sentinel", "sentinel"]
-    assert [n for n in lines[2:] if n.startswith(".swarm-probe")] == [
-        ".swarm-probe-swarm-w-1",
-        ".swarm-probe-swarm-w-1.moved",
-    ]
+
+
+# a command that fails for the arguments matching a case pattern, in place of the
+# image's own; the probe's scripts find commands only in the system directories
+def _failing(command: str, pattern: str) -> str:
+    return (
+        f"mv /usr/bin/{command} /usr/bin/{command}.real"
+        f' && printf \'#!/bin/sh\\ncase "$*" in {pattern}) exit 1 ;; esac\\nexec /usr/bin/{command}.real "$@"\\n\' > /usr/bin/{command}'
+        f" && chmod 755 /usr/bin/{command}"
+    )
+
+
+@pytest.mark.slow
+def test_the_self_test_removes_only_the_directories_it_reserved(
+    tmp_path: Path,
+) -> None:
+    # entries with names like the self-test's, which it must leave alone whether it
+    # passes, fails to create its probes, or fails to rename one
+    sentinels = ["/shared/.swarm-probe-sentinel", "/shared/.swarm-probe-sentinel.moved"]
+    setup = (
+        f"mkdir /shared && for f in {' '.join(sentinels)}; do echo sentinel > $f; done"
+    )
+    after = f"find /scratch /shared -name '.swarm-probe-*' | sort && cat {' '.join(sentinels)}"
+    rw = {"shared": [{"path": "/shared", "access": "rw"}]}
+    idle: dict[str, list[Step]] = {"w-1": [], "w-2": []}
+    cases = {
+        "passes": Case(runs=[Run(rw, idle, after=after)], setup=setup),
+        "creation-fails": Case(
+            runs=[Run(rw, idle, before=_failing("mktemp", "*/shared/*"), after=after)],
+            setup=setup,
+        ),
+        "rename-fails": Case(
+            runs=[Run(rw, idle, before=_failing("mv", "*.moved*"), after=after)],
+            setup=setup,
+        ),
+    }
+    _eval(tmp_path, cases)
+    errors = {
+        "passes": None,
+        "creation-fails": "the member could not create a file in the shared directory /shared",
+        "rename-fails": "a member could not rename a file another member created in the shared directory /shared",
+    }
+    for name, error in errors.items():
+        results = cases[name].results
+        if error is None:
+            assert "error" not in results
+        else:
+            [message] = results["error"]
+            assert error in message, message
+        assert results["after"][0].splitlines() == [*sentinels, "sentinel", "sentinel"]
 
 
 @pytest.mark.slow

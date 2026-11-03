@@ -1,6 +1,5 @@
 import posixpath
 import re
-import secrets
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -477,16 +476,15 @@ add_users() {
       user)
         name=$2 uid=$3 home=$4
         groupadd -g "$uid" "$name" || fail "users isolation could not create the group $name"
-        useradd -u "$uid" -g "$uid" -G "$group" -d "$home" -m -s "$shell" "$name" || fail "users isolation could not create the user $name"
+        # -M: no copy of the image's /etc/skel, whose modes could let peers write
+        useradd -u "$uid" -g "$uid" -G "$group" -d "$home" -M -s "$shell" "$name" || fail "users isolation could not create the user $name"
+        mkdir -m 0700 -- "$home" && chown -h "$uid:$uid" "$home" || fail "users isolation could not create $home"
         if [ "$peers" = read ]; then
-          chgrp -h "$group" "$home" && chmod 2750 "$home"
-        else
-          chmod 0700 "$home"
-        fi || fail "users isolation could not set the mode of $home"
+          chgrp -h "$group" "$home" && chmod 2750 "$home" || fail "users isolation could not set the mode of $home"
+        fi
         mkdir -m 0700 -- "$home/tmp" && chown -h "$uid:$uid" "$home/tmp" || fail "users isolation could not create $home/tmp"
         for f in .profile .bashrc; do
-          [ -L "$home/$f" ] && fail "$home/$f is a symlink"
-          printf '\n%s\n' 'export TMPDIR="$HOME/tmp"' >>"$home/$f" && chown -h "$uid:$uid" "$home/$f" || fail "users isolation could not write $home/$f"
+          printf '%s\n' 'export TMPDIR="$HOME/tmp"' >"$home/$f" && chown -h "$uid:$uid" "$home/$f" || fail "users isolation could not write $home/$f"
         done
         shift 4 ;;
       share) shift 3 ;;
@@ -560,22 +558,28 @@ shares "$@"
 )
 
 # The self-test, run as a member through the provider's own exec(user=...). Checks
-# that the member runs as its uid and cannot become root, that it can write no entry
-# of a ro share, and leaves a probe file in its home and in each rw share for a peer.
-# $1 uid, $2 home, $3 probe file name, then `rw <path>` and `ro <path>` items.
+# that the member runs as its uid and cannot become root, and that it can write no
+# entry of a ro share. Its probes go in a directory it reserves with mktemp -d in its
+# home and in each rw share, which it prints, one per line, as it reserves them, so
+# that cleanup removes those directories and nothing else; each holds a file `probe`
+# for the pair check.
+# $1 uid, $2 home, then `rw <path>` and `ro <path>` items.
 _SELF_TEST = (
     _PRELUDE
     + r"""
-uid=$1 home=$2 probe=$3
-shift 3
+uid=$1 home=$2
+shift 2
+reserve() {
+  d=$(mktemp -d "$1/.swarm-probe-XXXXXXXX") || return 1
+  printf '%s\n' "$d"
+}
 actual=$(id -u)
 [ "$actual" = "$uid" ] || fail "commands for this member run as uid $actual, not $uid: the sandbox does not run commands as the user it is given"
 if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   fail "the member can become root with sudo; remove its sudoers entry from the image"
 fi
-# probe files are created only where nothing exists, so that no existing file is changed
-set -C
-printf probe >"$home/$probe" || fail "the member could not create $home/$probe in its home"
+# mktemp makes a directory 0700; give it the mode mkdir would
+{ reserve "$home" && chmod go+rx "$d" && printf probe >"$d/probe"; } || fail "the member could not create a file in its home $home"
 while [ $# -gt 0 ]; do
   # every entry readable and every directory, the share's ancestors included, searchable
   unreadable=$(find -P "$2" -xdev ! -type l \( ! -readable -o -type d ! -executable \) -printf '%p\n' -quit 2>&1) \
@@ -585,14 +589,13 @@ while [ $# -gt 0 ]; do
     w=$(find -P "$2" -xdev ! -type l ! -writable -printf '%p\n' -quit 2>&1) \
       || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$w" | head -n 1)"
     [ -z "$w" ] || fail "the member cannot write $w in the read-write shared directory $2"
-    printf probe >"$2/$probe" || fail "the member could not create $2/$probe in the shared directory $2"
+    { reserve "$2" && chmod g+rwx "$d" && printf probe >"$d/probe"; } || fail "the member could not create a file in the shared directory $2"
   else
     w=$(find -P "$2" -xdev -writable -print -quit 2>&1) \
       || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$w" | head -n 1)"
     [ -z "$w" ] || fail "the member can write $w in the read-only shared directory $2"
-    if (: >"$2/$probe") 2>/dev/null; then
-      rm -f -- "$2/$probe"
-      fail "the member could create a file in the read-only shared directory $2"
+    if reserve "$2" 2>/dev/null; then
+      fail "the member could create a directory in the read-only shared directory $2"
     fi
   fi
   shift 2
@@ -601,7 +604,8 @@ done
 )
 
 # The pair check, run as a second member against the first's probe files.
-# $1 the first member's home, $2 its probe file, $3 peers, then rw share paths.
+# $1 the first member's home, $2 its probe file there, $3 peers, then its probe file in
+# each rw share.
 _PEER_TEST = (
     _PRELUDE
     + r"""
@@ -620,10 +624,10 @@ if mv -- "$home" "$home.swarm-probe" 2>/dev/null; then
   mv -- "$home.swarm-probe" "$home"
   fail "a peer could rename $home"
 fi
-for s in "$@"; do
-  f="$s/${file##*/}"
+for f in "$@"; do
+  s=$(dirname -- "$(dirname -- "$f")")
   (printf x >>"$f") 2>/dev/null || fail "a member could not change a file another member created in the shared directory $s; its filesystem may not keep ACLs"
-  { [ ! -e "$f.moved" ] && [ ! -L "$f.moved" ] && mv -- "$f" "$f.moved" && mv -- "$f.moved" "$f"; } 2>/dev/null || fail "a member could not rename a file another member created in the shared directory $s"
+  { mv -- "$f" "$f.moved" && mv -- "$f.moved" "$f"; } 2>/dev/null || fail "a member could not rename a file another member created in the shared directory $s"
 done
 """
 )
@@ -750,31 +754,30 @@ async def _self_test(
     isolation: UserIsolation,
     identities: list[MemberIdentity],
 ) -> None:
-    # a fresh name, so that no file the probes create or remove existed before
-    probe = f".swarm-probe-{secrets.token_hex(8)}"
-    shares: list[str] = []
-    for share in isolation.shared:
-        shares += [share.access, share.path]
-    rw = [share.path for share in isolation.shared if share.access == "rw"]
-    files = [
-        *(f"{i.home}/{probe}-{i.user}" for i in identities),
-        *(
-            f"{path}/{probe}-{i.user}{moved}"
-            for path in rw
-            for i in identities
-            for moved in ("", ".moved")
-            if moved == "" or len(identities) > 1
-        ),
-    ]
+    # the probe directories the members reserved, by member and by the directory
+    # each is in
+    reserved: dict[str, dict[str, str]] = {}
     try:
-        await _check_members(env, env_name, isolation, identities, probe, shares, rw)
+        await _check_members(env, env_name, isolation, identities, reserved)
     except BaseException:
         # the self-test's own error is the one to report
         with anyio.CancelScope(shield=True), suppress(Exception):
-            await _run(env, env_name, 'rm -f -- "$@"', *files)
+            await _remove_probes(env, env_name, reserved)
         raise
     with anyio.CancelScope(shield=True):
-        await _run(env, env_name, 'rm -f -- "$@"', *files)
+        await _remove_probes(env, env_name, reserved)
+
+
+# removes the probe directories the self-test reserved, and nothing else
+async def _remove_probes(
+    env: SandboxEnvironment, env_name: str, reserved: dict[str, dict[str, str]]
+) -> None:
+    dirs = [d for by_parent in reserved.values() for d in by_parent.values()]
+    if dirs:
+        await _run(env, env_name, 'rm -rf -- "$@"', *dirs)
+
+
+_PROBE_DIR = re.compile(r"\.swarm-probe-[A-Za-z0-9]{8}")
 
 
 async def _check_members(
@@ -782,25 +785,37 @@ async def _check_members(
     env_name: str,
     isolation: UserIsolation,
     identities: list[MemberIdentity],
-    probe: str,
-    shares: list[str],
-    rw: list[str],
+    reserved: dict[str, dict[str, str]],
 ) -> None:
+    shares: list[str] = []
+    for share in isolation.shared:
+        shares += [share.access, share.path]
+    rw = [share.path for share in isolation.shared if share.access == "rw"]
     results: dict[str, ExecResult[str] | BaseException] = {}
 
     async def member_test(identity: MemberIdentity) -> None:
         try:
-            results[identity.user] = await privileged_shell(
+            result = await privileged_shell(
                 env,
                 _SELF_TEST,
                 str(identity.uid),
                 identity.home,
-                f"{probe}-{identity.user}",
                 *shares,
                 user=identity.user,
             )
         except Exception as ex:
             results[identity.user] = ex
+            return
+        results[identity.user] = result
+        # each line a directory the self-test reserved, in its home or a share,
+        # whether or not it went on to pass
+        parents = {identity.home, *(share.path for share in isolation.shared)}
+        reserved[identity.user] = {
+            posixpath.dirname(line): line
+            for line in result.stdout.splitlines()
+            if posixpath.dirname(line) in parents
+            and _PROBE_DIR.fullmatch(posixpath.basename(line))
+        }
 
     async with anyio.create_task_group() as tg:
         for identity in identities:
@@ -809,13 +824,14 @@ async def _check_members(
         _check_result(results[identity.user], env_name, identity.user)
     if len(identities) > 1:
         first, second = identities[0], identities[1]
+        probes = reserved[first.user]
         result = await privileged_shell(
             env,
             _PEER_TEST,
             first.home,
-            f"{first.home}/{probe}-{first.user}",
+            f"{probes[first.home]}/probe",
             isolation.peers,
-            *rw,
+            *(f"{probes[path]}/probe" for path in rw),
             user=second.user,
         )
         _check_result(result, env_name, second.user)

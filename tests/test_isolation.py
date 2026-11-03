@@ -1,4 +1,3 @@
-import re
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -71,6 +70,21 @@ class IsolationStub(SandboxEnvironment):
             )
         if "echo begin" in cmd[2]:
             return ExecResult(True, 0, self.probe, "")
+        if "reserve()" in cmd[2]:
+            # the self-test prints the directories it reserves, in its home and in each
+            # rw share, as mktemp names them; a failing one reserves only the first
+            home, items = cmd[5], cmd[6:]
+            rw = [
+                path
+                for access, path in zip(items[::2], items[1::2], strict=True)
+                if access == "rw"
+            ]
+            dirs = [f"{d}/.swarm-probe-{str(user)[-1]}0000000\n" for d in [home, *rw]]
+            if self.fail is not None and self.fail_on in cmd[2]:
+                return ExecResult(
+                    False, self.fail.returncode, dirs[0], self.fail.stderr
+                )
+            return ExecResult(True, 0, "".join(dirs) + "/etc\n", "")
         if self.fail is not None and self.fail_on in cmd[2]:
             return self.fail
         return ExecResult(True, 0, "", "")
@@ -148,48 +162,49 @@ def _scoped(seen: dict[str, dict[str, str | None]], count: int = 2) -> Any:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("fails", [False, True])
-async def test_the_self_test_creates_and_removes_only_fresh_probe_files(
+async def test_the_self_test_removes_only_the_directories_it_reserved(
     fails: bool,
 ) -> None:
     seen: dict[str, dict[str, str | None]] = {}
-    stubs = [
-        IsolationStub(
-            fail=ExecResult(False, 3, "", "the member cannot read /shared\n")
-            if fails
-            else None,
-            fail_on="probe files are created only",
-        )
-        for _ in range(2)
-    ]
-    probes: list[str] = []
-    for stub in stubs:
-        with environments(default=stub):
-            if fails:
-                with pytest.raises(RuntimeError, match="the member cannot read"):
-                    await run_swarm(
-                        swarm(_scoped(seen), channels=[], isolation="users")
-                    )
-            else:
+    stub = IsolationStub(
+        fail=ExecResult(False, 3, "", "the member cannot read /shared\n")
+        if fails
+        else None,
+        fail_on="reserve()",
+    )
+    with environments(default=stub):
+        if fails:
+            with pytest.raises(RuntimeError, match="the member cannot read"):
                 await run_swarm(swarm(_scoped(seen), channels=[], isolation="users"))
-        # the self-test's arguments: uid, home, probe file name, shares
-        names = {args[2].rsplit("-swarm-", 1)[0] for _, _, args in stub.calls[3:5]}
-        assert len(names) == 1
-        [probe] = names
-        assert re.fullmatch(r"\.swarm-probe-[0-9a-f]{16}", probe)
-        probes.append(probe)
-        # the cleanup removes the names this run made up, and nothing else
-        user, script, removed = stub.calls[-1]
-        assert user == "root" and script.endswith('\nrm -f -- "$@"')
-        assert removed == [
-            f"/scratch/w-1/{probe}-swarm-w-1",
-            f"/scratch/w-2/{probe}-swarm-w-2",
-            *(
-                f"/shared/{probe}-swarm-w-{i}{moved}"
-                for i in (1, 2)
-                for moved in ["", ".moved"]
-            ),
+        else:
+            await run_swarm(swarm(_scoped(seen), channels=[], isolation="users"))
+    user, script, removed = stub.calls[-1]
+    assert user == "root" and script.endswith('\nrm -rf -- "$@"')
+    if fails:
+        # each failed after reserving the directory in its home
+        assert sorted(removed) == [
+            "/scratch/w-1/.swarm-probe-10000000",
+            "/scratch/w-2/.swarm-probe-20000000",
         ]
-    assert probes[0] != probes[1]
+    else:
+        # the pair check uses the first member's probes; the line that names no
+        # reservation is not removed
+        assert stub.calls[-2] == (
+            "swarm-w-2",
+            stub.calls[-2][1],
+            [
+                "/scratch/w-1",
+                "/scratch/w-1/.swarm-probe-10000000/probe",
+                "none",
+                "/shared/.swarm-probe-10000000/probe",
+            ],
+        )
+        assert sorted(removed) == [
+            "/scratch/w-1/.swarm-probe-10000000",
+            "/scratch/w-2/.swarm-probe-20000000",
+            "/shared/.swarm-probe-10000000",
+            "/shared/.swarm-probe-20000000",
+        ]
 
 
 @pytest.mark.anyio
