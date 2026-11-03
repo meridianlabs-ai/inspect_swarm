@@ -230,7 +230,8 @@ def _logged_output(output: ModelOutput, member: str) -> ModelOutput | None:
 # fields (metadata, tool arguments, provider data) hold what a model returns, the data
 # JSON and YAML parsers give; anything else there, one of Inspect's models included,
 # was put there by the task's code, and is refused as the record's other values from
-# the task's author are. The whole output is checked, each container once in each
+# the task's author are. So is any value elsewhere that is neither one of Inspect's
+# models nor such data, such as a subclass of one of them defined by task code. The whole output is checked, each container once in each
 # position, without recursion, so that a refusal never depends on what else the
 # output holds, shared data is checked once and a cycle ends; nothing is serialized,
 # and no iterator is advanced.
@@ -251,7 +252,7 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
         if len(steps) > 20:
             steps = [*steps[:10], f"...({len(steps) - 15} steps)...", *steps[-5:]]
         return TypeError(
-            f"The swarm's result record cannot be written: the output of member {member!r} holds a value of type {type(value).__name__} at output{''.join(steps)}. Metadata and tool arguments in a member's output must be data a model can return: dicts, lists, strings, numbers, booleans and None, or the dates, times, bytes and sets YAML gives."
+            f"The swarm's result record cannot be written: the output of member {member!r} holds a value of type {type(value).__name__} at output{''.join(steps)}. A member's output must be built from Inspect's own classes, and its metadata and tool arguments must hold data a model can return: dicts, lists, strings, numbers, booleans and None, or the dates, times, bytes and sets YAML gives."
         )
 
     def push(child: object, data: bool, at: int, step: str) -> None:
@@ -264,7 +265,7 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
         if model and data:
             raise refuse(value, at)
         if not model and not _container(value):
-            if data and not isinstance(value, _DATA):
+            if not isinstance(value, _DATA):
                 raise refuse(value, at)
             continue
         if (id(value), data) in seen:
@@ -334,11 +335,11 @@ def _container(value: object) -> bool:
     return isinstance(value, dict | list | tuple | set)
 
 
+# One of Inspect's own models, by its class's module: a subclass from task code is not.
 def _inspect_model(value: object) -> bool:
-    return isinstance(value, ToolCall) or (
-        isinstance(value, BaseModel)
-        and type(value).__module__.startswith("inspect_ai.")
-    )
+    return isinstance(value, BaseModel | ToolCall) and type(
+        value
+    ).__module__.startswith("inspect_ai.")
 
 
 # A Pydantic model's extra fields, which are free-form data.

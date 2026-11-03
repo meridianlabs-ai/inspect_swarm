@@ -675,6 +675,34 @@ async def test_an_object_the_task_put_in_an_output_fails_the_sample(
             await run_agent(_plain_then(odd, "result_test_author_object"), "task")
 
 
+class _TaskOutput(ModelOutput):
+    """A `ModelOutput` subclass, as task code might define."""
+
+
+@pytest.mark.anyio
+async def test_a_subclass_of_an_inspect_model_fails_the_sample_before_it_is_read() -> (
+    None
+):
+    rows = iter([1, 2])
+
+    def build() -> ModelOutput:
+        base = ModelOutput.from_content("mockllm", "41")
+        # data that would be left out, and data that would be refused, inside it
+        return _TaskOutput(
+            model=base.model,
+            choices=base.choices,
+            metadata={"value": _aliased(60), "rows": rows},
+        )
+
+    async with sample():
+        with pytest.raises(
+            TypeError,
+            match=r"output of member 'odd' holds a value of type _TaskOutput at output\. ",
+        ):
+            await run_agent(_plain_then(build, "result_test_subclass"), "task")
+    assert next(rows) == 1
+
+
 @pytest.mark.parametrize(
     "deep",
     [
