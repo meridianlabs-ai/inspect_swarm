@@ -511,6 +511,7 @@ class SwarmRun:
             m.gate.recheck = self.bus.recheck
             m.gate.in_flight = self._in_flight
             m.gate.ending = functools.partial(self._ending, m)
+            m.gate.approve = functools.partial(self._approve, m)
             m.gate.waiting = self.bus.waits.max_wait is not None
             m.gate.record_answer = functools.partial(self._answer, m)
             m.gate.publish_idle = functools.partial(self._idle, m)
@@ -1087,7 +1088,8 @@ class SwarmRun:
         self._notify()
 
     # An output from a member, checked when the runtime first has it, before anything
-    # copies, settles or records it: only Inspect's output classes and model data, so
+    # classifies, copies, settles or records it (the member gate calls it before a
+    # returned output's or an answer's status is read, and `_end()` for any other): only Inspect's output classes and model data, so
     # that no method of a class from task code ever runs. One that holds anything else
     # fails the sample with a `TypeError`, and the member's outputs are not read again.
     def _approve(self, m: MemberRun, output: ModelOutput) -> None:

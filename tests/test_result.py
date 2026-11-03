@@ -699,6 +699,12 @@ class _List(_Hooked, list[Any]):
     def __iter__(self) -> Iterator[Any]:
         raise _ran("__iter__")
 
+    def __len__(self) -> int:
+        raise _ran("__len__")
+
+    def __getitem__(self, index: Any) -> Any:
+        raise _ran("__getitem__")
+
     def __repr__(self) -> str:
         raise _ran("__repr__")
 
@@ -936,6 +942,18 @@ class _RaisingOutput(ModelOutput):
         raise _ran("__copy__")
 
 
+class _GetterOutput(ModelOutput):
+    """A `ModelOutput` subtype whose getters, which classifying an output reads, are its own."""
+
+    @property
+    def empty(self) -> bool:
+        raise _ran("empty")
+
+    @property
+    def stop_reason(self) -> Any:
+        raise _ran("stop_reason")
+
+
 class _RaisingMessage(ChatMessageAssistant):
     """A message subtype whose copy raises, as the final conversation copies it."""
 
@@ -957,9 +975,9 @@ def _raising_message() -> ModelOutput:
     return output
 
 
-# The member's output is checked when it ends, before the answer, the record or
-# anything else copies it, and the sample fails with the record, the ledger and the
-# metrics kept.
+# The member's output is checked when it ends, before its status is classified from
+# it or anything copies it, and the sample fails with the member `errored` and the
+# record, the ledger and the metrics kept.
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "odd,where",
@@ -979,9 +997,19 @@ def _raising_message() -> ModelOutput:
             r"type _RaisingMessage at output\.choices\[0\]\.message\. ",
             id="answer-message-copy-raises",
         ),
+        # what classifying an output reads: its choices' length and first item, and
+        # its own getters
+        pytest.param(
+            _choices_in_a_list_subclass,
+            r"type _List at output\.choices\. ",
+            id="choices-length-and-item",
+        ),
+        pytest.param(
+            _subtype(_GetterOutput), r"type _GetterOutput at output\. ", id="getters"
+        ),
     ],
 )
-async def test_an_output_is_checked_before_anything_copies_it(
+async def test_an_output_is_checked_before_anything_reads_it(
     odd: Callable[[], ModelOutput], where: str
 ) -> None:
     _hook_calls.clear()
@@ -997,7 +1025,7 @@ async def test_an_output_is_checked_before_anything_copies_it(
     assert _hook_calls == []
     assert record is not None and None not in accounting
     [m] = record.members
-    assert (m.status, m.output, m.left_out) == ("submitted", None, ["output"])
+    assert (m.status, m.output, m.left_out) == ("errored", None, ["output"])
 
 
 class _Uncopyable:
