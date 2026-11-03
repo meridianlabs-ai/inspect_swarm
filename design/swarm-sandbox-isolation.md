@@ -386,7 +386,7 @@ What it still cannot see: reads (nothing records who read a file), modifications
 ### Limits
 
 - **No change to the budget.** Users isolation changes no limit node, cap, share or the ledger (swarm-limits.md). Setup, the self-test, reaping and the census make no model calls.
-- **Time.** Setup runs before the controller and counts towards the sample's time and working limits; it is a few execs. Reaping runs inside each member's end and inside the drain, and is bounded by its 40 s wall-clock bound.
+- **Time.** Setup runs before the controller and counts towards the sample's time and working limits; it is a few execs, plus the id scan. A time cap derived from the sample's time limit (swarm-limits.md) is derived again after setup, so the time setup took is not counted on and the cap still ends before the sample's limit, leaving the reserve for the final step. An explicit `Budget.time` is unchanged. Reaping runs inside each member's end and inside the drain, and is bounded by its 40 s wall-clock bound.
 - **No per-member resources.** Members share the sandbox's CPU, memory and process table. A member that exhausts memory can cause the kernel to kill a peer's process. Per-member limits need cgroups (Docker only, with a container flag) and are a later rung; rlimits are not used because `RLIMIT_NPROC` is global per uid across containers *(spike)*. The sandbox is sized for the member count, as swarm.md already says ([Sandboxes: Sizing](https://meridianlabs-ai.github.io/inspect_swarm/sandboxes.html#sizing)).
 
 ### Later rungs (surveyed, not designed)

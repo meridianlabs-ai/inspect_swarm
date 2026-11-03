@@ -2,7 +2,7 @@ import logging
 import math
 from collections.abc import Callable, Mapping, Sequence, Set
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import Literal
 
@@ -148,6 +148,15 @@ def derive_caps(budget: Budget, member_count: int) -> Caps:
         token_type=token_type,
         time=_cap("time", budget.time, limits.time, budget.reserve),
     )
+
+
+def rederive_time_cap(budget: Budget, caps: Caps) -> Caps:
+    # the caps with a time cap derived from the sample's time limit again, after work
+    # at swarm start (users isolation's setup) that used sample time the first
+    # derivation counted on; an explicit time cap is fixed
+    if budget.time is not None:
+        return caps
+    return replace(caps, time=_derived("time", sample_limits().time, budget.reserve))
 
 
 def _cap(

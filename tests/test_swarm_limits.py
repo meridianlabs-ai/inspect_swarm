@@ -196,6 +196,25 @@ async def test_grace_is_clipped_to_half_the_samples_remaining_time() -> None:
 
 
 @pytest.mark.anyio
+async def test_isolation_setup_time_comes_out_of_the_derived_time_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # setup takes 0.6 s of a 1 s sample; a cap derived before it would outlast the
+    # sample, whose limit would then end the swarm without its final step
+    async def slow_setup(isolation: object, names: Sequence[str]) -> dict[str, Any]:
+        await anyio.sleep(0.6)
+        return {}
+
+    monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", slow_setup)
+    stop = await run_swarm(
+        swarm(sleeper(), channels=[], isolation="users", budget=Budget(grace=0)),
+        time=1,
+    )
+    assert stop.reason == "swarm_time"
+    assert statuses(stop) == {"sleeper": "cancelled"}
+
+
+@pytest.mark.anyio
 async def test_the_first_stop_wins() -> None:
     # two members reach the cap, and the time cap fires during grace
     spender = member(

@@ -24,6 +24,7 @@ from ._budget import (
     check_cost_data,
     derive_caps,
     is_bridged,
+    rederive_time_cap,
     share_nodes,
     split_sentence,
 )
@@ -149,11 +150,12 @@ def swarm(
             )
             for i, info in enumerate(roster)
         }
-        identities = (
-            await setup_isolation(resolved_isolation, [info.name for info in roster])
-            if resolved_isolation is not None
-            else None
-        )
+        identities = None
+        if resolved_isolation is not None:
+            identities = await setup_isolation(
+                resolved_isolation, [info.name for info in roster]
+            )
+            caps = rederive_time_cap(resolved_budget, caps)
         await SwarmRun(
             runs,
             state=state,
