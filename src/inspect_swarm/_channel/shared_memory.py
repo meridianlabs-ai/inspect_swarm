@@ -415,10 +415,11 @@ class _SharedMemoryState:
                 seen.setdefault(change.file, 0)
         self._applied[record.id] = changes
         written = [self._files[change.file] for change in changes]
+        # idle members too: their own loop sees the record when they are woken
         notify = [
             name
             for name in self._roster
-            if self._bus.running(name)
+            if (self._bus.running(name) or self._bus.idle(name))
             and any(
                 f.loop != self._top_loop(name)
                 and self._is_news(self._top_loop(name), f)

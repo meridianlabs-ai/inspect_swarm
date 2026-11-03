@@ -24,6 +24,7 @@ from ._controller._control import (
     MemberEnded,
     MemberHandle,
     MemberIdle,
+    MemberNews,
     MemberState,
     SwarmControl,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "MemberHandle",
     "MemberIdle",
     "MemberInfo",
+    "MemberNews",
     "MemberResult",
     "MemberState",
     "Record",

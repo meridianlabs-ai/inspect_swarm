@@ -312,6 +312,9 @@ class MemberContext:
     # first resolved, and whether ACP was bound to that channel then
     loop: AgentChannel | None = None
     acp_bound: bool | None = None
+    # the agent span of that loop, recorded at the same binding: the loop whose views
+    # clear a persistent member's news while it is idle
+    loop_span: str | None = None
     # the agent channel of the loop the turn gate holds: the first loop to reach the
     # gate in the member's own task, which can differ from `loop`
     turn_loop: AgentChannel | None = None

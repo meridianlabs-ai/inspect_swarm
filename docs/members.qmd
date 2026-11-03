@@ -175,6 +175,7 @@ When a persistent member submits, or a `react(submit=False)` member gives a repl
 - Every answer is a candidate for the swarm's answer: `first` and `last` choose across all of them, and `choose_answer()` takes the member's latest. An answer stays a candidate however the member ends later.
 - A submission in a turn that also calls a `handoff()` is not an answer. Nor is a refusal (`content_filter`) or a reply cut off by the context window.
 - A member stopped or ended while idle ends `submitted`. A member whose loop returns without an answer ends `unsubmitted`, its earlier answers still candidates.
+- While it is idle, another member's write that is news to it reaches the controller as `MemberNews`, and the controller decides whether to wake it ([News for idle members](controllers.qmd#news-for-idle-members)).
 
 Only a member whose agent is a `react()`, `react(submit=False)` or `deepagent()` loop can persist, given directly or returned by a [member builder](#member-builders). The swarm refuses every other agent before it runs: a bridged member, a custom loop, `deepagent()` with background dispatch, and an agent that calls a loop and then checks its result (`checked_solver()` in the examples). In a swarm with `shared_memory()`, a persistent member must have `swarm_tools()` in its own tools, not only in a subagent's.
 

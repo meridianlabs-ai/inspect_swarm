@@ -339,12 +339,16 @@ def dispatch(tasks: list[str], worker: str = "worker") -> Controller:
 swarm(members=[member(worker_agent, name="worker", persistent=True)], controller=dispatch(tasks))
 ```
 
-A lead that posts work on the shared memory for persistent workers is the other use: the controller wakes a worker on the lead's writes (`MemberNews` with the lead as `sender`) and returns when the lead ends. Its worker protocol (what a worker reads before it answers, so that a peer's unread result does not leave `MemberIdle.news` true after every activation, and what it does on a wake with no task) is the implementation's to define, with that worked example and its test.
+A lead that posts work on the shared memory for persistent workers is the other use, `examples/lead_and_workers.py`: the controller starts every member, wakes an idle worker on the lead's writes (`MemberNews` with the lead as `sender`) and on a `MemberIdle` with `news` set, and returns when the lead ends, choosing the lead's submission with `choose_answer()`, since the workers' answers are reports on their own tasks. The lead appends tasks to one file, each naming its worker, and the workers append results to another. The worker protocol, in the worker's prompt:
+
+- On every activation, do each task for you that you have not done, and append its result.
+- Before answering, call `changes` and view each file it names until it names none, doing any new task it shows first. A peer's result left unviewed would stay news to the worker's loop, so every `MemberIdle` would have `news` set and the controller would wake it again for writes it has already been told of.
+- With no task for you, answer at once. Every idle worker is woken on each of the lead's writes, since `MemberNews` does not say which worker a task is for.
 
 ### Relation to other designs
 
 - [swarm.md Members](swarm.md#members) lists two candidates for persistence, a `submit=False` protocol and clean re-entry; this design takes neither ([Alternatives](#alternatives-considered)).
-- [swarm-communication.md Wake later](swarm-communication.md#wake-and-turn-boundaries) sketches the news event for addressed messages; `MemberNews` is that event for every waiting channel, the later messages channel included once it implements `WaitingState` as [swarm-wait.md Room for later work](swarm-wait.md#room-for-later-work) plans.
+- [swarm-communication.md Wake later](swarm-communication.md#wake-and-turn-boundaries) sketches the news event for addressed messages; `MemberNews` is that event for every waiting channel, the messages channel included: a message sent to an idle member with `wake=True` is news to it.
 - The seam's `"end"` is never a submission ([swarm-turn-seam.md The callback contract](swarm-turn-seam.md#the-callback-contract)); the submitted ending it leaves to this design is the idle ending above.
 
 ## Alternatives considered
@@ -422,7 +426,7 @@ All with mockllm, no network or Docker, on asyncio and trio through `tests/conft
    - `src/inspect_swarm/_evidence.py` (`answer` with its index, `boundary` at admitted idle holds, `final`'s `answer`), `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/_critical_path.py` and `src/inspect_swarm/_ledger.py` (answer positions), `src/inspect_swarm/__init__.py` (`MemberIdle`).
    - Docs: `docs/members.qmd` (persistent members; in its status table, the `submitted` row's normal-return clause limited to non-persistent members while the row keeps a persistent member stopped or ended while idle or at the boundary after an answer, with its last answer as its output, and the `unsubmitted` row gaining a persistent member's normal return without an answer, a cut-off included; and the prose under the table, which says a normal return is a submission), `design/swarm-limits.md`'s definition of the status set (`:368`), which defines `unsubmitted` by stop reason alone, `docs/controllers.qmd` (idle, `wake()`, quiescence, the `dispatch` example), `docs/analysis.qmd` (the event, record and metrics fields), `docs/reference/inspect_swarm.qmd`.
    - Tests: `tests/test_persistent.py` without the news cases.
-3. **inspect_swarm: news for idle members.** `src/inspect_swarm/_budget.py` (`MemberContext.loop_span`), `src/inspect_swarm/_bus/_tools.py` (record it at binding), `src/inspect_swarm/_bus/_bus.py` (the idle check at step 4 and the runtime's callback), `src/inspect_swarm/_channel/shared_memory.py` (`notify` with idle members), `src/inspect_swarm/_controller/_control.py` (`MemberNews`, `MemberIdle.news`), `src/inspect_swarm/__init__.py`; the news tests. The lead-and-workers example, its worker protocol and its test come with the implementation. Until it lands, `MemberIdle.news` is `False`.
+3. **inspect_swarm: news for idle members.** `src/inspect_swarm/_budget.py` (`MemberContext.loop_span`), `src/inspect_swarm/_bus/_tools.py` (record it at binding), `src/inspect_swarm/_bus/_bus.py` (the idle check at step 4 and the runtime's callback), `src/inspect_swarm/_channel/shared_memory.py` (`notify` with idle members), `src/inspect_swarm/_controller/_control.py` (`MemberNews`, `MemberIdle.news`), `src/inspect_swarm/__init__.py`; the news tests. The lead-and-workers example, its worker protocol and its test come with the implementation.
 
 ## Open questions
 
