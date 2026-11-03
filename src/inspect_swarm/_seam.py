@@ -173,6 +173,10 @@ class MemberGate:
 
     # TurnGate
 
+    async def after_answer(self, channel: AgentChannel, state: AgentState) -> bool:
+        # an answering loop returns, as it would with no gate
+        return False
+
     def closed(self, channel: AgentChannel) -> None:
         if channel is self.context.turn_loop:
             self._turn_closed = True
