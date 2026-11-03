@@ -1066,6 +1066,7 @@ dependencies = [
     { name = "anyio" },
     { name = "inspect-ai" },
     { name = "pydantic" },
+    { name = "shortuuid" },
 ]
 
 [package.dev-dependencies]
@@ -1097,6 +1098,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.0" },
     { name = "inspect-ai", git = "https://github.com/UKGovernmentBEIS/inspect_ai?rev=main" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "shortuuid" },
 ]
 
 [package.metadata.requires-dev]

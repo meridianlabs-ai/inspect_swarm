@@ -17,12 +17,13 @@ from inspect_ai.model import (
     ChatMessageUser,
     ModelOutput,
 )
+from inspect_ai.util import suspend_working_limit
 from pydantic import JsonValue
 
 from ._budget import Lever, MemberContext, SwarmTimeNode
 from ._evidence import seam_boundary, seam_changed
 
-BoundaryAfter: TypeAlias = Literal["start", "tools", "reply", "user"]
+BoundaryAfter: TypeAlias = Literal["start", "tools", "reply", "user", "wake"]
 
 
 @dataclass(frozen=True)
@@ -35,8 +36,11 @@ class Boundary:
     index: int
     """The boundary's place among the boundaries of the member's own loop, from 0 before its first generation."""
 
+    activation: int
+    """The member's activation: 0 until a persistent member is first woken, then one more at each wake."""
+
     after: BoundaryAfter
-    """What the conversation ends with: `start` at index 0, `tools` after a tool result, `reply` after an assistant message with no tool calls, and `user` after anything else."""
+    """What the conversation ends with: `start` at index 0, `tools` after a tool result, `reply` after an assistant message with no tool calls, `wake` after a persistent member's wake input, and `user` after anything else."""
 
     messages: list[ChatMessage]
     """A copy of the conversation: the member's at the first callback, and as the callbacks before it left it at each later one. Changing it changes nothing; return the conversation instead."""
@@ -92,6 +96,8 @@ class _Registration:
 # call with inspect_ai's turn_gate(), it binds the member's own loop (the first loop to
 # reach it in the member's own task), ends the member at a boundary once the swarm is
 # stopping or an end was requested, and holds it there while its boundary callbacks run.
+# For a persistent member it also records the own loop's answers and holds the member
+# idle at the boundary after each one, until a wake gives it its next input.
 @dataclass(eq=False)
 class MemberGate:
     name: str
@@ -106,6 +112,19 @@ class MemberGate:
     recheck: Callable[[], None] = lambda: None
     in_flight: Callable[[], list[str]] = lambda: []
     ending: Callable[[], None] = lambda: None
+    # a persistent member's: set by the runtime, whether the swarm has a channel that
+    # wakes waits, what records an answer (the output given), what sets the member
+    # `idle` and publishes it, and what sets it `ending` when its hold is refused
+    persistent: bool = False
+    waiting: bool = False
+    record_answer: Callable[[ModelOutput], None] = lambda output: None
+    publish_idle: Callable[[], None] = lambda: None
+    refuse_hold: Callable[[], None] = lambda: None
+    # its current activation ended with an answer; a wake clears it
+    answered: bool = False
+    # activations begun after the first, and the seconds it was idle
+    activation: int = 0
+    awaiting_work_time: float = 0.0
     # the member's own task, set by the member wrapper
     task: int | None = None
     # a callback was registered for this run, unregistered since or not
@@ -129,20 +148,36 @@ class MemberGate:
     _successor: AgentChannel | None = None
     _index: int = 0
     _chain: anyio.CancelScope | None = None
+    # the idle member's wake, and the input it brings
+    _woken: anyio.Event | None = None
+    _wake_input: list[ChatMessage] = field(default_factory=list[ChatMessage])
 
     @property
     def held(self) -> bool:
         return self.context.held
 
-    # Whether callbacks were registered but the member's own loop never reached the
-    # gate, so they never ran.
+    # Whether callbacks were registered, or the member is persistent, but the member's
+    # own loop never reached the gate, so they never ran.
     def unsupervised(self) -> bool:
-        return self.registered and not self.reached
+        return (self.registered or self.persistent) and not self.reached
 
     def unsupervised_error(self) -> RuntimeError:
+        if self.persistent and not self.registered:
+            return RuntimeError(
+                f"Member {self.name!r} is persistent, but it never reached a turn boundary of an agent loop, so it could not be held after an answer."
+            )
         return RuntimeError(
             f"Member {self.name!r} had boundary callbacks, but they never ran: it never reached a turn boundary of an agent loop. Only members whose agent runs an Inspect agent loop such as react() can be held at a boundary."
         )
+
+    # From the runtime's wake(), for a member held idle: the answered mark cleared, the
+    # activation counted, and the input given to the waiting boundary.
+    def wake(self, messages: list[ChatMessage]) -> None:
+        assert self._woken is not None
+        self.answered = False
+        self.activation += 1
+        self._wake_input = messages
+        self._woken.set()
 
     def register(self, callback: BoundaryCallback, origin: str) -> Callable[[], None]:
         entry = _Registration(callback, origin)
@@ -174,8 +209,31 @@ class MemberGate:
     # TurnGate
 
     async def after_answer(self, channel: AgentChannel, state: AgentState) -> bool:
-        # an answering loop returns, as it would with no gate
-        return False
+        # synchronous apart from its signature: nothing awaits between the answer and
+        # the loop's next boundary
+        if (
+            not self.persistent
+            or self.task is None
+            or anyio.get_current_task().id != self.task
+            or channel is not self.context.turn_loop
+            or self._turn_closed
+        ):
+            # a nested loop's answer returns to its caller
+            return False
+        self._check_reader()
+        if self.end_origin is not None:
+            # the loop returns, and the member ends `stopped`
+            return False
+        # deferred: the member wrapper imports this module
+        from ._member import output_status
+
+        if output_status(state.output) != "submitted":
+            # the loop returns from the exit it was at, and the member ends
+            # `unsubmitted`
+            return False
+        self.record_answer(state.output)
+        self.answered = True
+        return True
 
     def closed(self, channel: AgentChannel) -> None:
         if channel is self.context.turn_loop:
@@ -219,6 +277,10 @@ class MemberGate:
         self.reached = True
         index = self._index
         self._index += 1
+        if self.answered:
+            # the boundary after an answer, where the member is held idle
+            return await self._idle(index, messages, state)
+        self._check_reader()
         self._end_if_requested()
         if not self._callbacks:
             return False
@@ -231,6 +293,55 @@ class MemberGate:
                 f"Member {self.name!r} has background work running, so it cannot be held at a turn boundary."
             )
         return await self._hold(index, messages, state)
+
+    # A persistent member's board must be read by the loop the gate holds, when the
+    # swarm has a channel that gives news: no other loop lives across its activations.
+    def _reader_error(self) -> RuntimeError | None:
+        loop = self.context.loop
+        if (
+            not self.persistent
+            or not self.waiting
+            or loop is None
+            or loop is self.context.turn_loop
+        ):
+            return None
+        return RuntimeError(
+            f"Member {self.name!r} is persistent and reads the swarm's channels only through a subagent. A persistent member that reads the swarm's channels must have swarm_tools() in its own tools, not only in its subagents'."
+        )
+
+    def _check_reader(self) -> None:
+        error = self._reader_error()
+        if error is not None:
+            raise error
+
+    # The boundary after a persistent member's answer: the admission (the stop and end
+    # checks, background work, the reader rule, then the time limit in the hold), each
+    # refusal setting the member `ending` before it ends it, then the idle hold.
+    async def _idle(
+        self,
+        index: int,
+        messages: Sequence[ChatMessage],
+        state: AgentState | None,
+    ) -> bool:
+        pending = self._pending()
+        if pending is not None:
+            self.refuse_hold()
+            self._end(pending)
+        if state is None:
+            self.refuse_hold()
+            raise RuntimeError(
+                f"Member {self.name!r} is persistent, but its agent loop does not pass its state to before_turn(), so it cannot be held after an answer."
+            )
+        if self.context.background_running:
+            self.refuse_hold()
+            raise RuntimeError(
+                f"Member {self.name!r} has background work running, so it cannot be held at a turn boundary."
+            )
+        error = self._reader_error()
+        if error is not None:
+            self.refuse_hold()
+            raise error
+        return await self._hold(index, messages, state, idle=True)
 
     # ending the member
 
@@ -259,7 +370,12 @@ class MemberGate:
     # the hold
 
     async def _hold(
-        self, index: int, messages: Sequence[ChatMessage], state: AgentState
+        self,
+        index: int,
+        messages: Sequence[ChatMessage],
+        state: AgentState,
+        *,
+        idle: bool = False,
     ) -> bool:
         live = list(messages)
         live_hashes = [message_hash(m) for m in live]
@@ -278,6 +394,9 @@ class MemberGate:
         # time, and with nothing between here and the pause that yields
         for node in self.time_nodes:
             if node.overdue():
+                if idle:
+                    # a refused hold: the member is ending before its limit ends it
+                    self.refuse_hold()
                 # its own limit ends the member, through Inspect's path
                 await node.expire()
         try:
@@ -287,16 +406,31 @@ class MemberGate:
             start = anyio.current_time()
             for node in self.time_nodes:
                 node.pause()
+            if idle:
+                # with no await since the pause: the member is `idle`, and the
+                # controller hears it, only once its hold is admitted
+                self._woken = anyio.Event()
+                self.publish_idle()
             self.recheck()
             ended: str | None = None
             try:
                 with anyio.CancelScope() as chain:
                     self._chain = chain
+                    if idle:
+                        staged = await self._await_wake(staged)
+                        # the runtime's change, recorded before the callbacks' own
+                        wake_change = _diff(live, staged)
+                        assert wake_change is not None
+                        changes.append((_RUNTIME, wake_change))
+                        after = "wake"
+                        # callbacks registered while the member was idle run too
+                        registrations = list(self._callbacks)
                     for registration in registrations:
                         origins.append(registration.origin)
                         boundary = Boundary(
                             member=self.name,
                             index=index,
+                            activation=self.activation,
                             after=after,
                             messages=[m.model_copy(deep=True) for m in staged],
                             output=output.model_copy(deep=True),
@@ -328,6 +462,7 @@ class MemberGate:
             finally:
                 # 5. release
                 self._chain = None
+                self._woken = None
                 for node in self.time_nodes:
                     node.resume()
                 self.context.held = False
@@ -402,6 +537,20 @@ class MemberGate:
                     change={"removed": list[JsonValue](stale)},
                     applied=applied,
                 )
+
+    # The idle wait, in the chain's cancel scope, so that a stop or an end cancels it;
+    # counted as waiting for the sample's working limit. Returns the staged
+    # conversation with the wake's input appended.
+    async def _await_wake(self, staged: list[ChatMessage]) -> list[ChatMessage]:
+        assert self._woken is not None
+        since = anyio.current_time()
+        try:
+            with suspend_working_limit():
+                await self._woken.wait()
+        finally:
+            self.awaiting_work_time += anyio.current_time() - since
+        woken, self._wake_input = self._wake_input, []
+        return [*staged, *woken]
 
 
 def _after(index: int, messages: Sequence[ChatMessage]) -> BoundaryAfter:
