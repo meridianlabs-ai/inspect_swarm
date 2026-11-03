@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import date
 from functools import cache
@@ -12,7 +12,7 @@ from inspect_ai.event import Event, InfoEvent, SwarmEvent
 from inspect_ai.log import EvalSample, transcript
 from inspect_ai.log._condense import (
     ATTACHMENT_PROTOCOL,
-    condense_event,
+    condense_sample,
     resolve_events_attachments,
 )
 from inspect_ai.model import ModelOutput
@@ -22,6 +22,7 @@ from inspect_ai.tool import ToolCall
 from inspect_ai.util import Store, store
 from pydantic import (
     BaseModel,
+    ConfigDict,
     JsonValue,
     ValidationError,
     ValidatorFunctionWrapHandler,
@@ -99,7 +100,7 @@ class MemberResult(BaseModel):
     """Swarm time when the verdict was taken; `None` without one."""
 
     left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that begins with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and an output nested too deep for a JSON log, with a cycle, that reuses the same lists or dicts so often that writing it would expand it past 10,000 copies, or that Inspect cannot write to a log. Empty when nothing was left out. An output whose metadata or tool arguments hold any other Python object, one of Inspect's own included, which only task code puts there, fails the sample instead."""
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that begins with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and an output nested too deep for a JSON log, with a cycle, that reuses the same lists or dicts so often that writing it would expand it past 10,000 copies, or that a log cannot write or read back, such as a dict key with more digits than Python prints. Empty when nothing was left out. An output whose metadata or tool arguments hold any other Python object, one of Inspect's own included, which only task code puts there, fails the sample instead."""
 
     # Validating a `ModelOutput` fills an empty completion from its message, both when
     # the record is made and when it is read; the record keeps the completion the
@@ -158,6 +159,10 @@ class SwarmResultRecord(BaseModel):
     verifier: str | None = None
     """A label for the result contract's verifier, for audit: its `name`, else its qualified name; `None` without one."""
 
+    # serialized as Inspect serializes a sample (`EvalSample`), which keeps NaN and
+    # infinities, the members' outputs included
+    model_config = ConfigDict(ser_json_inf_nan="constants")
+
 
 # Only the runtime writes the record: once, when the swarm ends, in the swarm's span,
 # with its id in the store the swarm ran with, which ties the record to that store
@@ -166,71 +171,113 @@ def write_record(record: SwarmResultRecord) -> None:
     # such as one nested in a member
     forget_record()
     id = uuid4().hex
-    logged = _logged_members(record)
+    record = record.model_copy(
+        update={"members": [_logged_member(record, m) for m in record.members]}
+    )
+    data: dict[str, JsonValue] = {"id": id, **record.model_dump(mode="json")}
+    logged = _as_logged(data)
     # the members' model text is held as a log gives it back; the rest is the task
     # author's, refused if a log would change it
-    authored = logged.model_dump(mode="json", exclude=_MODEL_TEXT)
-    if _changed_by_logging(SwarmEvent(kind=RECORD_TYPE, member=None, data=authored)):
+    if any(
+        _unresolved(written) or _authored(written) != _authored(data)
+        for written in (logged, _as_logged(data, log_images=False))
+    ):
         raise ValueError(
             "The swarm's result record cannot be written: a string in it would read back from the log as other text. Inspect reads a string that begins with attachment:// or tc:// as a reference to an attachment, removes base64 data: URIs when an eval does not log images, and escapes text that is not valid UTF-8, such as a lone surrogate. Check the members' names, roles and sandboxes, and the reason given to choose_answer()."
         )
-    event = SwarmEvent(
-        kind=RECORD_TYPE, member=None, data={"id": id, **logged.model_dump(mode="json")}
+    transcript()._event(  # pyright: ignore[reportPrivateUsage]
+        SwarmEvent(kind=RECORD_TYPE, member=None, data=logged)
     )
-    transcript()._event(event)  # pyright: ignore[reportPrivateUsage]
     store().set(RESULT_ID_KEY, id)
 
 
-_MODEL_TEXT = {"members": {"__all__": {"output", "answer_key", "verdict"}}}
+# A member's values that come from its model: its output, its answer key, and its
+# verdict's explanation (the verdict as a whole, since its other values are the task's).
+_MODEL_TEXT = ("output", "answer_key", "verdict")
 
 
-# The members' outputs, answer keys and verdict explanations, as a log gives them back.
-# A value the record cannot hold is left out of its member and named in its left_out,
-# so that one member's model output never costs the sample its record.
-def _logged_members(record: SwarmResultRecord) -> SwarmResultRecord:
-    return record.model_copy(
-        update={"members": [_logged_member(m) for m in record.members]}
-    )
+# The record's data without the members' model text.
+def _authored(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    members = cast(list[dict[str, JsonValue]], data.get("members", []))
+    return {
+        **data,
+        "members": [
+            {k: v for k, v in m.items() if k not in _MODEL_TEXT} for m in members
+        ],
+    }
 
 
-def _logged_member(m: MemberResult) -> MemberResult:
-    update: dict[str, Any] = {}
-    left_out = list(m.left_out)
+# A member with its output, answer key and verdict explanation as a log gives them
+# back. A value the record cannot hold is left out of its member and named in its
+# left_out, so that one member's model output never costs the sample its record: one a
+# log cannot write or read, one with text that reads as an attachment reference, and
+# an output whose serialization is not bounded (`_bounded()`). An object the task's
+# code put in an output fails the sample first (`_refuse_author_objects()`).
+def _logged_member(record: SwarmResultRecord, m: MemberResult) -> MemberResult:
     if m.output is not None:
-        update["output"] = _logged_output(m.output, m.name)
-        if update["output"] is None:
-            left_out.append("output")
+        _refuse_author_objects(m.output, m.name)
+    verdict = m.verdict
+    # the member with each value alone, so that each is kept or left out by itself
+    alone = m.model_copy(
+        update={
+            "output": None,
+            "answer_key": None,
+            "verdict": None if verdict is None else replace(verdict, explanation=None),
+        }
+    )
+    values: list[tuple[LeftOut, dict[str, Any]]] = []
+    if m.output is not None:
+        values.append(("output", {"output": m.output}))
     if m.answer_key is not None:
-        update["answer_key"] = _logged_text(m.answer_key)
-        if update["answer_key"] is None:
-            left_out.append("answer_key")
-    if m.verdict is not None and m.verdict.explanation is not None:
-        explanation = _logged_text(m.verdict.explanation)
-        update["verdict"] = replace(m.verdict, explanation=explanation)
-        if explanation is None:
-            left_out.append("explanation")
-    return m.model_copy(update={**update, "left_out": left_out})
+        values.append(("answer_key", {"answer_key": m.answer_key}))
+    if verdict is not None and verdict.explanation is not None:
+        values.append(("explanation", {"verdict": verdict}))
+    logged = alone
+    left_out = list(m.left_out)
+    for name, value in values:
+        kept = _logged_value(record, alone.model_copy(update=value))
+        if kept is None:
+            left_out.append(name)
+        else:
+            field = "verdict" if name == "explanation" else name
+            logged = logged.model_copy(update={field: getattr(kept, field)})
+    return logged.model_copy(update={"left_out": left_out})
 
 
-# An output in the form Inspect's log writer gives a sample's output (`to_json_safe()`),
-# read back as a log is read, or None when the record cannot hold it: one whose
-# serialization is not bounded (`_bounded()`), one Inspect cannot serialize, or one
-# with text that reads as an attachment reference. An object the task's code put in
-# it fails the sample first (`_refuse_author_objects()`).
-def _logged_output(output: ModelOutput, member: str) -> ModelOutput | None:
-    _refuse_author_objects(output, member)
+# `m` as the record gives it back from a log, or None when the log cannot write or read
+# it, or it holds text that reads as an attachment reference. `m` is written in a copy
+# of the record, which serializes as a sample does, at its place in the record.
+def _logged_value(record: SwarmResultRecord, m: MemberResult) -> MemberResult | None:
     try:
-        if not _bounded(output):
+        if m.output is not None and not _bounded(m.output):
             return None
-        data = json.loads(to_json_safe(output))
-        if _unresolved(data):
+        data = _as_logged(
+            record.model_copy(update={"members": [m]}).model_dump(mode="json")
+        )
+        [member] = cast(list[dict[str, JsonValue]], data["members"])
+        if _unresolved({k: v for k, v in member.items() if k in _MODEL_TEXT}):
             return None
-        logged = ModelOutput.model_validate(data, context=get_deserializing_context())
+        return MemberResult.model_validate(member, context=get_deserializing_context())
     except ValueError:
         return None
-    # validation fills an empty completion from the message; the record keeps it empty
-    logged.completion = data["completion"]
-    return logged
+
+
+# The record's data as a log gives it back: in a sample's event, written as Inspect
+# writes a sample to its log (`condense_sample()`, then `to_json_safe()` with the
+# sample's serialization settings, which keep NaN and infinities) and read as a log is
+# read, with the event's attachments resolved, as `swarm_result()` resolves them.
+def _as_logged(
+    data: dict[str, JsonValue], log_images: bool = True
+) -> dict[str, JsonValue]:
+    event = SwarmEvent(kind=RECORD_TYPE, member=None, data=data)
+    sample = EvalSample(id=0, epoch=1, input="", target="", events=[event])
+    written = to_json_safe(condense_sample(sample, log_images), indent=None)
+    read = EvalSample.model_validate(
+        json.loads(written), context=get_deserializing_context()
+    )
+    [resolved] = resolve_events_attachments(read.events, read.attachments)
+    assert isinstance(resolved, SwarmEvent)
+    return resolved.data
 
 
 # Raises `TypeError` naming the member and the path when an output holds a value a
@@ -246,16 +293,17 @@ def _logged_output(output: ModelOutput, member: str) -> ModelOutput | None:
 # and no iterator is advanced.
 def _refuse_author_objects(output: ModelOutput, member: str) -> None:
     seen: set[tuple[int, bool]] = set()
-    # for each value reached: the index of its container's entry, and its step
-    trail: list[tuple[int, str]] = []
+    # for each value reached: the index of its container's entry, and its step, an
+    # attribute or index, or else the dict key it is reached by
+    trail: list[tuple[int, str | None, object]] = []
     # the value, whether it is free-form data, and its index in `trail`
     stack: list[tuple[object, bool, int]] = [(output, False, -1)]
 
     def refuse(value: object, at: int) -> TypeError:
         steps: list[str] = []
         while at >= 0:
-            at, step = trail[at]
-            steps.append(step)
+            at, step, key = trail[at]
+            steps.append(_key_step(key) if step is None else step)
         steps.reverse()
         # a deeply nested path is shortened in the middle
         if len(steps) > 20:
@@ -264,8 +312,10 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
             f"The swarm's result record cannot be written: the output of member {member!r} holds a value of type {type(value).__name__} at output{''.join(steps)}. A member's output must be built from Inspect's own classes, and its metadata and tool arguments must hold data a model can return: dicts, lists, strings, numbers, booleans and None, or the dates, times, bytes and sets YAML gives."
         )
 
-    def push(child: object, data: bool, at: int, step: str) -> None:
-        trail.append((at, step))
+    def push(
+        child: object, data: bool, at: int, step: str | None, key: object = None
+    ) -> None:
+        trail.append((at, step, key))
         stack.append((child, data, len(trail) - 1))
 
     while stack:
@@ -290,7 +340,7 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
             for key, child in cast(dict[object, object], value).items():
                 if data and not isinstance(key, _DATA):
                     raise refuse(key, at)
-                push(child, data, at, f"[{key!r}]")
+                push(child, data, at, None, key)
         else:
             for i, child in enumerate(cast(Iterable[object], value)):
                 push(child, data, at, f"[{i}]")
@@ -332,6 +382,15 @@ def _bounded(output: ModelOutput) -> bool:
 
     root = measure(output, 1)
     return root is not None and root[1] - len(measured) <= _MAX_SHARED_EXPANSION
+
+
+# A dict key's step in a path: a key too large to print, such as an integer YAML gives
+# with more digits than Python prints, is named by its type.
+def _key_step(key: object) -> str:
+    try:
+        return f"[{key!r}]"
+    except ValueError:
+        return f"[<{type(key).__name__} key>]"
 
 
 # What JSON and YAML parsers give inside a container, which `to_json_safe()` writes as
@@ -382,13 +441,6 @@ def _children(value: object) -> Iterable[object] | None:
     return None
 
 
-# Text as the log writer gives it back (text that is not valid UTF-8 escaped), or None
-# when it reads as an attachment reference.
-def _logged_text(text: str) -> str | None:
-    logged: str = json.loads(to_json_safe(text))
-    return None if _unresolved(logged) else logged
-
-
 # An output's own nesting, which holds tool arguments as deep as Inspect accepts within
 # the output's containers, well below the depth at which the record inside its sample
 # no longer reads from a JSON log.
@@ -404,47 +456,6 @@ _MAX_SHARED_EXPANSION = 10_000
 def forget_record() -> None:
     if RESULT_ID_KEY in store():
         store().delete(RESULT_ID_KEY)
-
-
-# Whether a log would give back other text than `event` holds. Inspect condenses an
-# event's strings when it logs it (long text into attachments, and base64 data: URIs
-# removed under log_images=False), writes the event and its attachments as JSON (which
-# escapes text that is not valid UTF-8, such as a lone surrogate), and resolves them
-# when a log is read or re-scored,
-# rewriting tc:// as attachment:// and replacing a reference with the attachment it
-# names. Resolving against the event's own attachments only, where any other reference
-# reads as something else, finds text that would read back as another attachment of
-# the sample or not at all.
-def _changed_by_logging(event: SwarmEvent) -> bool:
-    for log_images in (True, False):
-        attachments: dict[str, str] = {}
-        condensed = condense_event(event, attachments, log_images)
-        # written and read back as the log writes and reads them
-        resolved: Event = SwarmEvent.model_validate_json(to_json_safe(condensed))
-        own = _OwnAttachments(json.loads(to_json_safe(attachments)))
-        # twice, as a sample read with its attachments resolved is resolved again by
-        # swarm_result()
-        for _ in range(2):
-            [resolved] = resolve_events_attachments([resolved], own)
-        assert isinstance(resolved, SwarmEvent)
-        if resolved.data != event.data:
-            return True
-    return False
-
-
-# An event's own attachments, which give any other hash a value no string holds.
-class _OwnAttachments(Mapping[str, str]):
-    def __init__(self, own: dict[str, str]) -> None:
-        self._own = own
-
-    def __getitem__(self, key: str) -> str:
-        return self._own.get(key, "\0")
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._own)
-
-    def __len__(self) -> int:
-        return len(self._own)
 
 
 # Only the runtime writes it: when a swarm starts, in the swarm's span, before any

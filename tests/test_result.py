@@ -26,6 +26,10 @@ from inspect_ai.model import (
     ModelOutput,
     UrlCitation,
 )
+from inspect_ai.model._call_tools import parse_tool_call
+from inspect_ai.scorer import Score, Scorer, Target, scorer
+from inspect_ai.solver import TaskState
+from inspect_ai.tool import ToolInfo, ToolParam, ToolParams
 from inspect_ai.util import store, token_limit
 
 from inspect_swarm import (
@@ -592,6 +596,25 @@ def _output_in_metadata() -> ModelOutput:
     return _with_metadata({"inner": inner})
 
 
+# A tool call as Inspect parses it from the model's text: JSON, or YAML for a tool
+# whose one parameter takes an object.
+def _parsed_tool_call(arguments: str) -> ModelOutput:
+    tool = ToolInfo(
+        name="submit",
+        description="Submit an answer.",
+        parameters=ToolParams(properties={"answer": ToolParam(type="object")}),
+    )
+    call = parse_tool_call("call", "submit", arguments, [tool])
+    assert call.arguments and call.parse_error is None
+    output = _tool_call({})
+    output.message.tool_calls = [call]
+    return output
+
+
+# An integer with more digits than Python prints, which YAML reads from hex.
+_HUGE_KEY = "? 0x" + "f" * 4000 + "\n: value"
+
+
 def _list_cycle() -> list[Any]:
     cycle: list[Any] = []
     cycle.append(cycle)
@@ -629,6 +652,8 @@ def _aliased(depth: int) -> list[Any]:
         pytest.param(
             lambda: _tool_call({"loop": _list_cycle()}), id="tool-arguments-cycle"
         ),
+        # a key the log cannot write
+        pytest.param(lambda: _parsed_tool_call(_HUGE_KEY), id="huge-yaml-key"),
     ],
 )
 async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> None:
@@ -658,6 +683,12 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
             _output_in_metadata,
             r"type ModelOutput at output\.metadata\['inner'\]",
             id="model-in-metadata",
+        ),
+        # under a key too large to print, which the path names by its type
+        pytest.param(
+            lambda: _with_metadata({16**4000: {"x": object()}}),
+            r"type object at output\.metadata\[<int key>\]\['x'\]",
+            id="under-a-huge-key",
         ),
         pytest.param(
             _tool_call_in_its_arguments,
@@ -780,10 +811,6 @@ def _odd_metadata(value: Any) -> Callable[[], ModelOutput]:
             lambda: _tool_call({"when": "2024-01-02"}),
             id="date-in-tool-arguments",
         ),
-        # the log writes it as null in a sample's own output
-        pytest.param(
-            _odd_metadata(float("inf")), _odd_metadata(None), id="infinity-in-metadata"
-        ),
     ],
 )
 async def test_an_output_is_recorded_as_a_log_keeps_a_samples_output(
@@ -792,6 +819,68 @@ async def test_an_output_is_recorded_as_a_log_keeps_a_samples_output(
     stop = await run_swarm(_plain_then(built, "result_test_kept"))
     _, odd = stop.record.members
     assert odd.left_out == [] and odd.output == kept()
+
+
+def _argument(output: ModelOutput) -> Any:
+    [call] = output.message.tool_calls or []
+    return call.arguments["value"]
+
+
+def _metadata(output: ModelOutput) -> Any:
+    return (output.metadata or {})["value"]
+
+
+@pytest.mark.parametrize(
+    "odd,value,kept",
+    [
+        pytest.param(
+            lambda: _parsed_tool_call('{"value": NaN}'),
+            _argument,
+            "nan",
+            id="nan-in-tool-arguments",
+        ),
+        pytest.param(
+            _odd_metadata(float("-inf")),
+            _metadata,
+            "-inf",
+            id="infinity-in-metadata",
+        ),
+    ],
+)
+def test_the_live_record_is_the_record_its_logged_sample_gives_back(
+    tmp_path: Path,
+    odd: Callable[[], ModelOutput],
+    value: Callable[[ModelOutput], Any],
+    kept: str,
+) -> None:
+    live: list[SwarmResultRecord] = []
+
+    @scorer(metrics=[])
+    def keep_record() -> Scorer:
+        async def score(state: TaskState, target: Target) -> Score:
+            record = swarm_result(state)
+            assert record is not None
+            live.append(record)
+            return Score(value=0)
+
+        return score
+
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=_plain_then(odd, "result_test_live_and_logged"),
+        scorer=keep_record(),
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    samples = read_eval_log(log.location).samples
+    assert samples is not None
+    logged = swarm_result(samples[0])
+    [record] = live
+    assert logged is not None
+    # compared as JSON, in which a NaN is equal to itself
+    assert logged.model_dump_json() == record.model_dump_json()
+    _, member = record.members
+    assert member.left_out == [] and member.output is not None
+    assert repr(value(member.output)) == kept
 
 
 def test_a_message_without_an_id_reads_back_without_one(tmp_path: Path) -> None:
