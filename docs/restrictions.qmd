@@ -5,7 +5,7 @@ llms-description: "What the swarm does not support, the limits of bridged member
 
 ## What the swarm does not support
 
-- No background work in bridged members. A member cannot combine background work with the agent bridge. `background()` raises in a bridged member, and a member that uses the bridge after starting background work ends `errored`.
+- No Inspect background work in bridged members. A member cannot combine Inspect's `background()` with the agent bridge. `background()` raises in a bridged member, and a member that uses the bridge after starting background work ends `errored`. The CLI's own background work is a separate gap ([The CLI's own concurrent work](#the-clis-own-concurrent-work)).
 - No checkpointing. Inspect's sample checkpointing does not restore the swarm's shared state or its caps, so a swarm raises an error before any member starts in a sample with checkpointing on. Turn checkpointing off for tasks that run a swarm: set `checkpoint=False` on `Task()` or `eval()`, or remove every checkpoint setting, including `--checkpoint` and `INSPECT_EVAL_CHECKPOINT`.
 - No ACP agents. ACP agents wait for their caller to drive them, so they are refused.
 - No scorers that read a member's tool state. Each member runs in its own tool-state scope, so built-in tools that keep state in the store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) keep each member's at keys inside its scope, which differ from the default ones. Tool state that a setup solver prepared at the default instance is not carried into the members either; they start with fresh state ([Members](members.qmd#tool-state)).
@@ -68,6 +68,40 @@ A CLI gives up on an MCP tool call that runs too long, and the model then gets a
 If the CLI abandons a wait while its host call continues, that call can still mark member ends reported and record dependency links for the CLI's shared loop. Later conversations may then miss those end notices, and later reads do not repeat those links, even though no model received the abandoned result. The default `max_wait` keeps a wait inside the CLI's timeout, but it does not confirm delivery, and it does not prevent an abandoned call after an interruption.
 
 Inspect limits shared-memory views to 16 KiB by default. The CLIs also apply token limits (25,000 for Claude Code; 10,000 for Codex), so a view can be shortened further by the CLI. A default `read_messages` result is about 9 KB.
+
+### The CLI's own concurrent work
+
+The swarm owns and drains only work started with Inspect's `background()`. It does not own, drain or attribute the CLI's own concurrent work: Claude Code's background shell commands, background subagents and agent teams, and Codex's subagents (its multi-agent tools).
+
+- The swarm cannot wait for this work or stop it apart from the CLI. Claude Code waits for much of its background work before it exits, and the member keeps running until then.
+- Its model calls go through the member's bridge, so they count as the member's usage: against its limits and the swarm's caps, and in the ledger.
+- Work left running can outlast the member. The swarm does not check that the CLI stopped it, and a process started with `nohup` or `&` can keep running after the CLI exits. Such work can change the sandbox after the member ends and before scoring.
+
+To keep a bridged member to work the swarm can see, turn these features off.
+
+Claude Code (checked against 2.1.311, the stable release `claude_code()` installs when the sandbox has none):
+
+- Agent teams are off by default. Claude Code turns them on only with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` or `--agent-teams`, and `claude_code()` sets neither.
+- Background shell commands and background subagents are on by default. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` turns them off, and also stops Claude Code moving long subagents and timed-out commands to the background.
+- The `Monitor` tool still runs in the background with that setting. Leave it out with `disallowed_tools=["Monitor"]`.
+- Workflows also run subagents, where the account has them. `CLAUDE_CODE_DISABLE_WORKFLOWS=1` turns them off.
+
+```python
+claude_code(
+    env={
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+        "CLAUDE_CODE_DISABLE_WORKFLOWS": "1",
+    },
+    disallowed_tools=["Monitor"],
+    bridged_tools=[swarm_bridged_tools(channels)],
+)
+```
+
+Codex (checked against 0.166.0, the latest release `codex_cli()` installs when the sandbox has none):
+
+- Subagents are on by default. `agents.enabled = false` turns them off: `codex_cli(config_overrides={"agents.enabled": "false"}, bridged_tools=[swarm_bridged_tools(channels)])`. Use this rather than `features.multi_agent = false`, which a model's catalog entry can override. Only an explicit `features.multi_agent_v2 = true` turns them back on.
+
+None of these settings stop a shell command from starting a process that keeps running on its own, such as `nohup server &`. The swarm does not stop such processes when the member ends.
 
 ## What the log records
 
