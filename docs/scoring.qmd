@@ -90,6 +90,7 @@ solver = swarm(
 - A submission can be left without a verdict when the swarm stops: once the stop has begun the verifier's model calls are refused, and a verifier still running at the hard stop is cancelled.
 - An exception from `answer_key` or the verifier fails the sample, and so does a result of the wrong type: a key that is not a string or `None`, or a `Verdict` whose `passed` is not a bool, `value` not a float, an int a float holds exactly, or `None`, or `explanation` not a string or `None`. The record keeps the member's end and output, and any key or verdict recorded before the error.
 - The contract does not change which submission is the answer.
+- A contract with an `answer_key` or a `verifier` does not yet work with [persistent members](members.qmd#persistent-members), whose every answer is a submission: `swarm()` raises `ValueError` for the two together.
 
 The contract holds the task's functions, so the log records it only as `"ResultSpec"`. Retrying the task rebuilds it. A swarm replayed from its logged arguments (`--solver inspect_swarm/swarm`) cannot rebuild it and raises `TypeError`; to make such a swarm replayable, return it from a registered `@agent` builder.
 

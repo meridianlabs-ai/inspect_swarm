@@ -13,7 +13,7 @@ from inspect_ai._util.registry import (
     registry_info,
     registry_params,
 )
-from inspect_ai.agent import Agent, AgentState, agent
+from inspect_ai.agent import Agent, AgentState, agent, react
 from inspect_ai.agent import run as run_agent
 from inspect_ai.dataset import Sample
 from inspect_ai.event import SwarmEvent
@@ -133,6 +133,26 @@ def _key(text: str) -> str | None:
 def test_a_contract_the_swarm_cannot_use_is_refused(build: Any, error: str) -> None:
     with pytest.raises(ValueError, match=error):
         build()
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(answer_result(answer_key=_key), id="answer-key"),
+        pytest.param(answer_result(verifier=Checker()), id="verifier"),
+    ],
+)
+def test_a_contract_that_keys_or_verifies_refuses_a_persistent_member(
+    result: ResultSpec,
+) -> None:
+    members = [
+        member(answers("42"), name="plain"),
+        member(react(), name="kept", persistent=True),
+    ]
+    with pytest.raises(ValueError, match="Member 'kept' is persistent"):
+        swarm(members, channels=[], result=result)
+    # a contract that only names the kind applies no per-submission work
+    swarm(members, channels=[], result=answer_result())
 
 
 def test_the_builders_set_the_kind() -> None:
