@@ -128,7 +128,7 @@ A builder is also the place for anything each member must have its own of. Every
 
 ## Tool state
 
-Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member.
+Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member.
 
 An explicit `instance` is used as given: members that name the same instance share its state. A board shared on purpose was `memory(instance="board")` before the shared-memory channel; see [Shared Memory](shared-memory.qmd#migrating-from-memoryinstance) for moving to the channel.
 
