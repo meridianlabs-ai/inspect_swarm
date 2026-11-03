@@ -1544,8 +1544,8 @@ async def test_a_write_while_a_worker_is_idle_is_news_to_it(tools: bool) -> None
         *news,
         MemberEnded("lead", "submitted", True),
     ]
-    # the idle worker's own loop sees the record when it is woken
-    assert lead_write.data["notify"] == ["worker"]
+    # the idle worker's own loop sees the record when it is woken, if it has one
+    assert lead_write.data["notify"] == (["worker"] if tools else [])
 
 
 @pytest.mark.anyio
