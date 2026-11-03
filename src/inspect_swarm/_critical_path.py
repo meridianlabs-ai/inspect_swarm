@@ -41,6 +41,8 @@ class PathLog:
         self.results: list[PathResult] = []
         # `member_result`: member -> position
         self.ends: dict[str, int] = {}
+        # a persistent member's `answer`: (member, answer index) -> position
+        self.answers: dict[tuple[str, int], int] = {}
         # the evidence events taken, by uuid, so that an update is not taken again
         self._taken: set[str] = set()
 
@@ -55,6 +57,10 @@ class PathLog:
             if event.kind == "member_result" and self._take(event, event.member):
                 assert event.member is not None
                 self.ends.setdefault(event.member, position)
+            elif event.kind == "answer" and self._take(event, event.member):
+                assert event.member is not None
+                index = cast(int, event.data["answer"])
+                self.answers.setdefault((event.member, index), position)
             return
         if not (
             isinstance(event, CommunicationEvent)
@@ -96,26 +102,43 @@ class _End:
     member: str
 
 
-# The number of steps on the longest chain into the answering member's end: each
+# the chosen answer of a persistent member
+@dataclass(frozen=True)
+class _Answered:
+    member: str
+
+
+# The number of steps on the longest chain into the answering member's end, or for a
+# persistent member's answer (`answer_index`) into that answer's `answer` event: each
 # member's nodes form one chain in position order, a commit is its sender's chain
 # there, and a result follows the commits it depends on and the member ends it named.
-# None without an answer, without the answering member's end, or when a result depends
-# on a record no recorded commit made (with a warning).
+# None without an answer, without the answering member's end or answer event, or when
+# a result depends on a record no recorded commit made (with a warning).
 def critical_steps_to_answer(
     log: PathLog,
     completed: Callable[[str], bool],
     places: Callable[[str | None], tuple[bool, str | None]],
     answer: str | None,
+    answer_index: int | None = None,
 ) -> int | None:
-    if answer is None or answer not in log.ends:
+    if answer is None:
         return None
-    nodes: list[tuple[int, _Step | _End | PathCommit | PathResult]] = []
+    target = (
+        log.ends.get(answer)
+        if answer_index is None
+        else log.answers.get((answer, answer_index))
+    )
+    if target is None:
+        return None
+    nodes: list[tuple[int, _Step | _End | _Answered | PathCommit | PathResult]] = []
     for uuid, (span, position) in log.steps.items():
         member = places(span)[1]
         # steps outside every member (the controller's, the final step's) are ignored
         if member is not None and completed(uuid):
             nodes.append((position, _Step(member)))
     nodes.extend((member_end, _End(m)) for m, member_end in log.ends.items())
+    if answer_index is not None:
+        nodes.append((target, _Answered(answer)))
     nodes.extend((n.position, n) for n in [*log.commits, *log.results])
     nodes.sort(key=lambda node: node[0])
 
@@ -129,8 +152,10 @@ def critical_steps_to_answer(
         match node:
             case _Step():
                 reached += 1
+            case _Answered():
+                return reached
             case _End():
-                if node.member == answer:
+                if answer_index is None and node.member == answer:
                     return reached
                 ends.setdefault(node.member, reached)
             case PathCommit():
@@ -147,6 +172,25 @@ def critical_steps_to_answer(
                     reached = max(reached, ends.get(ended, 0))
         value[node.member] = reached
     return None
+
+
+# A persistent member's steps before one of its answers: its completed model calls
+# recorded before that answer's `answer` event. None when the event is not recorded.
+def steps_before_answer(
+    log: PathLog,
+    completed: Callable[[str], bool],
+    places: Callable[[str | None], tuple[bool, str | None]],
+    answer: str,
+    answer_index: int,
+) -> int | None:
+    target = log.answers.get((answer, answer_index))
+    if target is None:
+        return None
+    return sum(
+        1
+        for uuid, (span, position) in log.steps.items()
+        if position < target and places(span)[1] == answer and completed(uuid)
+    )
 
 
 def _entries(value: JsonValue) -> list[dict[str, JsonValue]]:

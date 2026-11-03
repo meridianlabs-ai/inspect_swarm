@@ -17,6 +17,7 @@ from inspect_ai.util._checkpoint.checkpointer_noop import (
     _NoopCheckpointer,  # pyright: ignore[reportPrivateUsage]
 )
 from inspect_ai.util._store import suspend_store_events
+from shortuuid import uuid
 
 from .._budget import (
     Budget,
@@ -86,7 +87,7 @@ class MemberHandle(Protocol):
 
     @property
     def state(self) -> MemberState:
-        """The member's lifecycle state."""
+        """The member's lifecycle state: `pending`, `running` or `ended`, and for a persistent member also `idle` (held after an answer until `SwarmControl.wake()`) and `ending` (its ending has begun, and its `MemberEnded` is still to come)."""
         ...
 
     @property
@@ -101,7 +102,17 @@ class MemberHandle(Protocol):
 
     @property
     def held(self) -> bool:
-        """Whether the member is held at a turn boundary: its boundary callbacks are running."""
+        """Whether the member is held at a turn boundary: its boundary callbacks are running, or it is idle."""
+        ...
+
+    @property
+    def persistent(self) -> bool:
+        """Whether the member is persistent (`member(..., persistent=True)`)."""
+        ...
+
+    @property
+    def answers(self) -> int:
+        """How many answers a persistent member has given so far; 0 for other members."""
         ...
 
     def on_boundary(
@@ -154,7 +165,21 @@ class MemberEnded:
     """Whether it ended with a submission."""
 
 
-ControlEvent = MemberEnded
+@dataclass(frozen=True)
+class MemberIdle:
+    """A persistent member answered and is idle, held until `SwarmControl.wake()` gives it more work."""
+
+    member: str
+    """The member's name."""
+
+    answer: int
+    """The index of the answer it just gave, from 0."""
+
+    news: bool
+    """Whether a channel already has news for the member's own loop. Always `False` in this version."""
+
+
+ControlEvent = MemberEnded | MemberIdle
 """An event a controller receives from `SwarmControl.events()`. Later versions add kinds, so test an event's type before reading its fields."""
 
 
@@ -190,14 +215,34 @@ class SwarmControl(Protocol):
 
         Raises:
             KeyError: If no member has this name.
-            RuntimeError: If the member has already started (a member runs once), or the swarm is stopping.
+            RuntimeError: If the member has already started (a member runs once; `wake()` gives an idle persistent member more work), or the swarm is stopping.
+        """
+        ...
+
+    def wake(
+        self, member: str | MemberHandle, input: str | list[ChatMessageUser]
+    ) -> None:
+        """Give an idle member its next piece of work, and return at once.
+
+        The member continues its conversation with `input` appended: a string as one user message, a list of user messages as given. It keeps its tool state, its limits and what it has seen. Each message gets a new id and no `source`; the messages passed are not changed, so the same list can be passed again.
+
+        An event can be stale when the controller reads it, so check that `member(name).state == "idle"` before waking a member.
+
+        Args:
+            member: The member, or its name.
+            input: The member's next input.
+
+        Raises:
+            KeyError: If no member has this name.
+            ValueError: If `input` is an empty string, an empty list, or a list holding any message that is not a `ChatMessageUser`.
+            RuntimeError: If the member is not idle (pending members start with `start()`; a running member is working or has not yet been held since its answer; an ending or ended member is ending), or the swarm is stopping.
         """
         ...
 
     def events(self) -> AsyncGenerator[ControlEvent, None]:
         """The swarm's events, in order from the swarm's start.
 
-        Each event is yielded once. The iterator ends when no member is running and no event is waiting; a member started later is reported by a new `events()` call. Use one iterator at a time: an iterator holds the events from its first step until it ends or is closed (`aclose()`, or leaving a `contextlib.aclosing()` block).
+        Each event is yielded once. The iterator ends when no member is running or ending and no event is waiting: every member is pending, idle or ended. A member started or woken later is reported by a new `events()` call. Use one iterator at a time: an iterator holds the events from its first step until it ends or is closed (`aclose()`, or leaving a `contextlib.aclosing()` block).
 
         Raises:
             RuntimeError: If another iterator is still open.
@@ -209,7 +254,7 @@ class SwarmControl(Protocol):
     ) -> None:
         """Make this member's submission the swarm's answer, in place of the controller's `final` rule.
 
-        The choice is the provisional answer from now on and the final answer when the swarm ends. The result record and the `final` event give the mode `controller`, the member and `reason`. Choose once, from a member that has ended with a submission.
+        The choice is the provisional answer from now on and the final answer when the swarm ends. The result record and the `final` event give the mode `controller`, the member and `reason`. Choose once, from a member that has ended with a submission, or a persistent member that has answered: its latest answer at the time of the call, kept if it answers again.
 
         Args:
             member: The member, or its name.
@@ -217,7 +262,7 @@ class SwarmControl(Protocol):
 
         Raises:
             KeyError: If no member has this name.
-            RuntimeError: If the member has not ended with a submission, or the controller has already chosen.
+            RuntimeError: If the member has not ended with a submission (a persistent member: has not answered yet), or the controller has already chosen.
         """
         ...
 
@@ -239,6 +284,14 @@ def _without_refusals(error: Exception) -> Exception | None:
     return None if isinstance(error, _Stopping) else error
 
 
+# One answer of a persistent member: its output, a detached copy, and the swarm time
+# it was given.
+@dataclass(frozen=True)
+class _Answer:
+    output: ModelOutput
+    time: float
+
+
 # A member in one run of the swarm: what its handle shows, and the nodes its wrapper
 # enters. Its lever and limits are created here, once per run, so that a stop can close
 # the lever of a member that has started but whose task has not yet entered it.
@@ -249,6 +302,7 @@ class MemberRun:
         self.role = record.role
         self.choose_name = record.choose_name
         self.sandbox = member_sandbox(record, name)
+        self.persistent = record.persistent
         self.state: MemberState = "pending"
         self.status: str | None = None
         # the state the member runs on, kept for its output however it ends; its
@@ -259,6 +313,8 @@ class MemberRun:
         # swarm times of its start and its end
         self.started: float | None = None
         self.time: float | None = None
+        # a persistent member's answers, in order
+        self.answer_list: list[_Answer] = []
         # counted when it ends
         self.gates = GateChecks()
         # read from the record, before any agent is built
@@ -273,6 +329,7 @@ class MemberRun:
             self.context,
             self.lever,
             time_nodes=[n for n in self.nodes if isinstance(n, SwarmTimeNode)],
+            persistent=record.persistent,
         )
 
     @property
@@ -282,6 +339,15 @@ class MemberRun:
     @property
     def held(self) -> bool:
         return self.gate.held
+
+    @property
+    def answers(self) -> int:
+        return len(self.answer_list)
+
+    # started and not ended: what the stop procedure waits for and cancels
+    @property
+    def started_not_ended(self) -> bool:
+        return self.state not in ("pending", "ended")
 
     def on_boundary(
         self, callback: BoundaryCallback, *, origin: str
@@ -306,6 +372,9 @@ class MemberRun:
         check_origin(origin, f"end({self.name!r})")
         if self.state == "ended":
             return
+        if self.state == "idle":
+            # its ending begins now, and its held wait is cancelled
+            self.state = "ending"
         self.gate.request_end(origin)
 
     @property
@@ -331,6 +400,8 @@ class MemberRun:
             gate_checks=self.gates.checks,
             gate_passes=self.gates.passes,
             first_pass_time=self.gates.first_pass_time,
+            persistent=self.persistent,
+            answer_times=[a.time for a in self.answer_list],
         )
 
 
@@ -371,6 +442,10 @@ class SwarmRun:
             m.gate.recheck = self.bus.recheck
             m.gate.in_flight = self._in_flight
             m.gate.ending = functools.partial(self._ending, m)
+            m.gate.waiting = self.bus.waits.max_wait is not None
+            m.gate.record_answer = functools.partial(self._answer, m)
+            m.gate.publish_idle = functools.partial(self._idle, m)
+            m.gate.refuse_hold = functools.partial(self._refuse_hold, m)
         for node in caps:
             if isinstance(node, SwarmNode):
                 node.stop_swarm = self.stop
@@ -450,6 +525,23 @@ class SwarmRun:
             self._end_timer(m)
         self._notify()
 
+    def wake(
+        self, member: str | MemberHandle, input: str | list[ChatMessageUser]
+    ) -> None:
+        m = self._lookup(member if isinstance(member, str) else member.name)
+        call = f"wake({m.name!r})"
+        messages = _wake_messages(input, call)
+        if self.stop_reason is not None:
+            raise _Stopping(
+                f"{call}: the swarm is stopping ({self.stop_reason}), so no member can be woken."
+            )
+        if m.state != "idle":
+            raise RuntimeError(f"{call}: {_not_idle(m)}")
+        m.state = "running"
+        m.gate.wake(messages)
+        self._settle()
+        self._notify()
+
     async def events(self) -> AsyncGenerator[ControlEvent, None]:
         # an iterator holds the events from its first step until it ends or is closed,
         # so a second one cannot take events from its stream
@@ -462,7 +554,7 @@ class SwarmRun:
             while True:
                 if self._queue:
                     yield self._queue.popleft()
-                elif not self._running():
+                elif not self._live():
                     return
                 else:
                     await self._changed.wait()
@@ -477,11 +569,18 @@ class SwarmRun:
             raise RuntimeError(
                 f"choose_answer({m.name!r}): the controller has already chosen {self._pick.member!r}, and it chooses once."
             )
-        if not m.submitted:
+        if m.persistent:
+            if not m.answer_list:
+                raise RuntimeError(
+                    f"choose_answer({m.name!r}): the member has not answered yet (its state is {m.state}, its status {m.status}); only an answer can be the swarm's answer."
+                )
+            self._pick = Pick(m.name, reason, answer=len(m.answer_list) - 1)
+        elif not m.submitted:
             raise RuntimeError(
                 f"choose_answer({m.name!r}): the member has not ended with a submission (its state is {m.state}, its status {m.status}); only a submission can be the answer."
             )
-        self._pick = Pick(m.name, reason)
+        else:
+            self._pick = Pick(m.name, reason)
         self._settle()
 
     # the runtime
@@ -569,6 +668,7 @@ class SwarmRun:
                             self._pick,
                             span_id=self._span_id,
                             stop_reason=self.stop_reason,
+                            answers=self._answers(),
                         )
                     ended = True
         except Exception as ex:
@@ -698,6 +798,11 @@ class SwarmRun:
                             m.time,
                             holds=m.gate.holds,
                             held_time=m.gate.held_time,
+                            activations=0
+                            if not m.persistent or m.started is None
+                            else m.gate.activation + 1,
+                            answers=m.answers,
+                            awaiting_work_time=m.gate.awaiting_work_time,
                         )
                         for m in self._members
                     ],
@@ -710,6 +815,7 @@ class SwarmRun:
                     self.bus.waits.max_wait is not None,
                     wall_clock,
                     record.final.member,
+                    record.final.answer,
                 )
             )
             timelines.fill(places)
@@ -728,8 +834,11 @@ class SwarmRun:
         # a no-op when the controller has returned
         self._controller_scope.cancel()
         for m in self._members:
-            if m.state == "running":
+            if m.state in ("running", "idle"):
                 m.lever.close(reason)
+            if m.state == "idle":
+                # its ending begins now
+                m.state = "ending"
             # a held member ends at once, at its boundary
             m.gate.cancel_chain()
         self._runtime_lever.close(reason)
@@ -769,6 +878,9 @@ class SwarmRun:
 
     async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
         def end(status: str, state: AgentState) -> None:
+            if m.answer_list and status == "submitted":
+                # a persistent member ended after an answer: its last answer
+                state.output = m.answer_list[-1].output
             m.agent_state = state
             self._end(m, status)
 
@@ -789,8 +901,35 @@ class SwarmRun:
             end,
         )
 
+    # A persistent member's answer, from its gate: recorded with its swarm time, as
+    # evidence in the member's span, and settled, since it may now be the answer.
+    def _answer(self, m: MemberRun, output: ModelOutput) -> None:
+        index = len(m.answer_list)
+        m.answer_list.append(
+            _Answer(
+                output=output.model_copy(deep=True),
+                time=anyio.current_time() - self._start,
+            )
+        )
+        swarm_event("answer", member=m.name, answer=index)
+        self._settle()
+
+    # A persistent member's hold after its answer was admitted: `idle` and its event
+    # together, in one synchronous step.
+    def _idle(self, m: MemberRun) -> None:
+        m.state = "idle"
+        self._queue.append(MemberIdle(m.name, len(m.answer_list) - 1, news=False))
+        self._notify()
+
+    # A persistent member's hold after its answer was refused: its ending begins, so
+    # it is never available for a wake, and it stays live until its `MemberEnded`.
+    def _refuse_hold(self, m: MemberRun) -> None:
+        if m.state == "running":
+            m.state = "ending"
+            self._notify()
+
     def _end(self, m: MemberRun, status: str) -> None:
-        # the member counts as running until its event is queued
+        # the member counts as live until its event is queued
         m.state = "ended"
         m.status = status
         # releases the other members' waits
@@ -823,15 +962,26 @@ class SwarmRun:
             self._final,
             self._pick,
             provisional=True,
+            answers=self._answers(),
         )
 
     def _results(self) -> list[MemberResult]:
         return [m.result() for m in self._members]
 
-    # the ended members' outputs, kept here rather than in the record
+    # the ended non-persistent members' outputs, kept here rather than in the record
     def _outputs(self) -> dict[str, ModelOutput]:
         return {
-            m.name: m.agent_state.output for m in self._members if m.state == "ended"
+            m.name: m.agent_state.output
+            for m in self._members
+            if m.state == "ended" and not m.persistent
+        }
+
+    # the persistent members' answers, in order
+    def _answers(self) -> dict[str, list[ModelOutput]]:
+        return {
+            m.name: [a.output for a in m.answer_list]
+            for m in self._members
+            if m.persistent
         }
 
     # An end request, from end() or a callback's "end", for a running member: a turn may
@@ -839,7 +989,7 @@ class SwarmRun:
     # (a wrapper's `finally`, react's MCP teardown) may run long, so either way it gets
     # the effective grace. A pending member's starts when it is started.
     def _ending(self, m: MemberRun) -> None:
-        if m.state == "running":
+        if m.state in ("running", "ending"):
             self._end_timer(m)
 
     # end()'s grace: the member is cancelled, as the hard stop cancels one, if it is
@@ -852,9 +1002,9 @@ class SwarmRun:
 
     async def _end_grace(self, m: MemberRun, deadline: float) -> None:
         with anyio.CancelScope(deadline=deadline):
-            while m.state == "running":
+            while m.started_not_ended:
                 await self._changed.wait()
-        if m.state == "running":
+        if m.started_not_ended:
             m.context.scope.cancel()
 
     # the model calls in flight now, for the turn gate's cancelled chains
@@ -872,7 +1022,7 @@ class SwarmRun:
             await self._until_quiet()
         # hard stop
         for m in self._members:
-            if m.state == "running":
+            if m.started_not_ended:
                 m.context.scope.cancel()
         await self._until_quiet()
         # ends the time cap's timer
@@ -903,16 +1053,55 @@ class SwarmRun:
                 f"No member named {name!r}; the members are {', '.join(self._by_name)}."
             ) from None
 
-    def _running(self) -> bool:
-        return any(m.state == "running" for m in self._members)
+    # live for the controller's iterator: a member working, or one whose ending has
+    # begun and whose `MemberEnded` is still to come; an idle member is not
+    def _live(self) -> bool:
+        return any(m.state in ("running", "ending") for m in self._members)
 
     async def _until_quiet(self) -> None:
-        while self._running():
+        while any(m.started_not_ended for m in self._members):
             await self._changed.wait()
 
     def _notify(self) -> None:
         self._changed.set()
         self._changed = anyio.Event()
+
+
+# A wake's input as the messages to append: a string as one new user message, and each
+# message of a list as a detached copy with a new id and no `source`, so that a list
+# passed twice never repeats an id the member's conversation holds and no wake message
+# reads as the starting input.
+def _wake_messages(input: object, call: str) -> list[ChatMessage]:
+    if isinstance(input, str):
+        if not input:
+            raise ValueError(f"{call}: input is an empty string.")
+        return [ChatMessageUser(content=input)]
+    if not isinstance(input, list) or not input:
+        raise ValueError(
+            f"{call}: input must be a non-empty string or a non-empty list of user messages."
+        )
+    messages: list[ChatMessage] = []
+    for item in cast(list[object], input):
+        if not isinstance(item, ChatMessageUser):
+            raise ValueError(
+                f"{call}: input holds a {type(item).__name__}; a wake's input is user messages only."
+            )
+        messages.append(
+            item.model_copy(update={"id": uuid(), "source": None}, deep=True)
+        )
+    return messages
+
+
+def _not_idle(m: MemberRun) -> str:
+    if not m.persistent:
+        return "the member is not persistent, so it is never idle."
+    match m.state:
+        case "pending":
+            return "the member has not started; start it with start()."
+        case "running":
+            return "the member is running: it is working, or has not yet been held since its answer."
+        case _:
+            return f"the member is {m.state}."
 
 
 # How a sample limit or the operator ended the swarm, from direct evidence only: the

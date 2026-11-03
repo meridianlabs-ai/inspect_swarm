@@ -25,6 +25,7 @@ dependencies = [
     # dependency is not a promise
     "anyio>=4.0",
     "pydantic>=2.0",
+    "shortuuid",
 ]
 
 [project.urls]

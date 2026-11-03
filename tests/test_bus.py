@@ -170,6 +170,14 @@ class _Member:
     def held(self) -> bool:
         return False
 
+    @property
+    def persistent(self) -> bool:
+        return False
+
+    @property
+    def answers(self) -> int:
+        return 0
+
     def on_boundary(
         self, callback: BoundaryCallback, *, origin: str
     ) -> Callable[[], None]:

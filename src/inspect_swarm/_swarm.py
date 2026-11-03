@@ -33,7 +33,14 @@ from ._channel.messages import is_builtin_messages
 from ._channel.shared_memory import is_builtin_board
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
-from ._member import Member, is_factory, member, member_names, member_sandbox
+from ._member import (
+    Member,
+    is_factory,
+    member,
+    member_names,
+    member_sandbox,
+    persistent_refusal,
+)
 from ._record import forget_record
 from ._registry import resolve
 
@@ -68,6 +75,7 @@ def swarm(
     names = member_names(records)
     _check_distinct_agents(records, names)
     _check_phase_names(names)
+    _check_persistent(records, names)
     roster = [
         MemberInfo(name=name, role=record.role, choose_name=record.choose_name)
         for record, record_names in zip(records, names, strict=True)
@@ -263,6 +271,23 @@ def _check_phase_names(names: Sequence[list[str]]) -> None:
         if name in _PHASE_NAMES:
             raise ValueError(
                 f"members=: a member is named {name!r}, which Inspect's timelines read as a phase of the sample, so the member's timeline would lose its agents. Give the member another name with member(..., name=...)."
+            )
+
+
+# Persistent members' agents, before any model call: a built agent must be a loop that
+# can persist (a factory's is checked when the member builds it), and no persistent
+# member is declared bridged, whatever its agent.
+def _check_persistent(records: Sequence[Member], names: Sequence[list[str]]) -> None:
+    for record, record_names in zip(records, names, strict=True):
+        if not record.persistent:
+            continue
+        if record.agent is not None:
+            refusal = persistent_refusal(record.agent, record_names[0])
+            if refusal is not None:
+                raise refusal
+        if record.bridged:
+            raise ValueError(
+                f"Member {record_names[0]!r} is persistent and declared bridged. A bridged member's CLI runs its own turns, so it cannot be held after an answer; a persistent member's agent must be a react() or a deepagent() loop without background dispatch, or a builder that returns one."
             )
 
 

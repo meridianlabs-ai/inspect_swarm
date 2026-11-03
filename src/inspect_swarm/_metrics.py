@@ -6,7 +6,7 @@ from inspect_ai.scorer._score import _scorers  # pyright: ignore[reportPrivateUs
 from inspect_ai.scorer._scorer import unique_scorer_name
 from pydantic import BaseModel
 
-from ._critical_path import critical_steps_to_answer
+from ._critical_path import critical_steps_to_answer, steps_before_answer
 from ._ledger import (
     Calls,
     EventLog,
@@ -78,6 +78,13 @@ class MemberMetrics(BaseModel):
     # before these fields.
     holds: int = 0
     held_time: float = 0.0
+    # a persistent member's activations begun (1 at its start, one more per wake), its
+    # answers, and the part of `held_time` it spent idle, from each admitted hold after
+    # an answer to its wake or its end; 0 for other members. The defaults load metrics
+    # written before these fields.
+    activations: int = 0
+    answers: int = 0
+    awaiting_work_time: float = 0.0
 
 
 # The swarm's metrics for one run, written once, when the swarm ends, as a SwarmEvent
@@ -106,13 +113,16 @@ class SwarmMetrics(BaseModel):
     # everything it did through its end. Calls a member makes concurrently (parallel
     # subagent tool calls) count one each, so both numbers bound each member's own
     # sequential depth from above, not the swarm's: neither sees members' dependencies.
-    # the selected member's steps; None when there is no answer
+    # the selected member's steps; for a persistent member's answer, its steps before
+    # that answer's `answer` event. None when there is no answer, and for a persistent
+    # member's answer in a resumed sample, which records no positions
     steps_to_answer: int | None
     # the largest step count of any member
     longest_member_steps: int
     # critical path, the dependency-linked definition: the longest chain of steps
     # (completed model calls, cache replays included) ending at the answering member's
-    # end, linked across members where a channel's result showed another member's
+    # end (for a persistent member's answer, that answer's `answer` event), linked
+    # across members where a channel's result showed another member's
     # commit, as the channel reports it, or a wait named a member's end. Not a bound on
     # causal depth either way; see docs/analysis.qmd, "The critical path". None with no
     # answer, when the answering member has no recorded end, when the evidence names a
@@ -132,6 +142,10 @@ class MemberTimes:
     # the boundaries at which its callbacks ran, and the seconds it was held there
     holds: int = 0
     held_time: float = 0.0
+    # a persistent member's activations, answers and idle seconds
+    activations: int = 0
+    answers: int = 0
+    awaiting_work_time: float = 0.0
 
 
 # How a member was wired to the swarm's channels, as the runtime saw it.
@@ -197,6 +211,7 @@ def swarm_metrics(
     waits_offered: bool,
     wall_clock: float,
     answer: str | None,
+    answer_index: int | None = None,
 ) -> SwarmMetrics:
     tool_calls: dict[str, list[tuple[str, str]]] = {m.name: [] for m in ledger.members}
     for tool in events.tools.values():
@@ -234,6 +249,9 @@ def swarm_metrics(
                 idle_time=None if wait is None else wait.idle,
                 holds=member_times.holds,
                 held_time=member_times.held_time,
+                activations=member_times.activations,
+                answers=member_times.answers,
+                awaiting_work_time=member_times.awaiting_work_time,
             )
         )
     return SwarmMetrics(
@@ -248,16 +266,42 @@ def swarm_metrics(
             for m, w in zip(ledger.members, wiring, strict=True)
             if channels and not w.tools and not m.bridged and _steps(m) >= 1
         ],
-        steps_to_answer=None
-        if answer is None
-        else next(_steps(m) for m in ledger.members if m.name == answer),
+        steps_to_answer=_steps_to_answer(ledger, events, places, answer, answer_index),
         longest_member_steps=max(_steps(m) for m in ledger.members),
         # a resumed sample records no path
         critical_steps_to_answer=None
         if events.path is None
         else critical_steps_to_answer(
-            events.path, lambda uuid: _completed(events, uuid), places, answer
+            events.path,
+            lambda uuid: _completed(events, uuid),
+            places,
+            answer,
+            answer_index,
         ),
+    )
+
+
+# The answering member's steps: all of them, or for a persistent member's answer those
+# before it.
+def _steps_to_answer(
+    ledger: SwarmLedger,
+    events: EventLog,
+    places: SpanPlaces,
+    answer: str | None,
+    answer_index: int | None,
+) -> int | None:
+    if answer is None:
+        return None
+    if answer_index is None:
+        return next(_steps(m) for m in ledger.members if m.name == answer)
+    if events.path is None:
+        return None
+    return steps_before_answer(
+        events.path,
+        lambda uuid: _completed(events, uuid),
+        places,
+        answer,
+        answer_index,
     )
 
 
