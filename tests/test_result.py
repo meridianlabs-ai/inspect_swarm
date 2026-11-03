@@ -507,18 +507,17 @@ async def test_the_record_keeps_each_members_output_however_it_ended() -> None:
 
 
 @pytest.mark.parametrize(
-    "text,left_out",
+    "text,logged",
     [
-        # read back as a reference to an attachment; the explanation only quotes it
-        pytest.param("attachment://0123", ["output", "answer_key"], id="reference"),
-        # not valid UTF-8, which the log escapes
-        pytest.param(
-            "bad \ud800 text", ["output", "answer_key", "explanation"], id="surrogate"
-        ),
+        # read back as a reference to an attachment, so left out; the explanation only
+        # quotes it
+        pytest.param("attachment://0123", None, id="reference"),
+        # not valid UTF-8, which the log escapes, as it does in a sample's own output
+        pytest.param("bad \ud800 text", "bad \\ud800 text", id="surrogate"),
     ],
 )
-def test_model_text_a_log_would_change_is_left_out_of_its_member(
-    tmp_path: Path, text: str, left_out: list[str]
+def test_model_text_is_recorded_as_a_log_gives_it_back(
+    tmp_path: Path, text: str, logged: str | None
 ) -> None:
     task = Task(
         dataset=[Sample(input="task")],
@@ -538,14 +537,16 @@ def test_model_text_a_log_would_change_is_left_out_of_its_member(
     plain, odd = record.members
     assert plain.left_out == []
     assert plain.output is not None and plain.answer_key == "42"
-    assert odd.left_out == left_out
-    assert odd.output is None and odd.answer_key is None
+    if logged is None:
+        assert odd.left_out == ["output", "answer_key"]
+        assert odd.output is None and odd.answer_key is None
+    else:
+        assert odd.left_out == []
+        assert odd.output is not None and odd.output.completion == logged
+        assert odd.answer_key == logged
     assert odd.verdict is not None
     assert (odd.verdict.passed, odd.verdict.value) == (False, 0.0)
-    if "explanation" in left_out:
-        assert odd.verdict.explanation is None
-    else:
-        assert odd.verdict.explanation == f"EXPLANATION-{text}"
+    assert odd.verdict.explanation == f"EXPLANATION-{logged or text}"
 
 
 @agent
@@ -558,10 +559,6 @@ def returns(build: Callable[[], ModelOutput]) -> Agent:
         return state
 
     return execute
-
-
-def _tool_call_output(arguments: dict[str, Any]) -> ModelOutput:
-    return ModelOutput.for_tool_call("mockllm", "submit", arguments)
 
 
 def _with_metadata(metadata: dict[str, Any]) -> ModelOutput:
@@ -583,30 +580,21 @@ def _nested(depth: int) -> list[Any]:
     return value
 
 
+# Shared at every level, so that serializing it would expand it to 2 ** depth lists.
+def _aliased(depth: int) -> list[Any]:
+    value: list[Any] = []
+    for _ in range(depth):
+        value = [value, value]
+    return value
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "odd",
     [
-        # values the record's JSON cannot represent
-        pytest.param(
-            lambda: _with_metadata({"diagnostic": object()}), id="object-in-metadata"
-        ),
-        pytest.param(lambda: _with_metadata({"value": b"abc"}), id="bytes"),
-        # a key JSON would turn into a string, replacing the entry with that key
-        pytest.param(
-            lambda: _with_metadata({"value": {1: "first", "1": "second"}}),
-            id="non-string-key",
-        ),
         pytest.param(lambda: _with_metadata(_cycle()), id="cycle"),
-        # JSON turns it into null outside a float field
-        pytest.param(
-            lambda: _with_metadata({"value": float("inf")}), id="infinity-in-metadata"
-        ),
-        # text that is not valid UTF-8 in a dict's key, which JSON would replace
-        pytest.param(
-            lambda: _tool_call_output({"bad \ud800 key": "value"}),
-            id="surrogate-in-tool-argument-key",
-        ),
+        # refused before it is serialized
+        pytest.param(lambda: _with_metadata({"value": _aliased(130)}), id="aliased"),
     ],
 )
 async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> None:
@@ -654,20 +642,36 @@ def _infinite_logprob() -> ModelOutput:
     return output
 
 
+def _odd_metadata(value: Any) -> Callable[[], ModelOutput]:
+    def build() -> ModelOutput:
+        output = _with_metadata({"value": value})
+        output.message.id = "odd"
+        return output
+
+    return build
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "kept",
+    "built,kept",
     [
         # a citation's range is a tuple, which JSON holds as a list
-        pytest.param(_cited_range, id="cited-range"),
+        pytest.param(_cited_range, _cited_range, id="cited-range"),
         # a float field keeps an infinite number in JSON
-        pytest.param(_infinite_logprob, id="infinite-logprob"),
+        pytest.param(_infinite_logprob, _infinite_logprob, id="infinite-logprob"),
+        # the log writes them as null in a sample's own output
+        pytest.param(
+            _odd_metadata(float("inf")), _odd_metadata(None), id="infinity-in-metadata"
+        ),
+        pytest.param(
+            _odd_metadata(object()), _odd_metadata(None), id="object-in-metadata"
+        ),
     ],
 )
-async def test_an_output_whose_json_reads_back_whole_is_kept(
-    kept: Callable[[], ModelOutput],
+async def test_an_output_is_recorded_as_a_log_keeps_a_samples_output(
+    built: Callable[[], ModelOutput], kept: Callable[[], ModelOutput]
 ) -> None:
-    stop = await run_swarm(_plain_then(kept, "result_test_kept"))
+    stop = await run_swarm(_plain_then(built, "result_test_kept"))
     _, odd = stop.record.members
     assert odd.left_out == [] and odd.output == kept()
 

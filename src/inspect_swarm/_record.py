@@ -1,12 +1,11 @@
 import json
-import math
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from typing import Any, Literal, cast
 from uuid import uuid4
 
 from inspect_ai._util.constants import get_deserializing_context
-from inspect_ai._util.json import to_json_safe
+from inspect_ai._util.json import exceeds_max_depth, to_json_safe
 from inspect_ai.event import Event, InfoEvent, SwarmEvent
 from inspect_ai.log import EvalSample, transcript
 from inspect_ai.log._condense import (
@@ -32,7 +31,7 @@ MemberState = Literal["pending", "running", "ended"]
 """A member's lifecycle: not started, running, or ended."""
 
 LeftOut = Literal["output", "answer_key", "explanation"]
-"""A member's value that the record leaves out, because a log would give it back changed: its output, its answer key, or its verdict's explanation."""
+"""A member's value that the record leaves out, because the record cannot hold it: its output, its answer key, or its verdict's explanation."""
 
 RECORD_TYPE = "result_record"
 RESULT_ID_KEY = "inspect_swarm:result_id"
@@ -79,7 +78,7 @@ class MemberResult(BaseModel):
     """Swarm time of the member's first passing check; `None` without one. A pass assumes the default `value_to_float()` converter, as for `gate_passes`."""
 
     output: ModelOutput | None = None
-    """The member's output when it ended, however it ended; `None` until then."""
+    """The member's output when it ended, however it ended, as Inspect's log keeps a sample's output; `None` until then."""
 
     answer_key: str | None = None
     """The answer key of the member's submission, from the result contract's `answer_key`; `None` without a submission, a key function or a comparable answer."""
@@ -91,7 +90,7 @@ class MemberResult(BaseModel):
     """Swarm time when the verdict was taken; `None` without one."""
 
     left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that a log would give back changed, such as a string that begins with `attachment://` or `tc://`, a base64 `data:` URI such as an image, or text that is not valid UTF-8, and an output the record cannot hold as JSON, such as one with an object, bytes, a key that is not a string or a NaN or infinite number in its metadata, or one nested too deep. Empty when nothing was left out."""
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that begins with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and an output nested too deep for a JSON log, with a cycle, or that Inspect cannot write to a log. Empty when nothing was left out."""
 
     # Validating a `ModelOutput` fills an empty completion from its message, both when
     # the record is made and when it is read; the record keeps the completion the
@@ -155,23 +154,27 @@ def write_record(record: SwarmResultRecord) -> None:
     # such as one nested in a member
     forget_record()
     id = uuid4().hex
-    event = SwarmEvent(
-        kind=RECORD_TYPE,
-        member=None,
-        data={"id": id, **_logged_members(record).model_dump(mode="json")},
-    )
-    if _changed_by_logging(event.data):
+    logged = _logged_members(record)
+    # the members' model text is held as a log gives it back; the rest is the task
+    # author's, refused if a log would change it
+    authored = logged.model_dump(mode="json", exclude=_MODEL_TEXT)
+    if _changed_by_logging(SwarmEvent(kind=RECORD_TYPE, member=None, data=authored)):
         raise ValueError(
             "The swarm's result record cannot be written: a string in it would read back from the log as other text. Inspect reads a string that begins with attachment:// or tc:// as a reference to an attachment, removes base64 data: URIs when an eval does not log images, and escapes text that is not valid UTF-8, such as a lone surrogate. Check the members' names, roles and sandboxes, and the reason given to choose_answer()."
         )
+    event = SwarmEvent(
+        kind=RECORD_TYPE, member=None, data={"id": id, **logged.model_dump(mode="json")}
+    )
     transcript()._event(event)  # pyright: ignore[reportPrivateUsage]
     store().set(RESULT_ID_KEY, id)
 
 
-# Model text, the members' outputs, answer keys and verdict explanations, that a log
-# would give back changed is left out of its member and named in its left_out, so that
-# one member's output never costs the sample its record; text from the task's author is
-# refused instead.
+_MODEL_TEXT = {"members": {"__all__": {"output", "answer_key", "verdict"}}}
+
+
+# The members' outputs, answer keys and verdict explanations, as a log gives them back.
+# A value the record cannot hold is left out of its member and named in its left_out,
+# so that one member's output never costs the sample its record.
 def _logged_members(record: SwarmResultRecord) -> SwarmResultRecord:
     return record.model_copy(
         update={"members": [_logged_member(m) for m in record.members]}
@@ -181,83 +184,53 @@ def _logged_members(record: SwarmResultRecord) -> SwarmResultRecord:
 def _logged_member(m: MemberResult) -> MemberResult:
     update: dict[str, Any] = {}
     left_out = list(m.left_out)
-    if m.output is not None and not _logged_output(m.output):
-        update["output"] = None
-        left_out.append("output")
-    if m.answer_key is not None and _changed_by_logging({"answer_key": m.answer_key}):
-        update["answer_key"] = None
-        left_out.append("answer_key")
-    if (
-        m.verdict is not None
-        and m.verdict.explanation is not None
-        and _changed_by_logging({"explanation": m.verdict.explanation})
-    ):
-        update["verdict"] = replace(m.verdict, explanation=None)
-        left_out.append("explanation")
-    if not update:
-        return m
+    if m.output is not None:
+        update["output"] = _logged_output(m.output)
+        if update["output"] is None:
+            left_out.append("output")
+    if m.answer_key is not None:
+        update["answer_key"] = _logged_text(m.answer_key)
+        if update["answer_key"] is None:
+            left_out.append("answer_key")
+    if m.verdict is not None and m.verdict.explanation is not None:
+        explanation = _logged_text(m.verdict.explanation)
+        update["verdict"] = replace(m.verdict, explanation=explanation)
+        if explanation is None:
+            left_out.append("explanation")
     return m.model_copy(update={**update, "left_out": left_out})
 
 
-# Whether an output reads back from the log as it is. Its own values must be JSON data
-# first, since its JSON form would change any other value (bytes become text, a
-# non-string key is turned into one and can replace another, text that is not valid
-# UTF-8 in a key is replaced), and nested no deeper than `_MAX_OUTPUT_DEPTH`. It is then
-# judged where the record holds it. An output any step cannot take raises, and is left
-# out like one the log would change.
-def _logged_output(output: ModelOutput) -> bool:
+# An output in the form Inspect's log writer gives a sample's output (`to_json_safe()`),
+# read back as a log is read, or None when the record cannot hold it: one nested deeper
+# than `_MAX_OUTPUT_DEPTH` or with a cycle, measured before it is serialized by
+# Inspect's own guard, which never expands a container shared across paths; one Inspect
+# cannot serialize; or one with text that reads as an attachment reference.
+def _logged_output(output: ModelOutput) -> ModelOutput | None:
+    if exceeds_max_depth(output, _MAX_OUTPUT_DEPTH):
+        return None
     try:
-        raw = output.model_dump()
-        if not _json_data(raw, 1):
-            return False
-        data = output.model_dump(mode="json")
-        # the JSON form turns a non-finite number into None, except in a float field
-        if _non_finite(data) != _non_finite(raw):
-            return False
-        return not _changed_by_logging({"members": [{"output": data}]})
-    except Exception:
-        return False
+        data = json.loads(to_json_safe(output))
+        if _unresolved(data):
+            return None
+        logged = ModelOutput.model_validate(data, context=get_deserializing_context())
+    except ValueError:
+        return None
+    # validation fills an empty completion from the message; the record keeps it empty
+    logged.completion = data["completion"]
+    return logged
+
+
+# Text as the log writer gives it back (text that is not valid UTF-8 escaped), or None
+# when it reads as an attachment reference.
+def _logged_text(text: str) -> str | None:
+    logged: str = json.loads(to_json_safe(text))
+    return None if _unresolved(logged) else logged
 
 
 # An output's own nesting, which holds tool arguments as deep as Inspect accepts within
 # the output's containers, well below the depth at which the record inside its sample
-# no longer reads from a JSON log; a cycle exceeds it too.
+# no longer reads from a JSON log.
 _MAX_OUTPUT_DEPTH = MAX_TOOL_CALL_ARGUMENTS_DEPTH + 20
-
-
-# Whether `value` is JSON data: dicts with string keys, lists or tuples (as a citation's
-# range is), valid UTF-8 text, numbers, booleans and None, nested no deeper than
-# `_MAX_OUTPUT_DEPTH`, counting it as `depth`.
-def _json_data(value: object, depth: int) -> bool:
-    if value is None or isinstance(value, bool | int | float):
-        return True
-    if isinstance(value, str):
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError:
-            return False
-        return True
-    if depth > _MAX_OUTPUT_DEPTH:
-        return False
-    if isinstance(value, dict):
-        return all(
-            isinstance(k, str) and _json_data(k, depth) and _json_data(v, depth + 1)
-            for k, v in cast(dict[object, object], value).items()
-        )
-    if isinstance(value, list | tuple):
-        return all(_json_data(v, depth + 1) for v in cast(list[object], value))
-    return False
-
-
-# How many NaN and infinite numbers `value` holds.
-def _non_finite(value: object) -> int:
-    if isinstance(value, float):
-        return 0 if math.isfinite(value) else 1
-    if isinstance(value, dict):
-        return sum(_non_finite(v) for v in cast(dict[object, object], value).values())
-    if isinstance(value, list | tuple):
-        return sum(_non_finite(v) for v in cast(list[object], value))
-    return 0
 
 
 # Removes the store's record id, so that a swarm that leaves no record never leaves an
@@ -267,7 +240,7 @@ def forget_record() -> None:
         store().delete(RESULT_ID_KEY)
 
 
-# Whether a log would give back other text than `data` holds, as an event's data. Inspect condenses an
+# Whether a log would give back other text than `event` holds. Inspect condenses an
 # event's strings when it logs it (long text into attachments, and base64 data: URIs
 # removed under log_images=False), writes the event and its attachments as JSON (which
 # escapes text that is not valid UTF-8, such as a lone surrogate), and resolves them
@@ -275,10 +248,8 @@ def forget_record() -> None:
 # rewriting tc:// as attachment:// and replacing a reference with the attachment it
 # names. Resolving against the event's own attachments only, where any other reference
 # reads as something else, finds text that would read back as another attachment of
-# the sample or not at all. Compared as JSON text, so that NaN, which the log keeps,
-# matches itself.
-def _changed_by_logging(data: dict[str, JsonValue]) -> bool:
-    event = SwarmEvent(kind=RECORD_TYPE, member=None, data=data)
+# the sample or not at all.
+def _changed_by_logging(event: SwarmEvent) -> bool:
     for log_images in (True, False):
         attachments: dict[str, str] = {}
         condensed = condense_event(event, attachments, log_images)
@@ -290,13 +261,9 @@ def _changed_by_logging(data: dict[str, JsonValue]) -> bool:
         for _ in range(2):
             [resolved] = resolve_events_attachments([resolved], own)
         assert isinstance(resolved, SwarmEvent)
-        if _json(resolved.data) != _json(event.data):
+        if resolved.data != event.data:
             return True
     return False
-
-
-def _json(value: JsonValue) -> str:
-    return json.dumps(value, sort_keys=True)
 
 
 # An event's own attachments, which give any other hash a value no string holds.
