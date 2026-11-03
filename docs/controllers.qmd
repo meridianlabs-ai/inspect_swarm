@@ -138,7 +138,7 @@ The callback gets a `Boundary`:
 - `after`: what the conversation ends with: `start` at index 0, `tools` after a tool result, `reply` after an assistant reply with no tool calls, `user` after anything else.
 - `messages` and `output`: copies of the member's conversation and of its last output. Changing them changes nothing.
 
-It returns `None` to let the member go on, a list of messages to go on with that conversation, or `"end"` to end the member `stopped`. A returned list keeps each message's id, and must hold a user message.
+It returns `None` to let the member go on, a list of messages to go on with that conversation, or `"end"` to end the member `stopped`. A returned list keeps each message's id, and must hold a user message. The member gets copies of the returned messages, so changing them later changes nothing.
 
 While its callbacks run the member is held: `handle.held` is `True`, its time limit does not run, and `swarm_wait` does not count it as active. A callback can wait as long as it likes. Its own model calls count towards the member's limits. Its time counts as working time unless it marks its idle waits with `suspend_working_limit()`:
 

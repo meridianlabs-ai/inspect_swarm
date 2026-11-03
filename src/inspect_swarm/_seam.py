@@ -216,10 +216,6 @@ class MemberGate:
             raise RuntimeError(
                 f"Member {self.name!r} has background work running, so it cannot be held at a turn boundary."
             )
-        for node in self.time_nodes:
-            if node.overdue():
-                # its own limit ends the member, through Inspect's path
-                await node.expire()
         return await self._hold(index, messages, state)
 
     # ending the member
@@ -264,6 +260,12 @@ class MemberGate:
         outcome: Outcome = "cancelled"
         detail: dict[str, JsonValue] = {}
         held_for = 0.0
+        # checked after preparing the boundary, which may have used the member's last
+        # time, and with nothing between here and the pause that yields
+        for node in self.time_nodes:
+            if node.overdue():
+                # its own limit ends the member, through Inspect's path
+                await node.expire()
         try:
             # 4. hold
             self.context.held = True
@@ -399,8 +401,8 @@ def _after(index: int, messages: Sequence[ChatMessage]) -> BoundaryAfter:
     return "user"
 
 
-# A callback's result, checked: a list of messages, each with an id of its own, at least
-# one of them a user message.
+# A callback's result, checked and copied: a list of messages, each with an id of its
+# own, at least one of them a user message.
 def _checked(result: object, member: str, origin: str) -> list[ChatMessage]:
     where = f"Member {member!r}: the boundary callback with origin {origin!r}"
     if not isinstance(result, list):
@@ -419,7 +421,8 @@ def _checked(result: object, member: str, origin: str) -> list[ChatMessage]:
             raise TypeError(
                 f"{where} returned a list holding {type(item).__name__}; a callback returns a list of chat messages."  # pyright: ignore[reportUnknownArgumentType]
             )
-        messages.append(item)
+        # detached, so that nothing the callback keeps can change the conversation
+        messages.append(item.model_copy(deep=True))
     seen: set[str] = set()
     for message in messages:
         if message.id is None:

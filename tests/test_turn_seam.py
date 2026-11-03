@@ -427,6 +427,61 @@ async def test_callbacks_run_in_order_unregister_at_the_next_boundary_and_their_
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("change", ["append", "rewrite"])
+@pytest.mark.parametrize("when", ["same-chain", "later-boundary"])
+async def test_messages_a_callback_returned_and_kept_cannot_change_the_member_later(
+    change: str, when: str
+) -> None:
+    script = _Recording([_call("work"), _submit()])
+    kept: list[ChatMessage] = []
+    hashes: list[str] = []
+
+    def tamper() -> None:
+        kept[0].content = "TAMPERED"
+
+    async def first(b: Boundary) -> Result:
+        if b.index == 0:
+            if change == "append":
+                result = [*b.messages, _user("NOTE")]
+                edited = result[-1]
+            else:
+                result = b.messages
+                edited = [m for m in result if isinstance(m, ChatMessageUser)][-1]
+                edited.content = "NOTE"
+            kept.append(edited)
+            hashes.append(message_hash(edited))
+            return result
+        if when == "later-boundary":
+            tamper()
+        return None
+
+    async def second(b: Boundary) -> Result:
+        if b.index == 0:
+            tamper()
+        return None
+
+    callbacks: list[tuple[str, BoundaryCallback]] = [("first", first)]
+    if when == "same-chain":
+        callbacks.append(("second", second))
+    outcome = await _run(
+        [member(_react(script, tools=[work()]), name="a")], _starting({"a": callbacks})
+    )
+    assert _statuses(outcome) == {"a": "submitted"}
+    assert len(script.inputs) == 2
+    for model_input in script.inputs:
+        assert "TAMPERED" not in _text(model_input)
+        [note] = [m for m in model_input if m.text == "NOTE"]
+        assert message_hash(note) == hashes[0]
+    [changed] = _changes(outcome)
+    recorded = (
+        changed["added"][0]["hash"]
+        if change == "append"
+        else changed["replaced"][0]["after"]
+    )
+    assert recorded == hashes[0]
+
+
+@pytest.mark.anyio
 async def test_a_scheduler_alternates_two_members_while_a_pause_holds_one() -> None:
     calls: list[str] = []
     scripts = {
@@ -1419,6 +1474,48 @@ async def test_an_overdue_member_time_limit_ends_the_member_without_a_hold(
     else:
         assert _statuses(outcome) == {"a": "member_limit:time"}
         assert ran == [0] and script.started == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("limit", [0.1, 5, None])
+async def test_a_member_time_limit_used_up_preparing_a_boundary_ends_it_without_a_hold(
+    limit: float | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _Recording([_submit()])
+    ran: list[int] = []
+    slow = [True]
+
+    def slow_hash(message: ChatMessage) -> str:
+        # the first boundary's preparation blocks the event loop past a short limit
+        if slow:
+            slow.clear()
+            time.sleep(0.3)
+        return message_hash(message)
+
+    monkeypatch.setattr("inspect_swarm._seam.message_hash", slow_hash)
+
+    async def callback(b: Boundary) -> Result:
+        ran.append(b.index)
+        return None
+
+    outcome = await _run(
+        [
+            member(
+                _react(script),
+                name="a",
+                limits=[time_limit(limit)] if limit is not None else [],
+            )
+        ],
+        _starting({"a": [("test", callback)]}),
+    )
+    if limit == 0.1:
+        assert _statuses(outcome) == {"a": "member_limit:time"}
+        assert ran == [] and script.started == 0
+        assert _metrics(outcome).members[0].holds == 0
+    else:
+        assert _statuses(outcome) == {"a": "submitted"}
+        assert ran == [0]
+        assert _metrics(outcome).members[0].holds == 1
 
 
 async def _eval_sample(solver: Agent, tmp_path: Path) -> EvalSample:
