@@ -73,6 +73,11 @@ class MemberMetrics(BaseModel):
     waits_by_outcome: dict[str, int] | None = None
     wait_time: float | None = None
     idle_time: float | None = None
+    # the turn seam: the boundaries at which its callbacks ran, and the seconds it was
+    # held there, which `running_time` includes. The defaults load metrics written
+    # before these fields.
+    holds: int = 0
+    held_time: float = 0.0
 
 
 # The swarm's metrics for one run, written once, when the swarm ends, as a SwarmEvent
@@ -124,6 +129,9 @@ class MemberTimes:
     started: float | None
     # None for a member that has not ended, as when its task was cancelled before it ran
     ended: float | None
+    # the boundaries at which its callbacks ran, and the seconds it was held there
+    holds: int = 0
+    held_time: float = 0.0
 
 
 # How a member was wired to the swarm's channels, as the runtime saw it.
@@ -224,6 +232,8 @@ def swarm_metrics(
                 waits_by_outcome=None if wait is None else wait.by_outcome,
                 wait_time=None if wait is None else wait.time,
                 idle_time=None if wait is None else wait.idle,
+                holds=member_times.holds,
+                held_time=member_times.held_time,
             )
         )
     return SwarmMetrics(

@@ -13,10 +13,12 @@ from inspect_ai._util.registry import (
     registry_info,
     registry_log_name,
     registry_lookup,
+    registry_params,
     registry_unqualified_name,
     registry_value,
 )
 from inspect_ai.agent import Agent, AgentState
+from inspect_ai.agent._channel.gate import turn_gate
 from inspect_ai.model import ChatMessage, StopReason
 from inspect_ai.util import (
     Limit,
@@ -60,10 +62,12 @@ from ._budget import (
     MemberContext,
     SwarmMessageNode,
     SwarmNode,
+    SwarmTimeNode,
     SwarmTokenNode,
     SwarmTurnNode,
     current_member,
 )
+from ._seam import MemberGate
 
 AgentFactory = Callable[..., Agent]
 """A registered `@agent` factory, such as `deepagent`."""
@@ -76,6 +80,9 @@ _LIMIT_KINDS: dict[str, type[Limit]] = {
     "message": _MessageLimit,
     "time": _TimeLimit,
 }
+
+# deepagent(), whose background dispatch the turn seam cannot hold
+_DEEPAGENT = "inspect_ai/deepagent"
 
 # characters a tool-state scope name may not contain
 _RESERVED = "/#"
@@ -409,9 +416,31 @@ def member_nodes(
         elif isinstance(limit, _MessageLimit):
             nodes.append(SwarmMessageNode(limit.limit, owner=name))
         else:
-            # a time limit stays Inspect's: it cancels where it was entered, here
-            nodes.append(time_limit(limit.limit))
+            # Inspect's time limit, which cancels where it was entered, here, and
+            # pauses while the member is held at a turn boundary
+            nodes.append(SwarmTimeNode(limit.limit))
     return lever, nodes
+
+
+# Why the turn seam cannot hold this member, or None when it can: a bridged member's CLI
+# runs its own turns, and deepagent()'s background subagents would go on generating
+# while its top-level loop was held.
+def seam_refusal(record: Member, context: MemberContext) -> str | None:
+    if context.bridged:
+        return "it is bridged: its CLI runs its own turns, and opens no agent channel"
+    if record.agent is not None:
+        if registry_info(record.agent).name == _DEEPAGENT:
+            background = registry_params(record.agent).get("background", False)
+        else:
+            return None
+    else:
+        assert record.factory is not None
+        if registry_info(record.factory).name != _DEEPAGENT:
+            return None
+        background = record.args.get("background", False)
+    if background is False:
+        return None
+    return f"deepagent(background={background!r}) runs background subagents, which would go on generating while its loop was held"
 
 
 # What the member wrapper leaves on the member's run record: the state the agent
@@ -426,10 +455,14 @@ class MemberOutcome:
 
 # The member wrapper. Runs the member on `state` with `input` as its conversation, in
 # its tool-state scope, cancel scope and agent span, under its nodes and the swarm's
-# caps, with its background work owned by the member; drains that work once the agent
-# has returned; then calls `end` with its status and the state the agent returned,
-# inside the member's span when the span was entered. The caller keeps `state`, as
-# as_solver() does, for the output of a member that does not return. No error whose
+# caps, with its background work owned by the member and its turn gate installed;
+# drains that work once the agent has returned; then calls `end` with its status and
+# the state the agent returned, inside the member's span when the span was entered. The
+# caller keeps `state`, as as_solver() does, for the output of a member that does not
+# return; when its own loop reached the gate, the loop's state at its last boundary is
+# used instead. An end requested through the gate makes a normal return `stopped`, and
+# a member whose callbacks never ran because its loop never reached the gate ends
+# `errored` when it produced its ending itself. No error whose
 # source is a swarm node leaves it: a cap becomes a stop of the swarm, and the member's
 # own nodes a status, as does a sourceless custom limit error, which the agent raised
 # to stop itself. Anything else (a foreign error) is raised, without the swarm's
@@ -446,6 +479,7 @@ async def run_member(
     state: AgentState,
     grace: Callable[[], float],
     outcome: MemberOutcome,
+    gate: MemberGate,
     end: Callable[[str, AgentState], None],
 ) -> None:
     status = "cancelled"
@@ -464,14 +498,23 @@ async def run_member(
                 state,
                 grace,
                 outcome,
+                gate,
                 member_span,
             )
         except Exception:
             status = "errored"
             raise
         finally:
-            # the state the agent returned, kept through a drain that raised
-            end(status, outcome.state if outcome.state is not None else state)
+            # the state the agent returned, kept through a drain that raised; else the
+            # loop's state at its last boundary
+            end(
+                status,
+                outcome.state
+                if outcome.state is not None
+                else gate.state
+                if gate.state is not None
+                else state,
+            )
 
 
 async def _run_member(
@@ -485,10 +528,15 @@ async def _run_member(
     state: AgentState,
     grace: Callable[[], float],
     outcome: MemberOutcome,
+    gate: MemberGate,
     member_span: AsyncExitStack,
 ) -> str:
     token = current_member.set(context)
     status: str | None = None
+    # the member produced its ending itself: a normal return, or its own limit or
+    # error (the error)
+    returned = False
+    own: BaseException | None = None
     try:
         with (
             tool_state_scope(name),
@@ -526,8 +574,15 @@ async def _run_member(
                                 span(name, type=AGENT_SPAN_TYPE)
                             )
                             context.span_id = current_span_id()
-                            outcome.state, stopped = await _call_agent(agent, state)
-                        status = _returned(context, outcome.state, stopped)
+                            gate.task = anyio.get_current_task().id
+                            with turn_gate(gate):
+                                result, stopped = await _call_agent(agent, state)
+                        if not stopped:
+                            # a self-stop is a raise: the loop's state at its last
+                            # boundary is kept, as for any other raise
+                            outcome.state = result
+                        returned = True
+                        status = _returned(context, gate, result, stopped)
                     except Exception as ex:
                         cap, owned, foreign = classify_errors(ex, caps, nodes)
                         if foreign is None and cap:
@@ -536,6 +591,16 @@ async def _run_member(
                         elif foreign is None:
                             assert owned is not None
                             status = _status_for(owned)
+                            # the lever's error is the runtime's: a stop or an end
+                            if not _source_in(owned, lever.nodes):
+                                own = owned
+                        else:
+                            own = foreign
+                    if gate.unsupervised() and (returned or own is not None):
+                        # its result is never an answer, so an unsupervised run cannot
+                        # pass as a supervised one
+                        foreign = gate.unsupervised_error()
+                        foreign.__cause__ = own
                     if foreign is not None:
                         # no drain: leaving the owner cancels the background work
                         raise foreign
@@ -544,6 +609,12 @@ async def _run_member(
                 # after the owner has ended its work, so its cancellations are counted
                 outcome.background_started = owner.started
                 outcome.background_cancelled = owner.cancelled
+        if gate.unsupervised() and (returned or own is not None):
+            # a callback registered while the member's background work drained, which
+            # never ran; nothing awaits between here and the member's end
+            error = gate.unsupervised_error()
+            error.__cause__ = own
+            raise error
         if context.refusal is not None:
             # bridge use found after the member started background work
             raise context.refusal
@@ -575,14 +646,20 @@ async def _drain(
         await owner.wait()
 
 
-def _returned(context: MemberContext, state: AgentState, stopped: bool) -> str:
+def _returned(
+    context: MemberContext, gate: MemberGate, state: AgentState, stopped: bool
+) -> str:
     if context.stop_cause is not None:
         # a node that stopped a bridged member, whose cancellation may not have been
         # delivered when its last call was the one that stopped it, even if the agent
         # then stopped itself
         return context.stop_cause
     if stopped:
+        # the agent stopped itself with an error, which an end request does not change
         return "member_limit:custom"
+    if gate.end_origin is not None:
+        # an end requested before the agent returned wins over its output
+        return "stopped"
     if state.output.empty:
         return "submitted"
     return _return_status(state.output.stop_reason)

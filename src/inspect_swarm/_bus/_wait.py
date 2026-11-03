@@ -187,15 +187,19 @@ class Waits:
             self._release(waiter, "stopping")
 
     def recheck(self) -> None:
-        # the all-waiting check, run whenever a member can have become waiting or its
-        # background work started
+        # the all-waiting check, run whenever a member can have become waiting or held,
+        # or its background work started
         for waiter in self._waiters.values():
             self._clock(waiter)
         unreleased = self._unreleased()
         if not unreleased:
             return
+        # a member held at a turn boundary is not active
         if any(
-            self._bus.running(name) and not self._waiting(name) for name in self._roster
+            self._bus.running(name)
+            and not self._waiting(name)
+            and not self._contexts[name].held
+            for name in self._roster
         ):
             return
         for waiter in unreleased:

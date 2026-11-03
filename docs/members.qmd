@@ -101,6 +101,8 @@ The swarm does not change text you give the member yourself: the sample input, a
 
 `limits` takes token, cost, turn, message and time limits for that member alone. Working limits are refused. A member that reaches one ends with status `member_limit:<type>`, and the others continue. The swarm's own caps are set with `budget=` ([Budgets](budget.qmd)).
 
+A member time limit does not run while the member is held at a turn boundary by a controller's callbacks ([Controllers](controllers.qmd#boundary-callbacks)): it counts only the time the member was not held. A member whose time limit ran out before it reached the boundary ends `member_limit:time` there, without being held.
+
 ## Member builders
 
 A member builder is a function registered with `@agent` that builds the member's agent. Pass it to `member()` without calling it, with its arguments in `args`:
@@ -149,7 +151,7 @@ A member's status says how it ended:
 |---|---|
 | `submitted` | Its agent returned normally. Its output is its answer. |
 | `unsubmitted` | Its agent returned with a `content_filter` or `model_length` stop reason, as `react()` does after repeated refusals or a context overflow. |
-| `stopped` | The swarm stopped it, for example when another member submitted or the swarm's time cap was reached. |
+| `stopped` | The swarm stopped it, for example when another member submitted or the swarm's time cap was reached, or a controller ended it ([Controllers](controllers.qmd#boundary-callbacks)). A member that reaches a turn boundary of its agent loop after the stop began ends there. |
 | `share` | It used up its share of a split budget. |
 | `member_limit:<type>` | It reached one of its own `limits`. |
 | `member_limit:custom` | Its agent stopped itself by raising `LimitExceededError("custom", ...)` with no `source`, for example from `react(on_continue=...)`. The other members continue. |
