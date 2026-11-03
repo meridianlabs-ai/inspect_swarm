@@ -7,6 +7,7 @@ from typing import Any
 import anyio
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
+from inspect_ai._util.hash import mm3_hash
 from inspect_ai._util.registry import (
     create_registry_object,
     registry_info,
@@ -553,6 +554,35 @@ def test_model_text_is_recorded_as_a_log_gives_it_back(
     assert odd.verdict is not None
     assert (odd.verdict.passed, odd.verdict.value) == (False, 0.0)
     assert odd.verdict.explanation == f"EXPLANATION-{logged or text}"
+
+
+async def _echo(answer: str, metadata: dict[str, Any]) -> Verdict:
+    return Verdict(passed=False, value=0.0, explanation=answer)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("prefix", ["attachment://", "tc://"])
+async def test_model_text_naming_an_attachment_of_the_sample_is_left_out(
+    prefix: str,
+) -> None:
+    # long enough that the log keeps it as an attachment, which the reference names
+    role = "a role " * 50
+    reference = f"{prefix}{mm3_hash(role)}"
+    stop = await run_swarm(
+        swarm(
+            [
+                member(answers("42"), name="plain"),
+                member(answers(reference), name="odd", role=role),
+            ],
+            channels=[],
+            result=answer_result(answer_key=lambda text: text, verifier=_echo),
+        )
+    )
+    _, odd = stop.record.members
+    assert odd.role == role
+    assert odd.left_out == ["output", "answer_key", "explanation"]
+    assert (odd.output, odd.answer_key) == (None, None)
+    assert odd.verdict is not None and odd.verdict.explanation is None
 
 
 @agent

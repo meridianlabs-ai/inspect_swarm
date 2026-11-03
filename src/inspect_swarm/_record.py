@@ -245,21 +245,29 @@ def _logged_member(record: SwarmResultRecord, m: MemberResult) -> MemberResult:
 
 
 # `m` as the record gives it back from a log, or None when the log cannot write or read
-# it, or it holds text that reads as an attachment reference. `m` is written in a copy
-# of the record, which serializes as a sample does, at its place in the record.
+# it, or it holds text that reads as an attachment reference, before the log resolves
+# it (as the text of another attachment, when one matches) or after. `m` is written in
+# a copy of the record, which serializes as a sample does, at its place in the record.
 def _logged_value(record: SwarmResultRecord, m: MemberResult) -> MemberResult | None:
     try:
         if m.output is not None and not _bounded(m.output):
             return None
-        data = _as_logged(
-            record.model_copy(update={"members": [m]}).model_dump(mode="json")
-        )
-        [member] = cast(list[dict[str, JsonValue]], data["members"])
-        if _unresolved({k: v for k, v in member.items() if k in _MODEL_TEXT}):
+        data = record.model_copy(update={"members": [m]}).model_dump(mode="json")
+        if _unresolved(_model_text(data)):
             return None
+        logged = _as_logged(data)
+        if _unresolved(_model_text(logged)):
+            return None
+        [member] = cast(list[dict[str, JsonValue]], logged["members"])
         return MemberResult.model_validate(member, context=get_deserializing_context())
     except ValueError:
         return None
+
+
+# The model text of the one member in a record's data.
+def _model_text(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    [member] = cast(list[dict[str, JsonValue]], data["members"])
+    return {k: v for k, v in member.items() if k in _MODEL_TEXT}
 
 
 # The record's data as a log gives it back: in a sample's event, written as Inspect
