@@ -1,6 +1,7 @@
 import json
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import replace
+from datetime import date
 from typing import Any, Literal, cast
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from inspect_ai.log._condense import (
 from inspect_ai.model import ModelOutput
 from inspect_ai.model._call_tools import MAX_TOOL_CALL_ARGUMENTS_DEPTH
 from inspect_ai.solver import TaskState
+from inspect_ai.tool import ToolCall
 from inspect_ai.util import Store, store
 from pydantic import (
     BaseModel,
@@ -90,7 +92,7 @@ class MemberResult(BaseModel):
     """Swarm time when the verdict was taken; `None` without one."""
 
     left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that begins with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and an output nested too deep for a JSON log, with a cycle, that reuses the same lists, dicts or objects so often that writing it would expand it past 10,000 copies, or that Inspect cannot write to a log. Empty when nothing was left out."""
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that begins with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and an output nested too deep for a JSON log, with a cycle, that reuses the same lists or dicts so often that writing it would expand it past 10,000 copies, or that Inspect cannot write to a log. Empty when nothing was left out. An output whose metadata or tool arguments hold any other Python object, which only task code puts there, fails the sample instead."""
 
     # Validating a `ModelOutput` fills an empty completion from its message, both when
     # the record is made and when it is read; the record keeps the completion the
@@ -174,7 +176,7 @@ _MODEL_TEXT = {"members": {"__all__": {"output", "answer_key", "verdict"}}}
 
 # The members' outputs, answer keys and verdict explanations, as a log gives them back.
 # A value the record cannot hold is left out of its member and named in its left_out,
-# so that one member's output never costs the sample its record.
+# so that one member's model output never costs the sample its record.
 def _logged_members(record: SwarmResultRecord) -> SwarmResultRecord:
     return record.model_copy(
         update={"members": [_logged_member(m) for m in record.members]}
@@ -185,7 +187,7 @@ def _logged_member(m: MemberResult) -> MemberResult:
     update: dict[str, Any] = {}
     left_out = list(m.left_out)
     if m.output is not None:
-        update["output"] = _logged_output(m.output)
+        update["output"] = _logged_output(m.output, m.name)
         if update["output"] is None:
             left_out.append("output")
     if m.answer_key is not None:
@@ -204,9 +206,9 @@ def _logged_member(m: MemberResult) -> MemberResult:
 # read back as a log is read, or None when the record cannot hold it: one whose
 # serialization is not bounded (`_bounded()`), one Inspect cannot serialize, or one
 # with text that reads as an attachment reference.
-def _logged_output(output: ModelOutput) -> ModelOutput | None:
+def _logged_output(output: ModelOutput, member: str) -> ModelOutput | None:
     try:
-        if not _bounded(output):
+        if not _bounded(output, member):
             return None
         data = json.loads(to_json_safe(output))
         if _unresolved(data):
@@ -224,27 +226,38 @@ def _logged_output(output: ModelOutput) -> ModelOutput | None:
 # than one path (as YAML aliases in tool arguments give) adding at most
 # `_MAX_SHARED_EXPANSION` containers, since serializing writes a container once for
 # each path. Each container is measured once, by identity, so a shared one is never
-# expanded. Inspect's `exceeds_max_depth()` measures depth the same way, but it skips
-# dataclasses, which `to_json_safe()` serializes (a tool call is one), and does not
-# bound the expansion.
-def _bounded(output: ModelOutput) -> bool:
+# expanded; Inspect's `exceeds_max_depth()` measures depth the same way but does not
+# bound the expansion. The walk covers what a model can make: Inspect's own models,
+# and in their free-form fields (metadata, tool arguments) the data JSON and YAML
+# parsers give. Any other object there was put there by the task's code, and is
+# refused with `TypeError`, as the record's other values from the task's author are.
+def _bounded(output: ModelOutput, member: str) -> bool:
     # by container id: its height in levels and the containers serializing it writes
     measured: dict[int, tuple[int, int]] = {}
     in_progress: set[int] = set()
+    # where the walk is, for the error
+    path: list[str] = []
 
-    # None when `value`, at `depth`, is not bounded
-    def measure(value: object, depth: int) -> tuple[int, int] | None:
+    # None when `value`, at `depth`, is not bounded; `typed` when it is a field of one
+    # of Inspect's models, whose type Inspect declares
+    def measure(value: object, depth: int, typed: bool) -> tuple[int, int] | None:
         children = _children(value)
         if children is None:
-            return (0, 0)
+            if typed or isinstance(value, _DATA):
+                return (0, 0)
+            raise TypeError(
+                f"The swarm's result record cannot be written: the output of member {member!r} holds a value of type {type(value).__name__} at output{''.join(path)}. Metadata and tool arguments in a member's output must be data a model can return: dicts, lists, strings, numbers, booleans and None, or the dates, bytes and sets YAML gives."
+            )
         if depth > _MAX_OUTPUT_DEPTH or id(value) in in_progress:
             return None
         known = measured.get(id(value))
         if known is None:
             in_progress.add(id(value))
             height, written = 0, 1
-            for child in children:
-                child_measure = measure(child, depth + 1)
+            for step, child, child_typed in children:
+                path.append(step)
+                child_measure = measure(child, depth + 1, child_typed)
+                path.pop()
                 if child_measure is None:
                     return None
                 height = max(height, child_measure[0])
@@ -253,20 +266,37 @@ def _bounded(output: ModelOutput) -> bool:
             known = measured[id(value)] = (height + 1, written)
         return None if depth + known[0] - 1 > _MAX_OUTPUT_DEPTH else known
 
-    root = measure(output, 1)
+    root = measure(output, 1, True)
     return root is not None and root[1] - len(measured) <= _MAX_SHARED_EXPANSION
 
 
-# The values `to_json_safe()` serializes inside `value`, when it is a container.
-def _children(value: object) -> Iterable[object] | None:
+# What JSON and YAML parsers give inside a container, which `to_json_safe()` writes as
+# JSON; YAML also gives dates and times, bytes, and keys that are not strings.
+_DATA = (str, int, float, bool, type(None), bytes, date)
+
+
+# The values in `value`, each with its step in a path and whether it is a field of one
+# of Inspect's models, when `value` is a container: a dict (whose keys come first, as
+# values, so that a key that is not data is refused too), a list, tuple or set, or one
+# of Inspect's own models.
+def _children(value: object) -> list[tuple[str, object, bool]] | None:
     if isinstance(value, dict):
-        return cast(dict[object, object], value).values()
-    if isinstance(value, list | tuple | set | frozenset):
-        return cast(Iterable[object], value)
-    if isinstance(value, BaseModel):
-        return [*value.__dict__.values(), *(value.__pydantic_extra__ or {}).values()]
-    if is_dataclass(value) and not isinstance(value, type):
-        return [getattr(value, f.name) for f in fields(value)]
+        items = cast(dict[object, object], value).items()
+        return [
+            *((f"[{k!r}]", k, False) for k, _ in items),
+            *((f"[{k!r}]", v, False) for k, v in items),
+        ]
+    if isinstance(value, list | tuple | set):
+        return [
+            (f"[{i}]", v, False) for i, v in enumerate(cast(Iterable[object], value))
+        ]
+    if isinstance(value, ToolCall) or (
+        isinstance(value, BaseModel)
+        and type(value).__module__.startswith("inspect_ai.")
+    ):
+        extra = value.__pydantic_extra__ if isinstance(value, BaseModel) else None
+        fields = {**vars(value), **(extra or {})}
+        return [(f".{k}", v, True) for k, v in fields.items()]
     return None
 
 

@@ -1,6 +1,6 @@
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -584,12 +584,6 @@ def _cyclic_tool_call() -> ModelOutput:
     return output
 
 
-# A dataclass, which Inspect's log writer serializes as a dict of its fields.
-@dataclass
-class _Wrapper:
-    value: Any
-
-
 def _cycle() -> dict[str, Any]:
     cycle: dict[str, Any] = {}
     cycle["self"] = cycle
@@ -618,10 +612,6 @@ def _aliased(depth: int) -> list[Any]:
         pytest.param(lambda: _with_metadata(_cycle()), id="cycle"),
         # within the depth limit, refused before it is serialized
         pytest.param(lambda: _with_metadata({"value": _aliased(60)}), id="aliased"),
-        pytest.param(
-            lambda: _with_metadata({"value": _Wrapper(_aliased(60))}),
-            id="aliased-in-a-dataclass",
-        ),
         pytest.param(_cyclic_tool_call, id="cyclic-tool-call"),
     ],
 )
@@ -630,14 +620,24 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
     _assert_left_out(stop.record)
 
 
+@pytest.mark.anyio
+async def test_an_object_the_task_put_in_an_output_fails_the_sample() -> None:
+    odd = _plain_then(
+        lambda: _with_metadata({"diagnostic": object()}), "result_test_author_object"
+    )
+    async with sample():
+        with pytest.raises(
+            TypeError,
+            match=r"output of member 'odd' holds a value of type object at output\.metadata\['diagnostic'\]",
+        ):
+            await run_agent(odd, "task")
+
+
 @pytest.mark.parametrize(
     "deep",
     [
         pytest.param(lambda: _with_metadata({"value": _nested(194)}), id="metadata"),
         pytest.param(lambda: _tool_call({"value": _nested(194)}), id="tool-arguments"),
-        pytest.param(
-            lambda: _with_metadata({"value": _Wrapper(_nested(194))}), id="dataclass"
-        ),
     ],
 )
 def test_an_output_too_deep_for_a_json_log_is_left_out(
@@ -703,18 +703,15 @@ def _odd_metadata(value: Any) -> Callable[[], ModelOutput]:
             lambda: _tool_call({"value": _nested(98)}),
             id="deepest-tool-arguments",
         ),
-        # the log writes them as null in a sample's own output
+        # a date, as YAML tool arguments give, which the log writes as text
+        pytest.param(
+            lambda: _tool_call({"when": date(2024, 1, 2)}),
+            lambda: _tool_call({"when": "2024-01-02"}),
+            id="date-in-tool-arguments",
+        ),
+        # the log writes it as null in a sample's own output
         pytest.param(
             _odd_metadata(float("inf")), _odd_metadata(None), id="infinity-in-metadata"
-        ),
-        pytest.param(
-            _odd_metadata(object()), _odd_metadata(None), id="object-in-metadata"
-        ),
-        # and a dataclass as a dict of its fields
-        pytest.param(
-            _odd_metadata(_Wrapper([1])),
-            _odd_metadata({"value": [1]}),
-            id="dataclass-in-metadata",
         ),
     ],
 )
