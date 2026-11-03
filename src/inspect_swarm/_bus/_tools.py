@@ -2,6 +2,7 @@ from inspect_ai.agent import AgentChannel
 from inspect_ai.agent._channel import current_agent_channel
 from inspect_ai.log._samples import sample_active
 from inspect_ai.tool import Tool, ToolSource
+from inspect_ai.util._span import current_agent_span_id
 
 from ._bus import Bus, current_bus
 
@@ -23,6 +24,7 @@ class _SwarmTools(ToolSource):
             )
         if context.loop is None:
             context.loop = loop
+            context.loop_span = current_agent_span_id()
             context.acp_bound = _acp_bound(loop)
         return loop_tools(bus, context.loop is loop)
 

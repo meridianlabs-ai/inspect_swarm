@@ -88,7 +88,7 @@ def escalate(first: str = "fast") -> Controller:
 
 - `swarm.members` are the members in roster order, as `MemberHandle`s: name, role, state (`pending`, `running` or `ended`, and for [persistent members](#persistent-members) `idle` or `ending`), status and whether it submitted. A controller never sees what a member wrote unless it holds the member at a turn boundary ([Boundary callbacks](#boundary-callbacks)).
 - `swarm.start(member, input=None)` starts a member and returns at once. `input` replaces the swarm's input for that member; `None` gives it the swarm's input. The member's preamble follows either. A member runs once, and starting one after the stop has begun raises.
-- `swarm.events()` yields each event once, in order from the swarm's start. `MemberEnded` gives the member's name, status and whether it submitted; `MemberIdle` comes only from [persistent members](#persistent-members). Test an event's type before reading its fields. The iterator ends when no member is running or ending and no event is waiting, so a member started or woken later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
+- `swarm.events()` yields each event once, in order from the swarm's start. `MemberEnded` gives the member's name, status and whether it submitted; `MemberIdle` and `MemberNews` come only from [persistent members](#persistent-members). Test an event's type before reading its fields. The iterator ends when no member is running or ending and no event is waiting, so a member started or woken later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
 - `check`, if given, is called with the roster when `swarm()` is called. Raise `ValueError` for a roster the controller cannot run.
 - `final`, if given, is the rule that chooses the answer: `first` (the default, as here) or `last`.
 - The stop reasons `all_done`, `submitted`, `verified` and `quiescence` are recorded as they are. Any other is recorded as `controller:<reason>`.
@@ -229,6 +229,42 @@ swarm(
 - `handle.end()` or the swarm's stop on an idle member sets it `ending` at once, and it ends `submitted`, with its last answer as its output. The iterator waits for its `MemberEnded`.
 - The swarm is *quiescent* when every member is pending, idle or ended and no event is waiting: `events()` ends. Nothing moves until the controller starts, wakes or ends a member. A controller that wakes no one returns `quiescence`.
 - `leaderless` treats `MemberIdle` as a submission, so by default the first answer stops the swarm. With `stop_on_submission=False` it returns `quiescence` once no member is working and some are idle. It never wakes a member.
+
+### News for idle members
+
+An idle member is not in a tool call, so it cannot see what other members write. The controller is told instead. When a record is delivered that would end a `swarm_wait` of the idle member's own loop watching everything, such as another member's write to the shared memory or a message sent to it with `wake=True`, the controller gets `MemberNews`: the idle member, the channel, the record's id and the name of the member that sent it. The controller decides whether to wake the member.
+
+- `MemberIdle.news` says whether the member already had news when it went idle: a write it did not look at during its activation. No `MemberNews` reports that write, so a controller that wakes members on news also wakes on `MemberIdle.news`.
+- A file stays news to the member until its own loop views it. A member that leaves a file unviewed is reported with `news` set every time it goes idle, so its prompt should tell it to view what the status line names before it answers.
+- Two records give two events. Check that the member is still idle before waking it.
+- A member gets no news unless its own loop has `swarm_tools()`.
+
+[`examples/lead_and_workers.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/lead_and_workers.py) is a lead that hands out tasks on the shared memory to persistent workers. Its controller wakes a worker on the lead's writes and stops when the lead ends:
+
+```python
+@swarm_controller
+def lead_and_workers(lead: str = "lead") -> Controller:
+    async def run(swarm: SwarmControl) -> StopReason:
+        for m in swarm.members:
+            swarm.start(m)
+        async with aclosing(swarm.events()) as events:
+            async for event in events:
+                if isinstance(event, MemberEnded) and event.member == lead:
+                    if event.submitted:
+                        swarm.choose_answer(lead, reason="the lead's answer")
+                        return "submitted"
+                    return "lead_ended"
+                woken = (isinstance(event, MemberNews) and event.sender == lead) or (
+                    isinstance(event, MemberIdle) and event.news
+                )
+                if woken and swarm.member(event.member).state == "idle":
+                    swarm.wake(event.member, WAKE)
+        return "all_done"
+
+    return Controller(run)
+```
+
+Every worker is woken on each of the lead's writes, so a worker with no new task answers at once. The workers' answers are reports on their own tasks, so the controller makes the lead's submission the answer with `choose_answer()`.
 
 ## Stopping on the first proof
 

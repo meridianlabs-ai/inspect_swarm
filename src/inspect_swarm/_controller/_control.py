@@ -64,6 +64,7 @@ from .._seam import BoundaryCallback, MemberGate, check_origin
 
 if TYPE_CHECKING:
     from .._bus._bus import Bus
+    from .._bus._record import Record
     from .._channel._channel import Channel
 
 
@@ -176,10 +177,30 @@ class MemberIdle:
     """The index of the answer it just gave, from 0."""
 
     news: bool
-    """Whether a channel already has news for the member's own loop. Always `False` in this version."""
+    """Whether a channel already has news for the member's own loop: something that would end a `swarm_wait` of that loop that watches everything, such as a file another agent wrote that the member has not viewed. Later writes are reported as `MemberNews`, so a controller that wakes members on news also wakes on this."""
 
 
-ControlEvent = MemberEnded | MemberIdle
+@dataclass(frozen=True)
+class MemberNews:
+    """A record was delivered that is news to an idle persistent member: it would end a `swarm_wait` of the member's own loop that watches everything.
+
+    The controller decides whether to wake the member. Two records give two events, and an earlier event's handling may have woken the member, so check that it is still idle before waking it.
+    """
+
+    member: str
+    """The idle member the record is news to."""
+
+    channel: str
+    """The name of the channel that delivered the record."""
+
+    record: str
+    """The record's id."""
+
+    sender: str
+    """The name of the member that sent the record."""
+
+
+ControlEvent = MemberEnded | MemberIdle | MemberNews
 """An event a controller receives from `SwarmControl.events()`. Later versions add kinds, so test an event's type before reading its fields."""
 
 
@@ -437,6 +458,7 @@ class SwarmRun:
             {m.name: m.context for m in self._members},
             channels,
         )
+        self.bus.news = self._news
         for m in self._members:
             m.gate.stopping = lambda: self.stop_reason
             m.gate.recheck = self.bus.recheck
@@ -918,7 +940,14 @@ class SwarmRun:
     # together, in one synchronous step.
     def _idle(self, m: MemberRun) -> None:
         m.state = "idle"
-        self._queue.append(MemberIdle(m.name, len(m.answer_list) - 1, news=False))
+        self._queue.append(
+            MemberIdle(m.name, len(m.answer_list) - 1, news=self.bus.has_news(m.name))
+        )
+        self._notify()
+
+    # A delivered record that is news to an idle member, from the bus.
+    def _news(self, member: str, record: "Record") -> None:
+        self._queue.append(MemberNews(member, record.channel, record.id, record.sender))
         self._notify()
 
     # A persistent member's hold after its answer was refused: its ending begins, so

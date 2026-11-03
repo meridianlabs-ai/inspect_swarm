@@ -1,5 +1,5 @@
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
@@ -12,7 +12,13 @@ from inspect_ai.util._span import current_agent_span_id, current_span_id
 from pydantic import JsonValue
 
 from .._budget import MemberContext, current_member
-from .._channel._channel import Channel, ChannelRun, ChannelState, WaitingState
+from .._channel._channel import (
+    Channel,
+    ChannelRun,
+    ChannelState,
+    WaitingState,
+    WaitSpec,
+)
 from .._channel.messages import MessagesState
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_read, comm_sent
@@ -104,7 +110,10 @@ class Bus:
             if channel.max_wait is not None:
                 waiting[channel.name] = cast(WaitingState, state)
                 max_wait = max(max_wait or 0, channel.max_wait)
+        self._waiting = waiting
         self._waits = Waits(self, self._contexts, waiting, max_wait)
+        # the runtime's news callback: a delivered record is news to an idle member
+        self.news: Callable[[str, Record], None] = lambda member, record: None
 
     @property
     def states(self) -> Mapping[str, ChannelState]:
@@ -218,6 +227,7 @@ class Bus:
         self._committed[record.id] = record.channel
         comm_delivered(member_span, record, nested, self._seq, notify, result)
         self._waits.delivered(record, self._seq)
+        self._idle_news(record)
         return Delivery(record, self._seq, list(notify), result)
 
     def read(
@@ -273,6 +283,41 @@ class Bus:
     def running(self, name: str) -> bool:
         # whether the member has started and not yet ended
         return self._by_name[name].state == "running"
+
+    def idle(self, name: str) -> bool:
+        # whether the member is a persistent member held idle after an answer
+        return self._by_name[name].state == "idle"
+
+    def idle_spec(self, name: str) -> WaitSpec | None:
+        # what a wait of the member's own loop that watches the whole board would
+        # watch; None when no loop of the member has bound swarm_tools(), since it then
+        # cannot read the channels
+        context = self._contexts[name]
+        if context.loop is None:
+            return None
+        return WaitSpec(
+            id=f"idle-{name}", member=name, loop=context.loop_span, own=True, path=None
+        )
+
+    def has_news(self, name: str) -> bool:
+        # whether a waiting channel has news for the member's own loop now
+        spec = self.idle_spec(name)
+        return spec is not None and any(
+            state.news(spec) is not None for state in self._waiting.values()
+        )
+
+    def _idle_news(self, record: Record) -> None:
+        # step 4 of a delivery, after the waits: a record that would end a whole-board
+        # wait of an idle member's own loop is news the runtime reports for it
+        state = self._waiting.get(record.channel)
+        if state is None or not record.wake:
+            return
+        for m in self._members:
+            if m.name == record.sender or m.state != "idle":
+                continue
+            spec = self.idle_spec(m.name)
+            if spec is not None and state.wakes(spec, record):
+                self.news(m.name, record)
 
     def nested(self, context: MemberContext) -> bool:
         # whether the caller runs in a loop other than the member's own, such as a
