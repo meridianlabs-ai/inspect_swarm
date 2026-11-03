@@ -10,12 +10,18 @@ import anyio
 import pytest
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.agent import Agent, AgentState, agent, run
-from inspect_ai.event import InfoEvent, SpanBeginEvent
+from inspect_ai.event import (
+    CommunicationDelivery,
+    CommunicationEvent,
+    CommunicationRejection,
+    SpanBeginEvent,
+)
 from inspect_ai.log import EvalSample
 from inspect_ai.log._condense import condense_sample
 from inspect_ai.log._recorders.eval import _parse_sample_data
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.tool import Tool, ToolError
+from inspect_ai.util._span import span
 from pydantic import JsonValue
 
 from inspect_swarm import (
@@ -39,8 +45,9 @@ from inspect_swarm._budget import MemberContext, current_member
 from inspect_swarm._bus._bus import Bus, Delivery, current_bus
 from inspect_swarm._bus._record import Draft, thaw_json
 from inspect_swarm._bus._storm import StormControls
+from inspect_swarm._seam import BoundaryCallback
 
-from .swarm_runtime import evidence, run_swarm, sample
+from .swarm_runtime import data, run_swarm, sample, send, swarm_events
 
 
 class _BoardState:
@@ -159,6 +166,26 @@ class _Member:
     def submitted(self) -> bool:
         return self.status == "submitted"
 
+    @property
+    def held(self) -> bool:
+        return False
+
+    @property
+    def persistent(self) -> bool:
+        return False
+
+    @property
+    def answers(self) -> int:
+        return 0
+
+    def on_boundary(
+        self, callback: BoundaryCallback, *, origin: str
+    ) -> Callable[[], None]:
+        raise NotImplementedError
+
+    def end(self, *, origin: str) -> None:
+        raise NotImplementedError
+
 
 MEMBERS = ("w-1", "w-2", "w-3")
 
@@ -207,14 +234,8 @@ async def _send(
         return await bus.deliver(Draft(channel, "note", to, payload, op))
 
 
-def _comm(transcript: Transcript) -> list[dict[str, Any]]:
-    return [
-        e.data
-        for e in transcript.events
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "comm"
-    ]
+def _comm(transcript: Transcript) -> list[CommunicationEvent]:
+    return [e for e in transcript.events if isinstance(e, CommunicationEvent)]
 
 
 def _board(bus: Bus) -> _BoardState:
@@ -246,27 +267,35 @@ async def test_a_record_is_applied_once_with_its_evidence(
     assert (delivery.seq, delivery.notify) == (1, recipients)
     assert _board(bus).applied == [record]
     sent, delivered = _comm(transcript)
-    assert sent["kind"] == "sent"
-    assert sent["member"] == "w-1"
-    assert sent["record"]["to"] == list(to)
-    assert sent["record"]["recipients"] == recipients
-    assert sent["record"]["op"] == {"n": 1}
-    assert sent["rejected"] is None
-    assert delivered == {
-        "version": 1,
-        "type": "comm",
-        "kind": "delivered",
-        "channel": "board",
-        "member": "w-1",
-        "span_id": None,
-        "loop": None,
-        "nested": False,
-        "record": "b-1",
-        "recipients": recipients,
-        "seq": 1,
-        "notify": recipients,
-        "result": {"size": 1},
-    }
+    assert sent.kind == "sent"
+    assert sent.agent == "w-1"
+    assert send(sent).record.to == list(to)
+    assert send(sent).record.recipients == recipients
+    assert data(sent)["record"]["op"] == {"n": 1}
+    assert send(sent).rejected is None
+    assert (
+        delivered.kind,
+        delivered.source,
+        delivered.channel,
+        delivered.agent,
+        delivered.agent_span_id,
+        delivered.loop_span_id,
+        delivered.nested,
+        delivered.record_ids,
+        delivered.delivery,
+        delivered.data,
+    ) == (
+        "delivered",
+        "inspect_swarm",
+        "board",
+        "w-1",
+        None,
+        None,
+        False,
+        ["b-1"],
+        CommunicationDelivery(recipients=recipients, seq=1),
+        {"version": 1, "notify": recipients, "result": {"size": 1}},
+    )
 
 
 @pytest.mark.anyio
@@ -338,7 +367,9 @@ async def test_max_bytes_counts_utf8_bytes_of_the_payload(
         assert len(_board(bus).applied) == 1
     else:
         assert _board(bus).applied == []
-        assert sent["rejected"] == {"control": "max_bytes", "reason": error}
+        assert send(sent).rejected == CommunicationRejection(
+            control="max_bytes", reason=error
+        )
 
 
 @pytest.mark.anyio
@@ -359,8 +390,8 @@ async def test_the_rate_counts_each_senders_commits_in_a_sliding_window() -> Non
         # the window slides
         await anyio.sleep(0.6)
         await _send(bus)
-    rejected = [e["rejected"] for e in _comm(transcript) if e["kind"] == "sent"]
-    assert [r["control"] if r else None for r in rejected] == [
+    rejected = [send(e).rejected for e in _comm(transcript) if e.kind == "sent"]
+    assert [r.control if r else None for r in rejected] == [
         None,
         None,
         "rate",
@@ -391,7 +422,9 @@ async def test_a_payload_that_is_not_valid_text_is_refused_with_evidence() -> No
             await _send(bus, payload="a\ud800")
     assert _board(bus).applied == []
     [sent] = _comm(transcript)
-    assert sent["rejected"] == {"control": "payload", "reason": reason}
+    assert send(sent).rejected == CommunicationRejection(
+        control="payload", reason=reason
+    )
 
 
 @pytest.mark.anyio
@@ -405,7 +438,9 @@ async def test_a_sender_that_has_ended_is_refused_with_evidence() -> None:
             await _send(bus, to=("w-2", "w-3"))
     assert _board(bus).applied == []
     [sent] = _comm(transcript)
-    assert sent["rejected"] == {"control": "liveness", "reason": reason}
+    assert send(sent).rejected == CommunicationRejection(
+        control="liveness", reason=reason
+    )
 
 
 @pytest.mark.anyio
@@ -438,7 +473,7 @@ async def test_a_record_keeps_the_operation_data_it_was_sent_with() -> None:
     for record in (delivery.record, _board(bus).applied[0]):
         assert record.op is not None and thaw_json(record.op) == original
     sent, _ = _comm(transcript)
-    assert sent["record"]["op"] == original
+    assert data(sent)["record"]["op"] == original
 
 
 @pytest.mark.anyio
@@ -536,12 +571,9 @@ async def test_operation_data_commits_only_if_the_log_reads_it_back_as_sent(
         )
     )
     sent = [
-        e.data["record"]
+        data(e)["record"]
         for e in read.events
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("kind") == "sent"
-        and isinstance(e.data["record"], dict)
+        if isinstance(e, CommunicationEvent) and e.kind == "sent"
     ]
     if refusal is not None:
         assert sent == []
@@ -696,13 +728,15 @@ async def test_comm_evidence_names_the_members_span_and_the_record_the_loops(
     spans = {
         e.id: e.name for e in outcome.transcript.events if isinstance(e, SpanBeginEvent)
     }
-    [result] = evidence(outcome.transcript, "member_result")
-    member_span = result["span_id"]
+    [result] = swarm_events(outcome.transcript, "member_result")
+    member_span = result.data["span_id"]
+    assert isinstance(member_span, str)
     assert spans[member_span] == "w"
     sent, delivered = _comm(outcome.transcript)
-    assert (sent["span_id"], delivered["span_id"]) == (member_span, member_span)
-    assert (sent["member"], delivered["member"]) == ("w", "w")
-    loop_span = sent["record"]["sender_span_id"]
+    assert (sent.agent_span_id, delivered.agent_span_id) == (member_span, member_span)
+    assert (sent.agent, delivered.agent) == ("w", "w")
+    loop_span = data(sent)["record"]["sender_span_id"]
+    assert sent.loop_span_id == loop_span
     assert spans[loop_span] == ("bus_test_child" if nested else "w")
 
 
@@ -823,10 +857,14 @@ async def test_only_a_record_with_wake_releases_a_wait() -> None:
                 assert results == []
                 await send(True)
     assert results == ["a note for w-2"]
-    sent = [c["record"]["wake"] for c in _comm(transcript) if c["kind"] == "sent"]
+    sent = [data(c)["record"]["wake"] for c in _comm(transcript) if c.kind == "sent"]
     assert sent == [False, True]
-    [waited] = [c for c in _comm(transcript) if c["kind"] == "waited"]
-    assert (waited["channels"], waited["woken_by"]) == (["waking", "longer"], [2])
+    [waited] = [c for c in _comm(transcript) if c.kind == "waited"]
+    assert waited.wait is not None
+    assert (waited.wait.channels, data(waited)["woken_by"]) == (
+        ["waking", "longer"],
+        [2],
+    )
 
 
 @pytest.mark.anyio
@@ -849,6 +887,175 @@ async def test_a_channel_with_max_wait_needs_a_waiting_state(
 async def test_an_instructions_only_channel_needs_no_waiting_state() -> None:
     bus, _ = _bus(channels=[_Locks(), _Waking()])
     assert bus.waits.max_wait == 5
+
+
+# Reads and wait news: a channel reports what its results depend on
+
+
+async def _report(
+    bus: _TestBus,
+    records: Sequence[str],
+    *,
+    member: str = "w-2",
+    loop: str = "top",
+    channel: str = "board",
+    depends_on: Sequence[str] | None = None,
+) -> None:
+    # as a channel's tool reports a result, in a tool span of the member's loop
+    with _as(bus.stand_ins[member].context):
+        async with span("agent", type="agent", id=f"{member}/{loop}"):
+            async with span("tool", type="tool", id=f"{member}/{loop}/tool"):
+                bus.read(channel, records, depends_on=depends_on)
+
+
+@pytest.mark.anyio
+async def test_a_read_names_its_records_and_writes_each_dependency_once_per_loop() -> (
+    None
+):
+    bus, _ = _bus()
+    async with sample() as transcript:
+        await _send(bus)
+        await _send(bus)
+        await _report(bus, ["b-1", "b-2"])
+        # the same loop again: the records stay whole, the dependencies are written
+        await _report(bus, ["b-2", "b-1"])
+        # another loop of the same member, and a result that depends on other records
+        # than it concerns
+        await _report(bus, ["b-1"], loop="child")
+        await _report(bus, ["b-1"], member="w-3", depends_on=["b-2", "b-2"])
+    reads = [c for c in _comm(transcript) if c.kind == "read"]
+    first = reads[0]
+    assert (
+        first.source,
+        first.agent,
+        first.loop_span_id,
+        first.nested,
+        first.channel,
+        first.record_ids,
+        first.send,
+        first.delivery,
+        first.wait,
+    ) == (
+        "inspect_swarm",
+        "w-2",
+        "w-2/top",
+        False,
+        "board",
+        ["b-1", "b-2"],
+        None,
+        None,
+        None,
+    )
+    assert first.data == {
+        "version": 1,
+        "read": "r-1",
+        "tool_span_id": "w-2/top/tool",
+        "depends_on": ["b-1", "b-2"],
+        "listing": False,
+        "via": "tool",
+    }
+    assert [
+        (r.agent, r.loop_span_id, r.record_ids, data(r)["depends_on"]) for r in reads
+    ] == [
+        ("w-2", "w-2/top", ["b-1", "b-2"], ["b-1", "b-2"]),
+        ("w-2", "w-2/top", ["b-2", "b-1"], []),
+        ("w-2", "w-2/child", ["b-1"], ["b-1"]),
+        ("w-3", "w-3/top", ["b-1"], ["b-2"]),
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "report,error",
+    [
+        pytest.param({"records": ["b-9"]}, "names b-9", id="never-committed"),
+        pytest.param({"records": ["n-1"]}, "names n-1", id="another-channel"),
+        pytest.param({"records": ["b-2"]}, "names b-2", id="refused"),
+        pytest.param(
+            {"records": ["b-1"], "depends_on": ["n-1"]},
+            "names n-1",
+            id="dependency",
+        ),
+        pytest.param(
+            {"records": [], "channel": "nowhere"},
+            "No channel named 'nowhere'",
+            id="no-channel",
+        ),
+    ],
+)
+async def test_a_read_naming_a_record_its_channel_did_not_commit_is_refused(
+    report: dict[str, Any], error: str
+) -> None:
+    bus, _ = _bus(channels=[_Board(capacity=1), _Notes()])
+    async with sample() as transcript:
+        await _send(bus)
+        # refused at admission, after its id was given
+        with pytest.raises(ToolError):
+            await _send(bus)
+        await _send(bus, channel="notes")
+        with pytest.raises(ValueError, match=error):
+            await _report(bus, **report)
+        # a refusal marks nothing written for the loop
+        await _report(bus, ["b-1"])
+    [read] = [c for c in _comm(transcript) if c.kind == "read"]
+    assert (read.record_ids, data(read)["depends_on"]) == (["b-1"], ["b-1"])
+
+
+@pytest.mark.anyio
+async def test_a_read_outside_a_member_is_refused() -> None:
+    bus, _ = _bus()
+    await _send(bus)
+    with pytest.raises(RuntimeError, match="outside a member"):
+        bus.read("board", ["b-1"])
+
+
+class _ReportingState(_WakingState):
+    # news that depends on the records it reports, and on `extra`
+    def __init__(self, extra: list[str]) -> None:
+        super().__init__(None)
+        self.extra = extra
+
+    def news(self, spec: WaitSpec) -> WaitNews | None:
+        news = super().news(spec)
+        if news is None:
+            return None
+        ids = [r.id for r in self.applied if r.payload == spec.member]
+        return WaitNews(news.lines, news.files, depends_on=ids + self.extra)
+
+
+class _Reporting(_Waking):
+    def __init__(self, extra: Sequence[str] = ()) -> None:
+        super().__init__()
+        self.extra = list(extra)
+
+    def open(self, run: ChannelRun) -> ChannelState | None:
+        return _ReportingState(self.extra)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("extra", [[], ["k-9"]], ids=["committed", "not-committed"])
+async def test_a_waits_news_writes_each_dependency_once_per_loop(
+    extra: list[str],
+) -> None:
+    bus, members = _bus(channels=[_Reporting(extra)])
+
+    async def wait() -> str:
+        with _as(members["w-2"].context):
+            return await bus.wait(None, None, None)
+
+    async with sample() as transcript:
+        with _as(members["w-1"].context):
+            await bus.deliver(Draft("waking", "note", payload="w-2", wake=True))
+        if extra:
+            with pytest.raises(ValueError, match="names k-9"):
+                await wait()
+        else:
+            # both find the news at once; the second depends on nothing new
+            assert await wait() == await wait() == "a note for w-2"
+    waits = [c for c in _comm(transcript) if c.wait is not None]
+    assert [(c.wait.outcome, data(c)["depends_on"]) for c in waits if c.wait] == (
+        [("news", [])] if extra else [("news", ["k-1"]), ("news", [])]
+    )
 
 
 @agent(name="inspect_swe/bus_test_cli")
@@ -876,15 +1083,26 @@ def bus_test_native() -> Agent:
         ),
     ],
 )
-def test_a_bridged_member_is_refused_beside_a_channel_with_records(
-    bridged: Callable[[], Any],
+@pytest.mark.parametrize(
+    "channels,refused",
+    [
+        pytest.param(["filesystem", bus_test_board()], True, id="custom-records"),
+        pytest.param(["messages", "shared_memory"], False, id="built-ins"),
+        pytest.param(["filesystem", bus_test_locks()], False, id="instructions-only"),
+        pytest.param([], False, id="none"),
+    ],
+)
+def test_a_bridged_member_is_refused_only_beside_a_custom_channel_with_records(
+    bridged: Callable[[], Any], channels: list[Any], refused: bool
 ) -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"member 'cli' is bridged, and bridged members cannot use bus channels such as bus_test_board yet",
-    ):
-        swarm([bridged(), bus_test_native()], channels=["filesystem", bus_test_board()])
-    for channels in (["filesystem"], []):
+    # swarm_bridged_tools() serves only the built-in channels with records
+    if refused:
+        with pytest.raises(
+            ValueError,
+            match=r"member 'cli' is bridged, and swarm_bridged_tools\(\) serves only the messages and shared_memory channels, not bus_test_board",
+        ):
+            swarm([bridged(), bus_test_native()], channels=channels)
+    else:
         swarm([bridged(), bus_test_native()], channels=channels)
 
 

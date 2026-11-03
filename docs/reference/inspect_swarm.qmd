@@ -15,8 +15,11 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### Controller
 ### SwarmControl
 ### MemberHandle
+### Boundary
+### BoundaryCallback
 ### MemberEnded
-### SwarmEvent
+### MemberIdle
+### ControlEvent
 ### MemberInfo
 ### MemberState
 ### StopReason
@@ -28,6 +31,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### shared_memory
 ### messages
 ### swarm_tools
+### swarm_bridged_tools
 ### swarm_channel
 ### Channel
 ### ChannelRun

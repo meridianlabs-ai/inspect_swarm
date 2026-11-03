@@ -89,6 +89,11 @@ class MemberBackground:
             raise RuntimeError(
                 "background(): the member's background work has ended, so no new background work can start."
             )
+        if self._member.held:
+            # a held member does nothing, so its callbacks start no work for it
+            raise RuntimeError(
+                f"background(): member {self._member.name!r} is held at a turn boundary, so no background work can start for it."
+            )
         self._tg.start_soon(self._run, func, args)
         self.started += 1
         self.running += 1

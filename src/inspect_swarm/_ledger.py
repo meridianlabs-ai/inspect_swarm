@@ -7,8 +7,9 @@ from typing import Literal, cast
 
 import anyio
 from inspect_ai.event import (
+    CommunicationEvent,
+    CommunicationWait,
     Event,
-    InfoEvent,
     ModelEvent,
     ScoreEvent,
     SpanBeginEvent,
@@ -21,7 +22,7 @@ from inspect_ai.model._model import sample_model_usage
 from inspect_ai.scorer import Value
 from inspect_ai.util import Limit, current_span_id, sample_limits
 from inspect_ai.util._span import AGENT_SPAN_TYPE
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict
 
 from ._budget import Budget, CostPair, cost_node, token_node
 from ._critical_path import PathLog
@@ -120,7 +121,7 @@ class MemberLedger(BaseModel):
 class SwarmLedger(BaseModel):
     """Realized usage and cost of one run of the swarm, and how complete they are.
 
-    The swarm writes its ledger once, when it ends, to the sample store as `inspect_swarm:ledger` and as an `InfoEvent` with source `inspect_swarm`. Read it from a sample with `swarm_ledger()`.
+    The swarm writes its ledger once, when it ends, to the sample store as `inspect_swarm:ledger` and as a `SwarmEvent` of kind `ledger` whose `data` is the store entry. Read it from a sample with `swarm_ledger()`.
 
     The store entry's shape follows `version`. This inspect_swarm reads version 1 only.
     """
@@ -206,6 +207,9 @@ class MemberAccount:
     cancelled: bool
     background_started: int
     background_cancelled: int
+    # the model calls in flight when a stop or an end cancelled one of the member's
+    # boundary callback chains, by event id
+    cancelled_calls: Sequence[str] = ()
 
 
 # A model event as it last stood, with its live usage object.
@@ -240,8 +244,8 @@ class ScoreRecord:
     time: float
 
 
-# A communication evidence event (`comm`, written by `_evidence.py`): its kind, the
-# acting member and the channel; for `sent` and `delivered`, the record's id; for
+# A communication evidence event (a `CommunicationEvent` written by `_evidence.py`):
+# its kind, the acting member and the channel; for `sent` and `delivered`, the record's id; for
 # `sent`, the control that rejected the record, if one did, and otherwise its payload's
 # UTF-8 bytes; for `read`, whether it showed a listing.
 @dataclass(frozen=True)
@@ -255,7 +259,7 @@ class CommRecord:
     listing: bool
 
 
-# A wait's evidence event (`comm` of kind `waited`): the waiting member, what ended the
+# A wait's evidence event (a `CommunicationEvent` of kind `waited`): the waiting member, what ended the
 # wait, its duration and the seconds of it during which the member counted as waiting.
 @dataclass(frozen=True)
 class WaitRecord:
@@ -323,66 +327,57 @@ class EventLog:
                     time=anyio.current_time(),
                 )
             )
-        elif (
-            isinstance(event, InfoEvent)
-            and event.source == "inspect_swarm"
-            and isinstance(event.data, dict)
-            and event.data.get("type") == "comm"
-        ):
-            if event.data.get("kind") == "waited":
-                self.waits.append(_wait_record(event.data))
+        elif isinstance(event, CommunicationEvent) and event.source == "inspect_swarm":
+            if event.wait is not None:
+                self.waits.append(_wait_record(event, event.wait))
             else:
-                self.comms.append(_comm_record(event.data))
+                self.comms.append(_comm_record(event))
 
 
-def _wait_record(data: dict[str, JsonValue]) -> WaitRecord:
+def _wait_record(event: CommunicationEvent, wait: CommunicationWait) -> WaitRecord:
     return WaitRecord(
-        member=cast(str, data["member"]),
-        outcome=cast(str, data["outcome"]),
-        duration=cast(float, data["duration"]),
-        idle=cast(float, data["idle"]),
+        member=event.agent,
+        outcome=wait.outcome,
+        duration=wait.duration,
+        idle=cast(float, event.data["idle"]),
     )
 
 
-def _comm_record(data: dict[str, JsonValue]) -> CommRecord:
-    kind = cast(str, data["kind"])
-    record = data.get("record")
-    rejected = data.get("rejected")
+def _comm_record(event: CommunicationEvent) -> CommRecord:
+    record: str | None = None
+    rejected: str | None = None
     payload_bytes = 0
-    if kind == "sent":
-        # the full record, which its id stands for; only an accepted payload is
-        # measured, since a rejected one can be text no UTF-8 encoder takes
-        assert isinstance(record, dict)
-        if isinstance(rejected, dict):
-            rejected = rejected["control"]
+    if event.kind in ("sent", "delivered"):
+        [record] = event.record_ids
+    if event.send is not None:
+        # only an accepted payload is measured, since a rejected one can be text no
+        # UTF-8 encoder takes
+        if event.send.rejected is not None:
+            rejected = event.send.rejected.control
         else:
-            payload_bytes = utf8_bytes(cast(str, record["payload"]))
-        record = record["id"]
+            assert event.send.record.content is not None
+            payload_bytes = utf8_bytes(event.send.record.content)
+    assert event.channel is not None
     return CommRecord(
-        kind=kind,
-        member=cast(str, data["member"]),
-        channel=cast(str, data["channel"]),
-        record=cast(str | None, record),
-        rejected=cast(str | None, rejected),
+        kind=event.kind,
+        member=event.agent,
+        channel=event.channel,
+        record=record,
+        rejected=rejected,
         payload_bytes=payload_bytes,
-        listing=data.get("listing") is True,
+        listing=event.data.get("listing") is True,
     )
 
 
 # The ledger's view of the swarm's interval: what it reads when the swarm starts, and
-# the ledger it builds from that and the runtime's state when the swarm ends. `board`
-# and `messages` are the built-in board's and messages channel's record names, or None,
-# and `roster` the swarm's members, for the critical path; a resumed sample records
-# none, since its transcript receives the earlier attempt's events, counted before they
-# are notified and about a board this run does not have.
+# the ledger it builds from that and the runtime's state when the swarm ends. `roster`
+# is the swarm's members, for the critical path; a resumed sample records none, since
+# its transcript receives the earlier attempt's events, counted before they are notified
+# and about commits this run did not make.
 class LedgerInterval:
-    def __init__(
-        self, *, board: str | None, messages: str | None, roster: Collection[str]
-    ) -> None:
+    def __init__(self, *, roster: Collection[str]) -> None:
         self._resumed = sample_resumed()
-        self._events = EventLog(
-            None if self._resumed else PathLog(board, messages, roster)
-        )
+        self._events = EventLog(None if self._resumed else PathLog(roster))
         self._unsubscribe = transcript()._subscribe(  # pyright: ignore[reportPrivateUsage]
             self._events
         )
@@ -403,6 +398,10 @@ class LedgerInterval:
     @property
     def events(self) -> EventLog:
         return self._events
+
+    # the model calls in flight now, by event id
+    def pending_calls(self) -> list[str]:
+        return [uuid for uuid, call in self._events.calls.items() if call.pending]
 
     # stops observing the transcript; idempotent, so that the swarm's end calls it
     # however the swarm ends
@@ -430,10 +429,10 @@ class LedgerInterval:
     ) -> SwarmLedger:
         # synchronous, so that it runs under cancellation too
         self.close()
-        calls, member_calls = count_calls(
-            self._events,
-            self.places({m.name: m.span_id for m in members if m.span_id is not None}),
+        places = self.places(
+            {m.name: m.span_id for m in members if m.span_id is not None}
         )
+        calls, member_calls = count_calls(self._events, places)
         delta, unpriced_models, cost_scale = _usage_delta(
             self._start_usage, _usage_snapshot()
         )
@@ -456,7 +455,7 @@ class LedgerInterval:
                 bridged=m.bridged,
                 meter=_meter(m.lever),
                 calls=member_calls.get(m.name, Calls()),
-                cancelled=m.cancelled,
+                cancelled=m.cancelled or self._in_flight(m, places),
                 background_started=m.background_started,
                 background_cancelled=m.background_cancelled,
             )
@@ -465,7 +464,7 @@ class LedgerInterval:
         total_complete = (
             # a cancelled agent loop, background ones included, may have had work in
             # flight that left no trace
-            not any(m.cancelled or m.background_cancelled for m in members)
+            not any(m.cancelled or m.background_cancelled for m in member_ledgers)
             and not interrupted
             and not final_cancelled
             and calls.errored == 0
@@ -503,6 +502,21 @@ class LedgerInterval:
             resumed=self._resumed,
             total_complete=total_complete,
             attribution_complete=attribution_complete,
+        )
+
+    # Whether a stop or an end that cancelled one of the member's boundary callback
+    # chains interrupted a model call of the member's: one in flight at the
+    # cancellation, in the member's spans, that did not then complete, so its usage is
+    # unknown. A call that had already ended, a handled failure included, is not one.
+    def _in_flight(self, member: MemberAccount, places: "SpanPlaces") -> bool:
+        calls = [
+            self._events.calls[uuid]
+            for uuid in member.cancelled_calls
+            if uuid in self._events.calls
+        ]
+        return any(
+            (call.pending or call.errored) and places(call.span_id)[1] == member.name
+            for call in calls
         )
 
 

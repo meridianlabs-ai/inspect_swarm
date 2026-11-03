@@ -1,11 +1,12 @@
 import re
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import anyio
 import pytest
+from inspect_ai.event import CommunicationEvent
 from inspect_ai.log._transcript import Transcript
 from inspect_ai.tool import ToolDef, ToolError, memory
 from inspect_ai.tool._tools._memory import MemoryStore
@@ -19,8 +20,9 @@ from inspect_swarm._channel.shared_memory import (
     _SharedMemoryState,  # pyright: ignore[reportPrivateUsage]
 )
 from inspect_swarm._fence import utf8_bytes
+from inspect_swarm._seam import BoundaryCallback
 
-from .swarm_runtime import evidence, sample
+from .swarm_runtime import comm_events, data, delivery, sample, send
 
 ROOT = "/shared_memory"
 
@@ -41,6 +43,26 @@ class _Member:
     @property
     def submitted(self) -> bool:
         return self.status == "submitted"
+
+    @property
+    def held(self) -> bool:
+        return False
+
+    @property
+    def persistent(self) -> bool:
+        return False
+
+    @property
+    def answers(self) -> int:
+        return 0
+
+    def on_boundary(
+        self, callback: BoundaryCallback, *, origin: str
+    ) -> Callable[[], None]:
+        raise NotImplementedError
+
+    def end(self, *, origin: str) -> None:
+        raise NotImplementedError
 
 
 class _Board:
@@ -233,7 +255,7 @@ async def test_writes_return_no_content_and_record_no_read() -> None:
     async with _board() as (board, transcript):
         await board("w-1", "create", path=_p("a.md"), file_text="peer secret\nline")
         await board("w-2", "view", path=_p("a.md"))
-        reads = len(evidence(transcript, "read"))
+        reads = len(comm_events(transcript, "read"))
         results = [
             await board(
                 "w-2", "str_replace", path=_p("a.md"), old_str="line", new_str="edit"
@@ -246,7 +268,7 @@ async def test_writes_return_no_content_and_record_no_read() -> None:
             "Edited /shared_memory/a.md (f-1, now version 2).",
             "Inserted text after line 1 of /shared_memory/a.md (f-1, now version 3).",
         ]
-        assert len(evidence(transcript, "read")) == reads
+        assert len(comm_events(transcript, "read")) == reads
 
 
 @pytest.mark.anyio
@@ -327,7 +349,7 @@ async def test_a_write_over_content_needs_a_view_of_its_current_version(
             await board("w-2", command, **args)
         assert str(refused.value) == refusal
         # refused at the tool, before a record exists
-        assert len(evidence(transcript, "sent")) == 2
+        assert len(comm_events(transcript, "sent")) == 2
         await board("w-2", "view", file_id="f-1")
         await board("w-2", command, **args)
 
@@ -365,7 +387,9 @@ async def test_append_adds_a_line_at_the_end_with_no_view_and_creates_a_missing_
         await board("w-1", "create", path=_p("empty.md"), file_text="")
         await board("w-2", "append", path=_p("empty.md"), append_text="x")
         assert board.files() == {log: "one\ntwo\nthree", _p("empty.md"): "x"}
-        assert [s["record"]["op"] for s in evidence(transcript, "sent")[:2]] == [
+        assert [
+            data(s)["record"]["op"] for s in comm_events(transcript, "sent")[:2]
+        ] == [
             {
                 "command": "append",
                 "path": log,
@@ -438,7 +462,7 @@ async def test_a_peers_deletion_of_a_file_the_loop_blindly_appended_to_is_news(
         await board("w-2", "append", path=_p("a/log.md"), append_text="b")
         await board("w-1", "view", file_id="f-1")
         await board("w-1", "delete", path=_p(deleted))
-        assert evidence(transcript, "delivered")[-1]["notify"] == ["w-2"]
+        assert data(comm_events(transcript, "delivered")[-1])["notify"] == ["w-2"]
         news = board.state.news(WaitSpec("x-1", "w-2", "w-2/top", True, None))
         assert news is not None and news.lines[0].startswith(
             "1 shared memory file changed where you waited (f-1 deleted; by w-1)."
@@ -457,7 +481,7 @@ async def test_an_append_is_news_to_peers(existing: bool) -> None:
             await board("w-1", "create", path=log, file_text="a")
             await board("w-2", "view", path=log)
         await board("w-1", "append", path=log, append_text="b")
-        assert evidence(transcript, "delivered")[-1]["notify"] == ["w-2"]
+        assert data(comm_events(transcript, "delivered")[-1])["notify"] == ["w-2"]
         label = "f-1" if existing else "f-1 new"
         assert await board("w-2", "changes") == (
             f"Shared memory: 1 file changed since you last viewed it ({label})."
@@ -514,15 +538,15 @@ async def test_concurrent_appends_by_members_with_stale_views_all_land_in_commit
             for name in members:
                 for n in range(2):
                     tg.start_soon(append, name, n)
-        sent = evidence(transcript, "sent")[2:]
-        assert [s["rejected"] for s in sent] == [None] * 6
-        payloads = {s["record"]["id"]: s["record"]["payload"] for s in sent}
+        sent = comm_events(transcript, "sent")[2:]
+        assert [send(s).rejected for s in sent] == [None] * 6
+        payloads = {s.record_ids[0]: cast(str, send(s).record.content) for s in sent}
         delivered = sorted(
-            evidence(transcript, "delivered")[2:], key=lambda d: d["seq"]
+            comm_events(transcript, "delivered")[2:], key=lambda d: delivery(d).seq or 0
         )
         assert board.files()[log].split("\n") == [
             "begin",
-            *(payloads[d["record"]] for d in delivered),
+            *(payloads[d.record_ids[0]] for d in delivered),
         ]
         assert sorted(payloads.values()) == [
             f"{m} {n}" for m in members for n in (0, 1)
@@ -800,7 +824,7 @@ async def test_a_file_id_views_the_file_and_a_tombstones_id_says_who_deleted_it(
         assert _fenced(ranged) == "     2\ttwo"
         await board("w-2", "delete", path=_p("a.md"))
         assert await board("w-1", "view", file_id="f-1") == "f-1 was deleted by w-2."
-        assert evidence(transcript, "read")[-1]["files"] == [
+        assert data(comm_events(transcript, "read")[-1])["files"] == [
             {
                 "file": "f-1",
                 "version": 2,
@@ -816,7 +840,7 @@ async def test_a_file_id_views_the_file_and_a_tombstones_id_says_who_deleted_it(
 async def test_an_ended_member_and_a_stopping_swarm(ended: bool) -> None:
     async with _board() as (board, transcript):
         await board("w-1", "create", path=_p("a.md"), file_text="x")
-        sent = len(evidence(transcript, "sent"))
+        sent = len(comm_events(transcript, "sent"))
         if ended:
             board.members["w-1"].state = "ended"
         else:
@@ -829,7 +853,7 @@ async def test_an_ended_member_and_a_stopping_swarm(ended: bool) -> None:
                 await board("w-1", "view", path=_p("a.md"))
         else:
             await board("w-1", "view", path=_p("a.md"))
-        assert len(evidence(transcript, "sent")) == sent
+        assert len(comm_events(transcript, "sent")) == sent
         assert board.files() == {_p("a.md"): "x"}
 
 
@@ -845,9 +869,12 @@ async def test_parallel_calls_from_one_loop_see_each_others_results() -> None:
             tg.start_soon(edit, "one", "1")
             tg.start_soon(edit, "two", "2")
         assert board.files() == {_p("a.md"): "1\n2"}
-        delivered = evidence(transcript, "delivered")
-        assert [d["seq"] for d in delivered] == [1, 2, 3]
-        assert sorted(d["result"]["files"][0]["base"] for d in delivered[1:]) == [1, 2]
+        delivered = comm_events(transcript, "delivered")
+        assert [delivery(d).seq for d in delivered] == [1, 2, 3]
+        assert sorted(data(d)["result"]["files"][0]["base"] for d in delivered[1:]) == [
+            1,
+            2,
+        ]
 
 
 # Fencing
@@ -943,7 +970,7 @@ async def test_text_that_looks_like_a_fence_is_stored_as_typed(
         for command, args in steps:
             await board("w-1", command, path=_p("a.md"), **args)
         assert board.files() == {_p("a.md"): content}
-        assert len(evidence(transcript, "delivered")) == len(steps)
+        assert len(comm_events(transcript, "delivered")) == len(steps)
 
 
 # Views of the largest file and of a full board's listing, which the channel never cuts.
@@ -1101,9 +1128,10 @@ async def test_storm_controls(
         command, path, text = refused
         with pytest.raises(ToolError, match=re.escape(reason)):
             await board("w-1", command, path=_p(path), **{text_arg[command]: text})
-        rejected = evidence(transcript, "sent")[-1]["rejected"]
-        assert rejected["control"] == ("rate" if "rate" in config else "admit")
-        assert rejected["reason"].startswith(reason)
+        rejected = send(comm_events(transcript, "sent")[-1]).rejected
+        assert rejected is not None
+        assert rejected.control == ("rate" if "rate" in config else "admit")
+        assert rejected.reason.startswith(reason)
         assert board.files() == before
 
 
@@ -1148,9 +1176,11 @@ async def test_every_write_is_a_record_and_replaying_them_in_commit_order_rebuil
         await board("w-1", "view", path=_p("d/a.md"))
         await board("w-1", "rename", old_path=_p("d"), new_path=_p("e"))
         await board("w-1", "delete", path=_p("e/b.md"))
-        sent = evidence(transcript, "sent")
-        delivered = evidence(transcript, "delivered")
-        assert [(s["record"]["kind"], s["record"]["op"]["files"]) for s in sent] == [
+        sent = comm_events(transcript, "sent")
+        delivered = comm_events(transcript, "delivered")
+        assert [
+            (send(s).record.kind, data(s)["record"]["op"]["files"]) for s in sent
+        ] == [
             (
                 "create",
                 [{"file": "f-1", "path": _p("d/a.md"), "base": None, "version": 1}],
@@ -1204,12 +1234,16 @@ async def test_every_write_is_a_record_and_replaying_them_in_commit_order_rebuil
             ),
         ]
         for s in sent:
-            assert s["record"]["to"] == [] and s["record"]["recipients"] == []
-            assert s["record"]["sender_span_id"] == f"{s['member']}/top" == s["loop"]
-            assert s["record"]["tool_span_id"] is not None
-        assert [d["seq"] for d in delivered] == list(range(1, 8))
-        assert [d["result"]["files"] for d in delivered] == [
-            s["record"]["op"]["files"] for s in sent
+            assert send(s).record.to == [] and send(s).record.recipients == []
+            assert (
+                data(s)["record"]["sender_span_id"]
+                == f"{s.agent}/top"
+                == s.loop_span_id
+            )
+            assert data(s)["record"]["tool_span_id"] is not None
+        assert [delivery(d).seq for d in delivered] == list(range(1, 8))
+        assert [data(d)["result"]["files"] for d in delivered] == [
+            data(s)["record"]["op"]["files"] for s in sent
         ]
 
         # the board again from the records, in `seq` order
@@ -1218,20 +1252,23 @@ async def test_every_write_is_a_record_and_replaying_them_in_commit_order_rebuil
 
 
 def _replay(
-    sent: list[dict[str, Any]], delivered: list[dict[str, Any]]
+    sent: list[CommunicationEvent], delivered: list[CommunicationEvent]
 ) -> dict[str, str]:
-    records = {s["record"]["id"]: s["record"] for s in sent}
+    records = {send(s).record.id: s for s in sent}
     files: dict[str, tuple[str, str]] = {}
 
     def normalised(content: str) -> str:
         return content.replace("\r\n", "\n").replace("\r", "\n")
 
-    for d in sorted(delivered, key=lambda d: d["seq"]):
-        record = records[d["record"]]
-        op, payload = record["op"], record["payload"]
-        for entry in d["result"]["files"]:
+    for d in sorted(delivered, key=lambda d: delivery(d).seq or 0):
+        [record_id] = d.record_ids
+        event = records[record_id]
+        record = send(event).record
+        op, payload = data(event)["record"]["op"], record.content
+        assert payload is not None
+        for entry in data(d)["result"]["files"]:
             file = entry["file"]
-            match record["kind"]:
+            match record.kind:
                 case "create":
                     files[file] = (entry["path"], normalised(payload))
                 case "append" if entry["base"] is None:
@@ -1270,7 +1307,7 @@ async def test_each_view_writes_one_read_and_nothing_else_does() -> None:
         await board("w-1", "create", path=_p("b/c.md"), file_text="c")
         with pytest.raises(ToolError):
             await board("w-2", "view", path=_p("missing"))
-        assert evidence(transcript, "read") == []
+        assert comm_events(transcript, "read") == []
 
         async def view(loop: str, **args: Any) -> None:
             await board("w-2", "view", loop, **args)
@@ -1278,9 +1315,11 @@ async def test_each_view_writes_one_read_and_nothing_else_does() -> None:
         async with anyio.create_task_group() as tg:
             tg.start_soon(lambda: view("top", path=_p("a.md"), view_range=[2, 3]))
             tg.start_soon(lambda: view("child", path=ROOT))
-        reads = sorted(evidence(transcript, "read"), key=lambda r: r["loop"])
+        reads = sorted(
+            comm_events(transcript, "read"), key=lambda r: r.loop_span_id or ""
+        )
         assert [
-            (r["member"], r["loop"], r["nested"], r["listing"], r["files"])
+            (r.agent, r.loop_span_id, r.nested, data(r)["listing"], data(r)["files"])
             for r in reads
         ] == [
             (
@@ -1321,8 +1360,43 @@ async def test_each_view_writes_one_read_and_nothing_else_does() -> None:
                 ],
             ),
         ]
-        assert sorted(r["read"] for r in reads) == ["r-1", "r-2"]
-        assert all(r["tool_span_id"] is not None for r in reads)
+        assert [r.record_ids for r in reads] == [["w-1", "w-2"], ["w-1"]]
+        assert sorted(data(r)["read"] for r in reads) == ["r-1", "r-2"]
+        assert all(data(r)["tool_span_id"] is not None for r in reads)
+
+
+@pytest.mark.anyio
+async def test_a_read_names_the_last_write_of_each_file_at_the_version_read() -> None:
+    # whether the read listed the file, showed part or all of it, or its tombstone
+    async with _board() as (board, transcript):
+        await board("w-1", "create", path=_p("a.md"), file_text="1\n2\n3")
+        await board("w-1", "create", path=_p("b.md"), file_text="b")
+        await board("w-2", "append", path=_p("a.md"), append_text="4")
+        await board("w-2", "view", path=ROOT)
+        await board("w-1", "view", path=_p("a.md"), view_range=[2, 3])
+        await board("w-1", "view", path=_p("a.md"))
+        await board("w-1", "delete", path=_p("b.md"))
+        await board("w-2", "view", file_id="f-2")
+        assert [
+            (
+                r.record_ids,
+                data(r)["listing"],
+                [
+                    (f["file"], f["version"], f["record"], f["lines"], f["deleted"])
+                    for f in data(r)["files"]
+                ],
+            )
+            for r in comm_events(transcript, "read")
+        ] == [
+            (
+                ["w-3", "w-2"],
+                True,
+                [("f-1", 2, "w-3", None, False), ("f-2", 1, "w-2", None, False)],
+            ),
+            (["w-3"], False, [("f-1", 2, "w-3", "2-3", False)]),
+            (["w-3"], False, [("f-1", 2, "w-3", None, False)]),
+            (["w-4"], False, [("f-2", 2, "w-4", None, True)]),
+        ]
 
 
 # The status line
@@ -1393,4 +1467,4 @@ async def test_changes_gives_the_status_line_alone_and_marks_nothing_seen() -> N
         assert await board("w-2", "changes") == (
             "Shared memory: no files changed since you last viewed them."
         )
-        assert len(evidence(transcript, "read")) == 2
+        assert len(comm_events(transcript, "read")) == 2

@@ -6,7 +6,7 @@ from inspect_ai.scorer._score import _scorers  # pyright: ignore[reportPrivateUs
 from inspect_ai.scorer._scorer import unique_scorer_name
 from pydantic import BaseModel
 
-from ._critical_path import critical_steps_to_answer
+from ._critical_path import critical_steps_to_answer, steps_before_answer
 from ._ledger import (
     Calls,
     EventLog,
@@ -47,7 +47,8 @@ class MemberMetrics(BaseModel):
     running_time: float | None
     # harness validity: the longest run of consecutive tool calls in the member's spans
     # with the same function and arguments. A signal, with no threshold. None for a
-    # bridged member, whose tool calls leave no tool events.
+    # bridged member: the CLI's own tool calls are not recorded, only its bridged host
+    # tool calls.
     longest_identical_tool_run: int | None
     # gate checks (`GateChecks`): the in-loop checks of the member's own submissions,
     # those that passed, and the swarm time of the first that passed. Passes assume
@@ -72,9 +73,21 @@ class MemberMetrics(BaseModel):
     waits_by_outcome: dict[str, int] | None = None
     wait_time: float | None = None
     idle_time: float | None = None
+    # the turn seam: the boundaries at which its callbacks ran, and the seconds it was
+    # held there, which `running_time` includes. The defaults load metrics written
+    # before these fields.
+    holds: int = 0
+    held_time: float = 0.0
+    # a persistent member's activations begun (1 at its start, one more per wake), its
+    # answers, and the part of `held_time` it spent idle, from each admitted hold after
+    # an answer to its wake or its end; 0 for other members. The defaults load metrics
+    # written before these fields.
+    activations: int = 0
+    answers: int = 0
+    awaiting_work_time: float = 0.0
 
 
-# The swarm's metrics for one run, written once, when the swarm ends, as an InfoEvent
+# The swarm's metrics for one run, written once, when the swarm ends, as a SwarmEvent
 # and a store entry. Tokens and cost are the ledger's; its claims say whether they
 # are complete.
 class SwarmMetrics(BaseModel):
@@ -90,25 +103,31 @@ class SwarmMetrics(BaseModel):
     # order
     never_acted: list[str]
     # harness validity, in roster order: in a swarm with channels that have tools,
-    # members with a completed model call whose loops never resolved swarm_tools().
-    # The default loads metrics written before this field.
+    # native members with a completed model call whose loops never resolved
+    # swarm_tools(); a bridged member reaches the bus through swarm_bridged_tools(),
+    # fixed when its agent is built, so it is not checked. The default loads metrics
+    # written before this field.
     tools_unwired: list[str] = []
     # critical path, the simple definition: a member's steps are the completed model
     # calls in its spans, cache replays included, from its ledger line, so they cover
     # everything it did through its end. Calls a member makes concurrently (parallel
     # subagent tool calls) count one each, so both numbers bound each member's own
     # sequential depth from above, not the swarm's: neither sees members' dependencies.
-    # the selected member's steps; None when there is no answer
+    # the selected member's steps; for a persistent member's answer, its steps before
+    # that answer's `answer` event. None when there is no answer, and for a persistent
+    # member's answer in a resumed sample, which records no positions
     steps_to_answer: int | None
     # the largest step count of any member
     longest_member_steps: int
     # critical path, the dependency-linked definition: the longest chain of steps
     # (completed model calls, cache replays included) ending at the answering member's
-    # end, linked across members where a read or a swarm_wait result showed a write of
-    # the built-in board, or a wait named a member's end. Not a bound on causal depth
-    # either way; see docs/analysis.qmd, "The critical path". None with no answer, when
-    # the answering member has no recorded end, when the evidence is inconsistent (with
-    # a warning), for a resumed sample, and in metrics written before this field.
+    # end (for a persistent member's answer, that answer's `answer` event), linked
+    # across members where a channel's result showed another member's
+    # commit, as the channel reports it, or a wait named a member's end. Not a bound on
+    # causal depth either way; see docs/analysis.qmd, "The critical path". None with no
+    # answer, when the answering member has no recorded end, when the evidence names a
+    # record no recorded commit made (with a warning), for a resumed sample, and in
+    # metrics written before this field.
     critical_steps_to_answer: int | None = None
 
 
@@ -120,6 +139,13 @@ class MemberTimes:
     started: float | None
     # None for a member that has not ended, as when its task was cancelled before it ran
     ended: float | None
+    # the boundaries at which its callbacks ran, and the seconds it was held there
+    holds: int = 0
+    held_time: float = 0.0
+    # a persistent member's activations, answers and idle seconds
+    activations: int = 0
+    answers: int = 0
+    awaiting_work_time: float = 0.0
 
 
 # How a member was wired to the swarm's channels, as the runtime saw it.
@@ -185,6 +211,7 @@ def swarm_metrics(
     waits_offered: bool,
     wall_clock: float,
     answer: str | None,
+    answer_index: int | None = None,
 ) -> SwarmMetrics:
     tool_calls: dict[str, list[tuple[str, str]]] = {m.name: [] for m in ledger.members}
     for tool in events.tools.values():
@@ -220,6 +247,11 @@ def swarm_metrics(
                 waits_by_outcome=None if wait is None else wait.by_outcome,
                 wait_time=None if wait is None else wait.time,
                 idle_time=None if wait is None else wait.idle,
+                holds=member_times.holds,
+                held_time=member_times.held_time,
+                activations=member_times.activations,
+                answers=member_times.answers,
+                awaiting_work_time=member_times.awaiting_work_time,
             )
         )
     return SwarmMetrics(
@@ -232,18 +264,44 @@ def swarm_metrics(
         tools_unwired=[
             m.name
             for m, w in zip(ledger.members, wiring, strict=True)
-            if channels and not w.tools and _steps(m) >= 1
+            if channels and not w.tools and not m.bridged and _steps(m) >= 1
         ],
-        steps_to_answer=None
-        if answer is None
-        else next(_steps(m) for m in ledger.members if m.name == answer),
+        steps_to_answer=_steps_to_answer(ledger, events, places, answer, answer_index),
         longest_member_steps=max(_steps(m) for m in ledger.members),
         # a resumed sample records no path
         critical_steps_to_answer=None
         if events.path is None
         else critical_steps_to_answer(
-            events.path, lambda uuid: _completed(events, uuid), places, answer
+            events.path,
+            lambda uuid: _completed(events, uuid),
+            places,
+            answer,
+            answer_index,
         ),
+    )
+
+
+# The answering member's steps: all of them, or for a persistent member's answer those
+# before it.
+def _steps_to_answer(
+    ledger: SwarmLedger,
+    events: EventLog,
+    places: SpanPlaces,
+    answer: str | None,
+    answer_index: int | None,
+) -> int | None:
+    if answer is None:
+        return None
+    if answer_index is None:
+        return next(_steps(m) for m in ledger.members if m.name == answer)
+    if events.path is None:
+        return None
+    return steps_before_answer(
+        events.path,
+        lambda uuid: _completed(events, uuid),
+        places,
+        answer,
+        answer_index,
     )
 
 

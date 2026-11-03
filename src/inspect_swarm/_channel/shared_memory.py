@@ -4,19 +4,19 @@ from dataclasses import dataclass
 from typing import Literal, cast
 
 from inspect_ai.tool import Tool, ToolDef, ToolError
-from inspect_ai.util._span import current_agent_span_id, current_span_id
+from inspect_ai.util._span import current_agent_span_id
 from pydantic import JsonValue
 
 from .._bus._address import MEMBER_NAME
 from .._bus._record import Draft, FrozenJson, Record, thaw_json
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
-from .._evidence import comm_read
 from .._fence import fence, utf8_bytes, with_lines
 from ._channel import (
     Channel,
     ChannelRun,
     ChannelState,
+    ToolDeclaration,
     WaitNews,
     WaitSpec,
     swarm_channel,
@@ -68,6 +68,53 @@ _DESCRIPTION = (
     "Every result ends with the files other agents changed since you last viewed them, by ids such as f-3, which view takes as its file_id. "
     "The changes command returns that list alone: use it to check what other agents changed without viewing anything."
 )
+
+
+# the tool's signature, reflected once for its parameters, which each run's tool and a
+# bridged member's take
+async def _shared_memory(
+    command: Command,
+    path: str | None = None,
+    file_text: str | None = None,
+    old_str: str | None = None,
+    new_str: str | None = None,
+    insert_line: int | None = None,
+    insert_text: str | None = None,
+    view_range: list[int] | None = None,
+    old_path: str | None = None,
+    new_path: str | None = None,
+    append_text: str | None = None,
+    file_id: str | None = None,
+) -> str:
+    """Shared memory.
+
+    Args:
+        command: Command to execute (view, create, str_replace, insert, append, delete, rename, changes).
+        path: Required for `create`, `str_replace`, `insert`, `append` and `delete`, and for `view` without `file_id`. Path to a file or directory under /shared_memory, e.g. `/shared_memory/notes.md` or `/shared_memory/notes`.
+        file_text: Required for `create`: the content of the file. It replaces the file if it exists.
+        old_str: Required for `str_replace`: the text in `path` to replace, which must occur there exactly once.
+        new_str: Optional for `str_replace`: the new text (if not given, `old_str` is deleted).
+        insert_line: Required for `insert`: `insert_text` is inserted AFTER line `insert_line` of `path`; 0 inserts at the start.
+        insert_text: Required for `insert`: the text to insert.
+        view_range: Optional for `view` of a file: the lines to show, e.g. [11, 12] shows lines 11 and 12. Indexing starts at 1. `[start_line, -1]` shows from `start_line` to the end of the file.
+        old_path: Required for `rename`: the current path of a file or directory.
+        new_path: Required for `rename`: the new path, which must not exist.
+        append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
+        file_id: Optional for `view`, in place of `path`: the id of a file, such as `f-3`, as status lines name files.
+    """
+    ...
+
+
+_PARAMETERS = ToolDef(_shared_memory, description=_DESCRIPTION).parameters
+
+
+# the tool as each run builds it, for a bridged member's tools
+def declarations() -> list[ToolDeclaration]:
+    return [
+        ToolDeclaration(
+            "shared_memory", _DESCRIPTION, _PARAMETERS.model_copy(deep=True)
+        )
+    ]
 
 
 @dataclass(frozen=True)
@@ -162,10 +209,11 @@ class _BoardFile:
     record: str
     # the agent span of the loop that wrote this version
     loop: str | None
-    # the latest version written by another loop than `loop`, and its writer: what
-    # `loop` may not have seen when its own last write was a blind append
+    # the latest version written by another loop than `loop`, its writer and its
+    # record: what `loop` may not have seen when its own last write was a blind append
     peer_version: int = 0
     peer_writer: str | None = None
+    peer_record: str | None = None
 
     @property
     def deleted(self) -> bool:
@@ -251,6 +299,8 @@ class _SharedMemoryState:
         self._roster = [info.name for info in run.roster]
         # by id, tombstones included, in the order the files were created
         self._files: dict[str, _BoardFile] = {}
+        # file id -> the record of each of its versions, in order, tombstones included
+        self._history: dict[str, list[str]] = {}
         # live paths
         self._paths: dict[str, str] = {}
         self._bytes = 0
@@ -333,8 +383,8 @@ class _SharedMemoryState:
             path = change.path if change.path is not None else change.old_path
             assert path is not None
             old = self._files.get(change.file)
-            peer_version, peer_writer = (
-                (0, None) if old is None else _by_others(old, loop)
+            peer_version, peer_writer, peer_record = (
+                (0, None, None) if old is None else _by_others(old, loop)
             )
             self._files[change.file] = _BoardFile(
                 id=change.file,
@@ -346,7 +396,9 @@ class _SharedMemoryState:
                 loop=loop,
                 peer_version=peer_version,
                 peer_writer=peer_writer,
+                peer_record=peer_record,
             )
+            self._history.setdefault(change.file, []).append(record.id)
             if change.content is not None:
                 self._paths[path] = change.file
                 self._bytes += utf8_bytes(change.content)
@@ -409,6 +461,9 @@ class _SharedMemoryState:
                 {"file": f.id, "version": f.version, "deleted": f.deleted}
                 for f in files[:_LISTED_IDS]
             ],
+            # the line counts every file and names every writer: for each, the write
+            # it reports
+            depends_on=[cast(str, _by_others(f, spec.loop)[2]) for f in files],
         )
 
     def _reportable(self, spec: WaitSpec, f: _BoardFile) -> bool:
@@ -432,22 +487,6 @@ class _SharedMemoryState:
             append_text: str | None = None,
             file_id: str | None = None,
         ) -> str:
-            """Shared memory.
-
-            Args:
-                command: Command to execute (view, create, str_replace, insert, append, delete, rename, changes).
-                path: Required for `create`, `str_replace`, `insert`, `append` and `delete`, and for `view` without `file_id`. Path to a file or directory under /shared_memory, e.g. `/shared_memory/notes.md` or `/shared_memory/notes`.
-                file_text: Required for `create`: the content of the file. It replaces the file if it exists.
-                old_str: Required for `str_replace`: the text in `path` to replace, which must occur there exactly once.
-                new_str: Optional for `str_replace`: the new text (if not given, `old_str` is deleted).
-                insert_line: Required for `insert`: `insert_text` is inserted AFTER line `insert_line` of `path`; 0 inserts at the start.
-                insert_text: Required for `insert`: the text to insert.
-                view_range: Optional for `view` of a file: the lines to show, e.g. [11, 12] shows lines 11 and 12. Indexing starts at 1. `[start_line, -1]` shows from `start_line` to the end of the file.
-                old_path: Required for `rename`: the current path of a file or directory.
-                new_path: Required for `rename`: the new path, which must not exist.
-                append_text: Required for `append`: the text to add on a new line at the end of `path`, which is created if it does not exist.
-                file_id: Optional for `view`, in place of `path`: the id of a file, such as `f-3`, as status lines name files.
-            """
             return await self._call(
                 command,
                 path=path,
@@ -467,6 +506,7 @@ class _SharedMemoryState:
             execute,
             name="shared_memory",
             description=_DESCRIPTION,
+            parameters=_PARAMETERS.model_copy(deep=True),
             parallel=True,
         ).as_tool()
 
@@ -505,9 +545,7 @@ class _SharedMemoryState:
                 self._bus.status(context),
             )
         if command == "view":
-            result = self._view(
-                member, context.span_id, loop, own, path, file_id, view_range
-            )
+            result = self._view(loop, path, file_id, view_range)
         elif command in _WRITES and file_id is not None:
             raise ToolError(
                 f"{command} takes the file's path, not file_id; a view of the file shows its path."
@@ -812,10 +850,7 @@ class _SharedMemoryState:
 
     def _view(
         self,
-        member: str,
-        span_id: str | None,
         loop: str | None,
-        own: bool,
         path: str | None,
         file_id: str | None,
         view_range: list[int] | None,
@@ -834,10 +869,11 @@ class _SharedMemoryState:
                     raise ToolError(
                         f"The path {path} does not exist. Please provide a valid path."
                     )
-                return self._list(member, span_id, loop, own, path)
+                return self._list(path)
         if f.deleted:
             self._seen.setdefault(loop, {})[f.id] = f.version
-            self._read(member, span_id, loop, own, [_shown(f, None)], listing=False)
+            # a tombstone shows the delete
+            self._read([f], [f.record])
             return f"{f.id} was deleted by {f.writer}."
         content = f.content
         assert content is not None
@@ -854,22 +890,15 @@ class _SharedMemoryState:
         ]
         line_range = f"{start}-{end}" if view_range else None
         self._seen.setdefault(loop, {})[f.id] = f.version
-        self._read(member, span_id, loop, own, [_shown(f, line_range)], listing=False)
+        # the content is the sum of every write in the file's history
+        self._read([f], self._history[f.id], lines=line_range)
         return fence("peer_file", attributes, _numbered(shown, start))
 
-    def _list(
-        self,
-        member: str,
-        span_id: str | None,
-        loop: str | None,
-        own: bool,
-        path: str,
-    ) -> str:
+    def _list(self, path: str) -> str:
         # every file under the directory, at any depth; a listing marks nothing seen
+        # and shows no content
         files = self._under(path)
-        self._read(
-            member, span_id, loop, own, [_shown(f, None) for f in files], listing=True
-        )
+        self._read(files, [], listing=True)
         if not files:
             return f"{ROOT} has no files."
         widths = (
@@ -884,23 +913,18 @@ class _SharedMemoryState:
 
     def _read(
         self,
-        member: str,
-        span_id: str | None,
-        loop: str | None,
-        own: bool,
-        files: list[JsonValue],
-        listing: bool,
+        files: Sequence[_BoardFile],
+        depends_on: list[str],
+        listing: bool = False,
+        lines: str | None = None,
     ) -> None:
-        comm_read(
-            span_id,
-            member,
+        # the result concerns each shown file's last write
+        self._bus.read(
             CHANNEL,
-            self._bus.read_id(),
-            loop,
-            not own,
-            current_span_id(),
-            files,
-            listing,
+            list(dict.fromkeys(f.record for f in files)),
+            depends_on=depends_on,
+            files=[_shown(f, lines) for f in files],
+            listing=listing,
         )
 
     # news: what changed since a loop last viewed it
@@ -951,11 +975,17 @@ def builtin_board(states: Mapping[str, ChannelState]) -> str | None:
     )
 
 
-def _by_others(f: _BoardFile, loop: str | None) -> tuple[int, str | None]:
-    # the latest version of a file written by another loop than `loop`, and its writer
+# Whether a channel is the built-in board, which swarm_bridged_tools() serves.
+def is_builtin_board(channel: Channel) -> bool:
+    return type(channel) is _SharedMemory
+
+
+def _by_others(f: _BoardFile, loop: str | None) -> tuple[int, str | None, str | None]:
+    # the latest version of a file written by another loop than `loop`, its writer and
+    # its record
     if f.loop != loop:
-        return f.version, f.writer
-    return f.peer_version, f.peer_writer
+        return f.version, f.writer, f.record
+    return f.peer_version, f.peer_writer, f.peer_record
 
 
 def _writers(files: Sequence[_BoardFile], loop: str | None) -> str:

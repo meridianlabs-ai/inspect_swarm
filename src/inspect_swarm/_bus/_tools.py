@@ -17,6 +17,10 @@ class _SwarmTools(ToolSource):
         loop = current_agent_channel()
         # no await from here to the binding, so two loops resolving at once cannot both
         # bind; the member's own loop resolves its tools before it can start a subagent
+        if context.bridge_used:
+            raise RuntimeError(
+                f"swarm_tools() was resolved in {context.name}, which has used swarm_bridged_tools(). A member uses one or the other: a bridged member's CLI is its own loop, and a second one would read its inbox too."
+            )
         if context.loop is None:
             context.loop = loop
             context.acp_bound = _acp_bound(loop)

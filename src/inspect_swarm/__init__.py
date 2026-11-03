@@ -4,6 +4,7 @@ Everything in this package is experimental and may change in any release without
 """
 
 from ._budget import Budget, BudgetUsage, SwarmBudget, swarm_budget
+from ._bus._bridged import swarm_bridged_tools
 from ._bus._record import Record
 from ._bus._tools import swarm_tools
 from ._channel._channel import (
@@ -19,11 +20,12 @@ from ._channel.filesystem import filesystem
 from ._channel.messages import messages
 from ._channel.shared_memory import shared_memory
 from ._controller._control import (
+    ControlEvent,
     MemberEnded,
     MemberHandle,
+    MemberIdle,
     MemberState,
     SwarmControl,
-    SwarmEvent,
 )
 from ._controller._controller import (
     Controller,
@@ -35,6 +37,7 @@ from ._controller.leaderless import leaderless
 from ._final import FinalName
 from ._member import Member, member
 from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
+from ._seam import Boundary, BoundaryCallback
 from ._swarm import swarm
 from ._tools import swarm_resources
 
@@ -45,17 +48,21 @@ except ImportError:
 
 
 __all__ = [
+    "Boundary",
+    "BoundaryCallback",
     "Budget",
     "BudgetUsage",
     "Channel",
     "ChannelRun",
     "ChannelState",
+    "ControlEvent",
     "Controller",
     "FinalName",
     "FinalRecord",
     "Member",
     "MemberEnded",
     "MemberHandle",
+    "MemberIdle",
     "MemberInfo",
     "MemberResult",
     "MemberState",
@@ -63,7 +70,6 @@ __all__ = [
     "StopReason",
     "SwarmBudget",
     "SwarmControl",
-    "SwarmEvent",
     "SwarmResultRecord",
     "WaitNews",
     "WaitSpec",
@@ -75,6 +81,7 @@ __all__ = [
     "messages",
     "shared_memory",
     "swarm",
+    "swarm_bridged_tools",
     "swarm_budget",
     "swarm_channel",
     "swarm_controller",

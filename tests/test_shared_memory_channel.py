@@ -10,7 +10,7 @@ from inspect_ai._eval.task.log import plan_to_eval_plan
 from inspect_ai._util.registry import create_registry_object
 from inspect_ai.agent import Agent, as_solver, deepagent, general, react
 from inspect_ai.dataset import Sample
-from inspect_ai.event import InfoEvent, SpanBeginEvent, ToolEvent
+from inspect_ai.event import CommunicationEvent, SpanBeginEvent, ToolEvent
 from inspect_ai.log import EvalLog, EvalSample
 from inspect_ai.model import (
     ChatMessage,
@@ -37,6 +37,8 @@ from inspect_swarm._channel.shared_memory import (
     _SharedMemory,  # pyright: ignore[reportPrivateUsage]
 )
 from inspect_swarm._registry import resolve
+
+from .swarm_runtime import data, delivery, send
 
 DEFAULTS = {
     "max_files": 10_000,
@@ -174,11 +176,6 @@ def test_member_names_outside_the_grammar_are_refused(name: str) -> None:
         swarm(member(react(), name=name), channels=["shared_memory"])
 
 
-def test_a_bridged_member_is_refused() -> None:
-    with pytest.raises(ValueError, match="bridged members cannot use bus channels"):
-        swarm(member(react(), bridged=True), channels=["shared_memory"])
-
-
 @pytest.mark.parametrize(
     "members,channels",
     [
@@ -249,15 +246,15 @@ async def _eval(task: Task, tmp_path: Path, **config: Any) -> EvalLog:
     return log
 
 
-def _comm(sample: EvalSample, kind: str) -> list[dict[str, Any]]:
+def _comm(sample: EvalSample, kind: str) -> list[CommunicationEvent]:
     return [
-        e.data
-        for e in sample.events
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("type") == "comm"
-        and e.data.get("kind") == kind
+        e for e in sample.events if isinstance(e, CommunicationEvent) and e.kind == kind
     ]
+
+
+def _loop(event: CommunicationEvent) -> str:
+    assert event.loop_span_id is not None
+    return event.loop_span_id
 
 
 def _results(sample: EvalSample) -> list[str]:
@@ -333,22 +330,27 @@ async def test_a_subagent_reads_and_writes_the_board_as_its_member(
     spans = {e.id: e.name for e in sample.events if isinstance(e, SpanBeginEvent)}
 
     sent = _comm(sample, "sent")
-    assert [(s["member"], s["record"]["kind"], s["nested"]) for s in sent] == [
+    assert [(s.agent, send(s).record.kind, s.nested) for s in sent] == [
         ("p", "create", False),
         ("w", "create", False),
         ("w", "create", True),
         ("w", "delete", True),
     ]
-    assert spans[sent[2]["loop"]] == spans[sent[3]["loop"]] == "general"
-    assert sent[1]["loop"] != sent[2]["loop"]
+    assert spans[_loop(sent[2])] == spans[_loop(sent[3])] == "general"
+    assert sent[1].loop_span_id != sent[2].loop_span_id
     # the member's own writes are not news to it; its subagent's are
-    assert [d["notify"] for d in _comm(sample, "delivered")] == [[], [], ["w"], ["w"]]
+    assert [data(d)["notify"] for d in _comm(sample, "delivered")] == [
+        [],
+        [],
+        ["w"],
+        ["w"],
+    ]
 
     reads = _comm(sample, "read")
-    assert [(r["member"], r["nested"], spans[r["loop"]]) for r in reads] == [
+    assert [(r.agent, r.nested, spans[_loop(r)]) for r in reads] == [
         ("w", True, "general"),
         ("w", True, "general"),
-        ("w", False, spans[sent[1]["loop"]]),
+        ("w", False, spans[_loop(sent[1])]),
     ]
 
     results = _results(sample)
@@ -389,11 +391,11 @@ async def test_one_swarm_object_keeps_concurrent_samples_boards_apart(
     for sample in log.samples:
         [delivered] = _comm(sample, "delivered")
         assert (
-            delivered["record"],
-            delivered["seq"],
-            delivered["result"]["files"],
+            delivered.record_ids,
+            delivery(delivered).seq,
+            data(delivered)["result"]["files"],
         ) == (
-            "w-1",
+            ["w-1"],
             1,
             [
                 {
@@ -404,7 +406,7 @@ async def test_one_swarm_object_keeps_concurrent_samples_boards_apart(
                 }
             ],
         )
-        assert [r["read"] for r in _comm(sample, "read")] == ["r-1"]
+        assert [data(r)["read"] for r in _comm(sample, "read")] == ["r-1"]
 
 
 @pytest.mark.anyio

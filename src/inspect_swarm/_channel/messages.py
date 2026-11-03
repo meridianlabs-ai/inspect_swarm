@@ -1,19 +1,18 @@
 from collections.abc import Mapping, Sequence
 
 from inspect_ai.tool import Tool, ToolDef, ToolError, ToolParams
-from inspect_ai.util._span import current_agent_span_id, current_span_id
 from pydantic import JsonValue
 
 from .._bus._address import MEMBER_NAME, RESERVED
 from .._bus._record import Draft, Record
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
-from .._evidence import comm_read
 from .._fence import fence, utf8_bytes, with_lines
 from ._channel import (
     Channel,
     ChannelRun,
     ChannelState,
+    ToolDeclaration,
     WaitNews,
     WaitSpec,
     swarm_channel,
@@ -71,6 +70,15 @@ async def _send_message(
 _SEND_PARAMETERS = ToolDef(_send_message, description=_SEND).parameters
 
 
+# the tools as each run builds them, for a bridged member's tools
+def declarations() -> list[ToolDeclaration]:
+    return [
+        ToolDeclaration("send_message", _SEND, _SEND_PARAMETERS.model_copy(deep=True)),
+        ToolDeclaration("read_messages", _READ, ToolParams(), max_output=0),
+        ToolDeclaration("list_members", _LIST, ToolParams()),
+    ]
+
+
 class _Messages(Channel):
     name = CHANNEL
     prefix = "m"
@@ -125,7 +133,7 @@ def messages(
 
     The member's own loop also gets `swarm_wait`, which returns while it has unread messages sent with `wake=True` (the default), and otherwise blocks as `shared_memory()`'s does, up to `max_wait` seconds. A wait is wall-clock time inside a tool call: it counts towards the member's time limit, the swarm's time cap, and the sample's time and working limits.
 
-    The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`, other than `all` and `swarm`. Bridged members cannot use it yet.
+    The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`, other than `all` and `swarm`. Bridged members get its tools from `swarm_bridged_tools()`; all of a bridged member's conversations share its inbox.
 
     Args:
         max_bytes: The most UTF-8 bytes in one message, at least 1.
@@ -254,6 +262,8 @@ class MessagesState:
                 f"{_count(len(unread))} (from {senders}). Call read_messages() to read them."
             ],
             files=[{"record": r.id, "from": r.sender} for r in unread],
+            # the line counts every unread message and names every sender
+            depends_on=[r.id for r in unread],
         )
 
     # the tools
@@ -363,20 +373,7 @@ class MessagesState:
         read = unread[: len(shown)]
         del unread[: len(shown)]
         self._known[name].update(r.id for r in read)
-        context = self._bus.member()
-        assert context is not None
-        comm_read(
-            context.span_id,
-            name,
-            CHANNEL,
-            self._bus.read_id(),
-            current_agent_span_id(),
-            False,
-            current_span_id(),
-            None,
-            False,
-            records=[r.id for r in read],
-        )
+        self._bus.read(CHANNEL, [r.id for r in read])
         text = _header(len(read)) + "\n\n" + "\n".join(shown)
         if unread:
             text += "\n" + _trailer(len(unread))
@@ -395,6 +392,11 @@ def builtin_messages(states: Mapping[str, ChannelState]) -> str | None:
     return next(
         (name for name, s in states.items() if isinstance(s, MessagesState)), None
     )
+
+
+# Whether a channel is the built-in messages channel, which swarm_bridged_tools() serves.
+def is_builtin_messages(channel: Channel) -> bool:
+    return type(channel) is _Messages
 
 
 def _fenced(record: Record) -> str:

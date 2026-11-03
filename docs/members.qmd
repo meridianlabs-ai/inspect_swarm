@@ -101,6 +101,8 @@ The swarm does not change text you give the member yourself: the sample input, a
 
 `limits` takes token, cost, turn, message and time limits for that member alone. Working limits are refused. A member that reaches one ends with status `member_limit:<type>`, and the others continue. The swarm's own caps are set with `budget=` ([Budgets](budget.qmd)).
 
+A member time limit does not run while the member is held at a turn boundary by a controller's callbacks ([Controllers](controllers.qmd#boundary-callbacks)): it counts only the time the member was not held. A member whose time limit ran out before it reached the boundary ends `member_limit:time` there, without being held.
+
 ## Member builders
 
 A member builder is a function registered with `@agent` that builds the member's agent. Pass it to `member()` without calling it, with its arguments in `args`:
@@ -126,7 +128,7 @@ A builder is also the place for anything each member must have its own of. Every
 
 ## Tool state
 
-Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member.
+Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member.
 
 An explicit `instance` is used as given: members that name the same instance share its state. A board shared on purpose was `memory(instance="board")` before the shared-memory channel; see [Shared Memory](shared-memory.qmd#migrating-from-memoryinstance) for moving to the channel.
 
@@ -147,9 +149,9 @@ A member's status says how it ended:
 
 | Status | Meaning |
 |---|---|
-| `submitted` | Its agent returned normally. Its output is its answer. |
-| `unsubmitted` | Its agent returned with a `content_filter` or `model_length` stop reason, as `react()` does after repeated refusals or a context overflow. |
-| `stopped` | The swarm stopped it, for example when another member submitted or the swarm's time cap was reached. |
+| `submitted` | Its agent returned normally. Its output is its answer. A [persistent member](#persistent-members) is never `submitted` by a normal return: it ends `submitted` when it is stopped or ended while idle, or at the turn boundary after an answer, with its last answer as its output. |
+| `unsubmitted` | Its agent returned with a `content_filter` or `model_length` stop reason, as `react()` does after repeated refusals or a context overflow. A persistent member also ends `unsubmitted` when its agent returns without an answer, for example when its `on_continue` returns `False` (a cut-off). |
+| `stopped` | The swarm stopped it, for example when another member submitted or the swarm's time cap was reached, or a controller ended it ([Controllers](controllers.qmd#boundary-callbacks)). A member that reaches a turn boundary of its agent loop after the stop began ends there. |
 | `share` | It used up its share of a split budget. |
 | `member_limit:<type>` | It reached one of its own `limits`. |
 | `member_limit:custom` | Its agent stopped itself by raising `LimitExceededError("custom", ...)` with no `source`, for example from `react(on_continue=...)`. The other members continue. |
@@ -157,7 +159,24 @@ A member's status says how it ended:
 | `cancelled` | It was cancelled, after the grace period of a stop or from outside the swarm. |
 | `errored` | It raised any other error. The error ends the sample. |
 
-A normal return counts as a submission for any agent other than `react()`'s two cases above. An agent that gives up in some other way and returns is treated as having answered. To make a normal return mean something stronger, such as a passed check, have the member's builder raise a custom limit when it is not so ([Controllers](controllers.qmd#stopping-on-the-first-proof)).
+For a member that is not persistent, a normal return counts as a submission for any agent other than `react()`'s two cases above. An agent that gives up in some other way and returns is treated as having answered. To make a normal return mean something stronger, such as a passed check, have the member's builder raise a custom limit when it is not so ([Controllers](controllers.qmd#stopping-on-the-first-proof)).
+
+## Persistent members
+
+A persistent member stays available after it answers, so a controller can give the same member several tasks with its context intact:
+
+```python
+member(worker(), name="worker", persistent=True)
+```
+
+When a persistent member submits, or a `react(submit=False)` member gives a reply with no tool calls, the swarm records that as one of its *answers* and holds the member *idle* at its next turn boundary. The agent loop does not return. The controller hears `MemberIdle` and gives the member its next task with `SwarmControl.wake()`, which appends the task to the member's conversation ([Controllers](controllers.qmd#persistent-members)). The member keeps its conversation, tool state and limits across these *activations*.
+
+- Its limits span its whole life. Its member time limit does not run while it is idle.
+- Every answer is a candidate for the swarm's answer: `first` and `last` choose across all of them, and `choose_answer()` takes the member's latest. An answer stays a candidate however the member ends later.
+- A submission in a turn that also calls a `handoff()` is not an answer. Nor is a refusal (`content_filter`) or a reply cut off by the context window.
+- A member stopped or ended while idle ends `submitted`. A member whose loop returns without an answer ends `unsubmitted`, its earlier answers still candidates.
+
+Only a member whose agent is a `react()`, `react(submit=False)` or `deepagent()` loop can persist, given directly or returned by a [member builder](#member-builders). The swarm refuses every other agent before it runs: a bridged member, a custom loop, `deepagent()` with background dispatch, and an agent that calls a loop and then checks its result (`checked_solver()` in the examples). In a swarm with `shared_memory()`, a persistent member must have `swarm_tools()` in its own tools, not only in a subagent's.
 
 ## A swarm of one
 
@@ -166,4 +185,4 @@ A normal return counts as a submission for any agent other than `react()`'s two 
 ## Agents the swarm refuses
 
 - ACP agents wait for their caller to drive them, so they are refused.
-- Bridged members, which run a CLI agent in the sandbox through Inspect's agent bridge, cannot use channels with tools yet. See [Restrictions](restrictions.qmd).
+- Bridged members, which run a CLI agent in the sandbox through Inspect's agent bridge, cannot be persistent or run beside a custom channel that has records. See [Restrictions](restrictions.qmd).

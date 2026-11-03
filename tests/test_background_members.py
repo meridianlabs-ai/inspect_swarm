@@ -11,10 +11,10 @@ from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariable
 from inspect_ai.agent import Agent, AgentState, agent, deepagent, general, run
 from inspect_ai.dataset import Sample
 from inspect_ai.event import (
-    InfoEvent,
     ModelEvent,
     SpanBeginEvent,
     SpanEndEvent,
+    SwarmEvent,
     ToolEvent,
 )
 from inspect_ai.log import EvalSample
@@ -40,6 +40,7 @@ from inspect_ai.util import (
 
 from inspect_swarm import (
     Budget,
+    MemberEnded,
     SwarmControl,
     leaderless,
     member,
@@ -57,8 +58,8 @@ from .swarm_runtime import (
     Outcome,
     Script,
     bridged_generate,
+    comm_events,
     controller,
-    evidence,
     generator,
     output,
     run_swarm,
@@ -66,6 +67,7 @@ from .swarm_runtime import (
     scripted_model,
     sleeper,
     statuses,
+    wait,
 )
 from .test_budget import _written_ledger
 from .test_member_sandboxes import _member_name, _name, environments
@@ -193,7 +195,11 @@ async def test_a_controller_sees_a_member_end_after_its_drain() -> None:
         control.start("prover")
         control.start("other")
         async for event in control.events():
-            if event.member == "prover" and event.submitted:
+            if (
+                isinstance(event, MemberEnded)
+                and event.member == "prover"
+                and event.submitted
+            ):
                 seen.append(list(log))
                 break
         return "verified"
@@ -925,9 +931,7 @@ async def test_a_deepagent_members_background_children_are_drained_before_it_end
     [ended] = [
         i
         for i, e in enumerate(events)
-        if isinstance(e, InfoEvent)
-        and isinstance(e.data, dict)
-        and e.data.get("kind") == "member_result"
+        if isinstance(e, SwarmEvent) and e.kind == "member_result"
     ]
     assert len(child_ends) == 3 and max(child_ends) < ended
     ledger = _sample_ledger(sample)
@@ -1027,10 +1031,10 @@ async def test_a_cap_reached_in_a_childs_tool_call_stops_the_swarm_while_the_par
     assert nested_event.error is not None and nested_event.error.type == "limit"
     [line] = ledger.members
     if released == "within_grace":
-        # each child was refused its next call and ended alone; the parent then met
-        # the cap
+        # each child was refused its next call and ended alone; the parent then
+        # ended at its next turn boundary, as the swarm's stop ends a member there
         assert sorted(log) == ["capper finished", "other finished"]
-        assert line.status == "swarm_cap"
+        assert line.status == "stopped"
         assert line.background_cancelled == 0
         assert ledger.calls.errored == 0
     else:
@@ -1070,7 +1074,7 @@ async def test_the_drain_releases_a_childs_wait_and_its_later_waits() -> None:
         swarm(member(waits_in_a_child(results), name="m"), channels=["shared_memory"])
     )
     assert results == ["m is ending: its own agent has finished."] * 2
-    assert [w["outcome"] for w in evidence(outcome.transcript, "waited")] == [
+    assert [wait(w).outcome for w in comm_events(outcome.transcript, "waited")] == [
         "member_ending"
     ] * 2
 
@@ -1094,9 +1098,9 @@ async def test_a_member_whose_child_works_is_not_waiting_until_it_ends() -> None
         swarm(member(waits_beside_a_child(0.2), name="m"), channels=["shared_memory"])
     )
     # the all-waiting release came when the child ended, not when the wait began
-    [record] = evidence(outcome.transcript, "waited")
-    assert record["outcome"] == "all_waiting"
-    assert record["duration"] >= 0.15
+    [record] = comm_events(outcome.transcript, "waited")
+    assert wait(record).outcome == "all_waiting"
+    assert wait(record).duration >= 0.15
 
 
 @agent
@@ -1137,6 +1141,6 @@ async def test_a_child_started_by_a_nested_swarms_controller_rechecks_its_owners
     # two swarms in one sample, so not run_swarm(), which reads one final event
     async with sample() as transcript:
         await run(outer, "task")
-    [record] = evidence(transcript, "waited")
-    assert record["outcome"] == "all_waiting"
-    assert record["duration"] < 1
+    [record] = comm_events(transcript, "waited")
+    assert wait(record).outcome == "all_waiting"
+    assert wait(record).duration < 1

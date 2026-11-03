@@ -13,11 +13,13 @@ from inspect_ai._util.registry import (
     registry_info,
     registry_log_name,
     registry_lookup,
+    registry_params,
     registry_unqualified_name,
     registry_value,
 )
 from inspect_ai.agent import Agent, AgentState
-from inspect_ai.model import ChatMessage, StopReason
+from inspect_ai.agent._channel.gate import turn_gate, turn_loop
+from inspect_ai.model import ChatMessage, ModelOutput, StopReason
 from inspect_ai.util import (
     Limit,
     LimitExceededError,
@@ -60,10 +62,12 @@ from ._budget import (
     MemberContext,
     SwarmMessageNode,
     SwarmNode,
+    SwarmTimeNode,
     SwarmTokenNode,
     SwarmTurnNode,
     current_member,
 )
+from ._seam import MemberGate
 
 AgentFactory = Callable[..., Agent]
 """A registered `@agent` factory, such as `deepagent`."""
@@ -76,6 +80,9 @@ _LIMIT_KINDS: dict[str, type[Limit]] = {
     "message": _MessageLimit,
     "time": _TimeLimit,
 }
+
+# deepagent(), whose background dispatch the turn seam cannot hold
+_DEEPAGENT = "inspect_ai/deepagent"
 
 # characters a tool-state scope name may not contain
 _RESERVED = "/#"
@@ -124,6 +131,9 @@ class Member(BaseModel):
 
     visible_sandboxes: list[str] = []
     """Other sandbox environments the member can reach by name, such as a shared service. Only with `sandbox`."""
+
+    persistent: bool = False
+    """Whether the member stays available after it answers, held idle until the controller wakes it with `SwarmControl.wake()`."""
 
     @field_validator("factory", mode="before")
     @classmethod
@@ -192,6 +202,9 @@ class Member(BaseModel):
         data["bridged"] = self.bridged
         data["sandbox"] = self.sandbox
         data["visible_sandboxes"] = list(self.visible_sandboxes)
+        # only when set, so that other members log as before
+        if self.persistent:
+            data["persistent"] = True
         return data
 
 
@@ -207,6 +220,7 @@ def member(
     bridged: bool | None = None,
     sandbox: str | None = None,
     visible_sandboxes: Sequence[str] = (),
+    persistent: bool = False,
 ) -> Member:
     """A swarm member, with a name, role, limits or count.
 
@@ -218,9 +232,11 @@ def member(
 
     Objects given to an agent are shared. Every member built from one record receives the same objects from `args`, and two built agents given the same tool object share it, across members and samples. Inspect's built-in tools keep their state in the sample store or the sandbox, so this matters only for a custom tool or helper that keeps state in its Python object (a counter, a cache, a client). To give each member its own, construct it inside a member builder, an `@agent` factory that builds the configured agent, and use the factory form.
 
-    Tool state. Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member. An explicit `instance` is used as given: members, or the copies of one counted member, that name the same instance share its state, so a board shared on purpose is `memory(instance="board")`. The sample store itself is shared. State that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with `tool_state_instance()`. Built-in tool state that a setup solver prepared at the default instance before the swarm runs is not visible to the members.
+    Tool state. Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (`memory()`, `bash_session()`, the skill tool) give each member its own state when their `instance` is left at the default, so the default `memory()` is private to each member. An explicit `instance` is used as given: members, or the copies of one counted member, that name the same instance share its state, so a board shared on purpose is `memory(instance="board")`. The sample store itself is shared. State that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with `tool_state_instance()`. Built-in tool state that a setup solver prepared at the default instance before the swarm runs is not visible to the members.
 
-    Submissions. A member that returns normally has submitted, and its output is its answer, unless the output's stop reason is `content_filter` or `model_length`. That is how `react()` returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered.
+    Submissions. A member that returns normally has submitted, and its output is its answer, unless the output's stop reason is `content_filter` or `model_length`. That is how `react()` returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered. A persistent member's normal return is never a submission: its answers are recorded as it gives them, so a loop that returns has stopped without one (an `on_continue` that returns `False`, for example), and the member ends `unsubmitted`, its earlier answers still candidates.
+
+    Persistent members. With `persistent=True`, the member stays available after it answers: when it submits in a turn that calls no handoff, or a `react(submit=False)` member gives a tool-free reply, the swarm records that as one of its answers and holds the member idle at its next turn boundary, in the same agent loop. The controller hears `MemberIdle` and gives the member its next piece of work with `SwarmControl.wake()`, which appends it to the member's conversation. Every answer is a candidate for the swarm's answer. The member's limits span its whole life, and its time limit does not run while it is idle. A member stopped or ended while idle ends `submitted`, its last answer as its output. Only a member whose agent is a `react()`, `react(submit=False)` or `deepagent()` loop without background dispatch, given directly or returned by an `@agent` builder, can be persistent; any other agent, and a bridged member, is refused.
 
     Stopping itself. An agent that raises `LimitExceededError("custom", ...)` with no `source` to stop itself ends only its member, with status `member_limit:custom`; the other members continue and the swarm never chooses its output as the answer. This holds when the error is raised in a task group inside the agent, too.
 
@@ -242,9 +258,10 @@ def member(
         choose_name: Whether the member chooses its own name instead of being told `name`.
         count: How many members this record stands for. Above 1 needs a factory.
         limits: The member's own token, cost, turn, message or time limits.
-        bridged: Whether the agent is bridged (runs a CLI in the sandbox through Inspect's agent bridge). `None` counts inspect_swe's agents as bridged and others as native. Bridged members cannot use channels with tools and records yet, and `swarm()` refuses one beside such a channel. The ledger records the member as bridged, and its metrics have no tool-call run, since the CLI's own tool calls leave no tool events. A bridged agent that is not declared and not in the `inspect_swe/` namespace is not refused: it cannot reach those channels' tools, so it runs without them. Pass `True` to have it refused and recorded as bridged.
+        bridged: Whether the agent is bridged (runs a CLI in the sandbox through Inspect's agent bridge). `None` counts inspect_swe's agents as bridged and others as native. Pass `True` for any other bridged agent. `swarm()` refuses a bridged member beside a channel other than the built-in messages and shared memory channels, and refuses a persistent member declared bridged; `on_boundary()` refuses to hold one. The ledger records the member as bridged, and its metrics have no tool-call run, since the CLI's own tool calls leave no tool events. A bridged member reaches the swarm's channels through `swarm_bridged_tools()` in its agent's bridged tools; a bridged member waiting in `swarm_wait` never counts as waiting.
         sandbox: The name of the member's own sandbox environment. `{member}` stands for the member's name. `None` shares the sample's sandbox.
         visible_sandboxes: Other sandbox environments the member can reach by name, such as a shared service. Only with `sandbox`. It cannot include `default`, which inside the member is the member's own sandbox.
+        persistent: Whether the member stays available after it answers, held idle until the controller wakes it.
 
     Returns:
         The member record.
@@ -269,6 +286,7 @@ def member(
             "visible_sandboxes": visible_sandboxes
             if isinstance(visible_sandboxes, str)
             else list(visible_sandboxes),
+            "persistent": persistent,
         }
     )
 
@@ -409,9 +427,50 @@ def member_nodes(
         elif isinstance(limit, _MessageLimit):
             nodes.append(SwarmMessageNode(limit.limit, owner=name))
         else:
-            # a time limit stays Inspect's: it cancels where it was entered, here
-            nodes.append(time_limit(limit.limit))
+            # Inspect's time limit, which cancels where it was entered, here, and
+            # pauses while the member is held at a turn boundary
+            nodes.append(SwarmTimeNode(limit.limit))
     return lever, nodes
+
+
+# Why the turn seam cannot hold this member, or None when it can: a bridged member's CLI
+# runs its own turns, and deepagent()'s background subagents would go on generating
+# while its top-level loop was held.
+def seam_refusal(record: Member, context: MemberContext) -> str | None:
+    if context.bridged:
+        return "it is bridged: its CLI runs its own turns, and opens no agent channel"
+    if record.agent is not None:
+        if registry_info(record.agent).name == _DEEPAGENT:
+            background = registry_params(record.agent).get("background", False)
+        else:
+            return None
+    else:
+        assert record.factory is not None
+        if registry_info(record.factory).name != _DEEPAGENT:
+            return None
+        background = record.args.get("background", False)
+    if background is False:
+        return None
+    return f"deepagent(background={background!r}) runs background subagents, which would go on generating while its loop was held"
+
+
+# Why `agent` cannot be a persistent member's agent, as the error to raise, or None
+# when it can: it must itself be a react(), react(submit=False) or deepagent() loop
+# without background dispatch, given directly or returned as it is by a builder, so
+# that when the loop answers the member has answered, with no code of its own waiting
+# after the loop. Read from the loop's mark, which a copy or a wrapper of a loop fails.
+def persistent_refusal(agent: Agent, name: str) -> ValueError | None:
+    mark = turn_loop(agent)
+    if mark is not None and not mark.background:
+        return None
+    found = (
+        "deepagent() with background dispatch"
+        if mark is not None
+        else "not a react() or deepagent() loop"
+    )
+    return ValueError(
+        f"Member {name!r} is persistent, and its agent is {found}. A persistent member's agent must be a react() or a deepagent() loop without background dispatch, or a builder that returns one, not an agent that calls one."
+    )
 
 
 # What the member wrapper leaves on the member's run record: the state the agent
@@ -426,10 +485,14 @@ class MemberOutcome:
 
 # The member wrapper. Runs the member on `state` with `input` as its conversation, in
 # its tool-state scope, cancel scope and agent span, under its nodes and the swarm's
-# caps, with its background work owned by the member; drains that work once the agent
-# has returned; then calls `end` with its status and the state the agent returned,
-# inside the member's span when the span was entered. The caller keeps `state`, as
-# as_solver() does, for the output of a member that does not return. No error whose
+# caps, with its background work owned by the member and its turn gate installed;
+# drains that work once the agent has returned; then calls `end` with its status and
+# the state the agent returned, inside the member's span when the span was entered. The
+# caller keeps `state`, as as_solver() does, for the output of a member that does not
+# return; when its own loop reached the gate, the loop's state at its last boundary is
+# used instead. An end requested through the gate makes a normal return `stopped`, and
+# a member whose callbacks never ran because its loop never reached the gate ends
+# `errored` when it produced its ending itself. No error whose
 # source is a swarm node leaves it: a cap becomes a stop of the swarm, and the member's
 # own nodes a status, as does a sourceless custom limit error, which the agent raised
 # to stop itself. Anything else (a foreign error) is raised, without the swarm's
@@ -446,6 +509,7 @@ async def run_member(
     state: AgentState,
     grace: Callable[[], float],
     outcome: MemberOutcome,
+    gate: MemberGate,
     end: Callable[[str, AgentState], None],
 ) -> None:
     status = "cancelled"
@@ -464,14 +528,23 @@ async def run_member(
                 state,
                 grace,
                 outcome,
+                gate,
                 member_span,
             )
         except Exception:
             status = "errored"
             raise
         finally:
-            # the state the agent returned, kept through a drain that raised
-            end(status, outcome.state if outcome.state is not None else state)
+            # the state the agent returned, kept through a drain that raised; else the
+            # loop's state at its last boundary
+            end(
+                status,
+                outcome.state
+                if outcome.state is not None
+                else gate.state
+                if gate.state is not None
+                else state,
+            )
 
 
 async def _run_member(
@@ -485,10 +558,18 @@ async def _run_member(
     state: AgentState,
     grace: Callable[[], float],
     outcome: MemberOutcome,
+    gate: MemberGate,
     member_span: AsyncExitStack,
 ) -> str:
     token = current_member.set(context)
     status: str | None = None
+    # the member produced its ending itself: a normal return, or its own limit or
+    # error (the error)
+    returned = False
+    own: BaseException | None = None
+    # the agent was called: an error before that (building or refusing the agent) is
+    # not a run that missed its gate, and propagates as raised
+    called = False
     try:
         with (
             tool_state_scope(name),
@@ -504,6 +585,11 @@ async def _run_member(
                     foreign: BaseException | None = None
                     try:
                         agent = build_member(record)
+                        if record.persistent and record.factory is not None:
+                            # a built agent was checked when the swarm was built
+                            refusal = persistent_refusal(agent, name)
+                            if refusal is not None:
+                                raise refusal
                         if owner.started:
                             # such work would miss the member's nodes and span
                             raise RuntimeError(
@@ -526,8 +612,16 @@ async def _run_member(
                                 span(name, type=AGENT_SPAN_TYPE)
                             )
                             context.span_id = current_span_id()
-                            outcome.state, stopped = await _call_agent(agent, state)
-                        status = _returned(outcome.state, stopped)
+                            gate.task = anyio.get_current_task().id
+                            called = True
+                            with turn_gate(gate):
+                                result, stopped = await _call_agent(agent, state)
+                        if not stopped:
+                            # a self-stop is a raise: the loop's state at its last
+                            # boundary is kept, as for any other raise
+                            outcome.state = result
+                        returned = True
+                        status = _returned(gate, result, stopped)
                     except Exception as ex:
                         cap, owned, foreign = classify_errors(ex, caps, nodes)
                         if foreign is None and cap:
@@ -536,6 +630,20 @@ async def _run_member(
                         elif foreign is None:
                             assert owned is not None
                             status = _status_for(owned)
+                            # the lever's error is the runtime's: a stop or an end
+                            if not _source_in(owned, lever.nodes):
+                                own = owned
+                            elif gate.answered:
+                                # a persistent member stopped or ended after its answer,
+                                # held idle or at the boundary that follows it
+                                status = "submitted"
+                        else:
+                            own = foreign
+                    if called and gate.unsupervised() and (returned or own is not None):
+                        # its result is never an answer, so an unsupervised run cannot
+                        # pass as a supervised one
+                        foreign = gate.unsupervised_error()
+                        foreign.__cause__ = own
                     if foreign is not None:
                         # no drain: leaving the owner cancels the background work
                         raise foreign
@@ -544,6 +652,12 @@ async def _run_member(
                 # after the owner has ended its work, so its cancellations are counted
                 outcome.background_started = owner.started
                 outcome.background_cancelled = owner.cancelled
+        if called and gate.unsupervised() and (returned or own is not None):
+            # a callback registered while the member's background work drained, which
+            # never ran; nothing awaits between here and the member's end
+            error = gate.unsupervised_error()
+            error.__cause__ = own
+            raise error
     finally:
         current_member.reset(token)
 
@@ -572,12 +686,27 @@ async def _drain(
         await owner.wait()
 
 
-def _returned(state: AgentState, stopped: bool) -> str:
+def _returned(gate: MemberGate, state: AgentState, stopped: bool) -> str:
     if stopped:
+        # the agent stopped itself with an error, which an end request does not change
         return "member_limit:custom"
-    if state.output.empty:
+    if gate.end_origin is not None:
+        # an end requested before the agent returned wins over its output
+        return "stopped"
+    if gate.persistent:
+        # every answer was held where the loop gave it, so a loop that returns has
+        # stopped without one: a cut-off, or an output that was not an answer
+        return "unsubmitted"
+    return output_status(state.output)
+
+
+# How a returned output classifies: a submission unless it stopped the way react()
+# stops without an answer. The persistent member's gate applies it before it records an
+# answer.
+def output_status(output: ModelOutput) -> str:
+    if output.empty:
         return "submitted"
-    return _return_status(state.output.stop_reason)
+    return _return_status(output.stop_reason)
 
 
 # The agent call: the state it returned, and whether it stopped itself. An error the

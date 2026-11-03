@@ -34,7 +34,7 @@ solver = swarm(
 - Only the member's own loop gets the tools. Its subagents, such as a deepagent member's `general()`, do not, so each inbox has one reader.
 - The channel can be combined with `shared_memory()`. Then the member's own loop gets both channels' tools and one `swarm_wait` for both.
 - The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`. `all` and `swarm` are reserved.
-- Bridged members cannot use the channel yet, and `swarm()` refuses a bridged member beside it.
+- A bridged member gets the tools from `swarm_bridged_tools(["messages"])`. All of its CLI's conversations, subagents included, share its inbox: a message any of them reads is read ([Bridged members](restrictions.qmd#bridged-members)).
 
 ## The tools
 
@@ -90,12 +90,14 @@ An empty message is refused. Once the swarm begins to stop, sends are refused an
 
 ## The record of messages
 
-The swarm logs messages as `InfoEvent`s with source `inspect_swarm` and type `comm`, each in the span of the tool call that made it:
+The swarm logs messages as `CommunicationEvent`s with source `inspect_swarm`, each in the span of the tool call that made it. Its `kind` is one of:
 
-- `sent`: a send that reached the swarm, with its addresses, recipients, text, `reply_to` and `wake`, and why it was refused if it was. An inbox that is full, or a duplicate, is refused by the control `admit`.
-- `delivered`: a message delivered, with its recipients and commit sequence number.
-- `read`: a `read_messages` result, with the ids of the messages it showed. A read that showed nothing has no event.
-- `waited`: a `swarm_wait` call, with what ended it and the unread messages it named.
+- `sent`: a send that reached the swarm, with its addresses, recipients, text and `reply_to` in `send.record`, why it was refused in `send.rejected` if it was, and `wake` in `data["record"]`. An inbox that is full, or a duplicate, is refused by the control `admit`.
+- `delivered`: a message delivered, with its recipients and commit sequence number in `delivery`.
+- `read`: a `read_messages` result, with the ids of the messages it showed in `record_ids` and the messages it depends on in `data["depends_on"]`. A read that showed nothing has no event.
+- `waited`: a `swarm_wait` call, with what ended it and the unread messages it named. A wait that reports unread messages depends on all of them (`data["depends_on"]`), including those sent with `wake=False`. A wait that ends with only the unread count depends on none.
+
+`depends_on` names each message once per loop, so a read of messages that an earlier wait reported depends on none of them.
 
 The [metrics](analysis.qmd#communication) count these events for each member.
 

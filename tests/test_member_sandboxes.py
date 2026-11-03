@@ -29,7 +29,7 @@ from pydantic import BaseModel
 from inspect_swarm import Member, filesystem, leaderless, member, swarm, swarm_result
 from inspect_swarm._budget import current_member
 
-from .swarm_runtime import evidence, run_swarm
+from .swarm_runtime import run_swarm, swarm_events
 
 
 class StubConfig(BaseModel, frozen=True):
@@ -204,8 +204,8 @@ async def test_members_reach_only_their_own_sandbox_and_the_visible_ones(
         ("agent-2", "agent-2"),
     ]
     assert sorted(
-        (e["member"], e["sandbox"])
-        for e in evidence(outcome.transcript, "member_result")
+        (e.member, e.data["sandbox"])
+        for e in swarm_events(outcome.transcript, "member_result")
     ) == [("agent-1", "agent-1"), ("agent-2", "agent-2")]
 
 

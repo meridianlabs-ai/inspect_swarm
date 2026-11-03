@@ -5,10 +5,9 @@ llms-description: "What the swarm does not support, the limits of bridged member
 
 ## What the swarm does not support
 
-- No channels with tools for bridged members. A bridged member cannot use the [shared-memory channel](shared-memory.qmd) yet, and `swarm()` refuses one beside it.
 - No checkpointing. Inspect's sample checkpointing does not restore the swarm's shared state or its caps, so a swarm raises an error before any member starts in a sample with checkpointing on. Turn checkpointing off for tasks that run a swarm: set `checkpoint=False` on `Task()` or `eval()`, or remove every checkpoint setting, including `--checkpoint` and `INSPECT_EVAL_CHECKPOINT`.
 - No ACP agents. ACP agents wait for their caller to drive them, so they are refused.
-- No scorers that read a member's tool state. Each member runs in its own tool-state scope, so built-in tools that keep state in the store (`memory()`, `bash_session()`, `web_browser()`, the skill tool) keep each member's at keys inside its scope, which differ from the default ones. Tool state that a setup solver prepared at the default instance is not carried into the members either; they start with fresh state ([Members](members.qmd#tool-state)).
+- No scorers that read a member's tool state. Each member runs in its own tool-state scope, so built-in tools that keep state in the store (`memory()`, `bash_session()`, the skill tool) keep each member's at keys inside its scope, which differ from the default ones. Tool state that a setup solver prepared at the default instance is not carried into the members either; they start with fresh state ([Members](members.qmd#tool-state)).
 
 ## Bridged members
 
@@ -16,14 +15,101 @@ A bridged member runs a CLI agent in the sandbox through Inspect's agent bridge.
 
 The CLI's own tool calls do not emit Inspect `ToolEvent`s, so the tool-event evidence described here does not cover them, Inspect Sentinel does not see them, and `longest_identical_tool_run` is `null` for bridged members.
 
+### Channels for bridged members
+
+A bridged agent's tools are fixed when it is built, so it does not take `swarm_tools()`. Give it `swarm_bridged_tools()` in its bridged tools, naming the channels it uses:
+
+```python
+from inspect_ai.agent import Agent, agent, react
+from inspect_ai.tool import bash
+from inspect_swe import claude_code
+
+from inspect_swarm import (
+    member,
+    messages,
+    shared_memory,
+    swarm,
+    swarm_bridged_tools,
+    swarm_tools,
+)
+
+
+@agent
+def worker() -> Agent:
+    return react(tools=[bash(), swarm_tools()])
+
+
+@agent
+def cc_worker(channels: list[str] = ["messages", "shared_memory"]) -> Agent:
+    return claude_code(bridged_tools=[swarm_bridged_tools(channels)])
+
+
+solver = swarm(
+    members=[member(worker, count=2), member(cc_worker, name="cc", bridged=True)],
+    channels=[messages(), shared_memory()],
+)
+```
+
+- `"messages"` gives `send_message`, `read_messages` and `list_members`, and `"shared_memory"` gives `shared_memory`. Both give `swarm_wait`. The CLI sees them as the MCP server `swarm`.
+- A tool whose channel the swarm does not have returns an error that says so.
+- `swarm_bridged_tools()` serves only `messages()` and `shared_memory()`. `swarm()` refuses a bridged member beside a custom channel that has records. Custom channels that only add instructions are fine.
+- A bridged member in a swarm with `messages()` needs `"messages"` too: other members can send to it, and without `read_messages` it could never read them. Its tools return an error that says to add it. `["messages"]` alone, in a swarm that also has the shared memory, is fine, with one cost: the member's preamble includes every channel's instructions, so it is still told to use `shared_memory`, which it does not have. Per-member channel instructions are tracked in [#149](https://github.com/meridianlabs-ai/inspect_swarm/issues/149).
+- A member uses `swarm_bridged_tools()` or `swarm_tools()`, never both.
+- The CLI is one agent to the swarm, whichever of its conversations calls, its subagents included. They share the member's inbox, so a message any of them reads is read for all. They share what the member has viewed in the shared memory, so a view by a subagent lets the top-level session overwrite or delete that file. Sends and writes from any of them are the member's.
+- A bridged member never counts as waiting, since one call in `swarm_wait` does not show that its CLI is idle. Its waits end on news, a member's end, the swarm's stop or their timeout, never because every member is waiting. A native member waiting beside a running bridged member is released by its own timeout at worst.
+- The log records these calls as `ToolEvent`s, and their `CommunicationEvent`s have `via` set to `"bridge"` in `data` (in `data.record` for a send). Inspect Sentinel does not see them; the bridge's `approval=` policies do.
+
+A CLI gives up on an MCP tool call that runs too long, and the model then gets an error in place of the result. Claude Code and Codex both stop one after 300 seconds by default (Claude Code 2.1.308, Codex 0.166.0), while `shared_memory()` waits up to 600. So a bridged member's `swarm_wait` lasts at most `swarm_bridged_tools(channels, max_wait=280)` seconds, or the swarm's longest wait if that is shorter. Native members' waits are unchanged.
+
+- Claude Code: keep the default. Claude Code stops a call that sends nothing for 300 seconds, and inspect_swe has no setting that raises this for bridged tools; `MCP_TOOL_TIMEOUT` does not.
+- Codex: to wait longer, raise its timeout and `max_wait` together: `codex_cli(config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"}, bridged_tools=[swarm_bridged_tools(channels, max_wait=600)])`.
+
+If the CLI abandons a wait while its host call continues, that call can still mark member ends reported and record dependency links for the CLI's shared loop. Later conversations may then miss those end notices, and later reads do not repeat those links, even though no model received the abandoned result. The default `max_wait` keeps a wait inside the CLI's timeout, but it does not confirm delivery, and it does not prevent an abandoned call after an interruption.
+
+Inspect limits shared-memory views to 16 KiB by default. The CLIs also apply token limits (25,000 for Claude Code; 10,000 for Codex), so a view can be shortened further by the CLI. A default `read_messages` result is about 9 KB.
+
+### The CLI's own concurrent work
+
+The swarm owns and drains only work started with Inspect's `background()`. It does not own, drain or attribute the CLI's own concurrent work: Claude Code's background shell commands, background subagents and agent teams, and Codex's subagents (its multi-agent tools).
+
+- The swarm cannot wait for this work or stop it apart from the CLI. Claude Code waits for much of its background work before it exits, and the member keeps running until then.
+- Its model calls go through the member's bridge, so they count as the member's usage: against its limits and the swarm's caps, and in the ledger.
+- Work left running can outlast the member. The swarm does not check that the CLI stopped it, and a process started with `nohup` or `&` can keep running after the CLI exits. Such work can change the sandbox after the member ends and before scoring.
+
+To keep a bridged member to work the swarm can see, turn these features off.
+
+Claude Code (checked against 2.1.311, the stable release `claude_code()` installs when the sandbox has none):
+
+- Agent teams are off by default. Claude Code turns them on only with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` or `--agent-teams`, and `claude_code()` sets neither.
+- Background shell commands and background subagents are on by default. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` turns them off, and also stops Claude Code moving long subagents and timed-out commands to the background.
+- The `Monitor` tool still runs in the background with that setting. Leave it out with `disallowed_tools=["Monitor"]`.
+- Workflows also run subagents, where the account has them. `CLAUDE_CODE_DISABLE_WORKFLOWS=1` turns them off.
+
+```python
+claude_code(
+    env={
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+        "CLAUDE_CODE_DISABLE_WORKFLOWS": "1",
+    },
+    disallowed_tools=["Monitor"],
+    bridged_tools=[swarm_bridged_tools(channels)],
+)
+```
+
+Codex (checked against 0.166.0, the latest release `codex_cli()` installs when the sandbox has none):
+
+- Subagents are on by default. `agents.enabled = false` turns them off: `codex_cli(config_overrides={"agents.enabled": "false"}, bridged_tools=[swarm_bridged_tools(channels)])`. Use this rather than `features.multi_agent = false`, which a model's catalog entry can override. Only an explicit `features.multi_agent_v2 = true` turns them back on.
+
+None of these settings stop a shell command from starting a process that keeps running on its own, such as `nohup server &`. The swarm does not stop such processes when the member ends.
+
 ## What the log records
 
 - Members' `ToolEvent`s are the record of what they did, except for bridged members.
-- The shared-memory channel's writes, views and waits are `comm` events ([Shared Memory](shared-memory.qmd#the-record-of-the-board)).
+- The shared-memory channel's writes, views and waits are `CommunicationEvent`s ([Shared Memory](shared-memory.qmd#the-record-of-the-board)).
 - Files members share in a sandbox, tool instances they share, and a tool that reads the transcript are channels the swarm observes but does not record ([Channels](channels.qmd#shared-files-are-observed-not-recorded)).
 
 Spans inside a swarm log no `StoreEvent`s. The swarm's span logs the net change to the store, which says what changed but not which member changed it. If an error, limit or cancellation escapes the swarm and ends the sample, the log may have no `StoreEvent` for the swarm's writes. `sample.store` is always the record of the final store.
 
 ## The store keys
 
-The swarm owns three keys in the sample store, written when the swarm ends: `inspect_swarm:result_id`, `inspect_swarm:ledger` and `inspect_swarm:metrics`. Task code must not write them, or an event with source `inspect_swarm`. The result record itself is an event in the transcript ([Scoring](scoring.qmd#the-result-record)). A tool that reads the transcript sees every member's model and tool calls, a channel between members that the swarm records no evidence of ([Scoring](scoring.qmd#the-record-belongs-to-the-swarm)).
+The swarm owns three keys in the sample store, written when the swarm ends: `inspect_swarm:result_id`, `inspect_swarm:ledger` and `inspect_swarm:metrics`. Task code must not write them, a `SwarmEvent`, or an event with source `inspect_swarm`. The result record itself is an event in the transcript ([Scoring](scoring.qmd#the-result-record)). A tool that reads the transcript sees every member's model and tool calls, a channel between members that the swarm records no evidence of ([Scoring](scoring.qmd#the-record-belongs-to-the-swarm)).

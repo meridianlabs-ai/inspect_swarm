@@ -15,9 +15,16 @@ from .._budget import MemberContext, current_member
 from .._channel._channel import Channel, ChannelRun, ChannelState, WaitingState
 from .._channel.messages import MessagesState
 from .._controller._controller import MemberInfo
-from .._evidence import comm_delivered, comm_sent
+from .._evidence import comm_delivered, comm_read, comm_sent
 from ._address import resolve
-from ._record import Draft, FrozenJson, Record, freeze_json, thaw_json
+from ._record import (
+    Draft,
+    FrozenJson,
+    Record,
+    current_via,
+    freeze_json,
+    thaw_json,
+)
 from ._storm import Storm
 from ._wait import Waits
 
@@ -57,6 +64,10 @@ class Bus:
         self._seq = 0
         self._ids: dict[str, int] = {}
         self._reads = 0
+        # record id -> the channel that committed it
+        self._committed: dict[str, str] = {}
+        # loop agent span -> the records already in its results' `depends_on`
+        self._depended: dict[str | None, set[str]] = {}
         self._states: dict[str, ChannelState] = {}
         self._storms: dict[str, Storm] = {}
         self._prefixes: dict[str, str] = {}
@@ -125,10 +136,16 @@ class Bus:
         self._waits.close()
 
     async def wait(
-        self, path: str | None, file_id: str | None, timeout: int | None
+        self,
+        path: str | None,
+        file_id: str | None,
+        timeout: int | None,
+        channels: Sequence[str] | None = None,
+        cap: int | None = None,
     ) -> str:
-        # the swarm_wait tool's body
-        return await self._waits.wait(path, file_id, timeout)
+        # the swarm_wait tool's body; a bridged member's waits only on `channels`, those
+        # its tools reach, and at most `cap` seconds
+        return await self._waits.wait(path, file_id, timeout, channels, cap)
 
     def member_ended(self, name: str, status: str) -> None:
         # from the runtime, right after it marks the member ended
@@ -169,6 +186,7 @@ class Bus:
             reply_to=draft.reply_to,
             sender_span_id=current_agent_span_id(),
             tool_span_id=current_span_id(),
+            via=current_via.get(),
         )
         state.validate(record)
         # the id is given once the record exists, so that a refusal above skips none
@@ -197,9 +215,60 @@ class Bus:
         self._seq += 1
         notify, result = state.apply(record)
         storm.commit(record)
+        self._committed[record.id] = record.channel
         comm_delivered(member_span, record, nested, self._seq, notify, result)
         self._waits.delivered(record, self._seq)
         return Delivery(record, self._seq, list(notify), result)
+
+    def read(
+        self,
+        channel: str,
+        records: Sequence[str],
+        *,
+        depends_on: Sequence[str] | None = None,
+        files: list[JsonValue] | None = None,
+        listing: bool = False,
+    ) -> None:
+        # a result of the channel's tool concerned `records` and showed the calling
+        # loop the content or news of `depends_on` (by default `records`): writes its
+        # `read` evidence for the member and loop calling, as deliver() binds the sender
+        context = self.member()
+        if context is None:
+            raise RuntimeError(
+                "Bus.read() was called outside a member of this swarm; channel tools report reads for the member that calls them."
+            )
+        self._state(channel)
+        loop = current_agent_span_id()
+        self._check_committed(channel, records)
+        depends = self.depends(
+            channel, loop, records if depends_on is None else depends_on
+        )
+        comm_read(
+            context.span_id,
+            context.name,
+            channel,
+            self.read_id(),
+            loop,
+            self.nested(context),
+            current_span_id(),
+            list(records),
+            depends,
+            listing,
+            files,
+        )
+
+    def depends(
+        self, channel: str, loop: str | None, depends_on: Sequence[str]
+    ) -> list[str]:
+        # a result's dependencies, each a record the channel committed in this run:
+        # those not yet written for the loop, in order and once each, now marked
+        # written. A loop's value in the critical path never decreases, so a commit an
+        # earlier result of the loop linked adds nothing when linked again.
+        self._check_committed(channel, depends_on)
+        depended = self._depended.setdefault(loop, set())
+        new = [r for r in dict.fromkeys(depends_on) if r not in depended]
+        depended.update(new)
+        return new
 
     def running(self, name: str) -> bool:
         # whether the member has started and not yet ended
@@ -207,7 +276,8 @@ class Bus:
 
     def nested(self, context: MemberContext) -> bool:
         # whether the caller runs in a loop other than the member's own, such as a
-        # subagent's
+        # subagent's. A bridged member binds no loop, so its CLI is one loop, its own,
+        # whichever of its conversations calls
         return context.loop is not None and current_agent_channel() is not context.loop
 
     def status(self, context: MemberContext) -> str | None:
@@ -249,6 +319,15 @@ class Bus:
             raise ValueError(
                 f"No channel named {channel!r} is open in this swarm; the open channels are {', '.join(self._states) or 'none'}."
             ) from None
+
+    def _check_committed(self, channel: str, ids: Sequence[str]) -> None:
+        # a channel's result names only records it committed; anything else is a bug in
+        # the channel's code
+        for record in ids:
+            if self._committed.get(record) != channel:
+                raise ValueError(
+                    f"{channel}: a result names {record}, which is not a record this channel committed in this run."
+                )
 
     def _liveness(self, record: Record) -> tuple[str, str] | None:
         # step 0 checked the recipients and the stopping flag, and nothing has awaited

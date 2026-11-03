@@ -7,6 +7,7 @@ from fractions import Fraction
 from typing import Literal
 
 import anyio
+import anyio.lowlevel
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import is_registry_object, registry_info
 from inspect_ai.agent import Agent, AgentChannel
@@ -18,6 +19,7 @@ from inspect_ai.util import Limit, LimitExceededError, sample_limits
 from inspect_ai.util._limit import (
     _CostLimit,  # pyright: ignore[reportPrivateUsage]
     _MessageLimit,  # pyright: ignore[reportPrivateUsage]
+    _TimeLimit,  # pyright: ignore[reportPrivateUsage]
     _TokenLimit,  # pyright: ignore[reportPrivateUsage]
     _TurnLimit,  # pyright: ignore[reportPrivateUsage]
     token_limit_fields,
@@ -309,6 +311,15 @@ class MemberContext:
     # first resolved, and whether ACP was bound to that channel then
     loop: AgentChannel | None = None
     acp_bound: bool | None = None
+    # the agent channel of the loop the turn gate holds: the first loop to reach the
+    # gate in the member's own task, which can differ from `loop`
+    turn_loop: AgentChannel | None = None
+    # whether the member's boundary callbacks are running, for the bus's all-waiting
+    # check and the background owner
+    held: bool = False
+    # set when the member first uses a tool from swarm_bridged_tools(), which a member
+    # whose loop swarm_tools() binds cannot also use
+    bridge_used: bool = False
     # the member's background tasks not yet finished, kept by its owner, for the bus's
     # all-waiting check
     background_running: int = 0
@@ -497,6 +508,19 @@ class Lever(CostPair):
             self.reason = reason
             self.token_node.limit = int(self.token_node.usage)
 
+    def stop_error(self, reason: str) -> LimitExceededError:
+        # closes the lever and returns the error its next check would raise, for the
+        # turn gate to end the member at a boundary; the first reason stays
+        self.close(reason)
+        cost = self.cost
+        return LimitExceededError(
+            "custom",
+            value=cost,
+            limit=cost,
+            message=self.cost_node._message("cost", "", self.reason),  # pyright: ignore[reportPrivateUsage]
+            source=self.cost_node,
+        )
+
 
 class SwarmTurnNode(SwarmNode, _TurnLimit):
     def __init__(self, limit: int | None, *, owner: str) -> None:
@@ -535,6 +559,44 @@ class SwarmMessageNode(SwarmNode, _MessageLimit):
                 limit,
                 f"count: {count:,}; limit: {limit:,}",
             )
+
+
+# A member time limit that pauses while the member is held at a turn boundary: its
+# deadline and its usage count only the time the member was not held. Otherwise it is
+# Inspect's time limit, and raises its error.
+class SwarmTimeNode(_TimeLimit):
+    def __init__(self, limit: float | None) -> None:
+        super().__init__(limit)
+        self._held_since: float | None = None
+
+    def overdue(self) -> bool:
+        # its deadline has passed, or its scope already has a cancellation requested
+        scope = self._cancel_scope
+        return scope.cancel_called or scope.deadline <= anyio.current_time()
+
+    async def expire(self) -> None:
+        # delivers the overdue cancellation now, whatever the backend: on asyncio the
+        # deadline's own cancellation comes from a timer a bare checkpoint can precede
+        self._cancel_scope.cancel()
+        await anyio.lowlevel.checkpoint()
+
+    def pause(self) -> None:
+        self._held_since = anyio.current_time()
+        self._cancel_scope.deadline = math.inf
+
+    def resume(self) -> None:
+        if self._held_since is None:
+            return
+        assert self._start_time is not None
+        self._start_time += anyio.current_time() - self._held_since
+        self._held_since = None
+        self._refresh_deadline()
+
+    @property
+    def usage(self) -> float:
+        if self._held_since is not None and self._start_time is not None:
+            return self._held_since - self._start_time + self._prior_elapsed
+        return super().usage
 
 
 def cost_node(nodes: Sequence[Limit], role: NodeRole) -> SwarmCostNode | None:

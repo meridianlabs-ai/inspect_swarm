@@ -3,14 +3,21 @@
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import anyio
 from inspect_ai.agent import Agent, AgentState, agent, run
 from inspect_ai.agent._bridge.types import AgentBridge
 from inspect_ai.agent._bridge.util import bridge_generate
-from inspect_ai.event import InfoEvent
+from inspect_ai.event import (
+    CommunicationDelivery,
+    CommunicationEvent,
+    CommunicationKind,
+    CommunicationSend,
+    CommunicationWait,
+    SwarmEvent,
+)
 from inspect_ai.log import transcript as current_transcript
 from inspect_ai.log._transcript import Transcript, _transcript
 from inspect_ai.model import (
@@ -178,7 +185,7 @@ def after(names: list[str], inner: Agent) -> Agent:
     async def execute(state: AgentState) -> AgentState:
         while True:
             ended = {
-                d["member"] for d in evidence(current_transcript(), "member_result")
+                e.member for e in swarm_events(current_transcript(), "member_result")
             }
             if ended >= set(names):
                 return await inner(state)
@@ -253,25 +260,61 @@ async def run_swarm(
         state = await run(swarm, [ChatMessageUser(content=input)])
         record = _transcript_result(store())
         assert record is not None
-    return Outcome(final(transcript)["stop_reason"], record, state, transcript)
+    return Outcome(
+        cast(str, final(transcript).data["stop_reason"]),
+        record,
+        state,
+        transcript,
+    )
 
 
-def evidence(transcript: Transcript, kind: str) -> list[dict[str, Any]]:
-    """The swarm's evidence payloads of one kind, in order."""
+def comm_events(
+    transcript: Transcript, kind: CommunicationKind
+) -> list[CommunicationEvent]:
+    """The swarm's communication events of one kind, in order."""
     return [
-        e.data
+        e
         for e in transcript.events
-        if isinstance(e, InfoEvent)
+        if isinstance(e, CommunicationEvent)
         and e.source == "inspect_swarm"
-        and isinstance(e.data, dict)
-        and e.data.get("kind") == kind
+        and e.kind == kind
     ]
 
 
-def final(transcript: Transcript) -> dict[str, Any]:
-    """The swarm's `final` evidence from a transcript."""
-    [data] = evidence(transcript, "final")
-    return data
+def swarm_events(transcript: Transcript, kind: str) -> list[SwarmEvent]:
+    """The swarm's `SwarmEvent`s of one kind, in order."""
+    return [
+        e for e in transcript.events if isinstance(e, SwarmEvent) and e.kind == kind
+    ]
+
+
+def send(event: CommunicationEvent) -> CommunicationSend:
+    """A `sent` event's `send`."""
+    assert event.send is not None
+    return event.send
+
+
+def delivery(event: CommunicationEvent) -> CommunicationDelivery:
+    """A `delivered` event's `delivery`."""
+    assert event.delivery is not None
+    return event.delivery
+
+
+def wait(event: CommunicationEvent) -> CommunicationWait:
+    """A `waited` event's `wait`."""
+    assert event.wait is not None
+    return event.wait
+
+
+def data(event: CommunicationEvent | SwarmEvent) -> dict[str, Any]:
+    """An event's `data`, untyped, for reading nested values."""
+    return event.data
+
+
+def final(transcript: Transcript) -> SwarmEvent:
+    """The swarm's `final` event from a transcript."""
+    [event] = swarm_events(transcript, "final")
+    return event
 
 
 def statuses(outcome: Outcome) -> dict[str, str | None]:

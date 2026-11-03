@@ -1,10 +1,10 @@
 import json
 from collections.abc import Callable, Iterator, Mapping
-from typing import Any, Literal, TypeGuard
+from typing import Any, Literal
 from uuid import uuid4
 
 from inspect_ai._util.json import to_json_safe
-from inspect_ai.event import Event, InfoEvent
+from inspect_ai.event import Event, InfoEvent, SwarmEvent
 from inspect_ai.log import EvalSample, transcript
 from inspect_ai.log._condense import (
     ATTACHMENT_PROTOCOL,
@@ -15,8 +15,8 @@ from inspect_ai.solver import TaskState
 from inspect_ai.util import Store, store
 from pydantic import BaseModel, JsonValue, ValidationError
 
-MemberState = Literal["pending", "running", "ended"]
-"""A member's lifecycle: not started, running, or ended."""
+MemberState = Literal["pending", "running", "idle", "ending", "ended"]
+"""A member's lifecycle: not started, running, idle, ending, or ended. Only persistent members are ever `idle` (answered and waiting for `SwarmControl.wake()`) or `ending` (their ending has begun, and the member has not yet ended)."""
 
 RECORD_TYPE = "result_record"
 RESULT_ID_KEY = "inspect_swarm:result_id"
@@ -62,6 +62,12 @@ class MemberResult(BaseModel):
     first_pass_time: float | None = None
     """Swarm time of the member's first passing check; `None` without one. A pass assumes the default `value_to_float()` converter, as for `gate_passes`."""
 
+    persistent: bool = False
+    """Whether the member is persistent (`member(..., persistent=True)`)."""
+
+    answer_times: list[float] = []
+    """The swarm times of a persistent member's answers, in order. Empty for other members, whose answer is their submission at `time`."""
+
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
@@ -77,6 +83,9 @@ class FinalRecord(BaseModel):
 
     provisional: bool
     """`True` when the swarm ended without finalising its answer: a limit, error or cancellation ended it first, or the answer did not fit the sample's message limit."""
+
+    answer: int | None = None
+    """Which of a persistent member's answers is the swarm's answer, from 0. `None` for other members, and when there is no answer."""
 
 
 class SwarmResultRecord(BaseModel):
@@ -99,16 +108,14 @@ def write_record(record: SwarmResultRecord) -> None:
     # such as one nested in a member
     forget_record()
     id = uuid4().hex
-    data: dict[str, JsonValue] = {
-        "type": RECORD_TYPE,
-        "id": id,
-        **record.model_dump(mode="json"),
-    }
-    if _changed_by_logging(InfoEvent(data=data, source="inspect_swarm")):
+    event = SwarmEvent(
+        kind=RECORD_TYPE, member=None, data={"id": id, **record.model_dump(mode="json")}
+    )
+    if _changed_by_logging(event):
         raise ValueError(
             "The swarm's result record cannot be written: a string in it would read back from the log as other text. Inspect reads a string that begins with attachment:// or tc:// as a reference to an attachment, removes base64 data: URIs when an eval does not log images, and escapes text that is not valid UTF-8, such as a lone surrogate. Check the members' names, roles and sandboxes, and the reason given to choose_answer()."
         )
-    transcript().info(data, source="inspect_swarm")
+    transcript()._event(event)  # pyright: ignore[reportPrivateUsage]
     store().set(RESULT_ID_KEY, id)
 
 
@@ -128,18 +135,18 @@ def forget_record() -> None:
 # names. Resolving against the event's own attachments only, where any other reference
 # reads as something else, finds text that would read back as another attachment of
 # the sample or not at all.
-def _changed_by_logging(event: InfoEvent) -> bool:
+def _changed_by_logging(event: SwarmEvent) -> bool:
     for log_images in (True, False):
         attachments: dict[str, str] = {}
         condensed = condense_event(event, attachments, log_images)
         # written and read back as the log writes and reads them
-        resolved: Event = InfoEvent.model_validate_json(to_json_safe(condensed))
+        resolved: Event = SwarmEvent.model_validate_json(to_json_safe(condensed))
         own = _OwnAttachments(json.loads(to_json_safe(attachments)))
         # twice, as a sample read with its attachments resolved is resolved again by
         # swarm_result()
         for _ in range(2):
             [resolved] = resolve_events_attachments([resolved], own)
-        assert isinstance(resolved, InfoEvent)
+        assert isinstance(resolved, SwarmEvent)
         if resolved.data != event.data:
             return True
     return False
@@ -163,7 +170,9 @@ class _OwnAttachments(Mapping[str, str]):
 # Only the runtime writes it: when a swarm starts, in the swarm's span, before any
 # member can start, so a sample that ran a swarm says so however early it was cut off
 def write_start() -> None:
-    transcript().info({"type": START_TYPE, "version": 1}, source="inspect_swarm")
+    transcript()._event(  # pyright: ignore[reportPrivateUsage]
+        SwarmEvent(kind=START_TYPE, member=None, data={"version": 1})
+    )
 
 
 # swarms running in each sample, by the id of the sample's transcript, which the
@@ -262,20 +271,17 @@ def _read(
 
     # .get(), so that a record event without an id is skipped rather than raising
     def named(event: Event) -> bool:
-        return (
-            _is_record(event)
-            and isinstance(event.data, dict)
-            and event.data.get("id") == record_id
-        )
+        data = _record_data(event)
+        return data is not None and data.get("id") == record_id
 
     event = find_last(named)
     if event is None:
         raise ValueError(
             f"{where}: the store names the swarm's result record {record_id}, but no such event is in the sample: {missing}."
         )
-    resolved = resolve(event)
-    assert isinstance(resolved, InfoEvent) and isinstance(resolved.data, dict)
-    data = {k: v for k, v in resolved.data.items() if k not in ("type", "id")}
+    resolved = _record_data(resolve(event))
+    assert resolved is not None
+    data = {k: v for k, v in resolved.items() if k not in ("type", "id")}
     if _unresolved(data):
         raise ValueError(
             f"{where}: the swarm's result record holds a string that reads as an attachment reference (attachment:// or tc://). Either the sample was read without its attachments, so read it, or the log being re-scored, with them (read_eval_log() without exclude_fields={{'attachments'}}), or the record's own text begins with such a prefix, which Inspect's attachment resolution cannot tell from a reference."
@@ -288,17 +294,26 @@ def _read(
         ) from ex
 
 
-def _is_record(event: Event) -> TypeGuard[InfoEvent]:
-    return (
+# The data of a result record event: a `SwarmEvent` of kind `result_record`, or the
+# `InfoEvent` an inspect_swarm wrote before the swarm's evidence had its own event types.
+def _record_data(event: Event) -> dict[str, JsonValue] | None:
+    if isinstance(event, SwarmEvent):
+        return event.data if event.kind == RECORD_TYPE else None
+    if (
         isinstance(event, InfoEvent)
         and event.source == "inspect_swarm"
         and isinstance(event.data, dict)
         and event.data.get("type") == RECORD_TYPE
-    )
+    ):
+        return event.data
+    return None
 
 
+# Any event the runtime writes as a swarm runs, in either form.
 def _is_swarm_event(event: Event) -> bool:
-    return isinstance(event, InfoEvent) and event.source == "inspect_swarm"
+    return isinstance(event, SwarmEvent) or (
+        isinstance(event, InfoEvent) and event.source == "inspect_swarm"
+    )
 
 
 # Inspect's attachment resolution reads a string with either prefix as a reference, and
