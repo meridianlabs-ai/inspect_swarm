@@ -1123,6 +1123,7 @@ async def test_the_time_cap_releases_a_wait(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.usefixtures("warm_inspect_caches")
 async def test_a_member_time_limit_cancels_its_wait(tmp_path: Path) -> None:
     sample = await _sample(
         swarm(

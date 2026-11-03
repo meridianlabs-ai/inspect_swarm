@@ -10,7 +10,7 @@ from typing import (
     overload,
 )
 
-from inspect_ai.tool import Tool
+from inspect_ai.tool import Tool, ToolParams
 from pydantic import JsonValue
 
 from .._bus._record import Record
@@ -88,7 +88,7 @@ class ChannelRun:
     bus: "Bus"
     """The run's bus, which the channel's tools deliver records through.
 
-    A tool whose result shows the channel's records also reports them with `bus.read(name, records)`, where `name` is the channel's `name` and `records` are the ids of the records the result concerns. The log records the read, and the records the calling member's later work depends on. Pass `depends_on=` when the result depends on other records than it concerns: a result that tells the loop a record was committed, without its content, depends on it, and a result built from several records depends on them all. Every id must be one the channel committed in this run, and the call must come from a member's tool call; otherwise it raises `ValueError` or `RuntimeError`.
+    A tool whose result shows the channel's records also reports them with `bus.read(name, records)`, where `name` is the channel's `name` and `records` are the ids of the records the result concerns. The log records the read, and the records the calling member's later work depends on, which the swarm's critical path links. Pass `depends_on=` when the result depends on other records than it concerns: a result that tells the loop a record was committed, without its content, depends on it, and a result built from several records depends on them all. Every id must be one the channel committed in this run, and the call must come from a member's tool call; otherwise it raises `ValueError` or `RuntimeError`.
     """
 
     roster: Sequence[MemberInfo]
@@ -139,6 +139,16 @@ class ChannelState(Protocol):
         ...
 
 
+# A channel tool as a run declares it, without the run: what swarm_bridged_tools()
+# declares for it, since a bridged member's tools are fixed when its agent is built.
+@dataclass(frozen=True)
+class ToolDeclaration:
+    name: str
+    description: str
+    parameters: ToolParams
+    max_output: int | None = None
+
+
 @dataclass(frozen=True)
 class WaitSpec:
     """One call of `swarm_wait`, as the bus asks a `WaitingState` about it."""
@@ -173,7 +183,7 @@ class WaitNews:
     """What `lines` name, for the `waited` evidence."""
 
     depends_on: list[str] = field(default_factory=list[str])
-    """The ids of the records whose content or news `lines` report, each one this channel committed in this run. The `waited` evidence records them as what the waiting member's later work depends on. Empty for news that reports no record."""
+    """The ids of the records whose content or news `lines` report, each one this channel committed in this run. The `waited` evidence records them as what the waiting member's later work depends on, which the swarm's critical path links. Empty for news that reports no record."""
 
 
 class WaitingState(ChannelState, Protocol):

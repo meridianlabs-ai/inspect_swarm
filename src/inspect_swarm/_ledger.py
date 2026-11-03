@@ -370,19 +370,14 @@ def _comm_record(event: CommunicationEvent) -> CommRecord:
 
 
 # The ledger's view of the swarm's interval: what it reads when the swarm starts, and
-# the ledger it builds from that and the runtime's state when the swarm ends. `board`
-# and `messages` are the built-in board's and messages channel's record names, or None,
-# and `roster` the swarm's members, for the critical path; a resumed sample records
-# none, since its transcript receives the earlier attempt's events, counted before they
-# are notified and about a board this run does not have.
+# the ledger it builds from that and the runtime's state when the swarm ends. `roster`
+# is the swarm's members, for the critical path; a resumed sample records none, since
+# its transcript receives the earlier attempt's events, counted before they are notified
+# and about commits this run did not make.
 class LedgerInterval:
-    def __init__(
-        self, *, board: str | None, messages: str | None, roster: Collection[str]
-    ) -> None:
+    def __init__(self, *, roster: Collection[str]) -> None:
         self._resumed = sample_resumed()
-        self._events = EventLog(
-            None if self._resumed else PathLog(board, messages, roster)
-        )
+        self._events = EventLog(None if self._resumed else PathLog(roster))
         self._unsubscribe = transcript()._subscribe(  # pyright: ignore[reportPrivateUsage]
             self._events
         )

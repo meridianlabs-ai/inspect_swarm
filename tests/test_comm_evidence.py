@@ -236,6 +236,7 @@ async def test_a_waits_evidence_names_what_ended_it_in_its_tool_span() -> None:
             "files": [{"file": "f-1", "version": 1, "deleted": False}],
             "depends_on": ["w-1"],
             "ended": [],
+            "via": "tool",
         }
         assert timing["started"] >= 0
 
@@ -276,6 +277,7 @@ async def test_a_write_and_a_view_are_written_with_their_typed_fields() -> None:
             "wake": True,
             "sender_span_id": "w-2/top",
             "tool_span_id": write,
+            "via": "tool",
         },
     }
     assert _typed(delivered) == {**writer, "send": None, "wait": None}
@@ -311,6 +313,7 @@ async def test_a_write_and_a_view_are_written_with_their_typed_fields() -> None:
             }
         ],
         "listing": False,
+        "via": "tool",
     }
 
 

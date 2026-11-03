@@ -318,6 +318,9 @@ class MemberContext:
     # whether the member's boundary callbacks are running, for the bus's all-waiting
     # check and the background owner
     held: bool = False
+    # set when the member first uses a tool from swarm_bridged_tools(), which a member
+    # whose loop swarm_tools() binds cannot also use
+    bridge_used: bool = False
     # set when the member starts background work, which bridged members cannot have
     background: bool = False
     # the member's background tasks not yet finished, kept by its owner, for the bus's

@@ -1,0 +1,170 @@
+import os
+from collections.abc import Callable
+
+import anyio
+import pytest
+from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
+from inspect_ai.agent import Agent, AgentState, agent
+from inspect_ai.dataset import Sample
+from inspect_ai.event import CommunicationEvent, ModelEvent, ToolEvent
+from inspect_ai.log import EvalSample, transcript
+from inspect_ai.model import ChatMessageTool, ChatMessageUser
+from inspect_ai.tool import ToolDef
+
+from inspect_swarm import (
+    leaderless,
+    member,
+    messages,
+    swarm,
+    swarm_bridged_tools,
+    swarm_tools,
+)
+
+from .swarm_runtime import data
+
+inspect_swe = pytest.importorskip("inspect_swe")
+
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.timeout(900),
+    pytest.mark.skipif(
+        not (os.environ.get("ANTHROPIC_API_KEY") and os.environ.get("OPENAI_API_KEY")),
+        reason="needs ANTHROPIC_API_KEY and OPENAI_API_KEY",
+    ),
+]
+
+WORDS = {"cc": "AMBER-7", "codex": "COBALT-3"}
+
+TASK = "Work with the other members of the swarm."
+
+# the CLI's swarm_wait lasts longer than the 60 s Codex documents as its default MCP
+# tool timeout; both CLIs actually allow 300 s
+DELAY = 75
+
+PROMPT = """You are in a swarm with a member named w-1. Use the swarm's MCP tools.
+1. Call send_message with to="w-1" and the message "hello from <your member name>".
+2. Call swarm_wait once with no arguments, and wait for it to return.
+3. Call read_messages. It gives you a code word.
+4. {reply}
+Then stop."""
+
+CC_REPLY = 'Start a subagent with your Task (or Agent) tool and have the subagent call send_message with to="w-1" and the code word as the message. Do not send it yourself.'
+
+CODEX_REPLY = 'Call send_message with to="w-1" and the code word as the message.'
+
+
+@agent
+def collector(cli: str, delay: float = DELAY) -> Agent:
+    """Wait for the CLI's hello, give it its code word `delay` seconds after the CLI's wait begins, and wait for the word back."""
+
+    async def execute(state: AgentState) -> AgentState:
+        tools = {ToolDef(t).name: t for t in await swarm_tools().tools()}
+        heard = ""
+
+        async def until(done: Callable[[str], bool]) -> None:
+            nonlocal heard
+            for _ in range(20):
+                if done(heard):
+                    return
+                await tools["swarm_wait"]()
+                heard += str(await tools["read_messages"]())
+
+        await until(lambda text: f'from="{cli}"' in text)
+        # the delay runs from the start of the CLI's wait, whose host call the bridge
+        # records as it begins, however long the CLI takes to call it
+        while not any(
+            isinstance(e, ToolEvent)
+            and e.function == "swarm_wait"
+            and "bridge" in (e.metadata or {})
+            for e in transcript().events
+        ):
+            await anyio.sleep(0.5)
+        await anyio.sleep(delay)
+        await tools["send_message"](to=cli, message=f"The code word is {WORDS[cli]}.")
+        await until(lambda text: WORDS[cli] in text)
+        return state
+
+    return execute
+
+
+def _cli(name: str) -> Agent:
+    tools = [swarm_bridged_tools(["messages"])]
+    if name == "cc":
+        return inspect_swe.claude_code(
+            model="anthropic/claude-sonnet-4-5",
+            system_prompt=PROMPT.format(reply=CC_REPLY),
+            bridged_tools=tools,
+        )
+    return inspect_swe.codex_cli(
+        model="openai/gpt-5",
+        system_prompt=PROMPT.format(reply=CODEX_REPLY),
+        bridged_tools=tools,
+        config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"},
+    )
+
+
+# one CLI per swarm: two bridged agents in one sandbox both take the bridge's ports
+@pytest.mark.parametrize("cli", ["cc", "codex"])
+def test_a_cli_member_messages_a_native_member(cli: str) -> None:
+    task = Task(
+        dataset=[Sample(input=TASK)],
+        solver=swarm(
+            [member(collector(cli), name="w-1"), member(_cli(cli), name=cli)],
+            channels=[messages()],
+            controller=leaderless(stop_on_submission=False),
+        ),
+        sandbox="docker",
+    )
+    [log] = eval(task, model="mockllm/model", limit=1, time_limit=900)
+    assert log.status == "success", log.error
+    assert log.samples is not None
+    [sample] = log.samples
+
+    # the bus bound the sender, through the bridge
+    sends = [e for e in _comm(sample, "sent") if e.agent == cli]
+    assert {
+        (data(e)["record"]["via"], e.send.record.sender) for e in sends if e.send
+    } == {("bridge", cli)}
+    payloads = [e.send.record.content or "" for e in sends if e.send]
+    assert any(f"hello from {cli}" in p.lower() for p in payloads)
+    assert any(WORDS[cli] in p for p in payloads)
+    reads = [e for e in _comm(sample, "read") if e.agent == cli]
+    assert reads and {data(e)["via"] for e in reads} == {"bridge"}
+    # its wait outlasted the delay and returned the message, not an MCP timeout
+    [waited] = [e for e in _comm(sample, "waited") if e.agent == cli]
+    assert waited.wait is not None
+    assert (waited.wait.outcome, data(waited)["via"]) == ("news", "bridge")
+    assert waited.wait.duration > 60
+    assert any(
+        "Call read_messages() to read them." in m.text
+        for e in sample.events
+        if isinstance(e, ModelEvent)
+        for m in e.input
+        if isinstance(m, ChatMessageTool)
+    )
+    if cli == "cc":
+        # the reply came from a subagent: the conversation that proposed it is not the
+        # one the task started
+        proposals = [
+            e
+            for e in sample.events
+            if isinstance(e, ModelEvent)
+            and any(
+                c.function.endswith("send_message") and WORDS[cli] in str(c.arguments)
+                for c in e.output.message.tool_calls or []
+            )
+        ]
+        assert proposals
+        for e in proposals:
+            first = next(m for m in e.input if isinstance(m, ChatMessageUser))
+            assert TASK not in first.text
+
+
+def _comm(sample: EvalSample, kind: str) -> list[CommunicationEvent]:
+    return [
+        e
+        for e in sample.events
+        if isinstance(e, CommunicationEvent)
+        and e.source == "inspect_swarm"
+        and e.kind == kind
+    ]

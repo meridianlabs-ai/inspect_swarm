@@ -1,7 +1,8 @@
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TypeAlias, cast
+from typing import Literal, TypeAlias, cast
 
 from pydantic import JsonValue
 
@@ -15,6 +16,9 @@ FrozenJson: TypeAlias = (
     | Mapping[str, "FrozenJson"]
 )
 """JSON data that cannot be changed: objects are read-only mappings and arrays are tuples."""
+
+Via: TypeAlias = Literal["tool", "bridge"]
+"""How a member reached a channel's tool: as a tool of its own loop (`"tool"`), or through the agent bridge (`"bridge"`)."""
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,9 @@ class Record:
 
     tool_span_id: str | None
     """The tool span the call ran in."""
+
+    via: Via = "tool"
+    """How the sender reached the channel's tool: `"tool"` from its own loops, `"bridge"` from a bridged member's CLI through `swarm_bridged_tools()`."""
 
 
 # What a channel's tool hands to `Bus.deliver()`, which makes the `Record`: the
@@ -115,3 +122,8 @@ def thaw_json(value: FrozenJson) -> JsonValue:
     if isinstance(value, tuple):
         return [thaw_json(item) for item in value]
     return value
+
+
+# "bridge" while a bridged member's call of a swarm tool runs, set by the tool that
+# swarm_bridged_tools() gives it
+current_via: ContextVar[Via] = ContextVar("inspect_swarm_current_via", default="tool")
