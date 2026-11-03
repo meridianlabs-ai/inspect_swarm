@@ -1,7 +1,7 @@
 import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import is_dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from functools import cache
 from typing import Any, Literal, cast, get_args, get_type_hints
 from uuid import uuid4
@@ -332,7 +332,7 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
         if model and data:
             raise refuse(value, at)
         if not model and not _container(value):
-            if not _one_of(type(value), _DATA):
+            if not _data(value):
                 raise refuse(value, at)
             continue
         if (id(value), data) in seen:
@@ -346,7 +346,7 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
                 push(child, True, at, f".{name}")
         elif isinstance(value, dict):
             for key, child in cast(dict[object, object], value).items():
-                if not _one_of(type(key), _DATA):
+                if not _data(key):
                     raise refuse(key, at)
                 push(child, data, at, None, key)
         else:
@@ -405,6 +405,25 @@ def _key_step(key: object) -> str:
 # JSON; YAML also gives dates and times, bytes, sets, and keys that are not strings
 # (decision: Ransom, 2026-11-03).
 _DATA = (str, int, float, bool, type(None), bytes, date, datetime)
+
+
+# One of the data classes, a `datetime` included only with no time zone or one of the
+# fixed offsets YAML gives (`timezone`, with its own offset and name), so that
+# writing or printing it never calls a time zone, offset or name from task code.
+def _data(value: object) -> bool:
+    if not _one_of(type(value), _DATA):
+        return False
+    if type(value) is not datetime:
+        return True
+    zone = value.tzinfo
+    if zone is None:
+        return True
+    # `timezone`'s own methods, which return the offset and name it was made with
+    return (
+        type(zone) is timezone
+        and type(zone.utcoffset(None)) is timedelta
+        and type(zone.tzname(None)) is str
+    )
 
 
 def _container(value: object) -> bool:

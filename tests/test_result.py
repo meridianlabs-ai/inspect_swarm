@@ -1,7 +1,7 @@
 import math
 import re
 from collections.abc import Callable, Iterator
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Self, cast
 
@@ -954,6 +954,26 @@ class _GetterOutput(ModelOutput):
         raise _ran("stop_reason")
 
 
+class _TaskZone(_Hooked, tzinfo):
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        raise _ran("utcoffset")
+
+    def tzname(self, dt: datetime | None) -> str:
+        raise _ran("tzname")
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        raise _ran("dst")
+
+
+class _Offset(_Hooked, timedelta):
+    def __repr__(self) -> str:
+        raise _ran("__repr__")
+
+
+def _at(zone: tzinfo) -> datetime:
+    return datetime(2024, 1, 2, 3, 4, 5, tzinfo=zone)
+
+
 class _RaisingMessage(ChatMessageAssistant):
     """A message subtype whose copy raises, as the final conversation copies it."""
 
@@ -1006,6 +1026,24 @@ def _raising_message() -> ModelOutput:
         ),
         pytest.param(
             _subtype(_GetterOutput), r"type _GetterOutput at output\. ", id="getters"
+        ),
+        # a timestamp whose time zone, or its offset or name, is from task code
+        pytest.param(
+            lambda: _with_metadata({"at": _at(_TaskZone())}),
+            r"type datetime at output\.metadata\['at'\]",
+            id="task-time-zone",
+        ),
+        pytest.param(
+            lambda: _in_arguments(
+                {_at(timezone(timedelta(hours=1), _Str("x"))): object()}
+            ),
+            r"type datetime at output\.choices\[0\]\.message\.tool_calls\[0\]\.arguments\['value'\]\. ",
+            id="time-zone-name-in-a-key",
+        ),
+        pytest.param(
+            lambda: _with_message_metadata({"at": _at(timezone(_Offset(hours=1)))}),
+            r"type datetime at output\.choices\[0\]\.message\.metadata\['at'\]",
+            id="time-zone-offset",
         ),
     ],
 )
@@ -1258,6 +1296,19 @@ def _odd_metadata(value: Any) -> Callable[[], ModelOutput]:
             ),
             _odd_metadata({"at": "2024-01-02T03:04:05", "raw": "hi", "tags": [1]}),
             id="yaml-types-in-metadata",
+        ),
+        # the time zones YAML gives: UTC and fixed offsets
+        pytest.param(
+            _odd_metadata(
+                {
+                    "utc": _at(timezone.utc),
+                    "offset": _at(timezone(timedelta(hours=1, minutes=30))),
+                }
+            ),
+            _odd_metadata(
+                {"utc": "2024-01-02T03:04:05Z", "offset": "2024-01-02T03:04:05+01:30"}
+            ),
+            id="yaml-time-zones-in-metadata",
         ),
         pytest.param(
             _odd_metadata((1, 2)), _odd_metadata([1, 2]), id="tuple-in-metadata"
