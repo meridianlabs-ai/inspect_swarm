@@ -18,7 +18,8 @@ dependencies = [
     # Temporarily a git reference, to unblock work: the swarm writes its evidence as
     # CommunicationEvent and SwarmEvent (UKGovernmentBEIS/inspect_ai#6164), and users
     # isolation enters inspect_ai's sandbox_identity() scope
-    # (UKGovernmentBEIS/inspect_ai#6190); no release has either yet, so this tracks
+    # (UKGovernmentBEIS/inspect_ai#6190), which sets each member's HOME
+    # (UKGovernmentBEIS/inspect_ai#6276); no release has these yet, so this tracks
     # inspect_ai's `main`. PyPI rejects git dependencies, so go back to a released
     # `inspect-ai>=X` floor before inspect_swarm is published.
     "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",

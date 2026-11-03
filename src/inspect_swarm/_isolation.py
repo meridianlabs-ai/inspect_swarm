@@ -1,6 +1,6 @@
 import posixpath
 import re
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -67,7 +67,7 @@ def users(
 ) -> UserIsolation:
     """Run each member as its own Linux user in one shared sandbox.
 
-    When the swarm starts, before any member does, it creates a non-root user `swarm-<member>` for each member, with a private home directory, sets up the shared directories, and checks that the boundaries hold by running commands as the members. It refuses to start if any check fails. Each member then runs inside a sandbox identity scope, so that the built-in tools that run commands in the sandbox (`bash()`, `python()`, `bash_session()`, `text_editor()`, `grep()`, `list_files()` and the `read_file()` tool) run as its user and start in its home. Its preamble tells it its user and directories.
+    When the swarm starts, before any member does, it creates a non-root user `swarm-<member>` for each member, with a new private home directory (the image's `/etc/skel` is not copied), sets up the shared directories, and checks that the boundaries hold by running commands as the members. It refuses to start if any check fails. Each member then runs inside a sandbox identity scope, so that the built-in tools that run commands in the sandbox (`bash()`, `python()`, `bash_session()`, `text_editor()`, `grep()`, `list_files()` and the `read_file()` tool) run as its user and start in its home. Its preamble tells it its user and directories.
 
     A member cannot read or change another member's home unless `peers="read"` lets it read, and cannot write a `ro` share. It can still see the other members' processes and command lines, share files through `/tmp`, and connect to their sockets on localhost. Members share one kernel and one sandbox root: this is a default boundary and a record of who made what, not containment.
 
@@ -558,28 +558,20 @@ shares "$@"
 )
 
 # The self-test, run as a member through the provider's own exec(user=...). Checks
-# that the member runs as its uid and cannot become root, and that it can write no
-# entry of a ro share. Its probes go in a directory it reserves with mktemp -d in its
-# home and in each rw share, which it prints, one per line, as it reserves them, so
-# that cleanup removes those directories and nothing else; each holds a file `probe`
-# for the pair check.
-# $1 uid, $2 home, then `rw <path>` and `ro <path>` items.
+# that the member runs as its uid and cannot become root, that it can read every entry
+# of each share and write every entry of a rw share, and that it can write no entry of
+# a ro share.
+# $1 uid, then `rw <path>` and `ro <path>` items.
 _SELF_TEST = (
     _PRELUDE
     + r"""
-uid=$1 home=$2
-shift 2
-reserve() {
-  d=$(mktemp -d "$1/.swarm-probe-XXXXXXXX") || return 1
-  printf '%s\n' "$d"
-}
+uid=$1
+shift
 actual=$(id -u)
 [ "$actual" = "$uid" ] || fail "commands for this member run as uid $actual, not $uid: the sandbox does not run commands as the user it is given"
 if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   fail "the member can become root with sudo; remove its sudoers entry from the image"
 fi
-# mktemp makes a directory 0700; give it the mode mkdir would
-{ reserve "$home" && chmod go+rx "$d" && printf probe >"$d/probe"; } || fail "the member could not create a file in its home $home"
 while [ $# -gt 0 ]; do
   # every entry readable and every directory, the share's ancestors included, searchable
   unreadable=$(find -P "$2" -xdev ! -type l \( ! -readable -o -type d ! -executable \) -printf '%p\n' -quit 2>&1) \
@@ -589,14 +581,38 @@ while [ $# -gt 0 ]; do
     w=$(find -P "$2" -xdev ! -type l ! -writable -printf '%p\n' -quit 2>&1) \
       || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$w" | head -n 1)"
     [ -z "$w" ] || fail "the member cannot write $w in the read-write shared directory $2"
-    { reserve "$2" && chmod g+rwx "$d" && printf probe >"$d/probe"; } || fail "the member could not create a file in the shared directory $2"
   else
     w=$(find -P "$2" -xdev -writable -print -quit 2>&1) \
       || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$w" | head -n 1)"
     [ -z "$w" ] || fail "the member can write $w in the read-only shared directory $2"
-    if reserve "$2" 2>/dev/null; then
-      fail "the member could create a directory in the read-only shared directory $2"
-    fi
+  fi
+  shift 2
+done
+"""
+)
+
+# The probes, run as each member once every member's self-test has passed, so that no
+# self-test's scan meets another member's probes. Reserves a directory with mktemp -d
+# in the member's home and in each rw share, prints each as it reserves it, so that
+# cleanup removes those directories and nothing else, and puts a file `probe` in each
+# for the pair check. Also checks the member can create nothing in a ro share.
+# $1 home, then `rw <path>` and `ro <path>` items.
+_PROBES = (
+    _PRELUDE
+    + r"""
+home=$1
+shift
+reserve() {
+  d=$(mktemp -d "$1/.swarm-probe-XXXXXXXX") || return 1
+  printf '%s\n' "$d"
+}
+# mktemp makes a directory 0700; give it the mode mkdir would
+{ reserve "$home" && chmod go+rx "$d" && printf probe >"$d/probe"; } || fail "the member could not create a file in its home $home"
+while [ $# -gt 0 ]; do
+  if [ "$1" = rw ]; then
+    { reserve "$2" && chmod g+rwx "$d" && printf probe >"$d/probe"; } || fail "the member could not create a file in the shared directory $2"
+  elif reserve "$2" 2>/dev/null; then
+    fail "the member could create a directory in the read-only shared directory $2"
   fi
   shift 2
 done
@@ -791,37 +807,45 @@ async def _check_members(
     for share in isolation.shared:
         shares += [share.access, share.path]
     rw = [share.path for share in isolation.shared if share.access == "rw"]
-    results: dict[str, ExecResult[str] | BaseException] = {}
 
-    async def member_test(identity: MemberIdentity) -> None:
-        try:
-            result = await privileged_shell(
-                env,
-                _SELF_TEST,
-                str(identity.uid),
-                identity.home,
-                *shares,
-                user=identity.user,
-            )
-        except Exception as ex:
-            results[identity.user] = ex
-            return
-        results[identity.user] = result
-        # each line a directory the self-test reserved, in its home or a share,
-        # whether or not it went on to pass
-        parents = {identity.home, *(share.path for share in isolation.shared)}
-        reserved[identity.user] = {
-            posixpath.dirname(line): line
-            for line in result.stdout.splitlines()
-            if posixpath.dirname(line) in parents
-            and _PROBE_DIR.fullmatch(posixpath.basename(line))
-        }
+    # runs a script as each member, concurrently, with the member's own argument first
+    async def each_member(
+        script: str, own: Callable[[MemberIdentity], str], *args: str
+    ) -> None:
+        results: dict[str, ExecResult[str] | BaseException] = {}
 
-    async with anyio.create_task_group() as tg:
+        async def run(identity: MemberIdentity) -> None:
+            try:
+                result = await privileged_shell(
+                    env,
+                    script,
+                    own(identity),
+                    *args,
+                    user=identity.user,
+                )
+            except Exception as ex:
+                results[identity.user] = ex
+                return
+            results[identity.user] = result
+            if script is _PROBES:
+                # each line a directory it reserved, in its home or a share, whether
+                # or not it went on to pass
+                parents = {identity.home, *(share.path for share in isolation.shared)}
+                reserved[identity.user] = {
+                    posixpath.dirname(line): line
+                    for line in result.stdout.splitlines()
+                    if posixpath.dirname(line) in parents
+                    and _PROBE_DIR.fullmatch(posixpath.basename(line))
+                }
+
+        async with anyio.create_task_group() as tg:
+            for identity in identities:
+                tg.start_soon(run, identity)
         for identity in identities:
-            tg.start_soon(member_test, identity)
-    for identity in identities:
-        _check_result(results[identity.user], env_name, identity.user)
+            _check_result(results[identity.user], env_name, identity.user)
+
+    await each_member(_SELF_TEST, lambda identity: str(identity.uid), *shares)
+    await each_member(_PROBES, lambda identity: identity.home, *shares)
     if len(identities) > 1:
         first, second = identities[0], identities[1]
         probes = reserved[first.user]

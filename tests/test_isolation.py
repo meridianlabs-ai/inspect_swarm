@@ -71,9 +71,9 @@ class IsolationStub(SandboxEnvironment):
         if "echo begin" in cmd[2]:
             return ExecResult(True, 0, self.probe, "")
         if "reserve()" in cmd[2]:
-            # the self-test prints the directories it reserves, in its home and in each
-            # rw share, as mktemp names them; a failing one reserves only the first
-            home, items = cmd[5], cmd[6:]
+            # the probes print the directories they reserve, in the member's home and in
+            # each rw share, as mktemp names them; a failing one reserves only the first
+            home, items = cmd[4], cmd[5:]
             rw = [
                 path
                 for access, path in zip(items[::2], items[1::2], strict=True)
@@ -218,12 +218,12 @@ async def test_each_member_runs_as_its_user_after_setup_and_self_test() -> None:
         "w-1": ("swarm-w-1", "/scratch/w-1", "@w-1"),
         "w-2": ("swarm-w-2", "/scratch/w-2", "@w-2"),
     }
-    # setup runs as root; the self-test runs as each member, and a peer test as the
-    # second; the probe files are removed as root
+    # setup runs as root; the self-test and then the probes run as each member, and a
+    # peer test as the second; the probes are removed as root
     users = [str(user) for user, _, _ in stub.calls]
     assert users[:3] == ["root", "root", "root"]
-    assert sorted(users[3:5]) == ["swarm-w-1", "swarm-w-2"]
-    assert users[5:] == ["swarm-w-2", "root"]
+    assert sorted(users[3:5]) == sorted(users[5:7]) == ["swarm-w-1", "swarm-w-2"]
+    assert users[7:] == ["swarm-w-2", "root"]
     # every path and name reaches the scripts as an argument
     _, setup, args = stub.calls[2]
     assert "swarm-w-1" not in setup and "/scratch" not in setup
