@@ -576,12 +576,25 @@ def _tool_call(arguments: dict[str, Any]) -> ModelOutput:
     return output
 
 
-# A tool call whose arguments hold the call itself.
-def _cyclic_tool_call() -> ModelOutput:
+# A tool call whose arguments hold the call itself, which only task code can build.
+def _tool_call_in_its_arguments() -> ModelOutput:
     output = _tool_call({})
     [call] = output.message.tool_calls or []
     call.arguments["call"] = call
     return output
+
+
+# An output nested in another's metadata, carrying an iterator that must not be read.
+def _output_in_metadata() -> ModelOutput:
+    inner = ModelOutput.from_content("mockllm", "inner")
+    inner.metadata = {"rows": iter([1, 2])}
+    return _with_metadata({"inner": inner})
+
+
+def _list_cycle() -> list[Any]:
+    cycle: list[Any] = []
+    cycle.append(cycle)
+    return cycle
 
 
 def _cycle() -> dict[str, Any]:
@@ -612,7 +625,9 @@ def _aliased(depth: int) -> list[Any]:
         pytest.param(lambda: _with_metadata(_cycle()), id="cycle"),
         # within the depth limit, refused before it is serialized
         pytest.param(lambda: _with_metadata({"value": _aliased(60)}), id="aliased"),
-        pytest.param(_cyclic_tool_call, id="cyclic-tool-call"),
+        pytest.param(
+            lambda: _tool_call({"loop": _list_cycle()}), id="tool-arguments-cycle"
+        ),
     ],
 )
 async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> None:
@@ -621,16 +636,43 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
 
 
 @pytest.mark.anyio
-async def test_an_object_the_task_put_in_an_output_fails_the_sample() -> None:
-    odd = _plain_then(
-        lambda: _with_metadata({"diagnostic": object()}), "result_test_author_object"
-    )
+@pytest.mark.parametrize(
+    "odd,where",
+    [
+        pytest.param(
+            lambda: _with_metadata({"diagnostic": object()}),
+            r"type object at output\.metadata\['diagnostic'\]",
+            id="object",
+        ),
+        # refused whatever else the output holds: here data the record would leave out
+        pytest.param(
+            lambda: _with_metadata(
+                {"deep": _nested(194), "loop": _cycle(), "diagnostic": object()}
+            ),
+            r"type object at output\.metadata\['diagnostic'\]",
+            id="after-data-left-out",
+        ),
+        # one of Inspect's models, outside the places Inspect puts it
+        pytest.param(
+            _output_in_metadata,
+            r"type ModelOutput at output\.metadata\['inner'\]",
+            id="model-in-metadata",
+        ),
+        pytest.param(
+            _tool_call_in_its_arguments,
+            r"type ToolCall at output\.choices\[0\]\.message\.tool_calls\[0\]\.arguments\['call'\]",
+            id="tool-call-in-arguments",
+        ),
+    ],
+)
+async def test_an_object_the_task_put_in_an_output_fails_the_sample(
+    odd: Callable[[], ModelOutput], where: str
+) -> None:
     async with sample():
         with pytest.raises(
-            TypeError,
-            match=r"output of member 'odd' holds a value of type object at output\.metadata\['diagnostic'\]",
+            TypeError, match=f"output of member 'odd' holds a value of {where}"
         ):
-            await run_agent(odd, "task")
+            await run_agent(_plain_then(odd, "result_test_author_object"), "task")
 
 
 @pytest.mark.parametrize(
