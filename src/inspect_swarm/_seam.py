@@ -112,8 +112,8 @@ class MemberGate:
     registered: bool = False
     # the member's own loop reached the gate
     reached: bool = False
-    # the state the loop passed at its last boundary, for the member's output when its
-    # agent raises
+    # the state the own or successor loop passed at its last boundary, None when it
+    # passed none, for the member's output when its agent raises
     state: AgentState | None = None
     # the origin of the first end request
     end_origin: str | None = None
@@ -196,12 +196,12 @@ class MemberGate:
                 raise RuntimeError(
                     f"Member {self.name!r} started a second agent loop after its first one ended. A member with boundary callbacks may run only one agent loop."
                 )
-            if state is not None:
-                self.state = state
+            # None for a loop that does not pass its state, so that an earlier loop's
+            # state is not kept for this one's output
+            self.state = state
             self._end_if_requested()
             return False
-        if state is not None:
-            self.state = state
+        self.state = state
         self.reached = True
         index = self._index
         self._index += 1

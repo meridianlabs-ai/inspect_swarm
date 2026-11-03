@@ -1259,6 +1259,105 @@ async def test_an_agent_that_stops_itself_keeps_its_loops_last_boundary_state(
     assert kept.output.usage.output_tokens == 7
 
 
+@agent
+def shaped_loops(
+    shape: str, given: bool, ending: str, trigger: Callable[[], None]
+) -> Agent:
+    """Custom loops on fresh states, each with one generation between two boundaries: the member's own loop alone (`own`), a state-aware warmup loop then a `main` successor (`successor`), or an own loop with a loop nested in its turn (`nested`). The last loop (the nested one for `nested`) passes its state to before_turn() when `given`, and after its generation stops itself, calls `trigger` (an end or a stop), or goes on to return."""
+
+    def stop() -> LimitExceededError:
+        return LimitExceededError("custom", value=1, limit=1, message="done")
+
+    async def run_loop(
+        messages: list[ChatMessage],
+        label: str,
+        passes: bool,
+        last: bool,
+        inner: Callable[[], Awaitable[AgentState]] | None = None,
+    ) -> AgentState:
+        loop = AgentState(messages=list(messages))
+        async with agent_channel() as ch:
+            for _ in range(2):
+                if passes:
+                    loop.messages.extend(
+                        await ch.before_turn(loop.messages, state=loop)
+                    )
+                else:
+                    loop.messages.extend(await ch.before_turn(loop.messages))
+                if not loop.output.empty:
+                    break
+                loop.output = ModelOutput.from_content("mockllm", label)
+                loop.messages.append(loop.output.message)
+                if inner is not None:
+                    await inner()
+                if last and ending == "self-stop":
+                    raise stop()
+                if last and ending in ("end", "stop"):
+                    trigger()
+        return loop
+
+    async def execute(state: AgentState) -> AgentState:
+        if shape == "own":
+            return await run_loop(state.messages, "own", given, True)
+        if shape == "successor":
+            await run_loop(state.messages, "warmup", True, False)
+            return await run_loop(state.messages, "main", given, True)
+        return await run_loop(
+            state.messages,
+            "own",
+            True,
+            False,
+            lambda: run_loop(state.messages, "nested", given, True),
+        )
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("shape", ["own", "successor", "nested"])
+@pytest.mark.parametrize("given", [True, False])
+@pytest.mark.parametrize("ending", ["return", "self-stop", "end", "stop"])
+async def test_the_member_keeps_the_state_of_its_own_or_successor_loops_last_boundary(
+    shape: str, given: bool, ending: str
+) -> None:
+    runs: list[SwarmRun] = []
+
+    def trigger() -> None:
+        if ending == "end":
+            runs[0].member("a").end(origin="operator")
+        else:
+            runs[0].stop("controller:test")
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        runs.append(cast(SwarmRun, control))
+        control.start("a")
+        return await _drain(control)
+
+    outcome = await _run(
+        [member(shaped_loops(shape, given, ending, trigger), name="a")],
+        run_controller,
+        budget=Budget(grace=5),
+    )
+    kept = runs[0]._lookup("a").agent_state
+    assert _statuses(outcome) == {
+        "a": {
+            "return": "submitted",
+            "self-stop": "member_limit:custom",
+            "end": "stopped",
+            "stop": "stopped",
+        }[ending]
+    }
+    # a nested loop's state is never kept; a raise keeps the own or successor loop's
+    # state at its last boundary, or the state the agent was called with when that
+    # loop passed none, never an earlier loop's
+    label = {"own": "own", "successor": "main", "nested": "own"}[shape]
+    if shape != "nested" and not given and ending != "return":
+        label = ""
+    assert kept.output.completion == label
+    replies = [m.text for m in kept.messages if isinstance(m, ChatMessageAssistant)]
+    assert replies == ([label] if label else [])
+
+
 @pytest.mark.anyio
 async def test_a_stop_with_no_grace_ends_a_parked_member_with_no_generation() -> None:
     script = _Recording([_submit()])
