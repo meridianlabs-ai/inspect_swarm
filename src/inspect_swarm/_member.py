@@ -533,6 +533,10 @@ async def _run_member(
 ) -> str:
     token = current_member.set(context)
     status: str | None = None
+    # the member produced its ending itself: a normal return, or its own limit or
+    # error (the error)
+    returned = False
+    own: BaseException | None = None
     try:
         with (
             tool_state_scope(name),
@@ -546,10 +550,6 @@ async def _run_member(
             try:
                 async with owner:
                     foreign: BaseException | None = None
-                    # the member produced its ending itself: a normal return, or its
-                    # own limit or error (the error)
-                    returned = False
-                    own: BaseException | None = None
                     try:
                         agent = build_member(record)
                         if owner.started:
@@ -609,6 +609,12 @@ async def _run_member(
                 # after the owner has ended its work, so its cancellations are counted
                 outcome.background_started = owner.started
                 outcome.background_cancelled = owner.cancelled
+        if gate.unsupervised() and (returned or own is not None):
+            # a callback registered while the member's background work drained, which
+            # never ran; nothing awaits between here and the member's end
+            error = gate.unsupervised_error()
+            error.__cause__ = own
+            raise error
         if context.refusal is not None:
             # bridge use found after the member started background work
             raise context.refusal

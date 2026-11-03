@@ -668,6 +668,64 @@ async def test_a_staged_conversation_over_the_message_limit(then: str) -> None:
         assert script.started == 0
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("change", ["rewrite", "stale-summary"])
+@pytest.mark.parametrize("over", [True, False])
+async def test_a_growing_rewrite_over_the_message_limit_is_rejected_whole(
+    change: str, over: bool
+) -> None:
+    script = _Recording([_submit()])
+    earlier = ChatMessageAssistant(content="earlier reply")
+    summary = ChatMessageUser(content="summary", metadata={"summary": True})
+    # react's system prompt, the three input messages and the preamble: 5, with room
+    # for one more before the reply
+    limit = 7
+    # three messages more once applied, over the limit, or one more, under it
+    extra = [_user(f"extra {i}") for i in range(4 if over else 2)]
+
+    async def callback(b: Boundary) -> Result:
+        if b.index:
+            return None
+        messages = list(b.messages)
+        if change == "rewrite":
+            # an edit of the last message, so not an append
+            messages[-1] = messages[-1].model_copy(update={"content": "edited"})
+            return [*messages, *extra[1:]]
+        # an edit before the summary, which makes it stale and removes it
+        task = [m.id for m in messages].index(earlier.id) - 1
+        messages[task] = messages[task].model_copy(update={"content": "edited"})
+        return [*messages, *extra]
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        control.member("a").on_boundary(callback, origin="defence")
+        control.start("a", input=[_user("task"), earlier, summary])
+        return await _drain(control)
+
+    outcome = await _run(
+        [member(_react(script), name="a", limits=[message_limit(limit)])],
+        run_controller,
+    )
+    [boundary] = _boundaries(outcome)
+    changes = _changes(outcome)
+    assert [c["origin"] for c in changes] == (
+        ["defence"] if change == "rewrite" else ["defence", "swarm"]
+    )
+    assert boundary["messages"]["before"] == limit - 2
+    if over:
+        assert _statuses(outcome) == {"a": "member_limit:message"}
+        assert boundary["outcome"] == "rejected"
+        assert boundary["error"] == "LimitExceededError"
+        assert boundary["messages"]["after"] == boundary["messages"]["before"]
+        assert not any(c["applied"] for c in changes)
+        assert script.started == 0
+    else:
+        assert boundary["outcome"] == "continue"
+        assert boundary["messages"]["after"] == limit - 1
+        assert all(c["applied"] for c in changes)
+        assert [m.id for m in script.inputs[0]][-1] == extra[-1].id
+        assert (summary.id in [m.id for m in script.inputs[0]]) is (change == "rewrite")
+
+
 # ---------------------------------------------------------------------------
 # Ending a member
 
@@ -1713,6 +1771,71 @@ async def test_a_member_with_callbacks_that_never_reaches_a_boundary_ends_errore
     assert _boundaries(transcript) == []
     assert transcript.record.final.member is None
     assert _statuses(transcript) == {"a": "errored"}
+
+
+@agent
+def answers_with_background_work(
+    loop: bool, returned: anyio.Event, registered: anyio.Event
+) -> Agent:
+    """Start background work that runs until `registered` is set, then answer: through a react() loop, or with no agent loop at all."""
+    inner = _react(_Recording([_submit()]))
+
+    async def execute(state: AgentState) -> AgentState:
+        background(registered.wait)
+        if loop:
+            state = await inner(state)
+        else:
+            state.output = ModelOutput.from_content("mockllm", "answer")
+        # nothing awaits from here to the wrapper's first supervision check
+        returned.set()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "loop,registration",
+    [
+        (False, "registered"),
+        (False, "unregistered"),
+        (False, "none"),
+        (True, "registered"),
+    ],
+)
+async def test_a_callback_registered_while_the_member_drains_counts_as_never_run(
+    loop: bool, registration: str
+) -> None:
+    returned = anyio.Event()
+    registered = anyio.Event()
+
+    async def callback(b: Boundary) -> Result:
+        return None
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        control.start("a")
+        if registration != "none":
+            # the agent has returned, and its background work holds the member in
+            # its drain
+            await returned.wait()
+            remove = control.member("a").on_boundary(callback, origin="late")
+            if registration == "unregistered":
+                remove()
+        registered.set()
+        return await _drain(control)
+
+    members = [
+        member(answers_with_background_work(loop, returned, registered), name="a")
+    ]
+    if loop or registration == "none":
+        # a loop that reached its boundary, or no callback at all
+        outcome = await _run(members, run_controller)
+        assert _statuses(outcome) == {"a": "submitted"}
+        assert outcome.record.final.member == "a"
+    else:
+        transcript = await _raised(members, run_controller, RuntimeError, "never ran")
+        assert _statuses(transcript) == {"a": "errored"}
+        assert transcript.record.final.member is None
 
 
 @pytest.mark.anyio
