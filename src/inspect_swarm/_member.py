@@ -567,6 +567,9 @@ async def _run_member(
     # error (the error)
     returned = False
     own: BaseException | None = None
+    # the agent was called: an error before that (building or refusing the agent) is
+    # not a run that missed its gate, and propagates as raised
+    called = False
     try:
         with (
             tool_state_scope(name),
@@ -610,6 +613,7 @@ async def _run_member(
                             )
                             context.span_id = current_span_id()
                             gate.task = anyio.get_current_task().id
+                            called = True
                             with turn_gate(gate):
                                 result, stopped = await _call_agent(agent, state)
                         if not stopped:
@@ -635,7 +639,7 @@ async def _run_member(
                                 status = "submitted"
                         else:
                             own = foreign
-                    if gate.unsupervised() and (returned or own is not None):
+                    if called and gate.unsupervised() and (returned or own is not None):
                         # its result is never an answer, so an unsupervised run cannot
                         # pass as a supervised one
                         foreign = gate.unsupervised_error()
@@ -648,7 +652,7 @@ async def _run_member(
                 # after the owner has ended its work, so its cancellations are counted
                 outcome.background_started = owner.started
                 outcome.background_cancelled = owner.cancelled
-        if gate.unsupervised() and (returned or own is not None):
+        if called and gate.unsupervised() and (returned or own is not None):
             # a callback registered while the member's background work drained, which
             # never ran; nothing awaits between here and the member's end
             error = gate.unsupervised_error()

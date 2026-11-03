@@ -1,4 +1,5 @@
 import functools
+import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from typing import Any, cast
@@ -6,6 +7,7 @@ from uuid import uuid4
 
 import anyio
 import pytest
+from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import (
     Agent,
     AgentState,
@@ -16,14 +18,19 @@ from inspect_ai.agent import (
     react,
     research,
 )
-from inspect_ai.event import CommunicationEvent
+from inspect_ai.dataset import Sample
+from inspect_ai.event import CommunicationEvent, CompactionEvent
 from inspect_ai.model import (
     ChatMessage,
     ChatMessageSystem,
+    ChatMessageTool,
     ChatMessageUser,
+    CompactionTrim,
     Model,
     ModelOutput,
 )
+from inspect_ai.model._trim import partition_messages
+from inspect_ai.scorer import includes
 from inspect_ai.tool import Tool, ToolCall, ToolError, tool
 from inspect_ai.util import time_limit
 
@@ -455,6 +462,44 @@ async def test_wake_messages_get_fresh_ids_and_no_source_and_the_callers_list_is
     assert [c["added"][0]["id"] for c in _changes(ran)] == ids
 
 
+@pytest.mark.anyio
+async def test_an_input_marked_wake_task_stays_last_through_a_forced_compaction() -> (
+    None
+):
+    # the woken generation overflows the context window, which forces a compaction
+    overflow = output("too long")
+    overflow.choices[0].stop_reason = "model_length"
+    script = _Recording([_call("work"), _submit("one"), overflow, _submit("two")])
+    task = ChatMessageUser(content="the next task", source="input")
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("a")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                if isinstance(event, MemberIdle) and event.answer == 0:
+                    control.wake("a", [task])
+        return "quiescence"
+
+    agent_ = _react(script, compaction=CompactionTrim(preserve=1.0))
+    ran = await _run([member(agent_, name="a", persistent=True)], run)
+    [compaction] = [e for e in ran.events if isinstance(e, CompactionEvent)]
+    assert compaction.type == "trim"
+    # the generation after the compaction, given the compacted conversation
+    woken = script.inputs[-1]
+    assert len(script.inputs) == 4
+    # the wake task is still after the first activation's history, its answer included
+    assert woken[-1].role == "user" and woken[-1].text == "the next task"
+    assert any(
+        isinstance(m, ChatMessageTool) and m.function == "submit" for m in woken[:-1]
+    )
+    assert woken[-1].source is None
+    # only the starting input is in the preserved input group
+    starting = [m.id for m in script.inputs[0] if m.source == "input"]
+    assert [m.id for m in partition_messages(woken).input] == starting
+    assert task.source == "input"
+    assert len(ran.record.members[0].answer_times) == 2
+
+
 # ---------------------------------------------------------------------------
 # Endings
 
@@ -657,6 +702,57 @@ async def test_a_turn_limiter_spans_activations_and_its_cut_off_is_never_recorde
     assert len(ran.record.members[0].answer_times) == 1
     assert ran.record.final.model_dump()["answer"] == 0
     assert "one" in ran.sample.output.completion
+
+
+async def _scored(members: list[Any], run: Run) -> _Ran:
+    # a swarm on a sample whose scorer react() checks its submissions against
+    @swarm_controller(name=f"persistent_test_{uuid4().hex}")
+    def factory() -> Controller:
+        return Controller(run, final="last")
+
+    [log] = await eval_async(
+        Task(
+            dataset=[Sample(input="task", target="right")],
+            solver=swarm(members, controller=factory(), channels=[]),
+            scorer=includes(),
+        ),
+        model="mockllm/model",
+        log_dir=tempfile.mkdtemp(),
+    )
+    assert log.samples, log.error
+    sample = log.samples[0]
+    assert sample.error is None, sample.error.traceback
+    return _Ran(sample)
+
+
+@pytest.mark.anyio
+async def test_a_checked_submission_is_an_answer_and_an_incorrect_one_is_not() -> None:
+    # the first activation passes its check; the second submits an incorrect answer
+    # with an attempt left, and its on_continue then cuts it off
+    script = _Recording([_submit("right"), _submit("wrong"), _call("work")])
+    continued: list[str] = []
+
+    async def stop_once_woken(state: AgentState) -> bool:
+        continued.append(state.output.completion)
+        return False
+
+    ran = await _scored(
+        [
+            member(
+                _react(script, attempts=2, on_continue=stop_once_woken),
+                name="a",
+                persistent=True,
+            )
+        ],
+        _waking("next"),
+    )
+    assert _statuses(ran) == {"a": "unsubmitted"}
+    # the incorrect submission got the incorrect message, then on_continue ended it
+    assert len(script.inputs) == 2 and len(continued) == 1
+    assert len(ran.record.members[0].answer_times) == 1
+    assert [e["answer"] for e in _answer_events(ran)] == [0]
+    assert ran.record.final.answer == 0
+    assert "right" in ran.sample.output.completion
 
 
 @pytest.mark.anyio
@@ -875,10 +971,23 @@ def test_swarm_refuses_a_persistent_member_declared_bridged() -> None:
         )
 
 
+@agent
+def failing_builder(model: Model) -> Agent:
+    """A builder that raises before it returns an agent."""
+    raise ValueError("cannot build the worker")
+
+
 @pytest.mark.anyio
-@pytest.mark.parametrize("factory", [wrapping_builder, background_builder])
+@pytest.mark.parametrize(
+    "factory,match",
+    [
+        (wrapping_builder, "Member 'a' is persistent, and its agent is not a react"),
+        (background_builder, "Member 'a' is persistent, and its agent is deepagent"),
+        (failing_builder, "cannot build the worker"),
+    ],
+)
 async def test_a_factory_whose_agent_cannot_persist_is_refused_in_its_run(
-    factory: Callable[..., Agent],
+    factory: Callable[..., Agent], match: str
 ) -> None:
     script = _Recording([_submit("one")])
     ran = await _raised(
@@ -892,8 +1001,11 @@ async def test_a_factory_whose_agent_cannot_persist_is_refused_in_its_run(
         ],
         _waking(),
         ValueError,
-        "Member 'a' is persistent",
+        match,
     )
+    # the error itself, not one saying the agent never reached its gate
+    assert ran.sample.error is not None
+    assert "never reached a turn boundary" not in ran.sample.error.traceback
     # refused before its first generation
     assert script.started == 0
     assert _statuses(ran) == {"a": "errored"}
@@ -1049,6 +1161,27 @@ async def test_a_member_time_limit_does_not_run_while_idle() -> None:
     assert _statuses(ran) == {"a": "submitted"}
     [metrics] = _metrics(ran).members
     assert metrics.awaiting_work_time >= 1
+
+
+@pytest.mark.anyio
+async def test_working_time_stops_while_every_member_is_idle() -> None:
+    hold = 1.0
+    script = _Recording([_submit("one"), _submit("two")])
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("a")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                if isinstance(event, MemberIdle) and event.answer == 0:
+                    await anyio.sleep(hold)
+                    control.wake("a", "next")
+        return "quiescence"
+
+    ran = await _run([member(_react(script), name="a", persistent=True)], run)
+    total, working = ran.sample.total_time, ran.sample.working_time
+    assert total is not None and working is not None
+    # the controller's wait while the member was idle is waiting time
+    assert total - working >= hold * 0.9
 
 
 @pytest.mark.anyio
