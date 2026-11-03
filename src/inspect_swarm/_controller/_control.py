@@ -1040,7 +1040,10 @@ class SwarmRun:
             except TypeError as ex:
                 refusal = ex
         if m.refused:
-            # its own output is never read again, by the answer or the record
+            # however it ended, a refused output ends it `errored`, before its ending
+            # is published, settled or accounted; its own output is never read again,
+            # by the answer or the record
+            status = m.status = "errored"
             m.agent_state.output = ModelOutput()
         # releases the other members' waits
         self.bus.member_ended(m.name, status)

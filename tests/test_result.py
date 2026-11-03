@@ -37,7 +37,7 @@ from inspect_ai.model._call_tools import parse_tool_call
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import TaskState
 from inspect_ai.tool import ToolCall, ToolInfo, ToolParam, ToolParams
-from inspect_ai.util import store, token_limit
+from inspect_ai.util import LimitExceededError, store, token_limit
 
 from inspect_swarm import (
     Budget,
@@ -1065,7 +1065,86 @@ async def test_a_persistent_answer_is_checked_before_it_is_kept(
     assert record is not None
     assert LEDGER_KEY in ran.store and METRICS_KEY in ran.store
     [m] = record.members
-    assert (m.output, m.left_out, m.answer_times) == (None, ["output"], [])
+    assert (m.status, m.output, m.left_out, m.answer_times) == (
+        "errored",
+        None,
+        ["output"],
+        [],
+    )
+
+
+@agent
+def holds(
+    build: Callable[[], ModelOutput],
+    ending: str,
+    ready: anyio.Event,
+    release: anyio.Event,
+) -> Agent:
+    """Set the output `build` gives, then end as `ending` says: stop itself with a custom limit, or wait to be released or cancelled."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state.output = build()
+        ready.set()
+        if ending == "custom-limit":
+            raise LimitExceededError("custom", value=1, limit=1)
+        await release.wait()
+        return state
+
+    return execute
+
+
+# An output refused when its member ends some other way than by returning it: the
+# member ends `errored` in the record, its event and the ledger, as when it returns it.
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "ending,native",
+    [
+        ("custom-limit", "member_limit:custom"),
+        ("cancelled", "cancelled"),
+        ("end-request", "stopped"),
+    ],
+)
+@pytest.mark.parametrize("refused", [True, False], ids=["refused", "native"])
+async def test_a_refused_output_ends_its_member_errored_however_it_ends(
+    ending: str, native: str, refused: bool
+) -> None:
+    ready, release = anyio.Event(), anyio.Event()
+
+    def build() -> ModelOutput:
+        return _with_metadata({"diagnostic": object()} if refused else {"x": 1})
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("odd")
+        await ready.wait()
+        if ending == "end-request":
+            control.member("odd").end(origin="test")
+            release.set()
+        if ending != "cancelled":
+            async for _ in control.events():
+                pass
+        return "all_done"
+
+    solver = swarm(
+        member(holds(build, ending, ready, release), name="odd"),
+        controller=controller(run, f"result_test_refused_{ending}"),
+        channels=[],
+        budget=Budget(grace=0.05),
+    )
+    async with sample() as transcript:
+        if refused:
+            with pytest.raises(TypeError, match="output of member 'odd' holds"):
+                await run_agent(solver, "task")
+        else:
+            await run_agent(solver, "task")
+        record = _transcript_result(store())
+        ledger = SwarmLedger.model_validate(store().get(LEDGER_KEY))
+    status = "errored" if refused else native
+    assert record is not None
+    [m] = record.members
+    assert (m.status, m.left_out) == (status, ["output"] if refused else [])
+    [ended] = swarm_events(transcript, "member_result")
+    assert ended.data["status"] == status
+    assert [entry.status for entry in ledger.members] == [status]
 
 
 class _TaskOutput(ModelOutput):
