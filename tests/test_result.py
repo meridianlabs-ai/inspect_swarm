@@ -1,12 +1,17 @@
 import math
+import re
 from collections.abc import Callable, Iterator
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Self, cast
 
 import anyio
 import pytest
-from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
+from inspect_ai import (
+    Task,
+    eval,  # pyright: ignore[reportUnknownVariableType]
+    eval_async,  # pyright: ignore[reportUnknownVariableType]
+)
 from inspect_ai._util.hash import mm3_hash
 from inspect_ai._util.registry import (
     create_registry_object,
@@ -19,6 +24,7 @@ from inspect_ai.dataset import Sample
 from inspect_ai.event import SwarmEvent
 from inspect_ai.log import read_eval_log
 from inspect_ai.model import (
+    ChatMessageAssistant,
     ChatMessageUser,
     ContentText,
     Logprob,
@@ -47,7 +53,7 @@ from inspect_swarm import (
     swarm,
     swarm_result,
 )
-from inspect_swarm._evidence import LEDGER_KEY
+from inspect_swarm._evidence import LEDGER_KEY, METRICS_KEY
 from inspect_swarm._ledger import SwarmLedger
 from inspect_swarm._record import RECORD_TYPE, SwarmResultRecord, _transcript_result
 from inspect_swarm._result import verifier_label
@@ -682,6 +688,12 @@ class _Hooked:
     def __class__(self) -> type:  # pyright: ignore[reportIncompatibleMethodOverride]
         raise _ran("__class__")
 
+    def __copy__(self) -> Self:
+        raise _ran("__copy__")
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        raise _ran("__deepcopy__")
+
 
 class _List(_Hooked, list[Any]):
     def __iter__(self) -> Iterator[Any]:
@@ -907,6 +919,125 @@ async def test_an_object_the_task_put_in_an_output_fails_the_sample(
             await run_agent(_plain_then(odd, "result_test_author_object"), "task")
     # no method or property of the task's classes ran, `__class__` included
     assert _hook_calls == []
+
+
+class _RewrittenOutput(ModelOutput):
+    """A `ModelOutput` subtype whose copy is another output."""
+
+    def __copy__(self) -> Self:
+        _ran("__copy__")
+        return cast(Self, ModelOutput.from_content("mockllm", "rewritten"))
+
+
+class _RaisingOutput(ModelOutput):
+    """A `ModelOutput` subtype whose copy raises."""
+
+    def __copy__(self) -> Self:
+        raise _ran("__copy__")
+
+
+class _RaisingMessage(ChatMessageAssistant):
+    """A message subtype whose copy raises, as the final conversation copies it."""
+
+    def __copy__(self) -> Self:
+        raise _ran("__copy__")
+
+
+def _subtype(cls: type[ModelOutput]) -> Callable[[], ModelOutput]:
+    def build() -> ModelOutput:
+        base = ModelOutput.from_content("mockllm", "original")
+        return cls(model=base.model, choices=base.choices)
+
+    return build
+
+
+def _raising_message() -> ModelOutput:
+    output = ModelOutput.from_content("mockllm", "original")
+    output.choices[0].message = _RaisingMessage(content="original")
+    return output
+
+
+# The member's output is checked when it ends, before the answer, the record or
+# anything else copies it, and the sample fails with the record, the ledger and the
+# metrics kept.
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "odd,where",
+    [
+        pytest.param(
+            _subtype(_RewrittenOutput),
+            r"type _RewrittenOutput at output\. ",
+            id="copy-rewrites",
+        ),
+        pytest.param(
+            _subtype(_RaisingOutput),
+            r"type _RaisingOutput at output\. ",
+            id="copy-raises",
+        ),
+        pytest.param(
+            _raising_message,
+            r"type _RaisingMessage at output\.choices\[0\]\.message\. ",
+            id="answer-message-copy-raises",
+        ),
+    ],
+)
+async def test_an_output_is_checked_before_anything_copies_it(
+    odd: Callable[[], ModelOutput], where: str
+) -> None:
+    _hook_calls.clear()
+    async with sample():
+        with pytest.raises(
+            TypeError, match=f"output of member 'odd' holds a value of {where}"
+        ):
+            await run_agent(
+                swarm(member(returns(odd), name="odd"), channels=[]), "task"
+            )
+        record = _transcript_result(store())
+        accounting = (store().get(LEDGER_KEY), store().get(METRICS_KEY))
+    assert _hook_calls == []
+    assert record is not None and None not in accounting
+    [m] = record.members
+    assert (m.status, m.output, m.left_out) == ("submitted", None, ["output"])
+
+
+class _Uncopyable:
+    """An object whose copy records that it ran. It has no `__class__` hook, since Inspect's own log writer reads its class."""
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        raise _ran("__deepcopy__")
+
+
+@pytest.mark.anyio
+async def test_a_persistent_answer_is_checked_before_it_is_kept(
+    tmp_path: Path,
+) -> None:
+    _hook_calls.clear()
+    reply = ModelOutput.from_content("mockllm", "41")
+    reply.metadata = {"diagnostic": _Uncopyable()}
+    persistent = member(
+        react(model=scripted_model(Script(outputs=[reply])), submit=False),
+        name="odd",
+        persistent=True,
+    )
+    # react needs a running sample
+    [log] = await eval_async(
+        Task(dataset=[Sample(input="task")], solver=swarm(persistent, channels=[])),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+    )
+    assert log.samples is not None
+    [ran] = log.samples
+    assert ran.error is not None and "TypeError" in ran.error.traceback
+    assert re.search(
+        r"output of member 'odd' holds a value of type _Uncopyable at output\.metadata\['diagnostic'\]",
+        ran.error.message,
+    )
+    assert _hook_calls == []
+    record = swarm_result(ran)
+    assert record is not None
+    assert LEDGER_KEY in ran.store and METRICS_KEY in ran.store
+    [m] = record.members
+    assert (m.output, m.left_out, m.answer_times) == (None, ["output"], [])
 
 
 class _TaskOutput(ModelOutput):

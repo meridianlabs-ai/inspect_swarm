@@ -53,9 +53,11 @@ from .._metrics import (
     swarm_metrics,
 )
 from .._record import (
+    FinalRecord,
     MemberResult,
     MemberState,
     SwarmResultRecord,
+    _refuse_author_objects,  # pyright: ignore[reportPrivateUsage]
     _swarm_ended,  # pyright: ignore[reportPrivateUsage]
     _swarm_started,  # pyright: ignore[reportPrivateUsage]
     write_record,
@@ -365,6 +367,9 @@ class MemberRun:
         self.verified_time: float | None = None
         # ended, with its submission waiting for its verdict
         self.verifying = False
+        # its output held an object from task code, so it is never read again, and the
+        # record leaves it out
+        self.refused = False
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
         self.context = MemberContext(
@@ -456,8 +461,9 @@ class MemberRun:
             first_pass_time=self.gates.first_pass_time,
             # a copy, so that the record never shares the member's own output
             output=self.agent_state.output.model_copy()
-            if self.state == "ended"
+            if self.state == "ended" and not self.refused
             else None,
+            left_out=["output"] if self.refused else [],
             answer_key=self.answer_key,
             verdict=self.verified,
             verdict_time=self.verified_time,
@@ -762,25 +768,30 @@ class SwarmRun:
                 # started, the record first, provisional unless the final step
                 # completed, then the accounting
                 if started:
-                    results = self._results()
-                    record = SwarmResultRecord(
-                        members=results,
-                        final=answer(
-                            results, self._final, self._pick, provisional=not ended
-                        ),
-                        kind=self._result.kind if self._result is not None else None,
-                        verifier=verifier_label(self._result.verifier)
-                        if self._result is not None
-                        and self._result.verifier is not None
-                        else None,
-                    )
                     failures: list[Exception] = []
+                    chosen: FinalRecord | None = None
                     try:
-                        write_record(record)
+                        results = self._results()
+                        chosen = answer(
+                            results, self._final, self._pick, provisional=not ended
+                        )
+                        write_record(
+                            SwarmResultRecord(
+                                members=results,
+                                final=chosen,
+                                kind=self._result.kind
+                                if self._result is not None
+                                else None,
+                                verifier=verifier_label(self._result.verifier)
+                                if self._result is not None
+                                and self._result.verifier is not None
+                                else None,
+                            )
+                        )
                     except Exception as ex:
                         failures.append(ex)
                     failures += self._account(
-                        interval, timelines, record, ended=ended, error=error
+                        interval, timelines, chosen, ended=ended, error=error
                     )
                     # the error or cancellation that ended the swarm stays the one
                     # raised, else the first failure here; the others become its notes
@@ -815,13 +826,14 @@ class SwarmRun:
             raise error
 
     # The ledger and the metrics of a swarm that started, written however it ends, even
-    # when its record could not be; returns what failed rather than raising it, so that
+    # when its record could not be (`chosen` is the record's final answer, `None` when
+    # it could not be made); returns what failed rather than raising it, so that
     # the error that ended the swarm stays the one raised.
     def _account(
         self,
         interval: LedgerInterval,
         timelines: MemberTimelines,
-        record: SwarmResultRecord,
+        chosen: FinalRecord | None,
         *,
         ended: bool,
         error: BaseException | None,
@@ -897,8 +909,8 @@ class SwarmRun:
                     list(self.bus.states),
                     self.bus.waits.max_wait is not None,
                     wall_clock,
-                    record.final.member,
-                    record.final.answer,
+                    chosen.member if chosen is not None else None,
+                    chosen.answer if chosen is not None else None,
                 )
             )
             timelines.fill(places)
@@ -984,6 +996,7 @@ class SwarmRun:
     # A persistent member's answer, from its gate: recorded with its swarm time, as
     # evidence in the member's span, and settled, since it may now be the answer.
     def _answer(self, m: MemberRun, output: ModelOutput) -> None:
+        self._approve(m, output)
         index = len(m.answer_list)
         m.answer_list.append(
             _Answer(
@@ -1019,6 +1032,15 @@ class SwarmRun:
         # the member counts as live until its event is queued
         m.state = "ended"
         m.status = status
+        refusal: TypeError | None = None
+        if not m.refused:
+            try:
+                self._approve(m, m.agent_state.output)
+            except TypeError as ex:
+                refusal = ex
+        if m.refused:
+            # its own output is never read again, by the answer or the record
+            m.agent_state.output = ModelOutput()
         # releases the other members' waits
         self.bus.member_ended(m.name, status)
         m.time = anyio.current_time() - self._start
@@ -1037,6 +1059,9 @@ class SwarmRun:
             sandbox=m.sandbox,
         )
         self._settle()
+        if refusal is not None:
+            # after the member's end is recorded, as for a failing answer key
+            raise refusal
         key = self._result.answer_key if self._result is not None else None
         if m.submitted and key is not None:
             # task code, after the member's end is recorded and its output settled, so
@@ -1060,6 +1085,17 @@ class SwarmRun:
         else:
             self._queue.append(MemberEnded(m.name, status, m.submitted))
         self._notify()
+
+    # An output from a member, checked when the runtime first has it, before anything
+    # copies, settles or records it: only Inspect's output classes and model data, so
+    # that no method of a class from task code ever runs. One that holds anything else
+    # fails the sample with a `TypeError`, and the member's outputs are not read again.
+    def _approve(self, m: MemberRun, output: ModelOutput) -> None:
+        try:
+            _refuse_author_objects(output, m.name)
+        except TypeError:
+            m.refused = True
+            raise
 
     def _verifier(self) -> Verifier | None:
         return self._result.verifier if self._result is not None else None

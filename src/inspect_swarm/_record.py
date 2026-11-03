@@ -99,7 +99,7 @@ class MemberResult(BaseModel):
     """Swarm time when the verdict was taken; `None` without one."""
 
     left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that begins with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and an output nested too deep for a JSON log, with a cycle, that reuses the same lists or dicts so often that writing it would expand it past 10,000 copies, or that a log cannot write or read back, such as a dict key with more digits than Python prints. Empty when nothing was left out. An output whose metadata or tool arguments hold any other Python object, one of Inspect's own included, which only task code puts there, fails the sample instead."""
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that begins with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and an output nested too deep for a JSON log, with a cycle, that reuses the same lists or dicts so often that writing it would expand it past 10,000 copies, or that a log cannot write or read back, such as a dict key with more digits than Python prints. Empty when nothing was left out. An output that holds any other Python object, which only task code puts there, fails the sample when its member ends; the record is still written, with that output left out."""
 
     # Validating a `ModelOutput` fills an empty completion from its message, both when
     # the record is made and when it is read; the record keeps the completion the
