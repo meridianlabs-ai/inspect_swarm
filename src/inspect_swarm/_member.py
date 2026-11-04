@@ -490,8 +490,9 @@ class MemberOutcome:
 # the state the agent returned, inside the member's span when the span was entered. The
 # caller keeps `state`, as as_solver() does, for the output of a member that does not
 # return; when its own loop reached the gate, the loop's state at its last boundary is
-# used instead. An end requested through the gate makes a normal return `stopped`, and
-# a member whose callbacks never ran because its loop never reached the gate ends
+# used instead. An end requested through the gate makes a normal return `stopped`, one
+# requested while its background work drains included; a member ended while pending
+# ends `stopped` as soon as it is started, before any setup. A member whose callbacks never ran because its loop never reached the gate ends
 # `errored` when it produced its ending itself. No error whose
 # source is a swarm node leaves it: a cap becomes a stop of the swarm, and the member's
 # own nodes a status, as does a sourceless custom limit error, which the agent raised
@@ -561,6 +562,9 @@ async def _run_member(
     gate: MemberGate,
     member_span: AsyncExitStack,
 ) -> str:
+    if gate.end_origin is not None:
+        # ended while pending: no sandboxes, background owner, agent or model call
+        return "stopped"
     token = current_member.set(context)
     status: str | None = None
     # the member produced its ending itself: a normal return, or its own limit or
@@ -647,6 +651,7 @@ async def _run_member(
                     if foreign is not None:
                         # no drain: leaving the owner cancels the background work
                         raise foreign
+                    gate.draining = True
                     await _drain(name, owner, lever, grace)
             finally:
                 # after the owner has ended its work, so its cancellations are counted
@@ -665,6 +670,14 @@ async def _run_member(
         current_member.reset(token)
 
     if status is not None:
+        if (
+            returned
+            and gate.end_origin is not None
+            and status in ("submitted", "unsubmitted")
+        ):
+            # an end requested while its background work drained, checked after the
+            # drain and the member's cleanup, with nothing awaited before its end
+            return "stopped"
         return status
     # the agent was cancelled: a node that stopped a bridged member, or the hard stop
     return context.stop_cause or "cancelled"

@@ -1187,12 +1187,36 @@ def _chooses_alone(reason: str) -> Controller:
 
 @solver
 def forks_two_swarms(seen: list[Read]) -> Solver:
-    """Run two swarms in forked branches, B ending last; return A's state."""
+    """Run two swarms in forked branches, B starting once A has ended and so ending last; return A's state."""
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
+        # two swarms running at once outside any member share the operator group
+        # `swarm`, which the sample refuses
+        a_ended = anyio.Event()
+
+        @agent
+        def then_signal(inner: Agent) -> Agent:
+            async def execute(state: AgentState) -> AgentState:
+                state = await inner(state)
+                a_ended.set()
+                return state
+
+            return execute
+
+        @agent
+        def after_a(inner: Agent) -> Agent:
+            async def execute(state: AgentState) -> AgentState:
+                await a_ended.wait()
+                return await inner(state)
+
+            return execute
+
         a_state, b_state = await fork(
             state,
-            [as_solver(_pair("A")), as_solver(_pair("B", Script(delay=0.2)))],
+            [
+                as_solver(then_signal(_pair("A"))),
+                as_solver(after_a(_pair("B", Script(delay=0.2)))),
+            ],
         )
         seen.append(swarm_result(b_state))
         return a_state

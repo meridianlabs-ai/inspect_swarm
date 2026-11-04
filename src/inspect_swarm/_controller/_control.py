@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import anyio
 from anyio.abc import TaskGroup
+from inspect_ai._control.operator import operator_group
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai.agent import Agent, AgentState
 from inspect_ai.log._samples import sample_active
@@ -28,6 +29,7 @@ from .._budget import (
     SwarmNode,
     SwarmTimeNode,
     current_budget,
+    current_member,
     is_bridged,
 )
 from .._evidence import MemberTimelines, swarm_event, write_ledger, write_metrics
@@ -51,6 +53,7 @@ from .._metrics import (
     gate_checks,
     swarm_metrics,
 )
+from .._operator import SwarmOperator
 from .._record import (
     MemberResult,
     MemberState,
@@ -141,7 +144,7 @@ class MemberHandle(Protocol):
     def end(self, *, origin: str) -> None:
         """End the member `stopped`, with the reason `ended by <origin>`.
 
-        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary. A pending member ends at its first boundary once started. If the member is still running when the swarm's grace period has passed since the request (or since a pending member started), its turn or its cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output. A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
+        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary. A pending member ends as soon as it is started, before its setup and with no model call. If the member is still running when the swarm's grace period has passed since the request, its turn, setup or cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output, and so does one whose background work is draining after its agent returned (the drain keeps its own grace period). A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
 
         Args:
             origin: Names the caller in the evidence, as for `on_boundary()`.
@@ -408,6 +411,20 @@ class MemberRun:
             "member_limit:time",
         )
 
+    # the origin of the end request that decided how the member ended, once it has:
+    # None when no end request did (a submission, a member limit, the swarm's stop)
+    @property
+    def end_origin(self) -> str | None:
+        origin = self.gate.end_origin
+        if origin is None or self.state != "ended":
+            return None
+        if self.status in ("stopped", "cancelled"):
+            return origin
+        if self.status == "submitted" and self.gate.answered:
+            # a persistent member ended while idle keeps its last answer
+            return origin
+        return None
+
     def result(self) -> MemberResult:
         return MemberResult(
             name=self.name,
@@ -423,6 +440,7 @@ class MemberRun:
             first_pass_time=self.gates.first_pass_time,
             persistent=self.persistent,
             answer_times=[a.time for a in self.answer_list],
+            end_origin=self.end_origin,
         )
 
 
@@ -472,6 +490,15 @@ class SwarmRun:
             if isinstance(node, SwarmNode):
                 node.stop_swarm = self.stop
         self._by_name = {m.name: m for m in self._members}
+        # the swarm as an operator group, registered for its run
+        self.operator = SwarmOperator(
+            self._members,
+            lambda: self.stop_reason,
+            self.stop,
+            self.bus.waits.in_wait,
+        )
+        for m in self._members:
+            m.gate.loop_bound = self.operator.members[m.name].loop_bound
         self._state = state
         self._input = list(input)
         self._final: FinalName | None = final
@@ -538,13 +565,10 @@ class SwarmRun:
         self._settle()
         # from the saved context, so the member's lever is a child of the caps and never
         # of the runtime lever, whichever task starts it
+        # a member ended while pending ends in its task before any setup
         self._member_ctx.copy().run(
             self._members_tg.start_soon, self._run_member, m, messages, name=m.name
         )
-        if m.gate.end_origin is not None:
-            # ended while pending: it ends at its first boundary, its grace counted from
-            # now
-            self._end_timer(m)
         self._notify()
 
     def wake(
@@ -629,6 +653,13 @@ class SwarmRun:
         bus_token: "contextvars.Token[Bus | None] | None" = None
         budget_token: contextvars.Token[BudgetState | None] | None = None
         running: int | None = None
+        # the operator group, refused like the timelines before the swarm starts when
+        # another swarm running in the sample has its name; nothing awaits between here
+        # and the saving of its context below, so no action runs before it
+        outer = current_member.get()
+        self.operator.name = "swarm" if outer is None else f"swarm:{outer.name}"
+        registration = ExitStack()
+        registration.enter_context(operator_group(self.operator.name, self.operator))
         try:
             # in the swarm's span, before any member can start
             write_start()
@@ -647,6 +678,9 @@ class SwarmRun:
                     },
                 )
             )
+            # the context the operator's actions run in, as a member's or the
+            # controller's calls do
+            self.operator.context = contextvars.copy_context()
             # from here until the end of the finally below, swarm_result() refuses
             # reads in this sample
             running = _swarm_started()
@@ -743,6 +777,7 @@ class SwarmRun:
             finally:
                 # last, so that the bus and the budget are current through the final
                 # step and the ledger, and restored however the swarm ends
+                registration.close()
                 interval.close()
                 if budget_token is not None:
                     current_budget.reset(budget_token)
@@ -782,6 +817,7 @@ class SwarmRun:
                         background_started=m.outcome.background_started,
                         background_cancelled=m.outcome.background_cancelled,
                         cancelled_calls=list(m.gate.cancelled_calls),
+                        end_origin=m.end_origin,
                     )
                     for m in self._members
                 ],
@@ -850,6 +886,8 @@ class SwarmRun:
         # no member can start once a stop has begun
         if self.stop_reason is not None:
             return
+        # before anything changes, so that an error here leaves the swarm as it was
+        grace = self._grace_now()
         # first, so that no record commits once a stop has begun
         self.bus.close()
         self.stop_reason = reason
@@ -864,7 +902,7 @@ class SwarmRun:
             # a held member ends at once, at its boundary
             m.gate.cancel_chain()
         self._runtime_lever.close(reason)
-        self._effective_grace = self._grace_now()
+        self._effective_grace = grace
         self._stopped.set()
 
     async def _run_controller(
@@ -969,7 +1007,9 @@ class SwarmRun:
             m.gates = gate_checks(
                 self._interval.events, m.context.span_id, self._scorer, self._start
             )
-        # in the member's span, unless it ended before entering it
+        # in the member's span, unless it ended before entering it: the operator's
+        # messages it never drained, then its result
+        self.operator.members[m.name].ended()
         swarm_event(
             "member_result",
             member=m.name,
@@ -977,6 +1017,7 @@ class SwarmRun:
             status=status,
             time=m.time,
             sandbox=m.sandbox,
+            end_origin=m.end_origin,
         )
         self._settle()
         self._queue.append(MemberEnded(m.name, status, m.submitted))
@@ -1018,7 +1059,8 @@ class SwarmRun:
     # (a wrapper's `finally`, react's MCP teardown) may run long, so either way it gets
     # the effective grace. A pending member's starts when it is started.
     def _ending(self, m: MemberRun) -> None:
-        if m.state in ("running", "ending"):
+        # a draining member's drain has a grace of its own
+        if m.state in ("running", "ending") and not m.gate.draining:
             self._end_timer(m)
 
     # end()'s grace: the member is cancelled, as the hard stop cancels one, if it is

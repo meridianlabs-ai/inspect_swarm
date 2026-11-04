@@ -182,6 +182,11 @@ class Waits:
             if waiter.spec.member == name and waiter.reason != "stopping":
                 self._release(waiter, "member_ending")
 
+    # whether the member's own loop has a swarm_wait in progress, for the operator's
+    # detail line
+    def in_wait(self, name: str) -> bool:
+        return name in self._own_waits
+
     def close(self) -> None:
         for waiter in self._waiters.values():
             self._release(waiter, "stopping")
