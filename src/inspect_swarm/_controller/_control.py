@@ -1,5 +1,6 @@
 import contextvars
 import functools
+import math
 from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
@@ -1071,13 +1072,14 @@ class SwarmRun:
             # task code, after the member's end is recorded and its output settled, so
             # that an error, which fails the sample, leaves the answer and the record
             # agreeing
-            # task code, so checked as returned rather than as annotated
+            # task code, so checked as returned rather than as annotated, by its actual
+            # class rather than the one it reports
             answer_key = cast(object, key(m.agent_state.output.completion))
-            if answer_key is not None and not isinstance(answer_key, str):
+            if answer_key is not None and not issubclass(type(answer_key), str):
                 raise TypeError(
                     f"The result contract's answer_key must return a str or None, got a {type(answer_key).__name__} for member {m.name!r}."
                 )
-            m.answer_key = answer_key
+            m.answer_key = cast(str | None, answer_key)
         if (
             m.submitted
             and self._verifier() is not None
@@ -1140,10 +1142,16 @@ class SwarmRun:
             if foreign is not None:
                 raise foreign
             return
-        if not isinstance(verdict, Verdict):
+        if anyio.current_effective_deadline() == -math.inf:
+            # cancelled while the verifier ran, which caught the cancellation and
+            # returned: the submission stays unverified
+            return
+        # by actual classes rather than the ones the values report
+        if not issubclass(type(verdict), Verdict):
             raise TypeError(
                 f"The result contract's verifier must return a Verdict, got a {type(verdict).__name__} for member {m.name!r}."
             )
+        verdict = cast(Verdict, verdict)
         # task code, so checked as returned rather than as annotated
         passed = cast(object, verdict.passed)
         value = cast(object, verdict.value)
@@ -1151,9 +1159,9 @@ class SwarmRun:
         # the values themselves are not printed: an int too long to print, or a repr()
         # that raises, would replace this error
         if not (
-            isinstance(passed, bool)
+            type(passed) is bool
             and (value is None or _exact_float(value))
-            and (explanation is None or isinstance(explanation, str))
+            and (explanation is None or issubclass(type(explanation), str))
         ):
             raise TypeError(
                 f"The result contract's verifier must return a Verdict whose passed is a bool, value a float (or an int a float holds exactly) or None and explanation a str or None, got passed of type {type(passed).__name__}, value of type {type(value).__name__} and explanation of type {type(explanation).__name__} for member {m.name!r}."
@@ -1387,11 +1395,12 @@ def _sample_cause() -> str | None:
 
 # A number the record's float field holds exactly: a float, or an int a float equals.
 def _exact_float(value: object) -> bool:
-    if isinstance(value, float):
+    cls = type(value)
+    if issubclass(cls, float):
         return True
-    if isinstance(value, bool) or not isinstance(value, int):
+    if cls is bool or not issubclass(cls, int):
         return False
     try:
-        return float(value) == value
+        return float(cast(int, value)) == value
     except OverflowError:
         return False

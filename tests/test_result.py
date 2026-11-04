@@ -1,6 +1,7 @@
 import math
 import re
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Self, cast
@@ -409,22 +410,94 @@ async def test_the_stop_leaves_a_submission_unverified_when_it_refuses_its_check
     assert [m.meter.cost for m in ledger.members] == [0.0, 0.0]
 
 
+class _Held:
+    """A verifier that waits until released. Cancelled first, it either lets the cancellation propagate or catches it and returns a passing verdict all the same."""
+
+    def __init__(self, catches: bool) -> None:
+        self.catches = catches
+        self.started = anyio.Event()
+        self.release = anyio.Event()
+
+    async def __call__(self, answer: str, metadata: dict[str, Any]) -> Verdict:
+        self.started.set()
+        try:
+            await self.release.wait()
+        except anyio.get_cancelled_exc_class():
+            if not self.catches:
+                raise
+        return Verdict(passed=True)
+
+
 @pytest.mark.anyio
-async def test_the_hard_stop_ends_a_verification_in_progress() -> None:
-    checker = Checker(delay=3600)
-    stop = await run_swarm(
-        swarm(
-            answers("42"),
-            channels=[],
-            budget=Budget(time=0.1, grace=0.05),
-            result=answer_result(verifier=checker),
+@pytest.mark.parametrize(
+    "stop,behaviour",
+    [
+        # the swarm's time cap, a controller's stop and the sample's own cancellation
+        # each end the verification: whether the verifier lets the cancellation
+        # propagate or catches it and returns, the submission stays unverified
+        *[
+            pytest.param(stop, behaviour, id=f"{stop}-{behaviour}")
+            for stop in ("swarm-time", "controller", "sample")
+            for behaviour in ("propagates", "catches")
+        ],
+        # a verification that finishes during the stop's grace keeps its verdict
+        pytest.param("controller", "finishes", id="controller-finishes-in-grace"),
+    ],
+)
+async def test_the_hard_stop_ends_a_verification_in_progress(
+    stop: str, behaviour: str
+) -> None:
+    held = _Held(catches=behaviour == "catches")
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("solo")
+        await held.started.wait()
+        # the member has ended, and its event waits for the verdict
+        handle = control.member("solo")
+        assert (handle.state, handle.status, handle.verdict) == (
+            "ended",
+            "submitted",
+            None,
         )
+        with anyio.move_on_after(0.05):
+            async for event in control.events():
+                raise AssertionError(f"{event} came before its verdict")
+        if stop == "sample":
+            outer.cancel()
+        if stop != "controller":
+            # the time cap or the sample's cancellation ends the controller
+            await anyio.sleep_forever()
+        if behaviour == "finishes":
+            held.release.set()
+        return "done"
+
+    agent = swarm(
+        member(answers("42"), name="solo"),
+        controller=controller(run, "result_test_held"),
+        channels=[],
+        budget=Budget(time=0.2 if stop == "swarm-time" else None, grace=0.05),
+        result=answer_result(verifier=held),
     )
-    # the verification held the submission's event, so the time cap stopped the swarm
-    assert stop.reason == "swarm_time"
-    [m] = stop.record.members
-    assert (m.status, m.verdict) == ("submitted", None)
-    assert stop.record.final.member == m.name
+    async with sample() as transcript:
+        with anyio.CancelScope() as outer:
+            await run_agent(agent, "task")
+        record = _transcript_result(store())
+    assert outer.cancelled_caught == (stop == "sample")
+    assert record is not None
+    [m] = record.members
+    assert m.status == "submitted"
+    verdicts = swarm_events(transcript, "verdict")
+    if behaviour == "finishes":
+        assert m.verdict == Verdict(passed=True)
+        assert m.verdict_time is not None and len(verdicts) == 1
+    else:
+        assert (m.verdict, m.verdict_time, verdicts) == (None, None, [])
+    if stop == "swarm-time":
+        # the verification held the submission's event, so the time cap stopped the
+        # swarm
+        assert record.final.member == m.name
+        [final] = swarm_events(transcript, "final")
+        assert final.data["stop_reason"] == "swarm_time"
 
 
 @pytest.mark.anyio
@@ -1461,6 +1534,37 @@ def _assert_left_out(record: SwarmResultRecord) -> None:
             "value of type int and explanation of type NoneType for member",
             id="verdict-value-too-long-to-print",
         ),
+        # checked by their actual classes, not the ones they report
+        pytest.param(
+            answer_result(answer_key=lambda text: _Posing(str)),  # pyright: ignore[reportArgumentType]
+            "answer_key must return a str or None, got a _Posing",
+            id="answer-key-posing-as-a-str",
+        ),
+        pytest.param(
+            answer_result(
+                verifier=lambda answer, metadata: _returning(
+                    _Posing(Verdict, passed=True, value=None, explanation=None)
+                )
+            ),
+            "must return a Verdict, got a _Posing",
+            id="verdict-posing-as-a-verdict",
+        ),
+        *[
+            pytest.param(
+                answer_result(
+                    verifier=lambda answer, metadata, field=field, cls=cls: _returning(
+                        replace(Verdict(passed=True), **{field: _Posing(cls)})
+                    )
+                ),
+                f"{field} of type _Posing",
+                id=f"verdict-{field}-posing-as-a-{cls.__name__}",
+            )
+            for field, cls in [
+                ("passed", bool),
+                ("value", float),
+                ("explanation", str),
+            ]
+        ],
     ],
 )
 async def test_a_mistyped_contract_result_fails_the_sample_with_its_record(
@@ -1481,6 +1585,22 @@ async def test_a_mistyped_contract_result_fails_the_sample_with_its_record(
 
 async def _verdict(value: Any) -> Verdict:
     return Verdict(passed=True, value=value)
+
+
+async def _returning(value: Any) -> Any:
+    return value
+
+
+class _Posing:
+    """An object that reports another class as its own, with the given attributes."""
+
+    def __init__(self, cls: type, **attributes: Any) -> None:
+        self.cls = cls
+        self.__dict__.update(attributes)
+
+    @property
+    def __class__(self) -> type:  # pyright: ignore[reportIncompatibleMethodOverride]
+        return self.cls
 
 
 @pytest.mark.anyio
