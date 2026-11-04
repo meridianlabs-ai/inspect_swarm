@@ -63,6 +63,7 @@ Supports Python 3.11+, above `inspect-ai`'s 3.10 floor, so the swarm runtime can
 
 ### Common Pitfalls
 - Use the venv for all Python commands: either reference `.venv/bin/` directly or run `source .venv/bin/activate`
+- After changing dependencies in `pyproject.toml`, run `uv lock` and commit `uv.lock`; CI's `uv sync --locked` fails on a stale lock. Don't override the 7-day `exclude-newer` cooldown; for an emergency release, CONTRIBUTING.md describes a dated entry
 
 ## Reviewing other people's pull requests
 

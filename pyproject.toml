@@ -28,20 +28,7 @@ dependencies = [
     "shortuuid",
 ]
 
-[project.urls]
-"Source Code" = "https://github.com/meridianlabs-ai/inspect_swarm"
-"Issue Tracker" = "https://github.com/meridianlabs-ai/inspect_swarm/issues"
-Documentation = "https://meridianlabs-ai.github.io/inspect_swarm/"
-
-# lets inspect_ai resolve `inspect_swarm/<name>` without importing the package first
-[project.entry-points.inspect_ai]
-inspect_swarm = "inspect_swarm._entrypoint"
-
-[build-system]
-requires = ["hatchling", "hatch-vcs"]
-build-backend = "hatchling.build"
-
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
     "ruff",
     "pytest",
@@ -57,6 +44,24 @@ dev = [
     "pandas>=2.1.0",
     "pyarrow>=10.0.1",
 ]
+
+[project.urls]
+"Source Code" = "https://github.com/meridianlabs-ai/inspect_swarm"
+"Issue Tracker" = "https://github.com/meridianlabs-ai/inspect_swarm/issues"
+Documentation = "https://meridianlabs-ai.github.io/inspect_swarm/"
+
+# lets inspect_ai resolve `inspect_swarm/<name>` without importing the package first
+[project.entry-points.inspect_ai]
+inspect_swarm = "inspect_swarm._entrypoint"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+# Keeps a plain `uv sync` or `uv run` (Makefile) and the nightly canary's
+# `--group dev` install pulling the dev tools.
+dev = ["inspect_swarm[dev]"]
 # The docs' Python tools are in `doc`, which `dev` leaves out: CI installs `dev`
 # and never builds the docs. Quarto itself is a system install (`make docs`
 # checks its version), so the lock does not carry the Jupyter stack the
@@ -91,6 +96,16 @@ allow-direct-references = true
 
 [tool.uv]
 managed = true
+# 0.11.8 is the first uv that keeps uv.lock stable with a relative exclude-newer,
+# and 0.13.4 the first that no longer trusts the compromised emSign root
+# (GHSA-hq85-5cpj-mr62).
+required-version = ">=0.13.4"
+# Only resolve releases at least 7 days old (see CONTRIBUTING.md).
+exclude-newer = "7 days"
+# No [tool.uv.exclude-newer-package] table: no direct dependency is a model
+# provider SDK, and exclude-newer does not apply to the inspect-ai git
+# reference. When inspect-ai returns to a released floor, add
+# `inspect-ai = "6 hours"` there.
 
 [tool.ruff]
 extend-exclude = ["docs", "design"]
