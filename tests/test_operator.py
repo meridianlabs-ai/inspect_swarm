@@ -923,20 +923,50 @@ def fails_now() -> Agent:
     return execute
 
 
+@agent
+def returns_while_working(
+    entered: anyio.Event, stopped: anyio.Event, returning: anyio.Event
+) -> Agent:
+    """Start background work that never ends, then return once `stopped` is set."""
+
+    async def execute(state: AgentState) -> AgentState:
+        background(anyio.sleep_forever)
+        entered.set()
+        await stopped.wait()
+        state.output = ModelOutput.from_content("mockllm", "answer")
+        returning.set()
+        return state
+
+    return execute
+
+
 @pytest.mark.anyio
-async def test_a_cancellation_that_beats_the_stop_is_not_its_doing() -> None:
+@pytest.mark.parametrize("where", ["setup", "drain"])
+async def test_a_cancellation_that_beats_the_stop_is_not_its_doing(
+    where: str,
+) -> None:
     entered, go = anyio.Event(), anyio.Event()
+    stopped, returning = anyio.Event(), anyio.Event()
 
     async def drive(group: OperatorGroup) -> None:
         await entered.wait()
         assert _act(group.agents["a"].stop, dry_run=False).changed
+        if where == "drain":
+            # the stop turns its return into `stopped`, and its background work drains
+            stopped.set()
+            await returning.wait()
         # a sibling's error cancels the member long before the stop's grace
         go.set()
 
     ran = await _run(
         _swarm(
             [
-                member(_after(anyio.Event(), sleeper(), entered=entered), name="a"),
+                member(
+                    _after(anyio.Event(), sleeper(), entered=entered)
+                    if where == "setup"
+                    else returns_while_working(entered, stopped, returning),
+                    name="a",
+                ),
                 member(_after(go, fails_now()), name="b"),
             ],
             grace=60,

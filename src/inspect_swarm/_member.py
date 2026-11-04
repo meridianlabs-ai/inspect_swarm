@@ -580,6 +580,8 @@ async def _run_member(
     # the member produced its ending itself: a normal return, or its own limit or
     # error (the error)
     returned = False
+    # an end request turned the agent's return into `stopped`
+    requested = False
     own: BaseException | None = None
     # the agent was called: an error before that (building or refusing the agent) is
     # not a run that missed its gate, and propagates as raised
@@ -636,6 +638,7 @@ async def _run_member(
                             outcome.state = result
                         returned = True
                         status = _returned(context, gate, result, stopped)
+                        requested = status == "stopped" and context.stop_cause is None
                     except Exception as ex:
                         cap, owned, foreign = classify_errors(ex, caps, nodes)
                         if foreign is None and cap:
@@ -683,6 +686,12 @@ async def _run_member(
         # the agent was cancelled: a node that stopped a bridged member, or the hard
         # stop
         return context.stop_cause or "cancelled"
+    if requested:
+        # honoured once the drain kept that ending, even when another stop closed the
+        # lever first: a cancellation from outside the member during the drain does not
+        # reach here
+        gate.honoured = True
+        return status
     if (
         returned
         and gate.end_origin is not None
@@ -726,9 +735,7 @@ def _returned(
         # the agent stopped itself with an error, which an end request does not change
         return "member_limit:custom"
     if gate.end_origin is not None:
-        # an end requested before the agent returned wins over its output, even when
-        # another stop closed the lever first
-        gate.honoured = True
+        # an end requested before the agent returned wins over its output
         return "stopped"
     if gate.persistent:
         # every answer was held where the loop gave it, so a loop that returns has
