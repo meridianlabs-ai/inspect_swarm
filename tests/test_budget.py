@@ -17,12 +17,6 @@ from inspect_ai._eval.evalset import task_identifier
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import RegistryInfo, set_registry_info
 from inspect_ai.agent import Agent, AgentState, agent, run
-from inspect_ai.agent._bridge.types import AgentBridge
-from inspect_ai.agent._bridge.util import (
-    bridge_generate,
-    bridge_model_generate,
-    in_bridge_model_generate,
-)
 from inspect_ai.dataset import Sample
 from inspect_ai.event import ModelEvent, SampleLimitEvent, SwarmEvent, ToolEvent
 from inspect_ai.log._samples import (
@@ -94,7 +88,6 @@ from inspect_swarm._budget import (
     Caps,
     CostPair,
     Lever,
-    MemberContext,
     NodeRole,
     SwarmCostNode,
     SwarmMessageNode,
@@ -102,7 +95,6 @@ from inspect_swarm._budget import (
     SwarmTokenNode,
     SwarmTurnNode,
     check_cost_data,
-    current_member,
     derive_caps,
     is_bridged,
     share_nodes,
@@ -316,57 +308,6 @@ def test_pinned_limit_cannot_be_entered_twice() -> None:
     with pytest.raises(RuntimeError):
         with limit:
             pass
-
-
-# Bridge compaction that makes a generation, as summary compaction does.
-class _GenerateCompaction:
-    def __init__(self, model: Model, seen: list[tuple[str, bool]]) -> None:
-        self.model = model
-        self.seen = seen
-
-    async def compact_input(
-        self, messages: list[ChatMessage], force: bool = False
-    ) -> tuple[list[ChatMessage], ChatMessageUser | None]:
-        self.seen.append(("compaction", in_bridge_model_generate()))
-        await self.model.generate("summarise")
-        return messages, None
-
-    async def record_output(
-        self, input: list[ChatMessage], output: ModelOutput
-    ) -> None:
-        pass
-
-
-class _CompactingBridge(AgentBridge):
-    def __init__(self, compaction: _GenerateCompaction) -> None:
-        super().__init__(AgentState(messages=[]))
-        self._test_compaction = compaction
-
-    def compaction(self, tools: Sequence[ToolInfo | Tool], model: Model) -> Any:
-        return self._test_compaction
-
-
-async def _bridge_generate(model: Model, compaction: _GenerateCompaction) -> None:
-    await bridge_generate(
-        _CompactingBridge(compaction),
-        model,
-        [ChatMessageUser(content="hello")],
-        [],
-        None,
-        GenerateConfig(),
-        requested_model=None,
-    )
-
-
-@pytest.mark.anyio
-async def test_pinned_bridge_compaction_runs_before_the_generate_mark() -> None:
-    seen: list[tuple[str, bool]] = []
-    outputs = _Outputs(
-        on_call=lambda: seen.append(("generate", in_bridge_model_generate()))
-    )
-    model = _model(outputs=outputs)
-    await _bridge_generate(model, _GenerateCompaction(model, seen))
-    assert seen == [("compaction", False), ("generate", False), ("generate", True)]
 
 
 @tool
@@ -769,7 +710,6 @@ class _NodeCase:
     trigger: Callable[[], None]
     type: str
     message: str
-    stop_cause: str
     stops_swarm: bool
 
 
@@ -836,7 +776,6 @@ NODE_CASES = [
         _record_and_check(10, 1.5),
         "cost",
         "Swarm cost cap reached. value: $1.5000; limit: $1.0000",
-        "swarm_cap",
         True,
     ),
     _NodeCase(
@@ -845,7 +784,6 @@ NODE_CASES = [
         lambda: _suspended_cost(1.5),
         "cost",
         "Swarm cost cap reached. value: $1.5000; limit: $1.0000",
-        "swarm_cap",
         True,
     ),
     _NodeCase(
@@ -854,7 +792,6 @@ NODE_CASES = [
         _record_and_check(150),
         "token",
         "Swarm token cap reached. value: 150; limit: 100",
-        "swarm_cap",
         True,
     ),
     _NodeCase(
@@ -863,7 +800,6 @@ NODE_CASES = [
         _record_and_check(150),
         "token",
         "Swarm member 'a' token (output) share reached. value: 150; limit: 100",
-        "share",
         False,
     ),
     _NodeCase(
@@ -872,7 +808,6 @@ NODE_CASES = [
         _record_and_check(10, 1.5),
         "cost",
         "Swarm member 'a' cost limit reached. value: $1.5000; limit: $1.0000",
-        "member_limit:cost",
         False,
     ),
     _NodeCase(
@@ -881,7 +816,6 @@ NODE_CASES = [
         _two_turns,
         "turn",
         "Swarm member 'a' turn limit reached. value: 2; limit: 1",
-        "member_limit:turn",
         False,
     ),
     _NodeCase(
@@ -890,7 +824,6 @@ NODE_CASES = [
         lambda: check_message_limit(3, raise_for_equal=True),
         "message",
         "Swarm member 'a' message limit reached. count: 3; limit: 3",
-        "member_limit:message",
         False,
     ),
     _NodeCase(
@@ -899,7 +832,6 @@ NODE_CASES = [
         _pre_dispatch,
         "custom",
         "Stopped by the swarm: verified answer",
-        "stopped",
         False,
     ),
     _NodeCase(
@@ -908,23 +840,9 @@ NODE_CASES = [
         _suspended_pre_dispatch,
         "custom",
         "Stopped by the swarm: verified answer",
-        "stopped",
         False,
     ),
 ]
-
-
-@pytest.mark.parametrize("case", NODE_CASES, ids=lambda c: c.id)
-def test_node_raises_its_own_error_without_a_sample_limit_event(
-    case: _NodeCase, fresh_transcript: Transcript
-) -> None:
-    nodes, expected = case.nodes()
-    with _entered(nodes), pytest.raises(LimitExceededError) as raised:
-        case.trigger()
-    assert raised.value.source is expected
-    assert raised.value.type == case.type
-    assert raised.value.message == case.message
-    assert not any(isinstance(e, SampleLimitEvent) for e in fresh_transcript.events)
 
 
 def _stop_with(nodes: list[Limit], stops: list[str]) -> None:
@@ -934,123 +852,21 @@ def _stop_with(nodes: list[Limit], stops: list[str]) -> None:
             node.stop_swarm = stops.append
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("declared", [True, False], ids=["declared", "marked"])
 @pytest.mark.parametrize("case", NODE_CASES, ids=lambda c: c.id)
-async def test_node_cancels_a_bridged_member_instead_of_raising(
-    case: _NodeCase, declared: bool
+def test_node_raises_its_own_error_without_a_sample_limit_event(
+    case: _NodeCase, fresh_transcript: Transcript
 ) -> None:
     stops: list[str] = []
-    member = MemberContext("a", bridged=declared)
-    token = current_member.set(member)
-    try:
-        nodes, _ = case.nodes()
-        _stop_with(nodes, stops)
-        with member.scope:
-            with _entered(nodes):
-                if declared:
-                    case.trigger()
-                else:
-                    with bridge_model_generate():
-                        case.trigger()
-            await anyio.sleep(0)
-    finally:
-        current_member.reset(token)
-    assert member.scope.cancelled_caught
-    assert member.stop_cause == case.stop_cause
-    # stop() is idempotent, and every later check of a reached cap calls it again
-    assert set(stops) == ({"swarm_cap"} if case.stops_swarm else set())
-    assert member.bridged
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("bridged", [True, False])
-async def test_bridge_compaction_reaching_a_cap(bridged: bool) -> None:
-    # bridge compaction generates before the bridge's mark, so only a member declared
-    # bridged is cancelled there; a native member's error would end a sandboxed sample
-    stops: list[str] = []
-    member = MemberContext("a", bridged=bridged)
-    model = _model()
-    cap = SwarmTokenNode(0, owner=None, role="cap")
-    _stop_with([cap], stops)
-    token = current_member.set(member)
-    try:
-        with member.scope, cap:
-            if bridged:
-                await _bridge_generate(model, _GenerateCompaction(model, []))
-            else:
-                with pytest.raises(LimitExceededError) as raised:
-                    await _bridge_generate(model, _GenerateCompaction(model, []))
-                assert raised.value.source is cap
-    finally:
-        current_member.reset(token)
-    assert member.scope.cancelled_caught is bridged
-    # the cap begins the swarm's stop whether it cancels the member or raises
-    assert set(stops) == {"swarm_cap"}
-    assert member.stop_cause == ("swarm_cap" if bridged else None)
-
-
-@dataclass
-class _BridgeCase:
-    id: str
-    # builds the nodes to enter and the cap, if any, a second request trips
-    nodes: Callable[[], tuple[list[Limit], Limit | None]]
-    cost_per_call: float | None
-    suspended: bool
-
-
-def _lever_only() -> tuple[list[Limit], Limit | None]:
-    return Lever(owner="a").nodes, None
-
-
-def _token_cap_100() -> tuple[list[Limit], Limit | None]:
-    lever, cap = Lever(owner="a"), SwarmTokenNode(100, owner=None, role="cap")
-    return [cap, *lever.nodes], cap
-
-
-def _cost_cap_2() -> tuple[list[Limit], Limit | None]:
-    lever, cap = Lever(owner="a"), CostPair(2.0, owner=None, role="cap")
-    return [*cap.nodes, *lever.nodes], cap.token_node
-
-
-BRIDGE_CASES = [
-    _BridgeCase("uncapped lever", _lever_only, None, False),
-    _BridgeCase("uncapped lever, suspended", _lever_only, 1.0, True),
-    _BridgeCase("token cap", _token_cap_100, None, False),
-    _BridgeCase("cost cap", _cost_cap_2, 1.0, False),
-    _BridgeCase("cost cap, suspended", _cost_cap_2, 1.0, True),
-]
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("case", BRIDGE_CASES, ids=lambda c: c.id)
-async def test_member_found_bridged_by_a_successful_marked_request(
-    case: _BridgeCase,
-) -> None:
-    # the first request (compaction, then the marked generation) stays within the caps
-    # and marks the member bridged; the next request's compaction, before the mark,
-    # reaches the cap and must cancel the member rather than raise
-    stops: list[str] = []
-    member = MemberContext("a", bridged=False)
-    model = _model(cost_per_call=case.cost_per_call)
-    nodes, cap = case.nodes()
+    nodes, expected = case.nodes()
     _stop_with(nodes, stops)
-    token = current_member.set(member)
-    try:
-        with member.scope, _entered(nodes):
-            with ExitStack() as stack:
-                if case.suspended:
-                    stack.enter_context(suspend_token_limit())
-                await _bridge_generate(model, _GenerateCompaction(model, []))
-            assert member.bridged
-            assert not member.scope.cancel_called
-            if cap is not None:
-                await _bridge_generate(model, _GenerateCompaction(model, []))
-    finally:
-        current_member.reset(token)
-    assert member.scope.cancelled_caught is (cap is not None)
-    assert set(stops) == ({"swarm_cap"} if cap is not None else set())
-    assert member.stop_cause == ("swarm_cap" if cap is not None else None)
+    with _entered(nodes), pytest.raises(LimitExceededError) as raised:
+        case.trigger()
+    assert raised.value.source is expected
+    assert raised.value.type == case.type
+    assert raised.value.message == case.message
+    assert not any(isinstance(e, SampleLimitEvent) for e in fresh_transcript.events)
+    # a reached cap begins the swarm's stop before its error is raised
+    assert stops == (["swarm_cap"] if case.stops_swarm else [])
 
 
 @pytest.mark.anyio

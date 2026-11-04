@@ -246,7 +246,7 @@ def member(
 
     Scoring with member sandboxes. The task's scorers run after the swarm, outside every member, where `sandbox()` is `default`. A scorer that grades the members' work names each member's sandbox itself, as in `sandbox("agent-1")`, and the `sandbox` field of each member in the swarm's result record says which member used which.
 
-    Background work belongs to the member. Work its agent starts with `background()`, such as `deepagent(background=...)` subagents, spends through the member's limits and share, and is the member's in the ledger. When the member's agent returns, the swarm stops the background work from starting model calls, gives it the swarm's grace period to finish calls and tool calls in flight, and cancels what is left. The member ends after that, with the status its agent ended with; `Budget.grace=0` cancels background work at once. A member time limit bounds its agent only: after the agent returns, its background work gets the grace period too, and the cancelled work's cleanup is awaited. Background work must be started by the agent while it runs; a factory that starts it while building the agent makes the member `errored`. A sourceless custom limit error raised in background work ends only the task that raised it; the member's agent and its other background work continue. Work started outside `background()` (an `asyncio` task, a process left running in the sandbox) is not stopped. Bridged members cannot have background work: `background()` raises in a member declared or found bridged, and a member that uses the agent bridge after starting background work (through a bridged subagent, for example) is cancelled and ends `errored`.
+    Background work belongs to the member. Work its agent starts with `background()`, such as `deepagent(background=...)` subagents, spends through the member's limits and share, and is the member's in the ledger. When the member's agent returns, the swarm stops the background work from starting model calls, gives it the swarm's grace period to finish calls and tool calls in flight, and cancels what is left. The member ends after that, with the status its agent ended with; `Budget.grace=0` cancels background work at once. A member time limit bounds its agent only: after the agent returns, its background work gets the grace period too, and the cancelled work's cleanup is awaited. Background work must be started by the agent while it runs; a factory that starts it while building the agent makes the member `errored`. A sourceless custom limit error raised in background work ends only the task that raised it; the member's agent and its other background work continue. Work started outside `background()` (an `asyncio` task, a process left running in the sandbox) is not stopped.
 
     ACP agents, which wait for their caller to drive them rather than returning, are refused: a built one when `member()` is called, and a factory's when the member is built.
 
@@ -258,7 +258,7 @@ def member(
         choose_name: Whether the member chooses its own name instead of being told `name`.
         count: How many members this record stands for. Above 1 needs a factory.
         limits: The member's own token, cost, turn, message or time limits.
-        bridged: Whether the agent is bridged (runs a CLI in the sandbox through Inspect's agent bridge). `None` counts inspect_swe's agents as bridged and others as native. Pass `True` for any other bridged agent: the swarm stops a bridged member by cancelling it, because a limit error raised inside the bridge would end the sample, and it must know before the member's first model request. A bridged member reaches the swarm's channels through `swarm_bridged_tools()` in its agent's bridged tools; a bridged member waiting in `swarm_wait` never counts as waiting.
+        bridged: Whether the agent is bridged (runs a CLI in the sandbox through Inspect's agent bridge). `None` counts inspect_swe's agents as bridged and others as native. Pass `True` for any other bridged agent. `swarm()` refuses a bridged member beside a custom channel that has records, and refuses a persistent member declared bridged; `on_boundary()` refuses to hold one. The ledger records the member as bridged, and its metrics have no tool-call run, since the CLI's own tool calls leave no tool events. A bridged member reaches the swarm's channels through `swarm_bridged_tools()` in its agent's bridged tools; a bridged member waiting in `swarm_wait` never counts as waiting.
         sandbox: The name of the member's own sandbox environment. `{member}` stands for the member's name. `None` shares the sample's sandbox.
         visible_sandboxes: Other sandbox environments the member can reach by name, such as a shared service. Only with `sandbox`. It cannot include `default`, which inside the member is the member's own sandbox.
         persistent: Whether the member stays available after it answers, held idle until the controller wakes it.
@@ -621,7 +621,7 @@ async def _run_member(
                             # boundary is kept, as for any other raise
                             outcome.state = result
                         returned = True
-                        status = _returned(context, gate, result, stopped)
+                        status = _returned(gate, result, stopped)
                     except Exception as ex:
                         cap, owned, foreign = classify_errors(ex, caps, nodes)
                         if foreign is None and cap:
@@ -658,16 +658,13 @@ async def _run_member(
             error = gate.unsupervised_error()
             error.__cause__ = own
             raise error
-        if context.refusal is not None:
-            # bridge use found after the member started background work
-            raise context.refusal
     finally:
         current_member.reset(token)
 
     if status is not None:
         return status
-    # the agent was cancelled: a node that stopped a bridged member, or the hard stop
-    return context.stop_cause or "cancelled"
+    # the agent was cancelled: the hard stop, or a cancellation from outside the swarm
+    return "cancelled"
 
 
 # The member's background work, once its agent has returned: refused new model calls,
@@ -689,14 +686,7 @@ async def _drain(
         await owner.wait()
 
 
-def _returned(
-    context: MemberContext, gate: MemberGate, state: AgentState, stopped: bool
-) -> str:
-    if context.stop_cause is not None:
-        # a node that stopped a bridged member, whose cancellation may not have been
-        # delivered when its last call was the one that stopped it, even if the agent
-        # then stopped itself
-        return context.stop_cause
+def _returned(gate: MemberGate, state: AgentState, stopped: bool) -> str:
     if stopped:
         # the agent stopped itself with an error, which an end request does not change
         return "member_limit:custom"

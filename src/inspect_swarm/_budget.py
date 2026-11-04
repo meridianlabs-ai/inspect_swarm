@@ -11,7 +11,6 @@ import anyio.lowlevel
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import is_registry_object, registry_info
 from inspect_ai.agent import Agent, AgentChannel
-from inspect_ai.agent._bridge.util import in_bridge_model_generate
 from inspect_ai.model import Model, ModelUsage
 from inspect_ai.model._model_info import (
     _get_model_info_direct,  # pyright: ignore[reportPrivateUsage]
@@ -298,15 +297,15 @@ def is_bridged(agent: Agent, bridged: bool | None) -> bool:
     )
 
 
-# What a node, and the bus and its tools, need to know about the member they act for.
-# The member wrapper sets `current_member`, runs the member inside `scope` and records
-# its span in `span_id`.
+# What the bus, its tools and swarm_budget() need to know about the member they act
+# for. The member wrapper sets `current_member`, runs the member inside `scope` and
+# records its span in `span_id`.
 @dataclass(eq=False)
 class MemberContext:
     name: str
+    # declared, or an inspect_swe agent; recorded in the ledger
     bridged: bool
     scope: anyio.CancelScope = field(default_factory=anyio.CancelScope)
-    stop_cause: str | None = None
     span_id: str | None = None
     # the agent channel of the member's own loop, bound by swarm_tools() where it is
     # first resolved, and whether ACP was bound to that channel then
@@ -324,19 +323,9 @@ class MemberContext:
     # set when the member first uses a tool from swarm_bridged_tools(), which a member
     # whose loop swarm_tools() binds cannot also use
     bridge_used: bool = False
-    # set when the member starts background work, which bridged members cannot have
-    background: bool = False
     # the member's background tasks not yet finished, kept by its owner, for the bus's
     # all-waiting check
     background_running: int = 0
-    # the error for bridge use found after the member started background work
-    refusal: RuntimeError | None = None
-
-
-def bridged_background_error(name: str) -> RuntimeError:
-    return RuntimeError(
-        f"Member {name!r} uses the agent bridge and background work, which cannot be combined: a limit that stops a bridged member cancels all of its work. Run bridged agents in members that start no background work."
-    )
 
 
 current_member: ContextVar[MemberContext | None] = ContextVar(
@@ -355,19 +344,6 @@ class SwarmNode(Limit):
     # set by the runtime on the swarm's caps
     stop_swarm: Callable[[str], None] | None = None
 
-    def detect_bridge(self) -> None:
-        # every check, met or not, so a member found bridged by the bridge's mark stays
-        # bridged for later checks that run before the mark (compaction, filters)
-        member = current_member.get()
-        if member is not None and not member.bridged and in_bridge_model_generate():
-            member.bridged = True
-            if member.background:
-                # its nodes would now cancel the member, background work and all, with
-                # no error to say why; a raise here would end the sample, so the member
-                # wrapper raises the refusal once the member is cancelled
-                member.refusal = bridged_background_error(member.name)
-                member.scope.cancel()
-
     def exceeded(
         self,
         type: _LimitType,
@@ -377,18 +353,10 @@ class SwarmNode(Limit):
         values: str,
         reason: str | None = None,
     ) -> None:
-        self.detect_bridge()
         if self.stop_swarm is not None:
             # here rather than where the error is caught: a tool or handoff may turn
             # it into a message, and its caller go on or return normally
             self.stop_swarm("swarm_cap")
-        member = current_member.get()
-        if member is not None and member.bridged:
-            # a raise here would reach the sandbox service and end the sample
-            if member.stop_cause is None:
-                member.stop_cause = self.stop_cause(type)
-            member.scope.cancel()
-            return
         raise LimitExceededError(
             type,
             value=value,
@@ -450,7 +418,6 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
             self.pair.cost += usage.total_cost
 
     def _check_self(self, raise_for_equal: bool = False) -> None:
-        self.detect_bridge()
         limit = self.limit
         if limit is not None:
             total = self._metering.value(self._usage)
@@ -496,7 +463,6 @@ class SwarmCostNode(SwarmNode, _CostLimit):
             self.pair.suspended_cost += cost
 
     def _check_self(self, raise_for_equal: bool = False) -> None:
-        self.detect_bridge()
         if self.pair.reason is not None:
             # the stop gate: refuses every call, including suspended ones
             cost = self.pair.cost
@@ -566,7 +532,6 @@ class SwarmTurnNode(SwarmNode, _TurnLimit):
         self.role = "limit"
 
     def _check_self(self) -> None:
-        self.detect_bridge()
         limit = self.limit
         if limit is not None and self._turns > limit:
             self.exceeded(
@@ -586,7 +551,6 @@ class SwarmMessageNode(SwarmNode, _MessageLimit):
 
     def check(self, count: int, raise_for_equal: bool) -> None:
         # a message node has no ancestors to check
-        self.detect_bridge()
         limit = self.limit
         if limit is not None and (
             count > limit or (raise_for_equal and count == limit)
