@@ -485,11 +485,13 @@ add_users() {
         groupadd -g "$uid" "$name" || fail "users isolation could not create the group $name"
         # -M: no copy of the image's /etc/skel, whose modes could let peers write
         useradd -u "$uid" -g "$uid" -G "$group" -d "$home" -M -s "$shell" "$name" || fail "users isolation could not create the user $name"
-        mkdir -m 0700 -- "$home" && chown -h "$uid:$uid" "$home" || fail "users isolation could not create $home"
-        if [ "$peers" = read ]; then
-          chgrp -h "$group" "$home" && chmod 2750 "$home" || fail "users isolation could not set the mode of $home"
-        fi
-        mkdir -m 0700 -- "$home/tmp" && chown -h "$uid:$uid" "$home/tmp" || fail "users isolation could not create $home/tmp"
+        # ~/tmp takes the home's policy, so that peers can read what a member leaves in $TMPDIR
+        for d in "$home" "$home/tmp"; do
+          mkdir -m 0700 -- "$d" && chown -h "$uid:$uid" "$d" || fail "users isolation could not create $d"
+          if [ "$peers" = read ]; then
+            chgrp -h "$group" "$d" && chmod 2750 "$d" || fail "users isolation could not set the mode of $d"
+          fi
+        done
         for f in .profile .bashrc; do
           printf '%s\n' 'export TMPDIR="$HOME/tmp"' >"$home/$f" && chown -h "$uid:$uid" "$home/$f" || fail "users isolation could not write $home/$f"
         done

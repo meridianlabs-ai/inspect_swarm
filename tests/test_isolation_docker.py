@@ -288,11 +288,16 @@ def test_members_cannot_reach_each_others_homes_and_share_the_shares(
     tmp_path: Path,
 ) -> None:
     writer: list[Step] = [
-        ("bash", "echo secret > ~/secret && mkdir /shared/d && echo one > /shared/d/f"),
+        (
+            "bash",
+            'echo secret > ~/secret && echo temp > "$TMPDIR/temp" && mkdir /shared/d && echo one > /shared/d/f',
+        ),
         ("bash", "touch /shared/top /shared/nested/n"),
     ]
     peer: list[Step] = [
         ("bash", "cat /scratch/w-1/secret"),
+        ("bash", "cat /scratch/w-1/tmp/temp"),
+        ("bash", "touch /scratch/w-1/tmp/planted"),
         ("bash", "echo x >> /scratch/w-1/secret"),
         ("bash", "mv /scratch/w-1 /scratch/stolen"),
         ("bash", "echo two >> /shared/d/f && cat /shared/d/f"),
@@ -315,12 +320,16 @@ def test_members_cannot_reach_each_others_homes_and_share_the_shares(
     }
     _eval(tmp_path, cases)
     for peers, case in cases.items():
-        read, write, rename, share, data, append, create, move = case.results["w-2"]
+        (read, read_temp, plant, write, rename, share, data, append, create, move) = (
+            case.results["w-2"]
+        )
         if peers == "read":
             assert _ok(read) == "secret"
+            assert _ok(read_temp) == "temp"
         else:
             _refused(read)
-        for result in (write, rename, append, create):
+            _refused(read_temp)
+        for result in (plant, write, rename, append, create):
             _refused(result)
         assert _ok(share) == "one\ntwo"
         assert _ok(data) == "data"
