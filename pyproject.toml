@@ -28,6 +28,19 @@ dependencies = [
     "shortuuid",
 ]
 
+[project.urls]
+"Source Code" = "https://github.com/meridianlabs-ai/inspect_swarm"
+"Issue Tracker" = "https://github.com/meridianlabs-ai/inspect_swarm/issues"
+Documentation = "https://meridianlabs-ai.github.io/inspect_swarm/"
+
+# lets inspect_ai resolve `inspect_swarm/<name>` without importing the package first
+[project.entry-points.inspect_ai]
+inspect_swarm = "inspect_swarm._entrypoint"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
 [project.optional-dependencies]
 dev = [
     "ruff",
@@ -44,19 +57,6 @@ dev = [
     "pandas>=2.1.0",
     "pyarrow>=10.0.1",
 ]
-
-[project.urls]
-"Source Code" = "https://github.com/meridianlabs-ai/inspect_swarm"
-"Issue Tracker" = "https://github.com/meridianlabs-ai/inspect_swarm/issues"
-Documentation = "https://meridianlabs-ai.github.io/inspect_swarm/"
-
-# lets inspect_ai resolve `inspect_swarm/<name>` without importing the package first
-[project.entry-points.inspect_ai]
-inspect_swarm = "inspect_swarm._entrypoint"
-
-[build-system]
-requires = ["hatchling", "hatch-vcs"]
-build-backend = "hatchling.build"
 
 [dependency-groups]
 # Keeps a plain `uv sync` or `uv run` (Makefile) and the nightly canary's
