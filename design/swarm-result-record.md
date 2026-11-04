@@ -444,7 +444,7 @@ One pull request, `feat!: the swarm's result record moves from the sample store 
 - Docs: `docs/scoring.qmd`, `docs/restrictions.qmd`, `docs/channels.qmd`, `docs/index.qmd`, `docs/analysis.qmd`, `README.md`; `examples/proof_swarm.py`.
 - Tests as in [Testing](#testing).
 
-The scoring plan after M2 (swarm-scoring.md step 1 onward) starts from this pull request. The `SwarmEvent` switch ([swarm-event-types.md](swarm-event-types.md#implementation-plan) step 3), whenever it lands, writes the record as a `SwarmEvent`, and `_record_data()` reads both that form and the `InfoEvent` form.
+The scoring plan after M2 (swarm-scoring.md step 1 onward) starts from this pull request. The `SwarmEvent` switch ([swarm-event-types.md](swarm-event-types.md)), whenever it lands, writes the record as a `SwarmEvent`, and `_record_data()` reads both that form and the `InfoEvent` form.
 
 ## Open questions
 
