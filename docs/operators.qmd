@@ -50,7 +50,7 @@ An interrupt loses what the turn was doing. The cancelled tool calls return no r
 - A member that has not started ends `stopped` as soon as the controller starts it, before its setup and with no model call.
 - A member whose agent has returned and whose background work is still finishing ends `stopped` once that work is done.
 
-A stopped member's output is never the swarm's answer. A [persistent member](members.qmd#persistent-members) you stop ends `stopped` even when it is idle, and none of its answers can be the swarm's answer, including one the controller already chose. A second `stop`, a stop of a member that has ended, and a stop sent while a swarm that has already ended is cancelling its members change nothing. `stop` works for every member, bridged ones included.
+A stopped member's output is never the swarm's answer. A [persistent member](members.qmd#persistent-members) you stop ends `stopped` even when it is idle, and none of its answers can be the swarm's answer, including one the controller already chose. If the controller has not yet read the member's `MemberIdle`, it never gets it. A controller that calls `end(origin="operator")` stops a member the same way. A second `stop`, a stop of a member that has ended, and a stop sent while a swarm that has already ended is cancelling its members change nothing. `stop` works for every member, bridged ones included.
 
 ## Stopping the swarm
 

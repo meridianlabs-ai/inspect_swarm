@@ -227,6 +227,7 @@ swarm(
 - `wake()` takes only an `idle` member. An event can be stale by the time the controller reads it (an earlier event's handling may have woken or ended the member), so check `swarm.member(name).state == "idle"` first.
 - An idle member is held: `handle.held` is `True`, its time limit does not run, and `swarm_wait` does not count it as active. Boundary callbacks run after the wake, with `after == "wake"` and the input as the last messages.
 - `handle.end()` or the swarm's stop on an idle member sets it `ending` at once, and it ends `submitted`, with its last answer as its output. The iterator waits for its `MemberEnded`.
+- An [operator stop](operators.qmd#stopping-a-member) ends an idle member `stopped` instead and withdraws its answers. The controller never gets a `MemberIdle` of that member it has not read yet.
 - The swarm is *quiescent* when every member is pending, idle or ended and no event is waiting: `events()` ends. Nothing moves until the controller starts, wakes or ends a member. A controller that wakes no one returns `quiescence`.
 - `leaderless` treats `MemberIdle` as a submission, so by default the first answer stops the swarm. With `stop_on_submission=False` it returns `quiescence` once no member is working and some are idle. It never wakes a member.
 

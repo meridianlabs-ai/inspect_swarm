@@ -147,6 +147,9 @@ class MemberGate:
     # setup, or its grace timer's cancellation. A request that something else beat
     # (a limit, the swarm's stop, a cancellation from outside) leaves it unset.
     honoured: bool = False
+    # the gate ended the member for the end request, at a boundary or before a turn,
+    # whichever stop closed the lever first
+    end_raised: bool = False
     holds: int = 0
     held_time: float = 0.0
     # the model calls in flight when a stop or an end cancelled a chain, so the ledger
@@ -387,6 +390,7 @@ class MemberGate:
         if pending == "end":
             assert self.end_origin is not None
             reason = ended_reason(self.end_origin)
+            self.end_raised = True
         else:
             reason = self.stopping() or "stopped"
         raise self.lever.stop_error(reason)

@@ -146,6 +146,8 @@ class MemberHandle(Protocol):
 
         A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary. A pending member ends as soon as it is started, before its setup and with no model call. If the member is still running when the swarm's grace period has passed since the request, its turn, setup or cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output, and so does one whose background work is draining after its agent returned (the drain keeps its own grace period). A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
 
+        An end with origin `operator` is an operator stop, as `inspect ctl sample agent stop` makes: none of the member's answers can be the swarm's answer, and a persistent member ends `stopped` even when idle.
+
         Args:
             origin: Names the caller in the evidence, as for `on_boundary()`.
 
@@ -171,7 +173,10 @@ class MemberEnded:
 
 @dataclass(frozen=True)
 class MemberIdle:
-    """A persistent member answered and is idle, held until `SwarmControl.wake()` gives it more work."""
+    """A persistent member answered and is idle, held until `SwarmControl.wake()` gives it more work.
+
+    If the operator stops the member before the controller reads this event, the controller never gets it: the stop withdrew the answer, and the member's `MemberEnded` follows.
+    """
 
     member: str
     """The member's name."""
@@ -603,7 +608,15 @@ class SwarmRun:
         try:
             while True:
                 if self._queue:
-                    yield self._queue.popleft()
+                    event = self._queue.popleft()
+                    if (
+                        isinstance(event, MemberIdle)
+                        and self._lookup(event.member).gate.end_origin == OPERATOR
+                    ):
+                        # an answer the operator withdrew before the controller read
+                        # it: the member's MemberEnded follows
+                        continue
+                    yield event
                 elif not self._live():
                     return
                 else:

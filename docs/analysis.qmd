@@ -112,7 +112,7 @@ When an operator sends a member a message with `inspect ctl sample agent message
 
 `drained` does not mean that a model saw the message. The member's conversation can refuse it at its message limit, a boundary callback can remove it, and the member can end before its next model call. The member's messages and the `ModelEvent` inputs show where it arrived.
 
-A member's `member_result` event, its `MemberResult` in the result record and its ledger line have `end_origin`: who asked the member to end, when an end request decided how it ended. It is `operator` for `inspect ctl sample agent stop`, the origin a controller gave `MemberHandle.end()`, or `null` when no end request did, as for a submission, a member limit or the swarm's own stop. `MemberResult.withdrawn` is `true` for a member the operator stopped: none of its answers can be the swarm's answer, even when a member limit then decided how it ended.
+A member's `member_result` event, its `MemberResult` in the result record and its ledger line have `end_origin`: who asked the member to end, when an end request decided how it ended. It is `operator` for `inspect ctl sample agent stop`, the origin a controller gave `MemberHandle.end()`, or `null` when no end request did, as for a submission, a member limit or the swarm's own stop. `MemberResult.withdrawn` is `true` for a member an end request with origin `operator` stopped, as `inspect ctl sample agent stop` does: none of its answers can be the swarm's answer, even when a member limit then decided how it ended.
 
 ### Wiring checks
 

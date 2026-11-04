@@ -539,11 +539,12 @@ async def run_member(
             if (
                 gate.end_origin is not None
                 and status in ("stopped", "submitted")
-                and lever.reason == ended_reason(gate.end_origin)
+                and (gate.end_raised or lever.reason == ended_reason(gate.end_origin))
             ):
-                # the request closed the member's lever first and the member ended
-                # through it: at a boundary, on a refused call, on a normal return,
-                # held idle after an answer, or a bridged member's cancelled call
+                # the member ended through the request: the gate ended it at a
+                # boundary or before a turn, or the request closed the member's lever
+                # first and the member ended through it, on a refused call, held idle
+                # after an answer, or a bridged member's cancelled call
                 gate.honoured = True
             # the state the agent returned, kept through a drain that raised; else the
             # loop's state at its last boundary

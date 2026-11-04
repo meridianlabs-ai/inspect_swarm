@@ -3,11 +3,10 @@
 import contextvars
 import os
 import tempfile
-from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
-from types import SimpleNamespace
-from typing import Any, ParamSpec, TypeVar, cast
+from typing import Any, ParamSpec, TypeVar
 from uuid import uuid4
 
 import anyio
@@ -16,7 +15,7 @@ import pytest
 from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai._control.discovery import list_discovered_servers
 from inspect_ai._control.operator import OperatorGroup
-from inspect_ai.agent import Agent, AgentState, agent, react, run
+from inspect_ai.agent import Agent, AgentState, agent, as_tool, react, run
 from inspect_ai.dataset import Sample
 from inspect_ai.event import Event, ModelEvent, SwarmEvent
 from inspect_ai.log import EvalSample, transcript
@@ -39,7 +38,6 @@ from inspect_swarm import (
     Budget,
     ControlEvent,
     MemberEnded,
-    MemberHandle,
     MemberIdle,
     SwarmControl,
     leaderless,
@@ -321,6 +319,88 @@ async def test_message_with_interrupt_cancels_a_long_tool_call() -> None:
     }
     # written when the loop drained it, before the turn that follows
     assert _event_index(ran, message) < _model_events(ran)[1]
+
+
+@pytest.mark.anyio
+async def test_an_interrupt_cancels_a_subagent_and_spares_background_work() -> None:
+    child_started, finished, sibling = anyio.Event(), anyio.Event(), anyio.Event()
+    log: list[str] = []
+
+    @tool
+    def spawn() -> Tool:
+        async def execute() -> str:
+            """Start background work."""
+
+            async def work() -> None:
+                try:
+                    await finished.wait()
+                    log.append("background finished")
+                except anyio.get_cancelled_exc_class():
+                    log.append("background cancelled")
+                    raise
+
+            background(work)
+            return "started"
+
+        return execute
+
+    # the child loop binds its own channel; the message goes to the parent's
+    child_script = _Recording([_call("slow", seconds=30)])
+    child = react(
+        name="child",
+        description="A subagent.",
+        model=scripted_model(child_script),
+        tools=[_slow(child_started)],
+    )
+    script = _Recording([_call("spawn"), _call("child", input="Work."), _submit()])
+
+    @agent
+    def waits_for_sibling() -> Agent:
+        async def execute(state: AgentState) -> AgentState:
+            await sibling.wait()
+            state.output = ModelOutput.from_content("mockllm", "answer")
+            return state
+
+        return execute
+
+    async def drive(group: OperatorGroup) -> None:
+        await child_started.wait()
+        a = group.agents["a"]
+        outcome = _act(a.message, "Change course.", interrupt=True, dry_run=False)
+        assert (outcome.changed, outcome.refused) == (True, None)
+        # the parent's next turn comes before the background work and the sibling end
+        await _until(lambda: len(script.inputs) == 3)
+        finished.set()
+        sibling.set()
+
+    ran = await _run(
+        _swarm(
+            [
+                member(
+                    react(
+                        model=scripted_model(script), tools=[spawn(), as_tool(child)]
+                    ),
+                    name="a",
+                ),
+                member(waits_for_sibling(), name="b"),
+            ]
+        ),
+        drive,
+    )
+
+    assert (ran.status("a"), ran.status("b")) == ("submitted", "submitted")
+    # the child was cancelled in its tool call and never saw the message
+    assert len(child_script.inputs) == 1
+    assert all(m.text != "Change course." for m in child_script.inputs[0])
+    *_, repair, redirect = script.inputs[2]
+    assert isinstance(repair, ChatMessageTool)
+    assert (repair.function, repair.text) == ("child", "Tool call cancelled by user.")
+    assert isinstance(redirect, ChatMessageUser)
+    assert (redirect.text, redirect.source) == ("Change course.", "operator")
+    # the member's background work outlived the interrupt
+    assert log == ["background finished"]
+    [a] = [m for m in ran.ledger.members if m.name == "a"]
+    assert (a.background_started, a.background_cancelled) == (1, 0)
 
 
 @pytest.mark.anyio
@@ -1026,17 +1106,19 @@ async def test_a_stop_after_the_swarms_stop_decides_a_normal_return(
 
 
 class _Cleanup(MCPServer):
-    """A tool source whose teardown, when the loop exits, waits for `release`."""
+    """A tool source whose teardown, when the loop exits, waits for `release`, shielded from cancellation unless `shield` is false."""
 
-    def __init__(self, cleaning: anyio.Event, release: anyio.Event) -> None:
-        self._cleaning, self._release = cleaning, release
+    def __init__(
+        self, cleaning: anyio.Event, release: anyio.Event, shield: bool = True
+    ) -> None:
+        self._cleaning, self._release, self._shield = cleaning, release, shield
 
     async def tools(self) -> list[Tool]:
         return []
 
     async def __aexit__(self, *exc: object) -> None:
         self._cleaning.set()
-        with anyio.CancelScope(shield=True):
+        with anyio.CancelScope(shield=self._shield):
             await self._release.wait()
 
 
@@ -1077,54 +1159,100 @@ async def test_a_stop_while_an_idle_member_cleans_up_after_the_swarms_stop() -> 
     assert ran.end_origins() == {"p": ("operator", "operator", "operator")}
 
 
-class _Control:
-    """A `SwarmControl` with a fixed queue of events, for a controller's own logic."""
+@pytest.mark.anyio
+@pytest.mark.parametrize("by", ["controller", "operator"])
+async def test_an_idle_answer_the_controller_has_not_read_yet(by: str) -> None:
+    # p answers and is idle; it is ended before the controller reads its MemberIdle,
+    # and its cleanup outlasts the grace, so it is cancelled
+    cleaning, release, read = anyio.Event(), anyio.Event(), anyio.Event()
+    events: list[ControlEvent] = []
 
-    def __init__(self, states: dict[str, str], events: list[ControlEvent]) -> None:
-        self._handles = {
-            name: cast(MemberHandle, SimpleNamespace(name=name, state=state))
-            for name, state in states.items()
-        }
-        self._events = events
-        self.read = 0
+    async def run_controller(control: SwarmControl) -> str:
+        control.start("p")
+        if by == "controller":
+            await _until(lambda: control.member("p").state == "idle")
+            control.member("p").end(origin="scheduler")
+        else:
+            await read.wait()
+        async with aclosing(control.events()) as stream:
+            async for event in stream:
+                events.append(event)
+        return "all_done"
 
-    @property
-    def members(self) -> Sequence[MemberHandle]:
-        return list(self._handles.values())
+    async def drive(group: OperatorGroup) -> None:
+        if by == "operator":
+            await _until(lambda: _act(group.agents["p"].info).state == "idle")
+            assert _act(group.agents["p"].stop, dry_run=False).changed
+            read.set()
+        await cleaning.wait()
 
-    def member(self, name: str) -> MemberHandle:
-        return self._handles[name]
+    ran = await _run(
+        _swarm(
+            [
+                member(
+                    react(
+                        model=scripted_model(Script([_submit("first")])),
+                        tools=[_Cleanup(cleaning, release, shield=False)],
+                    ),
+                    name="p",
+                    persistent=True,
+                )
+            ],
+            run_controller,
+            grace=0.2,
+        ),
+        drive,
+    )
 
-    def start(self, member: Any, input: Any = None) -> None:
-        pass
-
-    def wake(self, member: Any, input: Any) -> None:
-        raise AssertionError("not woken")
-
-    async def events(self) -> AsyncGenerator[ControlEvent, None]:
-        for event in self._events:
-            self.read += 1
-            yield event
-
-    def choose_answer(self, member: Any, reason: str | None = None) -> None:
-        raise AssertionError("not chosen")
+    assert ran.status("p") == "cancelled"
+    [p] = [m for m in ran.record.members if m.name == "p"]
+    if by == "controller":
+        # the answer stands: the controller hears it, and it is the swarm's answer
+        assert events == [
+            MemberIdle("p", 0, news=False),
+            MemberEnded("p", "cancelled", False),
+        ]
+        assert ran.record.final.member == "p"
+        assert (p.end_origin, p.withdrawn) == ("scheduler", False)
+    else:
+        # the operator withdrew it before the controller read it
+        assert events == [MemberEnded("p", "cancelled", False)]
+        assert ran.record.final.member is None
+        assert (p.end_origin, p.withdrawn) == ("operator", True)
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("state", "read"), [("idle", 1), ("ending", 2)])
-async def test_leaderless_skips_an_answer_the_operator_withdrew(
-    state: str, read: int
-) -> None:
-    # p's answer was queued as MemberIdle, then the operator stopped it (`ending`)
-    # before the controller read the event: the swarm goes on to q's submission
-    control = _Control(
-        {"p": state, "q": "running"},
-        [MemberIdle("p", 0, news=False), MemberEnded("q", "submitted", True)],
+async def test_a_stop_after_the_swarms_stop_ends_a_held_member_for_the_operator() -> (
+    None
+):
+    held, release = anyio.Event(), anyio.Event()
+
+    async def hold(boundary: Boundary) -> None:
+        held.set()
+        await release.wait()
+
+    async def drive(group: OperatorGroup) -> None:
+        await held.wait()
+        try:
+            # both before the callback unwinds: the swarm's stop closes the lever
+            # first, and the boundary ends the member for the operator's request
+            assert _act(group.stop, dry_run=False).changed
+            assert _act(group.agents["a"].stop, dry_run=False).changed
+        finally:
+            release.set()
+
+    ran = await _run(
+        _swarm(
+            [member(_react(Script([_submit()])), name="a")],
+            _starting(callbacks={"a": hold}),
+            grace=60,
+        ),
+        drive,
     )
 
-    reason = await leaderless().run(cast(SwarmControl, control))
-
-    assert (reason, control.read) == ("submitted", read)
+    assert ran.status("a") == "stopped"
+    assert ran.record.final.member is None
+    assert ran.end_origins() == {"a": ("operator", "operator", "operator")}
 
 
 # ---------------------------------------------------------------------------

@@ -37,14 +37,9 @@ def leaderless(
             swarm.start(m)
         async with aclosing(swarm.events()) as events:
             async for event in events:
-                # a persistent member's answer is a submission while the member is
-                # still idle: one the operator has since stopped gave no answer, and
-                # one ended otherwise is reported again as submitted when it ends
+                # a persistent member's answer is a submission
                 if stop_on_submission and (
-                    (
-                        isinstance(event, MemberIdle)
-                        and swarm.member(event.member).state == "idle"
-                    )
+                    isinstance(event, MemberIdle)
                     or (isinstance(event, MemberEnded) and event.submitted)
                 ):
                     return "submitted"
