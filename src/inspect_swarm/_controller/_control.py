@@ -21,6 +21,7 @@ from inspect_ai.util._checkpoint.checkpointer_noop import (
 from inspect_ai.util._store import suspend_store_events
 from shortuuid import uuid
 
+from .._background import cancellation
 from .._budget import (
     Budget,
     BudgetState,
@@ -501,6 +502,7 @@ class SwarmRun:
         )
         for m in self._members:
             m.gate.loop_bound = self.operator.members[m.name].loop_bound
+            m.context.fatal = self._fail
         self._state = state
         self._input = list(input)
         self._final: FinalName | None = final
@@ -936,9 +938,14 @@ class SwarmRun:
         try:
             await self._run_controller(controller)
         except BaseException as ex:
-            if not isinstance(ex, anyio.get_cancelled_exc_class()):
-                self._failed = True
+            if not cancellation(ex):
+                self._fail()
             raise
+
+    # An error from a member or the controller that ends the swarm is known: from now on
+    # the stop guard refuses.
+    def _fail(self) -> None:
+        self._failed = True
 
     async def _run_controller(
         self, controller: Callable[["SwarmControl"], Awaitable[str]]
@@ -975,8 +982,9 @@ class SwarmRun:
         def end(status: str, state: AgentState) -> None:
             if status == "errored":
                 # the member's error leaves its task and ends the swarm: the stop guard
-                # closes before its result is published
-                self._failed = True
+                # closes before its result is published, if the member's work has not
+                # already closed it
+                self._fail()
             if m.answer_list and status == "submitted":
                 # a persistent member ended after an answer: its last answer
                 state.output = m.answer_list[-1].output

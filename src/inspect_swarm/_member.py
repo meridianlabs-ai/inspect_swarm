@@ -664,7 +664,9 @@ async def _run_member(
                         foreign = gate.unsupervised_error()
                         foreign.__cause__ = own
                     if foreign is not None:
-                        # no drain: leaving the owner cancels the background work
+                        # no drain: leaving the owner cancels the background work, which
+                        # may await its cleanup, so the runtime learns of the error first
+                        context.fatal()
                         raise foreign
                     gate.draining = True
                     await _drain(name, owner, lever, grace)

@@ -293,6 +293,10 @@ async def test_message_with_interrupt_cancels_a_long_tool_call() -> None:
         await started.wait()
         a = group.agents["a"]
         assert _act(a.info).activity == "in_turn"
+        # a preview takes no id, posts nothing and interrupts nothing
+        preview = _act(a.message, "Not this.", interrupt=True, dry_run=True)
+        assert preview.changed and preview.detail.startswith("Dry run: Posted, and")
+        assert _act(a.info).activity == "in_turn"
         outcome = _act(a.message, "Change course.", interrupt=True, dry_run=False)
         assert (outcome.changed, outcome.refused) == (True, None)
         assert "interrupted" in outcome.detail
@@ -308,6 +312,7 @@ async def test_message_with_interrupt_cancels_a_long_tool_call() -> None:
     assert (repair.function, repair.text) == ("slow", "Tool call cancelled by user.")
     assert isinstance(redirect, ChatMessageUser)
     assert (redirect.text, redirect.source) == ("Change course.", "operator")
+    assert not any("Not this." in str(m.content) for m in script.inputs[1])
     [message] = ran.messages()
     assert message == {
         "version": 1,
@@ -1110,6 +1115,81 @@ async def test_a_stop_once_an_error_is_known_changes_nothing(
     error = "controller failed" if by == "controller" else "sibling failed"
     assert ran.sample.error is not None and error in ran.sample.error.message
     assert ran.status("a") == "cancelled"
+    assert ran.ledger.stop_reason is None
+
+
+@agent
+def fails_with_background(
+    where: str, started: anyio.Event, cleaning: anyio.Event, release: anyio.Event
+) -> Agent:
+    """Start background work whose cancellation runs a shielded cleanup that waits for `release`, then fail: the agent itself, another background task while the agent runs, or one while its background work drains."""
+
+    async def cleans_up() -> None:
+        try:
+            started.set()
+            await anyio.sleep_forever()
+        finally:
+            with anyio.CancelScope(shield=True):
+                cleaning.set()
+                await release.wait()
+
+    async def fails() -> None:
+        raise ValueError("member failed")
+
+    async def execute(state: AgentState) -> AgentState:
+        background(cleans_up)
+        await started.wait()
+        if where == "agent":
+            raise ValueError("member failed")
+        background(fails)
+        if where == "worker":
+            await anyio.sleep_forever()
+        # "drain": the failing task first runs once the agent has returned
+        state.output = ModelOutput.from_content("mockllm", "answer")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("where", ["agent", "worker", "drain"])
+async def test_a_stop_while_a_failing_member_cleans_up_changes_nothing(
+    where: str,
+) -> None:
+    started, cleaning, release = anyio.Event(), anyio.Event(), anyio.Event()
+
+    async def drive(group: OperatorGroup) -> None:
+        # the error is raised, and the member's background work is in its cleanup
+        await cleaning.wait()
+        try:
+            for name in ("a", "b"):
+                for dry_run in (True, False):
+                    outcome = _act(group.agents[name].stop, dry_run=dry_run)
+                    assert (outcome.changed, outcome.refused) == (False, None)
+                    assert "ending after an error" in outcome.detail
+            for dry_run in (True, False):
+                outcome = _act(group.stop, dry_run=dry_run)
+                assert (outcome.changed, outcome.refused) == (False, None)
+        finally:
+            release.set()
+
+    ran = await _run(
+        _swarm(
+            [
+                member(sleeper(), name="a"),
+                member(
+                    fails_with_background(where, started, cleaning, release), name="b"
+                ),
+            ],
+            grace=60,
+        ),
+        drive,
+        errors=True,
+    )
+
+    assert ran.sample.error is not None
+    assert "member failed" in ran.sample.error.message
+    assert (ran.status("a"), ran.status("b")) == ("cancelled", "errored")
     assert ran.ledger.stop_reason is None
 
 
