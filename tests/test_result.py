@@ -411,14 +411,18 @@ async def test_the_stop_leaves_a_submission_unverified_when_it_refuses_its_check
 
 
 class _Held:
-    """A verifier that waits until released. Cancelled first, it either lets the cancellation propagate or catches it and returns a passing verdict all the same."""
+    """A verifier whose first call waits until released; cancelled first, it either lets the cancellation propagate or catches it and returns a passing verdict all the same. Later calls return a failing verdict at once."""
 
     def __init__(self, catches: bool) -> None:
         self.catches = catches
+        self.calls: list[str] = []
         self.started = anyio.Event()
         self.release = anyio.Event()
 
     async def __call__(self, answer: str, metadata: dict[str, Any]) -> Verdict:
+        self.calls.append(answer)
+        if len(self.calls) > 1:
+            return Verdict(passed=False)
         self.started.set()
         try:
             await self.release.wait()
@@ -434,13 +438,14 @@ class _Held:
     [
         # the swarm's time cap, a controller's stop and the sample's own cancellation
         # each end the verification: whether the verifier lets the cancellation
-        # propagate or catches it and returns, the submission stays unverified
+        # propagate or catches it and returns, the submission stays unverified, and
+        # the queued one is never verified
         *[
             pytest.param(stop, behaviour, id=f"{stop}-{behaviour}")
             for stop in ("swarm-time", "controller", "sample")
             for behaviour in ("propagates", "catches")
         ],
-        # a verification that finishes during the stop's grace keeps its verdict
+        # verifications that finish during the stop's grace keep their verdicts
         pytest.param("controller", "finishes", id="controller-finishes-in-grace"),
     ],
 )
@@ -450,15 +455,22 @@ async def test_the_hard_stop_ends_a_verification_in_progress(
     held = _Held(catches=behaviour == "catches")
 
     async def run(control: SwarmControl) -> StopReason:
-        control.start("solo")
+        control.start("one")
+        control.start("two")
         await held.started.wait()
-        # the member has ended, and its event waits for the verdict
-        handle = control.member("solo")
-        assert (handle.state, handle.status, handle.verdict) == (
-            "ended",
-            "submitted",
-            None,
-        )
+        # the other member ends while the first submission is being verified
+        while control.member("two").state != "ended" or (
+            control.member("one").state != "ended"
+        ):
+            await anyio.sleep(0.01)
+        # both have ended, and their events wait for their verdicts
+        for name in ("one", "two"):
+            handle = control.member(name)
+            assert (handle.state, handle.status, handle.verdict) == (
+                "ended",
+                "submitted",
+                None,
+            )
         with anyio.move_on_after(0.05):
             async for event in control.events():
                 raise AssertionError(f"{event} came before its verdict")
@@ -472,7 +484,7 @@ async def test_the_hard_stop_ends_a_verification_in_progress(
         return "done"
 
     agent = swarm(
-        member(answers("42"), name="solo"),
+        [member(answers("1"), name="one"), member(answers("2"), name="two")],
         controller=controller(run, "result_test_held"),
         channels=[],
         budget=Budget(time=0.2 if stop == "swarm-time" else None, grace=0.05),
@@ -484,18 +496,29 @@ async def test_the_hard_stop_ends_a_verification_in_progress(
         record = _transcript_result(store())
     assert outer.cancelled_caught == (stop == "sample")
     assert record is not None
-    [m] = record.members
-    assert m.status == "submitted"
+    assert [m.status for m in record.members] == ["submitted", "submitted"]
+    by_answer = {m.output.completion: m for m in record.members if m.output}
+    # the first verified, then the one queued behind it
+    first = by_answer.pop(held.calls[0])
+    [queued] = by_answer.values()
     verdicts = swarm_events(transcript, "verdict")
     if behaviour == "finishes":
-        assert m.verdict == Verdict(passed=True)
-        assert m.verdict_time is not None and len(verdicts) == 1
+        assert len(held.calls) == 2
+        assert (first.verdict, queued.verdict) == (
+            Verdict(passed=True),
+            Verdict(passed=False),
+        )
+        assert first.verdict_time is not None and queued.verdict_time is not None
+        assert len(verdicts) == 2
     else:
-        assert (m.verdict, m.verdict_time, verdicts) == (None, None, [])
+        # the queued submission's verifier is never called
+        assert len(held.calls) == 1
+        for m in (first, queued):
+            assert (m.verdict, m.verdict_time) == (None, None)
+        assert verdicts == []
     if stop == "swarm-time":
-        # the verification held the submission's event, so the time cap stopped the
+        # the verification held the submissions' events, so the time cap stopped the
         # swarm
-        assert record.final.member == m.name
         [final] = swarm_events(transcript, "final")
         assert final.data["stop_reason"] == "swarm_time"
 

@@ -1112,16 +1112,19 @@ class SwarmRun:
     # The submissions' verdicts, one at a time in the order they ended, in the swarm's
     # span and under the runtime lever, each before its member's event is queued. The
     # hard stop ends it, and a submission it has not verified by then, or whose
-    # verification the swarm's stop refused, has no verdict.
+    # verification the swarm's stop refused, has no verdict. Once cancelled, by the
+    # hard stop or the sample's own cancellation, it calls no further verifier, even
+    # when the one running caught the cancellation and returned.
     async def _verify(self, verifier: Verifier) -> None:
         with self._verifying:
-            while True:
-                while self._unverified:
+            while not _cancelled():
+                while self._unverified and not _cancelled():
                     m = self._unverified[0]
                     await self._take_verdict(m, verifier)
                     self._unverified.popleft()
                     self._verified(m)
-                await self._changed.wait()
+                if not _cancelled():
+                    await self._changed.wait()
         while self._unverified:
             self._verified(self._unverified.popleft())
 
@@ -1142,7 +1145,7 @@ class SwarmRun:
             if foreign is not None:
                 raise foreign
             return
-        if anyio.current_effective_deadline() == -math.inf:
+        if _cancelled():
             # cancelled while the verifier ran, which caught the cancellation and
             # returned: the submission stays unverified
             return
@@ -1391,6 +1394,11 @@ def _sample_cause() -> str | None:
     if time.limit is not None and time.usage >= time.limit:
         return "sample_limit:time"
     return None
+
+
+# Whether the current task is cancelled, by its own scope or an enclosing one.
+def _cancelled() -> bool:
+    return anyio.current_effective_deadline() == -math.inf
 
 
 # A number the record's float field holds exactly: a float, or an int a float equals.
