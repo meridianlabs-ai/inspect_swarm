@@ -13,9 +13,10 @@ from uuid import uuid4
 import anyio
 import httpx
 import pytest
+import trio
 from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai._control.discovery import list_discovered_servers
-from inspect_ai._control.operator import OperatorGroup
+from inspect_ai._control.operator import OperatorGroup, OperatorOutcome
 from inspect_ai.agent import Agent, AgentState, agent, as_tool, react, run
 from inspect_ai.dataset import Sample
 from inspect_ai.event import Event, ModelEvent, SwarmEvent
@@ -1043,6 +1044,72 @@ async def test_a_stop_while_the_ended_swarm_unwinds_its_members_changes_nothing(
         assert ran.sample.error is not None and error in ran.sample.error.message
     assert ran.status("a") == "cancelled"
     assert ran.end_origins()["a"] == (None, None, None)
+    assert ran.ledger.stop_reason is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("by", ["member", "controller"])
+async def test_a_stop_once_an_error_is_known_changes_nothing(
+    by: str, anyio_backend: str
+) -> None:
+    outcomes: list[OperatorOutcome] = []
+    # the error waits until the driver has found the group
+    found = anyio.Event()
+
+    def stops() -> None:
+        # as a control handler would, between steps of the swarm's tasks
+        [group] = [
+            active.operator_groups["swarm"]
+            for active in active_samples()
+            if "swarm" in active.operator_groups
+        ]
+        a = group.agents["a"]
+        for dry_run in (True, False):
+            outcomes.append(_act(a.stop, dry_run=dry_run))
+            outcomes.append(_act(group.stop, dry_run=dry_run))
+
+    def on_event(event: Event) -> None:
+        # b's errored result is published, and its error has not yet left its task
+        if (
+            isinstance(event, SwarmEvent)
+            and event.kind == "member_result"
+            and event.data["status"] == "errored"
+            and not outcomes
+        ):
+            stops()
+
+    async def run_controller(control: SwarmControl) -> str:
+        control.start("a")
+        if by == "member":
+            transcript()._subscribe(on_event)  # pyright: ignore[reportPrivateUsage]
+            control.start("b")
+            return await _drain(control)
+        await found.wait()
+        # runs once the error has left the controller's task: on asyncio before the
+        # task group's callback for it, on trio once the task group has it
+        if anyio_backend == "asyncio":
+            asyncio.get_running_loop().call_soon(stops)
+        else:
+            trio.lowlevel.current_trio_token().run_sync_soon(stops)
+        raise ValueError("controller failed")
+
+    members = [member(sleeper(), name="a")]
+    if by == "member":
+        members.append(member(_after(found, fails_now()), name="b"))
+
+    async def drive(group: OperatorGroup) -> None:
+        found.set()
+        await _until(lambda: bool(outcomes))
+
+    ran = await _run(_swarm(members, run_controller, grace=60), drive, errors=True)
+
+    assert len(outcomes) == 4
+    for outcome in outcomes:
+        assert (outcome.changed, outcome.refused) == (False, None)
+        assert "ending after an error or a cancellation" in outcome.detail
+    error = "controller failed" if by == "controller" else "sibling failed"
+    assert ran.sample.error is not None and error in ran.sample.error.message
+    assert ran.status("a") == "cancelled"
     assert ran.ledger.stop_reason is None
 
 

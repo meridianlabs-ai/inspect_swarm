@@ -145,7 +145,7 @@ class MemberHandle(Protocol):
     def end(self, *, origin: str) -> None:
         """End the member `stopped`, with the reason `ended by <origin>`.
 
-        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary. A pending member ends as soon as it is started, before its setup and with no model call. If the member is still running when the swarm's grace period has passed since the request, its turn, setup or cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output. A member whose background work is draining after its agent returned keeps its submission (the drain keeps its own grace period); one that returned without a submission ends `stopped`. A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
+        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary. A pending member ends as soon as it is started, before its setup and with no model call. If the member is still running when the swarm's grace period has passed since the request, its turn, setup or cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output. A member whose background work is draining after its agent returned keeps the status its return gave (the drain keeps its own grace period), except that a return without a submission (`unsubmitted`) ends `stopped`. A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
 
         Args:
             origin: Names the caller in the evidence, as for `on_boundary()`.
@@ -521,6 +521,8 @@ class SwarmRun:
         self._runtime_tg: TaskGroup | None = None
         # set when the supervisor returns or is cancelled
         self._supervisor_ended = False
+        # set as an error from a member or the controller leaves it, ending the swarm
+        self._failed = False
         # the task running the swarm, set by run()
         self._host: TaskInfo | None = None
         self._member_ctx: contextvars.Context | None = None
@@ -717,7 +719,7 @@ class SwarmRun:
                                             self._time_cap, self._time
                                         )
                                     runtime_tg.start_soon(
-                                        self._run_controller, controller
+                                        self._controller_task, controller
                                     )
                             finally:
                                 # the runtime has ended: members still unwinding are
@@ -926,6 +928,18 @@ class SwarmRun:
         self._effective_grace = grace
         self._stopped.set()
 
+    # The controller's task: an error leaving it ends the swarm, so the stop guard closes
+    # as it leaves, before the task group learns of it (on asyncio, a callback later).
+    async def _controller_task(
+        self, controller: Callable[["SwarmControl"], Awaitable[str]]
+    ) -> None:
+        try:
+            await self._run_controller(controller)
+        except BaseException as ex:
+            if not isinstance(ex, anyio.get_cancelled_exc_class()):
+                self._failed = True
+            raise
+
     async def _run_controller(
         self, controller: Callable[["SwarmControl"], Awaitable[str]]
     ) -> None:
@@ -959,6 +973,10 @@ class SwarmRun:
 
     async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
         def end(status: str, state: AgentState) -> None:
+            if status == "errored":
+                # the member's error leaves its task and ends the swarm: the stop guard
+                # closes before its result is published
+                self._failed = True
             if m.answer_list and status == "submitted":
                 # a persistent member ended after an answer: its last answer
                 state.output = m.answer_list[-1].output
@@ -1095,6 +1113,7 @@ class SwarmRun:
         return (
             runtime is not None
             and not self._supervisor_ended
+            and not self._failed
             and not runtime.cancel_scope.cancel_called
             # a cancellation that has reached the task running the swarm and that it has
             # not yet seen: a member's error, a scope around the swarm, or a cancel of
