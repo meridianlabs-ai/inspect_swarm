@@ -380,14 +380,27 @@ def test_files_already_in_a_share_are_kept_and_members_edit_them(
     assert _ok(edits).split() == ["a", "d", "b", "c", "e"]
 
 
-# a command that fails for the arguments matching a case pattern, in place of the
-# image's own; the probe's scripts find commands only in the system directories
-def _failing(command: str, pattern: str) -> str:
+# a command that runs `action` (by default, fails) for the arguments matching a case
+# pattern, in place of the image's own, which it runs otherwise as `$real`; the probe's
+# scripts find commands only in the system directories
+def _failing(command: str, pattern: str, action: str = "exit 1") -> str:
+    real = f"/usr/bin/{command}.real"
     return (
-        f"mv /usr/bin/{command} /usr/bin/{command}.real"
-        f' && printf \'#!/bin/sh\\ncase "$*" in {pattern}) exit 1 ;; esac\\nexec /usr/bin/{command}.real "$@"\\n\' > /usr/bin/{command}'
-        f" && chmod 755 /usr/bin/{command}"
+        f"set -e; mv /usr/bin/{command} {real}; cat > /usr/bin/{command} <<'EOF'\n"
+        f"#!/bin/sh\nreal={real}\n"
+        f'case "$*" in {pattern}) {action} ;; esac\n'
+        'exec "$real" "$@"\n'
+        f"EOF\nchmod 755 /usr/bin/{command}"
     )
+
+
+# what find reports for an entry removed while it runs, in English in the C locale
+# and in German otherwise, as a translated findutils would
+_REMOVED = (
+    '"$real" "$@" || exit; if [ "$LC_ALL" = C ]; then'
+    " echo \"find: '/tmp/gone': No such file or directory\" >&2; else"
+    " echo \"find: '/tmp/gone': Datei oder Verzeichnis nicht gefunden\" >&2; fi; exit 1"
+)
 
 
 @pytest.mark.slow
@@ -608,6 +621,43 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             runs=[Run({"shared": []}, idle, before=_failing("sort", "*window*"))],
             error=f"{refused}users isolation could not list the ids it found",
         ),
+        # an id scan that leaves out ids, silently or when killed, and a share scan
+        # that fails with a diagnostic other than a removed entry
+        "id-scan-fails-silently": Case(
+            runs=[
+                Run(
+                    {"shared": []},
+                    idle,
+                    before=_failing("find", "*-uid*", '"$real" "$@"; exit 1'),
+                )
+            ],
+            error=f"{refused}users isolation could not scan all of / for the user ids its files take, so it cannot choose ids that own nothing: find exited with status 1",
+        ),
+        "id-scan-killed": Case(
+            runs=[
+                Run(
+                    {"shared": []},
+                    idle,
+                    before=_failing("find", "*-uid*", "kill -9 $$"),
+                )
+            ],
+            error=f"{refused}users isolation could not scan all of / for the user ids its files take, so it cannot choose ids that own nothing: find exited with status 137",
+        ),
+        "share-scan-fails": Case(
+            runs=[
+                Run(
+                    {"shared": [{"path": "/shared", "access": "rw"}]},
+                    idle,
+                    before=_failing(
+                        "find",
+                        "*-links*",
+                        "echo 'find: /shared/x: Input/output error' >&2; exit 1",
+                    ),
+                )
+            ],
+            setup="mkdir /shared",
+            error=f"{refused}users isolation could not scan the files in /shared: find: /shared/x: Input/output error",
+        ),
         "hard-link-in-ro-share": Case(
             runs=[Run({"shared": [{"path": "/data", "access": "ro"}]}, idle)],
             setup="mkdir /outside /data && touch /outside/file && chmod 666 /outside/file && ln /outside/file /data/file",
@@ -649,7 +699,15 @@ def test_files_removed_while_setup_scans_do_not_refuse_it(tmp_path: Path) -> Non
     )
     runs = [Run({"shared": []}, {f"c{i}": []}) for i in range(8)]
     runs[0].before = churn
-    _eval(tmp_path, {"churn": Case(runs=runs)})
+    # a removed entry reported in the image's own language, which setup reads in C
+    localized = Run(
+        {"shared": []}, {"w-1": []}, before=_failing("find", "*-uid*", _REMOVED)
+    )
+    _eval(
+        tmp_path,
+        {"churn": Case(runs=runs), "localized": Case(runs=[localized])},
+        compose_extra="    environment:\n      LANG: de_DE.UTF-8\n      LC_ALL: de_DE.UTF-8\n",
+    )
 
 
 @pytest.mark.slow

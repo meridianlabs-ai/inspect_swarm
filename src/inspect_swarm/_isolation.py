@@ -281,7 +281,10 @@ _LAST_ID = 61999
 # their last line.
 _REFUSED = 3
 
+# The scripts read their tools' output and diagnostics, so they run them in the C
+# locale, whatever the image or sandbox sets.
 _PRELUDE = r"""
+export LC_ALL=C
 fail() { printf '%s\n' "$*" >&2; exit 3; }
 """
 
@@ -316,8 +319,14 @@ trap 'rm -rf "$dir"' EXIT
 scan() {
   what=$1
   shift
-  find "$@" >"$dir/found" 2>"$dir/errors" && return 0
-  grep -v ': No such file or directory$' "$dir/errors" >"$dir/other"
+  find "$@" >"$dir/found" 2>"$dir/errors"
+  status=$?
+  [ "$status" -eq 0 ] && return 0
+  # find exits 1 after errors it reports; a silent failure, another status or a signal
+  # could leave out anything
+  [ "$status" -eq 1 ] && [ -s "$dir/errors" ] \
+    || fail "$what: find exited with status $status$(head -n 1 "$dir/errors" | sed 's/^/: /')"
+  grep -v '^find: .*: No such file or directory$' "$dir/errors" >"$dir/other"
   [ $? -le 1 ] || fail "$what"
   [ ! -s "$dir/other" ] || fail "$what: $(head -n 1 "$dir/other")"
 }
