@@ -1090,11 +1090,13 @@ class SwarmRun:
             self._queue.append(MemberEnded(m.name, status, m.submitted))
         self._notify()
 
-    # An output from a member, checked when the runtime first has it, before anything
-    # classifies, copies, settles or records it (the member gate calls it before a
-    # returned output's or an answer's status is read, and `_end()` for any other): only Inspect's output classes and model data, so
-    # that no method of a class from task code ever runs. One that holds anything else
-    # fails the sample with a `TypeError`, and the member's outputs are not read again.
+    # An output from a member, checked before the runtime classifies, settles or
+    # records it (the member gate calls it before a returned output's or an answer's
+    # status is read, and `_end()` for any other): only Inspect's output classes and
+    # model data. One that holds anything else fails the sample with a `TypeError`, and
+    # the member's outputs are not read again. Task code is trusted, so this promises
+    # the error and the partial record, not that none of the object's own methods ran
+    # before it (decision: Ransom, 2026-11-04).
     def _approve(self, m: MemberRun, output: ModelOutput) -> None:
         try:
             _refuse_author_objects(output, m.name)

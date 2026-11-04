@@ -108,7 +108,7 @@ class MemberGate:
     # set by the runtime: the swarm's stop reason once it is stopping, the bus's
     # all-waiting check, the model calls in flight now (the ledger's event ids), what
     # an end request starts (the grace timer that bounds the member's ending), and what
-    # checks an output before anything reads it (raising `TypeError` for one that holds
+    # checks an output before its status is read (raising `TypeError` for one that holds
     # an object from task code)
     stopping: Callable[[], str | None] = lambda: None
     recheck: Callable[[], None] = lambda: None
