@@ -416,7 +416,7 @@ class MemberRun:
     @property
     def end_origin(self) -> str | None:
         origin = self.gate.end_origin
-        if origin is None or self.state != "ended":
+        if origin is None or not self.gate.honoured or self.state != "ended":
             return None
         if self.status in ("stopped", "cancelled"):
             return origin
@@ -499,6 +499,7 @@ class SwarmRun:
             self.stop,
             self.bus.waits.in_wait,
             self._settle,
+            lambda: self._runtime_tg is not None,
         )
         for m in self._members:
             m.gate.loop_bound = self.operator.members[m.name].loop_bound
@@ -707,12 +708,21 @@ class SwarmRun:
                         async with anyio.create_task_group() as members_tg:
                             self._members_tg = members_tg
                             self._member_ctx = contextvars.copy_context()
-                            async with anyio.create_task_group() as runtime_tg:
-                                self._runtime_tg = runtime_tg
-                                runtime_tg.start_soon(self._supervise, runtime_tg)
-                                if self._time is not None:
-                                    runtime_tg.start_soon(self._time_cap, self._time)
-                                runtime_tg.start_soon(self._run_controller, controller)
+                            try:
+                                async with anyio.create_task_group() as runtime_tg:
+                                    self._runtime_tg = runtime_tg
+                                    runtime_tg.start_soon(self._supervise, runtime_tg)
+                                    if self._time is not None:
+                                        runtime_tg.start_soon(
+                                            self._time_cap, self._time
+                                        )
+                                    runtime_tg.start_soon(
+                                        self._run_controller, controller
+                                    )
+                            finally:
+                                # the runtime has ended: members still unwinding are
+                                # being cancelled, and nothing more can be scheduled
+                                self._runtime_tg = None
                 except (Exception, BaseExceptionGroup) as ex:
                     # a foreign error from a member or the controller, or on trio a
                     # cancellation grouped with errors, which the wrappers do not
@@ -1078,8 +1088,13 @@ class SwarmRun:
     # (a wrapper's `finally`, react's MCP teardown) may run long, so either way it gets
     # the effective grace. A pending member's starts when it is started.
     def _ending(self, m: MemberRun) -> None:
-        # a draining member's drain has a grace of its own
-        if m.state in ("running", "ending") and not m.gate.draining:
+        # a draining member's drain has a grace of its own, and once the runtime has
+        # ended the members still unwinding are being cancelled
+        if (
+            m.state in ("running", "ending")
+            and not m.gate.draining
+            and self._runtime_tg is not None
+        ):
             self._end_timer(m)
 
     # end()'s grace: the member is cancelled, as the hard stop cancels one, if it is
@@ -1095,6 +1110,9 @@ class SwarmRun:
             while m.started_not_ended:
                 await self._changed.wait()
         if m.started_not_ended:
+            if not m.context.scope.cancel_called:
+                # the request's grace, not another cancellation, ends the member
+                m.gate.honoured = True
             m.context.scope.cancel()
 
     # the model calls in flight now, for the turn gate's cancelled chains

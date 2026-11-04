@@ -67,7 +67,7 @@ from ._budget import (
     SwarmTurnNode,
     current_member,
 )
-from ._seam import MemberGate
+from ._seam import MemberGate, ended_reason
 
 AgentFactory = Callable[..., Agent]
 """A registered `@agent` factory, such as `deepagent`."""
@@ -536,6 +536,15 @@ async def run_member(
             status = "errored"
             raise
         finally:
+            if (
+                gate.end_origin is not None
+                and status in ("stopped", "submitted")
+                and lever.reason == ended_reason(gate.end_origin)
+            ):
+                # the request closed the member's lever first and the member ended
+                # through it: at a boundary, on a refused call, on a normal return,
+                # held idle after an answer, or a bridged member's cancelled call
+                gate.honoured = True
             # the state the agent returned, kept through a drain that raised; else the
             # loop's state at its last boundary
             end(
@@ -564,6 +573,7 @@ async def _run_member(
 ) -> str:
     if gate.end_origin is not None:
         # ended while pending: no sandboxes, background owner, agent or model call
+        gate.honoured = True
         return "stopped"
     token = current_member.set(context)
     status: str | None = None
@@ -669,18 +679,20 @@ async def _run_member(
     finally:
         current_member.reset(token)
 
-    if status is not None:
-        if (
-            returned
-            and gate.end_origin is not None
-            and status in ("submitted", "unsubmitted")
-        ):
-            # an end requested while its background work drained, checked after the
-            # drain and the member's cleanup, with nothing awaited before its end
-            return "stopped"
-        return status
-    # the agent was cancelled: a node that stopped a bridged member, or the hard stop
-    return context.stop_cause or "cancelled"
+    if status is None:
+        # the agent was cancelled: a node that stopped a bridged member, or the hard
+        # stop
+        return context.stop_cause or "cancelled"
+    if (
+        returned
+        and gate.end_origin is not None
+        and status in ("submitted", "unsubmitted")
+    ):
+        # an end requested while its background work drained, checked after the drain
+        # and the member's cleanup, with nothing awaited before its end
+        gate.honoured = True
+        return "stopped"
+    return status
 
 
 # The member's background work, once its agent has returned: refused new model calls,

@@ -142,6 +142,11 @@ class MemberGate:
     # set by the member wrapper while the member's background work drains after its
     # agent returned, a phase the drain's own grace bounds
     draining: bool = False
+    # set where the end request decides how the member ends: its first boundary or a
+    # closed lever, a normal return or the drain after it, the request consumed before
+    # setup, or its grace timer's cancellation. A request that something else beat
+    # (a limit, the swarm's stop, a cancellation from outside) leaves it unset.
+    honoured: bool = False
     holds: int = 0
     held_time: float = 0.0
     # the model calls in flight when a stop or an end cancelled a chain, so the ledger

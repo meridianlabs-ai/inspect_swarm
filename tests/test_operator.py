@@ -3,10 +3,11 @@
 import contextvars
 import os
 import tempfile
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Any, ParamSpec, TypeVar
+from types import SimpleNamespace
+from typing import Any, ParamSpec, TypeVar, cast
 from uuid import uuid4
 
 import anyio
@@ -36,6 +37,9 @@ from inspect_swarm import (
     Boundary,
     BoundaryCallback,
     Budget,
+    ControlEvent,
+    MemberEnded,
+    MemberHandle,
     MemberIdle,
     SwarmControl,
     leaderless,
@@ -224,8 +228,10 @@ async def _run(
     drive: Callable[[OperatorGroup], Awaitable[None]],
     *,
     group: str = "swarm",
+    errors: bool = False,
     **task: Any,
 ) -> _Ran:
+    # `errors`: the sample may end with an error, for the test to check
     result: list[EvalSample] = []
 
     async def evaluate() -> None:
@@ -243,7 +249,8 @@ async def _run(
             tg.start_soon(evaluate)
             await drive(await _group(group))
     [sample] = result
-    assert sample.error is None, sample.error.traceback
+    if not errors:
+        assert sample.error is None, sample.error.traceback
     return _Ran(sample)
 
 
@@ -840,6 +847,159 @@ async def test_a_stopped_member_whose_limit_ends_it_first_gives_no_answer(
     assert (ran.record.final.mode, ran.record.final.member) == ("first", "q")
     [p] = [m for m in ran.record.members if m.name == "p"]
     assert (p.end_origin, p.withdrawn, len(p.answer_times)) == (None, True, 1)
+
+
+@agent
+def holds_in_cleanup(
+    entered: anyio.Event, cleaning: anyio.Event, release: anyio.Event
+) -> Agent:
+    """Wait; when cancelled, run a shielded cleanup that waits for `release`."""
+
+    async def execute(state: AgentState) -> AgentState:
+        try:
+            entered.set()
+            await anyio.sleep_forever()
+        finally:
+            with anyio.CancelScope(shield=True):
+                cleaning.set()
+                await release.wait()
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_stop_while_the_ended_swarm_unwinds_its_members_changes_nothing() -> (
+    None
+):
+    entered, cleaning, release = anyio.Event(), anyio.Event(), anyio.Event()
+
+    async def run_controller(control: SwarmControl) -> str:
+        control.start("a")
+        await entered.wait()
+        raise ValueError("controller failed")
+
+    async def drive(group: OperatorGroup) -> None:
+        # the controller's error ended the runtime, which cancelled the member: it is
+        # still running its cleanup, and still listed
+        await cleaning.wait()
+        a = group.agents["a"]
+        try:
+            assert _act(a.info).state == "running"
+            for outcome in (
+                _act(a.stop, dry_run=False),
+                _act(group.stop, dry_run=False),
+            ):
+                assert (outcome.changed, outcome.refused) == (False, None)
+                assert "The swarm has ended" in outcome.detail
+        finally:
+            # a shielded cleanup that never ends would hold the test
+            release.set()
+
+    ran = await _run(
+        _swarm(
+            [member(holds_in_cleanup(entered, cleaning, release), name="a")],
+            run_controller,
+            grace=60,
+        ),
+        drive,
+        errors=True,
+    )
+
+    assert ran.sample.error is not None
+    assert "controller failed" in ran.sample.error.message
+    assert ran.status("a") == "cancelled"
+    assert ran.end_origins() == {"a": (None, None, None)}
+    assert ran.ledger.stop_reason is None
+
+
+@agent
+def fails_now() -> Agent:
+    """Raise an error at once."""
+
+    async def execute(state: AgentState) -> AgentState:
+        raise RuntimeError("sibling failed")
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_cancellation_that_beats_the_stop_is_not_its_doing() -> None:
+    entered, go = anyio.Event(), anyio.Event()
+
+    async def drive(group: OperatorGroup) -> None:
+        await entered.wait()
+        assert _act(group.agents["a"].stop, dry_run=False).changed
+        # a sibling's error cancels the member long before the stop's grace
+        go.set()
+
+    ran = await _run(
+        _swarm(
+            [
+                member(_after(anyio.Event(), sleeper(), entered=entered), name="a"),
+                member(_after(go, fails_now()), name="b"),
+            ],
+            grace=60,
+        ),
+        drive,
+        errors=True,
+    )
+
+    assert ran.sample.error is not None and "sibling failed" in ran.sample.error.message
+    assert ran.status("a") == "cancelled"
+    assert ran.end_origins()["a"] == (None, None, None)
+    [a] = [m for m in ran.record.members if m.name == "a"]
+    assert a.withdrawn
+
+
+class _Control:
+    """A `SwarmControl` with a fixed queue of events, for a controller's own logic."""
+
+    def __init__(self, states: dict[str, str], events: list[ControlEvent]) -> None:
+        self._handles = {
+            name: cast(MemberHandle, SimpleNamespace(name=name, state=state))
+            for name, state in states.items()
+        }
+        self._events = events
+        self.read = 0
+
+    @property
+    def members(self) -> Sequence[MemberHandle]:
+        return list(self._handles.values())
+
+    def member(self, name: str) -> MemberHandle:
+        return self._handles[name]
+
+    def start(self, member: Any, input: Any = None) -> None:
+        pass
+
+    def wake(self, member: Any, input: Any) -> None:
+        raise AssertionError("not woken")
+
+    async def events(self) -> AsyncGenerator[ControlEvent, None]:
+        for event in self._events:
+            self.read += 1
+            yield event
+
+    def choose_answer(self, member: Any, reason: str | None = None) -> None:
+        raise AssertionError("not chosen")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("state", "read"), [("idle", 1), ("ending", 2)])
+async def test_leaderless_skips_an_answer_the_operator_withdrew(
+    state: str, read: int
+) -> None:
+    # p's answer was queued as MemberIdle, then the operator stopped it (`ending`)
+    # before the controller read the event: the swarm goes on to q's submission
+    control = _Control(
+        {"p": state, "q": "running"},
+        [MemberIdle("p", 0, news=False), MemberEnded("q", "submitted", True)],
+    )
+
+    reason = await leaderless().run(cast(SwarmControl, control))
+
+    assert (reason, control.read) == ("submitted", read)
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,9 @@ _T = TypeVar("_T")
 # the origin of the operator's end requests
 OPERATOR = "operator"
 
+# a stop after the swarm's runtime has ended
+_ENDED = "The swarm has ended, and its members still running are being cancelled."
+
 # pause and resume come with the operator's turn-seam callback
 _NO_PAUSE = "Pausing is not supported yet."
 
@@ -66,11 +69,15 @@ class SwarmOperator:
         stop: Callable[[str], None],
         in_wait: Callable[[str], bool],
         settle: Callable[[], None],
+        active: Callable[[], bool],
     ) -> None:
         self._stop_reason = stop_reason
         self._stop = stop
         # recomputes the provisional answer, once a stop withdraws a member's answers
         self.settle = settle
+        # whether the swarm's runtime is running: false while a swarm that ended
+        # unwinds its members, which are being cancelled
+        self.active = active
         self.in_wait = in_wait
         # set by the run when it registers the group
         self.name = "swarm"
@@ -127,6 +134,11 @@ class SwarmOperator:
         if self.stop_reason is not None:
             return OperatorOutcome(
                 changed=False, detail=_dry(dry_run, "The swarm is already stopping.")
+            )
+        if not self.active():
+            return OperatorOutcome(
+                changed=False,
+                detail=_dry(dry_run, _ENDED),
             )
         if not dry_run:
             self._stop(OPERATOR)
@@ -350,6 +362,8 @@ class MemberOperator:
             return OperatorOutcome(
                 changed=False, detail=_dry(dry_run, "The member is already ending.")
             )
+        if not self._swarm.active():
+            return OperatorOutcome(changed=False, detail=_dry(dry_run, _ENDED))
         if not dry_run:
             m.end(origin=OPERATOR)
             self._swarm.settle()
