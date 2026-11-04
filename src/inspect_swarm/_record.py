@@ -1,6 +1,6 @@
 import json
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import is_dataclass, replace
+from dataclasses import is_dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import cache
 from typing import Any, Literal, cast, get_args, get_type_hints
@@ -216,21 +216,19 @@ def _logged_member(record: SwarmResultRecord, m: MemberResult) -> MemberResult:
     if m.output is not None:
         _refuse_author_objects(m.output, m.name)
     verdict = m.verdict
+    # the verdict's declared fields alone, built as a plain `Verdict`, so that a
+    # subclass's own constructor never runs on the copy
+    base = None if verdict is None else Verdict(verdict.passed, verdict.value)
     # the member with each value alone, so that each is kept or left out by itself
-    alone = m.model_copy(
-        update={
-            "output": None,
-            "answer_key": None,
-            "verdict": None if verdict is None else replace(verdict, explanation=None),
-        }
-    )
+    alone = m.model_copy(update={"output": None, "answer_key": None, "verdict": base})
     values: list[tuple[LeftOut, dict[str, Any]]] = []
     if m.output is not None:
         values.append(("output", {"output": m.output}))
     if m.answer_key is not None:
         values.append(("answer_key", {"answer_key": m.answer_key}))
     if verdict is not None and verdict.explanation is not None:
-        values.append(("explanation", {"verdict": verdict}))
+        explained = Verdict(verdict.passed, verdict.value, verdict.explanation)
+        values.append(("explanation", {"verdict": explained}))
     logged = alone
     left_out = list(m.left_out)
     for name, value in values:

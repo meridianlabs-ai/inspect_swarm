@@ -1641,3 +1641,68 @@ async def test_a_verdict_of_nan_is_recorded_whole() -> None:
         "graded",
         [],
     )
+
+
+class _Passed(Verdict):
+    """A verdict whose constructor takes no `passed`: it always passes."""
+
+    def __init__(self, explanation: str | None = None) -> None:
+        super().__init__(passed=True, explanation=explanation)
+
+
+class _Explained(Verdict):
+    """A verdict whose constructor makes it pass only when it has an explanation."""
+
+    def __init__(
+        self,
+        passed: bool = False,
+        value: float | None = None,
+        explanation: str | None = None,
+    ) -> None:
+        super().__init__(explanation is not None, value, explanation)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "verdict,recorded,left_out",
+    [
+        pytest.param(
+            Verdict(True, 1.0, "fine"), Verdict(True, 1.0, "fine"), [], id="plain"
+        ),
+        # text that reads as an attachment reference: the explanation alone is left out
+        pytest.param(
+            Verdict(True, 1.0, "attachment://0123"),
+            Verdict(True, 1.0),
+            ["explanation"],
+            id="plain-explanation-left-out",
+        ),
+        # a subclass's own constructor never runs on the record's copy
+        pytest.param(_Passed(), Verdict(True), [], id="constructor-without-fields"),
+        pytest.param(
+            _Passed("fine"), Verdict(True, None, "fine"), [], id="constructor-explained"
+        ),
+        pytest.param(
+            _Explained(value=1.0, explanation="attachment://0123"),
+            Verdict(True, 1.0),
+            ["explanation"],
+            id="constructor-recomputes-passed",
+        ),
+    ],
+)
+async def test_a_verdict_is_recorded_by_its_fields(
+    verdict: Verdict, recorded: Verdict, left_out: list[str]
+) -> None:
+    stop = await run_swarm(
+        swarm(
+            answers("42"),
+            channels=[],
+            result=answer_result(verifier=lambda answer, metadata: _returning(verdict)),
+        )
+    )
+    [m] = stop.record.members
+    assert (m.verdict, m.left_out) == (recorded, left_out)
+    [event] = swarm_events(stop.transcript, "verdict")
+    assert (event.data["passed"], event.data["value"]) == (
+        recorded.passed,
+        recorded.value,
+    )
