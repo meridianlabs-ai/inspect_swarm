@@ -76,7 +76,7 @@ def users(
 
     - The sandbox must let commands run as root and as other users: Docker, or Kubernetes with a root container. The `local` sandbox is refused.
     - The image needs `useradd` and `groupadd` (package `passwd`) and GNU `find`; with any share, also `setfacl` and `getfacl` (package `acl`), which the default Inspect image and `python:3.12-bookworm` lack.
-    - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, hard-linked files in a share, and mounts inside a share or under the homes' parent are refused.
+    - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, hard-linked files, devices and set-user-id or set-group-id files in a share, and mounts inside a share or under the homes' parent are refused.
     - One swarm with users isolation per sandbox in a sample. Another is refused, whether it runs after the first, beside it, in a subtask or in a fork.
     - Members are not root: they cannot install system packages or write system directories. Tasks that need root while the members work are unsuitable.
     - Custom tools that call `sandbox().exec()` directly run as the sandbox's default user, usually root, unless they pass the member's user themselves. `computer()`, `web_browser()` and `skill()` raise inside the scope, and so do tools built with another `user`.
@@ -293,9 +293,9 @@ fail() { printf '%s\n' "$*" >&2; exit 3; }
 # exist, and which ids in the window are taken, by a passwd or group entry or by the
 # owner or group of a file on any filesystem the homes, shares or world-writable
 # directories are on. Setup does not reconcile permission state it did not make, so it
-# refuses any ACL in a share or on the homes' parent, a hard-linked file in a share,
-# and a mount inside a share or under the homes' parent, whose files it would not
-# reach.
+# refuses any ACL in a share or on the homes' parent, a hard-linked file, a device or a
+# set-id file in a share, and a mount inside a share or under the homes' parent, whose
+# files it would not reach.
 # $1 group, $2 first id, $3 last id, $4 1 when there are shares, $5 the homes' parent,
 # then the roots, `--`, and each share's access and path.
 _PROBE = (
@@ -351,8 +351,8 @@ mount_inside() {
 }
 
 # the first ACL entry in getfacl's output (-n -p -E --skip-base) beyond the owner,
-# group and other classes: a named entry in an access or default ACL, or else a file's
-# first default entry
+# group and other classes: a named entry or the mask in an access ACL, a named entry in
+# a default ACL, or else a file's first default entry
 foreign_acl() {
   awk '
     function finish() {
@@ -362,7 +362,9 @@ foreign_acl() {
     /^#/ || NF == 0 { next }
     {
       split($0, f, ":")
-      if (f[1] == "default") { q = f[3]; if (first == "") first = file ": " $0 } else q = f[2]
+      if (f[1] == "default") { q = f[3]; if (first == "") first = file ": " $0 }
+      else if (f[1] == "mask") q = "mask"
+      else q = f[2]
       if (q != "") { print file ": " $0; done = 1; exit }
     }
     END { if (!done) finish() }
@@ -421,6 +423,13 @@ while [ $# -gt 0 ]; do
     -P "$share" -xdev -ignore_readdir_race ! -type d -links +1 -printf '%p has %n links' -quit
   linked=$(cat -- "$dir/found") || fail "users isolation could not scan the files in $share"
   [ -z "$linked" ] || fail "users isolation does not support a hard-linked file in a shared directory: $linked; setup's changes to its mode, group and ACLs would reach its other names"
+  # setup opens entries to members: a device would become their access to the device,
+  # and a set-id file a program they could run with its owner's or group's rights
+  scan "users isolation could not scan the files in $share" \
+    -P "$share" -xdev -ignore_readdir_race \( -type b -o -type c \) -printf '%p is a device' -quit \
+    -o -type f -perm /6000 -printf '%p is set-user-id or set-group-id (mode %m)' -quit
+  special=$(cat -- "$dir/found") || fail "users isolation could not scan the files in $share"
+  [ -z "$special" ] || fail "users isolation does not support a device or a set-user-id or set-group-id file in a shared directory: $special; setup would give members access to it"
   if [ "$access" = rw ]; then
     # the default ACL setup writes takes its owner entry from the directory's owner
     # bits, and an owner entry beats the group's grant, so a member could not edit
@@ -697,12 +706,10 @@ async def setup_isolation(
     # once per sandbox: a later setup would rewrite shares that the members of the first
     # can change while it runs. The claim comes before any await, so of two concurrent
     # setups the second is refused.
-    provider = _provider(env)
-    if provider in _SET_UP:
+    if not _claim(env):
         raise RuntimeError(
             f"users isolation sets up a sandbox once per sample, and another swarm with users isolation in this sample has set up sandbox {env_name!r}, or tried to. Run the other swarms without isolation, or give them another sandbox."
         )
-    _SET_UP.add(provider)
     access = await resolve_root_access(env)
     if access.state != "usable":
         raise RuntimeError(
@@ -970,10 +977,29 @@ def _is_local(env: SandboxEnvironment) -> bool:
     return True
 
 
-# The sandboxes users isolation has set up, or started to. Kept with the sandbox's
-# object in the host process rather than in the store, which a subtask or fork has its
-# own copy of: every swarm run in the sample that uses the sandbox sees it.
-_SET_UP: "weakref.WeakSet[SandboxEnvironment]" = weakref.WeakSet()
+# The sandboxes users isolation has set up, or started to, by the identity of the
+# provider's object, which need not be hashable and may compare equal to another
+# sandbox's. Kept with the sandbox's object in the host process rather than in the
+# store, which a subtask or fork has its own copy of: every swarm run in the sample
+# that uses the sandbox sees it. An entry goes when its object does, before its id can
+# be reused.
+_SET_UP: "dict[int, weakref.ReferenceType[SandboxEnvironment]]" = {}
+
+
+# claims the sandbox, or returns False if it was claimed already
+def _claim(env: SandboxEnvironment) -> bool:
+    provider = _provider(env)
+    key = id(provider)
+    claimed = _SET_UP.get(key)
+    if claimed is not None and claimed() is provider:
+        return False
+
+    def release(ref: "weakref.ReferenceType[SandboxEnvironment]") -> None:
+        if _SET_UP.get(key) is ref:
+            del _SET_UP[key]
+
+    _SET_UP[key] = weakref.ref(provider, release)
+    return True
 
 
 # the provider's object, behind the sample's event-recording proxy

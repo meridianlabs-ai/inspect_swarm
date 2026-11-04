@@ -200,7 +200,8 @@ _RW_RO = {
     "shared": [{"path": "/shared", "access": "rw"}, {"path": "/data", "access": "ro"}]
 }
 
-_DATA = "mkdir -p /data && echo data > /data/existing"
+# with a setgid directory and an executable, which setup leaves as they are
+_DATA = "mkdir -p /data && echo data > /data/existing && mkdir -m 2755 /data/team && install -m 755 /dev/null /data/tool"
 
 
 @pytest.mark.slow
@@ -628,6 +629,26 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
             setup="mkdir -p /shared/nested && chmod 555 /shared/nested",
             error=f"{refused}users isolation does not support a directory without owner rwx in a read-write shared directory: /shared/nested is mode 555",
+        ),
+        "mask-only-acl": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir /shared && touch /shared/f && setfacl -m m::r-- /shared/f",
+            error=f"{refused}users isolation does not support ACLs in a shared directory: /shared/f: mask::r--",
+        ),
+        "device-in-rw-share": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir /shared && mknod -m 600 /shared/null c 1 3",
+            error=f"{refused}users isolation does not support a device or a set-user-id or set-group-id file in a shared directory: /shared/null is a device",
+        ),
+        "setuid-in-ro-share": Case(
+            runs=[Run({"shared": [{"path": "/data", "access": "ro"}]}, idle)],
+            setup="mkdir /data && install -m 4750 /dev/null /data/helper",
+            error=f"{refused}users isolation does not support a device or a set-user-id or set-group-id file in a shared directory: /data/helper is set-user-id or set-group-id (mode 4750)",
+        ),
+        "setgid-in-rw-share": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir /shared && install -m 2755 /dev/null /shared/helper",
+            error=f"{refused}users isolation does not support a device or a set-user-id or set-group-id file in a shared directory: /shared/helper is set-user-id or set-group-id (mode 2755)",
         ),
         "hard-link-in-rw-share": Case(
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],

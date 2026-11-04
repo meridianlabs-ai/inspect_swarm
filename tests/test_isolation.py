@@ -144,6 +144,22 @@ class IsolationStub(SandboxEnvironment):
         pass
 
 
+class UnhashableStub(IsolationStub):
+    """A provider whose objects cannot be hashed, as with a dataclass that defines equality."""
+
+    __hash__ = None  # pyright: ignore[reportAssignmentType]
+
+
+class EqualStub(IsolationStub):
+    """A provider whose distinct objects compare equal, as with a dataclass of equal fields."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, EqualStub)
+
+    def __hash__(self) -> int:
+        return 0
+
+
 @contextmanager
 def environments(
     **stubs: IsolationStub,
@@ -706,12 +722,13 @@ _ONCE = "users isolation sets up a sandbox once per sample, and another swarm wi
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("how", ["after", "subtask", "fork"])
+@pytest.mark.parametrize("provider", [IsolationStub, UnhashableStub])
 async def test_a_second_swarm_with_users_isolation_in_a_sandbox_is_refused(
-    how: str,
+    how: str, provider: type[IsolationStub]
 ) -> None:
     # each subtask and each fork has a store of its own; the sandbox is the sample's
     seen: dict[str, dict[str, str | None]] = {}
-    stub = IsolationStub()
+    stub = provider()
 
     @subtask
     async def child() -> str:
@@ -776,9 +793,12 @@ async def test_one_of_two_swarms_starting_together_in_a_sandbox_is_refused() -> 
 
 
 @pytest.mark.anyio
-async def test_swarms_in_two_sandboxes_each_set_up_their_own() -> None:
+@pytest.mark.parametrize("provider", [IsolationStub, UnhashableStub, EqualStub])
+async def test_swarms_in_two_sandboxes_each_set_up_their_own(
+    provider: type[IsolationStub],
+) -> None:
     seen: dict[str, dict[str, str | None]] = {}
-    stubs = {"default": IsolationStub(), "other": IsolationStub()}
+    stubs = {"default": provider(), "other": provider()}
     with environments(**stubs):
         async with sample():
             async with anyio.create_task_group() as tg:
