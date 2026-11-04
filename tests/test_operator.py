@@ -30,7 +30,7 @@ from inspect_ai.model import (
 )
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import TaskState
-from inspect_ai.tool import Tool, ToolChoice, ToolInfo, tool
+from inspect_ai.tool import MCPServer, Tool, ToolChoice, ToolInfo, tool
 from inspect_ai.util import background, message_limit, time_limit
 
 from inspect_swarm import (
@@ -950,6 +950,101 @@ async def test_a_cancellation_that_beats_the_stop_is_not_its_doing() -> None:
     assert ran.end_origins()["a"] == (None, None, None)
     [a] = [m for m in ran.record.members if m.name == "a"]
     assert a.withdrawn
+
+
+@agent
+def returns_when(entered: anyio.Event, release: anyio.Event) -> Agent:
+    """Return an answer once `release` is set, with no turn boundary before it."""
+
+    async def execute(state: AgentState) -> AgentState:
+        entered.set()
+        await release.wait()
+        state.output = ModelOutput.from_content("mockllm", "answer")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stop", [True, False])
+async def test_a_stop_after_the_swarms_stop_decides_a_normal_return(
+    stop: bool,
+) -> None:
+    entered, release = anyio.Event(), anyio.Event()
+
+    async def drive(group: OperatorGroup) -> None:
+        await entered.wait()
+        # the swarm's stop closes the member's lever first, with its grace ahead
+        assert _act(group.stop, dry_run=False).changed
+        if stop:
+            assert _act(group.agents["a"].stop, dry_run=False).changed
+        release.set()
+
+    ran = await _run(
+        _swarm([member(returns_when(entered, release), name="a")], grace=60),
+        drive,
+    )
+
+    if stop:
+        assert ran.status("a") == "stopped"
+        assert ran.record.final.member is None
+        assert ran.end_origins() == {"a": ("operator", "operator", "operator")}
+    else:
+        assert ran.status("a") == "submitted"
+        assert ran.record.final.member == "a"
+        assert ran.end_origins() == {"a": (None, None, None)}
+
+
+class _Cleanup(MCPServer):
+    """A tool source whose teardown, when the loop exits, waits for `release`."""
+
+    def __init__(self, cleaning: anyio.Event, release: anyio.Event) -> None:
+        self._cleaning, self._release = cleaning, release
+
+    async def tools(self) -> list[Tool]:
+        return []
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._cleaning.set()
+        with anyio.CancelScope(shield=True):
+            await self._release.wait()
+
+
+@pytest.mark.anyio
+async def test_a_stop_while_an_idle_member_cleans_up_after_the_swarms_stop() -> None:
+    cleaning, release = anyio.Event(), anyio.Event()
+
+    async def drive(group: OperatorGroup) -> None:
+        try:
+            # once p is idle the swarm stops at quiescence, which ends p's loop, and the
+            # loop tears down its tools
+            await cleaning.wait()
+            assert _act(group.info).state == "stopping"
+            assert _act(group.agents["p"].stop, dry_run=False).changed
+        finally:
+            # a shielded teardown that never ends would hold the test
+            release.set()
+
+    ran = await _run(
+        _swarm(
+            [
+                member(
+                    react(
+                        model=scripted_model(Script([_submit("first")])),
+                        tools=[_Cleanup(cleaning, release)],
+                    ),
+                    name="p",
+                    persistent=True,
+                )
+            ],
+            grace=60,
+        ),
+        drive,
+    )
+
+    assert ran.status("p") == "stopped"
+    assert ran.record.final.member is None
+    assert ran.end_origins() == {"p": ("operator", "operator", "operator")}
 
 
 class _Control:

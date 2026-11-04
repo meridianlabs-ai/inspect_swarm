@@ -726,7 +726,9 @@ def _returned(
         # the agent stopped itself with an error, which an end request does not change
         return "member_limit:custom"
     if gate.end_origin is not None:
-        # an end requested before the agent returned wins over its output
+        # an end requested before the agent returned wins over its output, even when
+        # another stop closed the lever first
+        gate.honoured = True
         return "stopped"
     if gate.persistent:
         # every answer was held where the loop gave it, so a loop that returns has

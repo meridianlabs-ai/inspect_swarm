@@ -965,7 +965,8 @@ class SwarmRun:
                 and m.gate.end_origin == OPERATOR
             ):
                 # a persistent member the operator stopped after an answer: stopped, and
-                # its answers withdrawn
+                # its answers withdrawn, even when another stop closed the lever first
+                m.gate.honoured = True
                 status = "stopped"
             if m.answer_list and status == "submitted":
                 # a persistent member ended after an answer: its last answer
