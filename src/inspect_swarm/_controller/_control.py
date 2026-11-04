@@ -53,7 +53,7 @@ from .._metrics import (
     gate_checks,
     swarm_metrics,
 )
-from .._operator import SwarmOperator
+from .._operator import OPERATOR, SwarmOperator
 from .._record import (
     MemberResult,
     MemberState,
@@ -278,7 +278,7 @@ class SwarmControl(Protocol):
     ) -> None:
         """Make this member's submission the swarm's answer, in place of the controller's `final` rule.
 
-        The choice is the provisional answer from now on and the final answer when the swarm ends. The result record and the `final` event give the mode `controller`, the member and `reason`. Choose once, from a member that has ended with a submission, or a persistent member that has answered: its latest answer at the time of the call, kept if it answers again.
+        The choice is the provisional answer from now on and the final answer when the swarm ends, unless the operator stops the member (`inspect ctl sample agent stop`), which withdraws its answers. The result record and the `final` event give the mode `controller`, the member and `reason`. Choose once, from a member that has ended with a submission, or a persistent member that has answered: its latest answer at the time of the call, kept if it answers again.
 
         Args:
             member: The member, or its name.
@@ -286,7 +286,7 @@ class SwarmControl(Protocol):
 
         Raises:
             KeyError: If no member has this name.
-            RuntimeError: If the member has not ended with a submission (a persistent member: has not answered yet), or the controller has already chosen.
+            RuntimeError: If the member has not ended with a submission (a persistent member: has not answered yet), the operator stopped it, or the controller has already chosen.
         """
         ...
 
@@ -611,6 +611,10 @@ class SwarmRun:
         self, member: str | MemberHandle, reason: str | None = None
     ) -> None:
         m = self._lookup(member if isinstance(member, str) else member.name)
+        if m.gate.end_origin == OPERATOR:
+            raise RuntimeError(
+                f"choose_answer({m.name!r}): the operator stopped the member, so none of its answers can be the swarm's answer."
+            )
         if self._pick is not None:
             raise RuntimeError(
                 f"choose_answer({m.name!r}): the controller has already chosen {self._pick.member!r}, and it chooses once."
@@ -635,7 +639,18 @@ class SwarmRun:
         from .._bus._bus import current_bus
 
         _refuse_checkpointing()
-        timelines = MemberTimelines([m.name for m in self._members])
+        # the operator group, refused before the swarm claims anything when another
+        # swarm running in the sample has its name; nothing awaits between here and the
+        # saving of its context below, so no action runs before it
+        outer = current_member.get()
+        self.operator.name = "swarm" if outer is None else f"swarm:{outer.name}"
+        registration = ExitStack()
+        registration.enter_context(operator_group(self.operator.name, self.operator))
+        try:
+            timelines = MemberTimelines([m.name for m in self._members])
+        except BaseException:
+            registration.close()
+            raise
         interval = self._interval = LedgerInterval(
             roster=[m.name for m in self._members]
         )
@@ -653,13 +668,6 @@ class SwarmRun:
         bus_token: "contextvars.Token[Bus | None] | None" = None
         budget_token: contextvars.Token[BudgetState | None] | None = None
         running: int | None = None
-        # the operator group, refused like the timelines before the swarm starts when
-        # another swarm running in the sample has its name; nothing awaits between here
-        # and the saving of its context below, so no action runs before it
-        outer = current_member.get()
-        self.operator.name = "swarm" if outer is None else f"swarm:{outer.name}"
-        registration = ExitStack()
-        registration.enter_context(operator_group(self.operator.name, self.operator))
         try:
             # in the swarm's span, before any member can start
             write_start()
@@ -938,6 +946,14 @@ class SwarmRun:
 
     async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
         def end(status: str, state: AgentState) -> None:
+            if (
+                status == "submitted"
+                and m.gate.answered
+                and m.gate.end_origin == OPERATOR
+            ):
+                # a persistent member the operator stopped after an answer: stopped, and
+                # its answers withdrawn
+                status = "stopped"
             if m.answer_list and status == "submitted":
                 # a persistent member ended after an answer: its last answer
                 state.output = m.answer_list[-1].output

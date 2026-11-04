@@ -6,6 +6,7 @@ from inspect_ai.agent import AgentState
 from inspect_ai.model import ChatMessage, ModelOutput
 
 from ._evidence import swarm_event
+from ._operator import OPERATOR
 from ._record import FinalRecord, MemberResult
 
 FinalName = Literal["first", "last"]
@@ -37,13 +38,21 @@ def check_final(final: object) -> None:
         raise ValueError(f"final= must be one of {names} or None, got {final!r}.")
 
 
+# A member the operator stopped: none of its answers can be the swarm's, as a stopped
+# member's output never is.
+def withdrawn(member: MemberResult) -> bool:
+    return member.end_origin == OPERATOR
+
+
 # Every candidate, in roster order and, within a persistent member, answer order: each
-# answer of a persistent member, whatever its status, and the submission of any other
-# member that ended with one.
+# answer of a persistent member, whatever its status, unless the operator stopped it,
+# and the submission of any other member that ended with one.
 def candidates(members: Sequence[MemberResult]) -> list[Candidate]:
     found: list[Candidate] = []
     for m in members:
         if m.persistent:
+            if withdrawn(m):
+                continue
             found.extend(
                 Candidate(m.name, i, time) for i, time in enumerate(m.answer_times)
             )
@@ -68,7 +77,8 @@ def last(members: Sequence[MemberResult]) -> Candidate | None:
 
 
 # The answer from the members' results so far: the controller's pick when it made one,
-# else `final`'s rule over the candidates. `final=None` is the default, `first`.
+# unless the operator has since stopped that member, else `final`'s rule over the
+# candidates. `final=None` is the default, `first`.
 def answer(
     members: Sequence[MemberResult],
     final: FinalName | None,
@@ -76,7 +86,9 @@ def answer(
     *,
     provisional: bool,
 ) -> FinalRecord:
-    if pick is not None:
+    if pick is not None and not any(
+        withdrawn(m) for m in members if m.name == pick.member
+    ):
         return FinalRecord(
             mode="controller",
             member=pick.member,

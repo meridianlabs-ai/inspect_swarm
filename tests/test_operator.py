@@ -18,7 +18,7 @@ from inspect_ai._control.operator import OperatorGroup
 from inspect_ai.agent import Agent, AgentState, agent, react, run
 from inspect_ai.dataset import Sample
 from inspect_ai.event import Event, ModelEvent, SwarmEvent
-from inspect_ai.log import EvalSample
+from inspect_ai.log import EvalSample, transcript
 from inspect_ai.log._samples import ActiveSample, active_samples, sample_active
 from inspect_ai.model import (
     ChatMessage,
@@ -30,12 +30,13 @@ from inspect_ai.model import (
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import TaskState
 from inspect_ai.tool import Tool, ToolChoice, ToolInfo, tool
-from inspect_ai.util import background
+from inspect_ai.util import background, message_limit
 
 from inspect_swarm import (
     Boundary,
     BoundaryCallback,
     Budget,
+    MemberIdle,
     SwarmControl,
     leaderless,
     member,
@@ -528,6 +529,85 @@ async def test_messages_a_member_never_drained_are_recorded_when_it_ends() -> No
     ]
 
 
+# Drained is not delivered: what the member's conversation does after the drain is the
+# loop's and the seam's, and the evidence says only that the loop took the message.
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("interrupt", "sends"), [(False, 1), (True, 1), (True, 2)])
+async def test_a_message_drained_into_a_conversation_at_its_limit(
+    interrupt: bool, sends: int
+) -> None:
+    started, release = anyio.Event(), anyio.Event()
+    script = _Recording([_call("slow", seconds=30), _submit()])
+    texts = [f"Redirect {i}." for i in range(sends)]
+
+    async def drive(group: OperatorGroup) -> None:
+        await started.wait()
+        a = group.agents["a"]
+        for text in texts:
+            _act(a.message, text, interrupt=interrupt, dry_run=False)
+        release.set()
+
+    # react's system prompt, the input and the preamble, then the model's tool call and
+    # its result (or the repair): the drained message is one more than the limit allows
+    ran = await _run(
+        _swarm(
+            [
+                member(
+                    _react(script, _slow(started, release)),
+                    name="a",
+                    limits=[message_limit(5)],
+                )
+            ]
+        ),
+        drive,
+    )
+
+    assert ran.status("a") == "member_limit:message"
+    assert [
+        (m["id"], m["outcome"], m["boundary"], m["recovery"]) for m in ran.messages()
+    ] == [(f"op-{i + 1}", "drained", 1, interrupt) for i in range(sends)]
+    # no model call after the drain saw it
+    assert len(script.inputs) == 1
+    assert not any(text in m.text for text in texts for m in script.inputs[0])
+
+
+@pytest.mark.anyio
+async def test_a_redirect_a_boundary_callback_removes_stays_drained() -> None:
+    started = anyio.Event()
+    script = _Recording([_call("slow", seconds=30), _submit()])
+
+    async def without_operator(b: Boundary) -> list[ChatMessage] | None:
+        kept = [m for m in b.messages if m.source != "operator"]
+        return kept if len(kept) < len(b.messages) else None
+
+    async def drive(group: OperatorGroup) -> None:
+        await started.wait()
+        _act(group.agents["a"].message, "Redirect.", interrupt=True, dry_run=False)
+
+    ran = await _run(
+        _swarm(
+            [member(_react(script, _slow(started)), name="a")],
+            _starting(callbacks={"a": without_operator}),
+        ),
+        drive,
+    )
+
+    [message] = ran.messages()
+    assert (message["outcome"], message["boundary"], message["recovery"]) == (
+        "drained",
+        1,
+        True,
+    )
+    [changed] = [e.data for e in ran.swarm_events("changed")]
+    assert (changed["boundary"], changed["origin"]) == (1, "test")
+    assert changed["removed"] == [message["message_id"]]
+    # the repair stays; the redirect reaches no model call
+    assert isinstance(script.inputs[1][-1], ChatMessageTool)
+    assert not any(m.text == "Redirect." for m in script.inputs[1])
+
+
 # ---------------------------------------------------------------------------
 # Stopping members
 
@@ -655,6 +735,61 @@ async def test_a_member_stopped_while_its_background_work_drains(stop: bool) -> 
         assert ran.end_origins() == {"a": (None, None, None)}
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("when", ["idle", "after_wake"])
+async def test_a_persistent_member_the_operator_stops_gives_no_answer(
+    when: str,
+) -> None:
+    idle, stopped, started = anyio.Event(), anyio.Event(), anyio.Event()
+    refusals: list[str] = []
+    script = Script([_submit("first"), _call("slow", seconds=30)])
+
+    async def run_controller(control: SwarmControl) -> str:
+        control.start("p")
+        control.start("q")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                if isinstance(event, MemberIdle):
+                    if when == "idle":
+                        # chosen before the stop, and withdrawn by it
+                        control.choose_answer("p")
+                    else:
+                        control.wake("p", "More.")
+                    idle.set()
+        await stopped.wait()
+        await _drain(control)
+        try:
+            control.choose_answer("p")
+        except RuntimeError as ex:
+            refusals.append(str(ex))
+        return "all_done"
+
+    async def drive(group: OperatorGroup) -> None:
+        await idle.wait()
+        if when == "after_wake":
+            await started.wait()
+        assert _act(group.agents["p"].stop, dry_run=False).changed
+        stopped.set()
+
+    ran = await _run(
+        _swarm(
+            [
+                member(_react(script, _slow(started)), name="p", persistent=True),
+                member(answers_now(), name="q"),
+            ],
+            run_controller,
+            grace=0.2,
+        ),
+        drive,
+    )
+
+    assert ran.status("p") == ("stopped" if when == "idle" else "cancelled")
+    assert ran.end_origins()["p"] == ("operator", "operator", "operator")
+    # the first rule over the remaining submissions
+    assert (ran.record.final.mode, ran.record.final.member) == ("first", "q")
+    assert refusals and "the operator stopped the member" in refusals[0]
+
+
 # ---------------------------------------------------------------------------
 # The swarm
 
@@ -765,19 +900,31 @@ async def test_a_swarm_in_a_member_is_its_own_group() -> None:
 @pytest.mark.anyio
 async def test_two_swarms_at_once_outside_any_member_are_refused() -> None:
     errors: list[str] = []
+    left: list[tuple[list[str], int]] = []
 
     @agent
     def two_swarms() -> Agent:
         async def execute(state: AgentState) -> AgentState:
             first = _swarm([member(sleeper(), name="a")], grace=0.1)
+            second = _swarm([member(answers_now(), name="b")])
             async with anyio.create_task_group() as tg:
                 tg.start_soon(run, first, "task")
                 group = await _group()
+                loggers = len(transcript()._event_loggers)
                 try:
-                    await run(_swarm([member(sleeper(), name="b")]), "task")
+                    await run(second, "task")
                 except ValueError as ex:
                     errors.append(str(ex))
+                # the refused swarm claimed no timeline and left no subscription
+                left.append(
+                    (
+                        [t.name for t in transcript().timelines],
+                        len(transcript()._event_loggers) - loggers,
+                    )
+                )
                 _act(group.stop, dry_run=False)
+            # the same roster runs once the first swarm has ended
+            await run(second, "task")
             return state
 
         return execute
@@ -785,9 +932,11 @@ async def test_two_swarms_at_once_outside_any_member_are_refused() -> None:
     async def drive(group: OperatorGroup) -> None:
         pass
 
-    await _run(two_swarms(), drive)
+    ran = await _run(two_swarms(), drive)
 
     assert errors == ["The sample already has an operator group named 'swarm'."]
+    assert left == [(["a"], 0)]
+    assert [e.member for e in ran.swarm_events("member_result")] == ["a", "b"]
 
 
 # ---------------------------------------------------------------------------
