@@ -434,7 +434,7 @@ The plan's M2-6 to M2-10 carry this design ([swarm-implementation-plan.md M2 pul
 4. **M2-9 (wiring checks)** touches nothing in this channel. The channel has no notices: members learn of changes from the status line, `changes` and `swarm_wait`.
 5. **M2-10 (communication metrics)** counts, per member, delivered writes and their payload bytes, views and listings, and rejections by control; file and board limit failures use `admit`.
 6. **M2-13 (waiting)** adds `max_wait`, `wake=True` and the channel's side of `swarm_wait` (`wakes()` and `news()`, reading `seen`), as [swarm-wait.md](swarm-wait.md#implementation-plan) specifies.
-7. **M2-11 (docs)** documents the channel, migration from `memory(instance=...)`, the seen rule, descendants, and that bridged members cannot use it yet; the example shaped like Epoch's port uses it.
+7. **M2-11 (docs)** documents the channel, migration from `memory(instance=...)`, the seen rule, descendants, and, under M2's rule (since superseded: `swarm_bridged_tools(["shared_memory"])` now serves the channel), that bridged members could not use it yet; the example shaped like Epoch's port uses it.
 
 ## Open questions
 
