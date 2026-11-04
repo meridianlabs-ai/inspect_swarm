@@ -91,23 +91,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The project's locked runtime dependencies, without the dev group and
-      # without the project: a later step installs the wheel.
-      - uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # main
+      # The build toolchain that publish.yaml uses, pinned with hashes. To
+      # update the file, see publish.yaml.
+      - name: Install build toolchain
+        uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # main
         with:
-          versions: locked
+          versions: hashed-requirements
           python-version: ${{ matrix.python-version }}
-          project-install: skip
-          default-dependency-groups: exclude
+          requirements-file: scripts/build-dist/requirements.txt
+          package-format: wheels-only
+          environment-dir: ${{ runner.temp }}/build-venv
       - name: Build package
         id: build
         run: |
-          uv build
+          "$RUNNER_TEMP/build-venv/bin/python" -m build --no-isolation
           wheels=(dist/*.whl)
           [ ${#wheels[@]} -eq 1 ] && [ -f "${wheels[0]}" ] || { echo "::error::expected one wheel in dist/"; exit 1; }
           # ./ marks a local path for the install action.
           echo "wheel=./${wheels[0]}" >> "$GITHUB_OUTPUT"
-      # The wheel, with --no-deps: the step above installed its dependencies.
+      # The locked runtime dependencies, without the dev group and without the
+      # project, then the wheel with --no-deps.
       - uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # main
         with:
           versions: locked
