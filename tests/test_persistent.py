@@ -362,28 +362,33 @@ async def test_a_wake_once_the_swarm_is_stopping_ends_the_controller_with_the_st
 @pytest.mark.anyio
 async def test_idle_and_member_idle_are_published_together() -> None:
     script = _Recording([_submit("one"), _submit("two")])
+    published: list[tuple[str, bool]] = []
     yielded: list[Any] = []
 
     async def run(control: SwarmControl) -> StopReason:
         runtime = cast(SwarmRun, control)
-        a = control.member("a")
+        a = runtime._lookup("a")  # pyright: ignore[reportPrivateUsage]
+        publish_idle = a.gate.publish_idle
+
+        # checked as soon as the gate's publication returns, before the member awaits
+        # again, so no other task can have run in between
+        def checked() -> None:
+            publish_idle()
+            published.append(
+                (a.state, MemberIdle("a", a.answers - 1, False) in runtime._queue)  # pyright: ignore[reportPrivateUsage]
+            )
+
+        a.gate.publish_idle = checked
         control.start("a")
         async with aclosing(control.events()) as events:
-            for answer in range(2):
-                # the member stays idle until the controller wakes it or returns, so
-                # the controller sees each idle state before it reads the event,
-                # which must already be queued
-                while a.state in ("pending", "running"):
-                    await anyio.lowlevel.checkpoint()
-                assert a.state == "idle" and a.answers == answer + 1
-                assert MemberIdle("a", answer, False) in runtime._queue  # pyright: ignore[reportPrivateUsage]
-                yielded.append(await anext(events))
-                if answer == 0:
+            async for event in events:
+                yielded.append(event)
+                if isinstance(event, MemberIdle) and event.answer == 0:
                     control.wake("a", "again")
-            yielded.extend([event async for event in events])
         return "quiescence"
 
     await _run([member(_react(script), name="a", persistent=True)], run)
+    assert published == [("idle", True), ("idle", True)]
     assert yielded == [MemberIdle("a", 0, False), MemberIdle("a", 1, False)]
 
 
