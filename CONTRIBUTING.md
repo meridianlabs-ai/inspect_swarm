@@ -24,7 +24,7 @@ Inspect Swarm depends on `inspect_ai`: `pyproject.toml` sets a minimum released 
 
 ### Dependencies and the cooldown
 
-`uv.lock` pins every Python dependency. CI's type-check, test and build jobs install their dependencies from it, and fail when `uv.lock` is out of date with `pyproject.toml`. When you change dependencies in `pyproject.toml`, run `uv lock` and commit both files.
+`uv.lock` pins every Python dependency, except the build backend (hatchling, hatch-vcs) that `uv build` installs; the build backend still gets the cooldown. CI's type-check, test and build jobs install their dependencies from it, and fail when `uv.lock` is out of date with `pyproject.toml`. When you change dependencies in `pyproject.toml`, run `uv lock` and commit both files.
 
 `pyproject.toml` sets `exclude-newer = "7 days"` under `[tool.uv]`, so `uv lock`, `uv sync` and `uv pip` only pick releases that have been on PyPI for at least seven days. A compromised release is usually found and removed within that time, before it reaches `uv.lock`, CI or your machine. No package has a 6-hour exception today: only a direct dependency that is a model provider SDK or an Inspect package gets one, and no direct dependency is a provider SDK. The `inspect-ai` git reference is outside the cooldown, because `exclude-newer` applies only to releases on an index. The dependencies of inspect-ai keep the cooldown.
 
@@ -36,7 +36,7 @@ In an emergency, for example a security fix, you can adopt a release that is les
 2. Run `uv lock --upgrade-package <package>` and commit both files.
 3. Within seven days, once the normal cooldown includes the release, delete the entry, run `uv lock --upgrade-package <package>`, and commit both files. A plain `uv lock` doesn't reliably remove the entry from `uv.lock`, and CI then fails. No test checks the age of the entry, so you must remove it yourself.
 
-Testing against the newest release of every dependency happens in the nightly canary in [meridianlabs-ai/canaries](https://github.com/meridianlabs-ai/canaries), so Inspect Swarm's own CI doesn't need to.
+Testing against the newest release of every dependency on the index, and against inspect_ai `main` (the git reference), happens in the nightly canary in [meridianlabs-ai/canaries](https://github.com/meridianlabs-ai/canaries), so Inspect Swarm's own CI doesn't need to.
 
 ## Checks and tests
 
@@ -97,7 +97,7 @@ Anything that isn't a user-facing feature or fix should avoid `feat:`/`fix:` so 
 
 A release of Inspect Swarm needs a released inspect_ai, because PyPI rejects git dependencies: the `inspect-ai` dependency must be a minimum version (`inspect-ai>=X`) when Inspect Swarm is published. Raise the minimum only when code in `src/` needs a newer inspect_ai, and say in the PR which code needs it. When only tests need a newer release, update `uv.lock` instead.
 
-Work does not wait for an inspect_ai release. If a change needs an inspect_ai feature that is merged on inspect_ai `main` but not released yet, `pyproject.toml` may use a git reference to inspect_ai `main`, with `uv lock --upgrade-package inspect-ai` to lock the commit. This is a temporary workaround to unblock work: the dependency goes back to a released minimum before Inspect Swarm is published. When it does, add `inspect-ai = "6 hours"` under `[tool.uv.exclude-newer-package]` in `pyproject.toml`, and in `.github/dependabot.yml` stop ignoring inspect-ai and add it to `cooldown.exclude` (see [Dependencies and the cooldown](#dependencies-and-the-cooldown)).
+Work does not wait for an inspect_ai release. If a change needs an inspect_ai feature that is merged on inspect_ai `main` but not released yet, `pyproject.toml` may use a git reference to inspect_ai `main`, with `uv lock --upgrade-package inspect-ai` to lock the commit. This is a temporary workaround to unblock work: the dependency goes back to a released minimum before Inspect Swarm is published. When it does, add `inspect-ai = "6 hours"` under `[tool.uv.exclude-newer-package]` in `pyproject.toml`, and in `.github/dependabot.yml` stop ignoring inspect-ai, add it to `cooldown.exclude`, and add it to its own group (see [Dependencies and the cooldown](#dependencies-and-the-cooldown)).
 
 ## Reporting issues
 

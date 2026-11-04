@@ -86,13 +86,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The project's locked dependencies, not the project itself: a later step
-      # installs the wheel.
+      # The project's locked runtime dependencies, without the dev group and
+      # without the project: a later step installs the wheel.
       - uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # main
         with:
           versions: locked
           python-version: ${{ matrix.python-version }}
           project-install: skip
+          default-dependency-groups: exclude
       - name: Build package
         id: build
         run: |
@@ -107,6 +108,7 @@ jobs:
           versions: locked
           python-version: ${{ matrix.python-version }}
           project-install: skip
+          default-dependency-groups: exclude
           also-install-without-deps: ${{ steps.build.outputs.wheel }}
       - name: Verify package
         # -I so the import resolves to the installed wheel, not the checkout's src/.
