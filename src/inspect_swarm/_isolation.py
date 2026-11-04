@@ -438,6 +438,8 @@ awk -F: -v g="$group" '$1 == g { print "groupname", $3 }' /etc/group >"$dir/answ
   || fail "users isolation could not read /etc/group"
 awk -F: '$1 ~ /^swarm-/ { print "username", $1 }' /etc/passwd >>"$dir/answer" \
   || fail "users isolation could not read /etc/passwd"
+awk -F: '$1 ~ /^swarm-/ { print "membergroup", $1 }' /etc/group >>"$dir/answer" \
+  || fail "users isolation could not read /etc/group"
 awk -v lo="$lo" -v hi="$hi" '$1 >= lo && $1 <= hi { print "id", $1 }' "$dir/ids" >"$dir/window" \
   || fail "users isolation could not list the ids it found"
 sort -u "$dir/window" >>"$dir/answer" || fail "users isolation could not list the ids it found"
@@ -545,7 +547,8 @@ rw_share() {
   find -P "$s" -xdev -type d -exec setfacl -P -d -m "g:$group:rwX,m:rwX" {} + || fail "users isolation could not set default ACLs on the directories in $s; its filesystem may not support them"
   if command -v git >/dev/null 2>&1; then
     safe_directory "$s" || fail "users isolation could not add $s to git's safe.directory"
-    find -P "$s" -xdev -maxdepth 4 -type d -name .git -prune -exec sh -c '
+    # a repository's .git directory, or the .git file of a linked worktree or a submodule
+    find -P "$s" -xdev -maxdepth 4 -name .git \( -type d -prune -o -type f \) -exec sh -c '
       for g in "$@"; do
         repo=${g%/.git}
         git config --system --get-all safe.directory 2>/dev/null | grep -Fxq -- "$repo" || git config --system --add safe.directory "$repo" || exit 1
@@ -742,6 +745,7 @@ async def _setup(
     taken: set[int] = set()
     existing_group = False
     existing_users: set[str] = set()
+    existing_groups: set[str] = set()
     lines = probe.stdout.splitlines()
     if lines[:1] != ["begin"] or lines[-1:] != ["end"]:
         raise RuntimeError(
@@ -755,6 +759,8 @@ async def _setup(
             existing_group = True
         elif kind == "username":
             existing_users.add(value)
+        elif kind == "membergroup":
+            existing_groups.add(value)
     if existing_group:
         raise RuntimeError(
             f"users isolation: the group {_GROUP} already exists in sandbox {env_name!r}. Users isolation creates it, so the image must not have it."
@@ -763,6 +769,10 @@ async def _setup(
         if user in existing_users:
             raise RuntimeError(
                 f"users isolation: the user {user} already exists in sandbox {env_name!r}. Users isolation creates its members' users, so the image must not have users named swarm-<member>."
+            )
+        if user in existing_groups:
+            raise RuntimeError(
+                f"users isolation: the group {user} already exists in sandbox {env_name!r}. Users isolation creates each member's own group, so the image must not have groups named swarm-<member>."
             )
     free = (i for i in range(_FIRST_ID, _LAST_ID + 1) if i not in taken)
     gid = next(free, None)

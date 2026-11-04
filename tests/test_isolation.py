@@ -335,6 +335,13 @@ async def test_members_of_a_swarm_without_isolation_run_as_the_default_user() ->
         ),
         pytest.param(
             users(),
+            lambda: IsolationStub(probe="begin\nmembergroup swarm-w-1\nend\n"),
+            RuntimeError,
+            "users isolation: the group swarm-w-1 already exists in sandbox 'default'. Users isolation creates each member's own group, so the image must not have groups named swarm-<member>.",
+            id="existing-member-group",
+        ),
+        pytest.param(
+            users(),
             lambda: IsolationStub(uid="1000"),
             RuntimeError,
             "users isolation needs root in sandbox 'default' to create users; its root access is unusable (commands run as uid 1000, not as root)",

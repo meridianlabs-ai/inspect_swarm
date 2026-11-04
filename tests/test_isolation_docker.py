@@ -568,6 +568,17 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             setup="mkdir /scratch/w-1",
             error=f"{refused}/scratch/w-1 already exists; users isolation creates each member's home",
         ),
+        # refused before setup changes anything: no share, no group
+        "existing-member-group": Case(
+            runs=[
+                Run(
+                    {"shared": [{"path": "/shared", "access": "rw"}]},
+                    idle,
+                    after="ls -d /shared 2>&1; getent group inspect-swarm; echo done",
+                )
+            ],
+            setup="groupadd swarm-w-1",
+        ),
         "no-setfacl": Case(
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
             setup="rm /usr/bin/setfacl",
@@ -685,6 +696,13 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
         ),
     }
     samples = _eval(tmp_path, cases)
+    group = cases["existing-member-group"].results
+    assert group["error"] == [
+        "users isolation: the group swarm-w-1 already exists in sandbox 'default'. Users isolation creates each member's own group, so the image must not have groups named swarm-<member>."
+    ]
+    assert group["after"] == [
+        "ls: cannot access '/shared': No such file or directory\ndone\n"
+    ]
     sudo = samples["sudo"].error
     assert sudo is not None
     assert "the member can become root with sudo" in sudo.message
@@ -788,15 +806,17 @@ def test_members_work_in_worktrees_of_a_shared_repository(tmp_path: Path) -> Non
             )
         return steps
 
+    # a worktree linked to the repository before setup, which a .git file marks
+    linked: Step = ("bash", "git -C /shared/linked status --short --branch")
     cases = {
         "git": Case(
             runs=[
                 Run(
                     {"shared": [{"path": "/shared", "access": "rw"}]},
-                    {"w-1": work("w-1", None), "w-2": work("w-2", "w-1")},
+                    {"w-1": [*work("w-1", None), linked], "w-2": work("w-2", "w-1")},
                 )
             ],
-            setup=f"mkdir -p /shared/repo && cd /shared/repo && git init -q -b main && echo base > base.txt && git add base.txt && {git} commit -qm base",
+            setup=f"mkdir -p /shared/repo && cd /shared/repo && git init -q -b main && echo base > base.txt && git add base.txt && {git} commit -qm base && git worktree add -q /shared/linked -b linked",
         )
     }
     _eval(tmp_path, cases)
@@ -805,3 +825,4 @@ def test_members_work_in_worktrees_of_a_shared_repository(tmp_path: Path) -> Non
         for result in results[name][:2]:
             _ok(result)
     assert _ok(results["w-2"][2]).split() == ["base.txt", "w-1.txt", "w-2.txt"]
+    assert _ok(results["w-1"][2]).startswith("## linked")
