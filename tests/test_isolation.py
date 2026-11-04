@@ -1,4 +1,4 @@
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, overload
@@ -6,13 +6,16 @@ from typing import Any, Literal, overload
 import anyio
 import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
-from inspect_ai.agent import Agent, AgentState, agent
+from inspect_ai.agent import Agent, AgentState, agent, as_solver, run
 from inspect_ai.dataset import Sample
+from inspect_ai.model import ChatMessageUser, ModelName
+from inspect_ai.solver import TaskState, fork
+from inspect_ai.solver._fork import set_task_generate
 from inspect_ai.util import (
     ExecResult,
     SandboxEnvironment,
     sandbox,
-    store,
+    subtask,
     tool_state_instance,
 )
 from inspect_ai.util._sandbox._privileged import SHELL_PATH
@@ -22,6 +25,7 @@ from inspect_ai.util._sandbox.context import (
     sandbox_with_environments_context_var,
 )
 from inspect_ai.util._sandbox.identity import (
+    sandbox_identity,
     sandbox_identity_cwd,
     sandbox_identity_user,
 )
@@ -29,7 +33,7 @@ from inspect_ai.util._sandbox.identity import (
 from inspect_swarm import Share, UserIsolation, filesystem, member, swarm, users
 from inspect_swarm._budget import current_member
 
-from .swarm_runtime import run_swarm
+from .swarm_runtime import run_swarm, sample
 
 _ROOT_PROBE = "Uid:\t0\t0\t0\t0\nCapEff:\t00000000a80425fb\nsetgroups: allow\n"
 
@@ -44,8 +48,16 @@ class IsolationStub(SandboxEnvironment):
         fail_on: str = "add_users()",
         probe: str = "begin\nend\n",
         stall_on: str | None = None,
+        probes_together: int = 1,
     ) -> None:
         super().__init__()
+        # the group and users setup made, which later probes report
+        self.group: int | None = None
+        self.users: dict[str, int] = {}
+        # the probe waits, for a while, until this many probes are running at once
+        self.probes_together = probes_together
+        self.probes_running = 0
+        self.probes_met: anyio.Event | None = None
         self.stall_on = stall_on
         self.stall_timeouts: list[int | None] = []
         self.calls: list[tuple[str | None, str, list[str]]] = []
@@ -77,7 +89,23 @@ class IsolationStub(SandboxEnvironment):
                 True, 0, _ROOT_PROBE.replace("Uid:\t0", f"Uid:\t{self.uid}"), ""
             )
         if "echo begin" in cmd[2]:
-            return ExecResult(True, 0, self.probe, "")
+            self.probes_met = self.probes_met or anyio.Event()
+            self.probes_running += 1
+            if self.probes_running >= self.probes_together:
+                self.probes_met.set()
+            with anyio.move_on_after(0.5):
+                await self.probes_met.wait()
+            self.probes_running -= 1
+            made = "".join(
+                [
+                    *([] if self.group is None else [f"groupname {self.group}\n"]),
+                    *(f"username {user}\n" for user in self.users),
+                    *(f"id {i}\n" for i in [self.group, *self.users.values()] if i),
+                ]
+            )
+            return ExecResult(
+                True, 0, self.probe.replace("begin\n", f"begin\n{made}"), ""
+            )
         if "reserve()" in cmd[2]:
             # the probes print the directories they reserve, in the member's home and in
             # each rw share, as mktemp names them; a failing one reserves only the first
@@ -95,6 +123,20 @@ class IsolationStub(SandboxEnvironment):
             return ExecResult(True, 0, "".join(dirs) + "/etc\n", "")
         if self.fail is not None and self.fail_on in cmd[2]:
             return self.fail
+        if "add_users()" in cmd[2]:
+            # setup: $2 the gid, $3 1 to create the group, then the users from $7
+            gid, create, items = int(cmd[5]), cmd[6] == "1", cmd[10:]
+            if create and self.group is not None:
+                return ExecResult(
+                    False, 9, "", "groupadd: group 'inspect-swarm' already exists\n"
+                )
+            self.group = gid
+            while items:
+                if items[0] == "user":
+                    self.users[items[1]] = int(items[2])
+                    items = items[4:]
+                else:
+                    items = items[3:]
         return ExecResult(True, 0, "", "")
 
     async def write_file(
@@ -250,7 +292,6 @@ async def test_each_member_runs_as_its_user_after_setup_and_self_test() -> None:
     stub = IsolationStub()
     with environments(default=stub):
         await run_swarm(swarm(_scoped(seen), channels=[], isolation="users"))
-        record = store().get("inspect_swarm:isolation")
     assert {name: (s["user"], s["cwd"], s["instance"]) for name, s in seen.items()} == {
         "w-1": ("swarm-w-1", "/scratch/w-1", "@w-1"),
         "w-2": ("swarm-w-2", "/scratch/w-2", "@w-2"),
@@ -275,12 +316,6 @@ async def test_each_member_runs_as_its_user_after_setup_and_self_test() -> None:
         *("user", "swarm-w-2", "61002", "/scratch/w-2"),
         *("share", "rw", "/shared"),
     ]
-    assert record == {
-        "default": {
-            "gid": 61000,
-            "users": {"swarm-w-1": 61001, "swarm-w-2": 61002},
-        }
-    }
 
 
 @pytest.mark.anyio
@@ -299,7 +334,7 @@ async def test_members_of_a_swarm_without_isolation_run_as_the_default_user() ->
     [
         pytest.param(
             users(sandbox="workspace"),
-            IsolationStub(),
+            lambda: IsolationStub(),
             ValueError,
             "users(sandbox='workspace'): this sample has no such sandbox",
             id="unknown-sandbox",
@@ -307,21 +342,21 @@ async def test_members_of_a_swarm_without_isolation_run_as_the_default_user() ->
         pytest.param(
             users(),
             # what a provider that keeps only the last bytes of a long output returns
-            IsolationStub(probe="id 61003\nid 61004\nend\n"),
+            lambda: IsolationStub(probe="id 61003\nid 61004\nend\n"),
             RuntimeError,
             "users isolation: the id scan's output in sandbox 'default' came back incomplete",
             id="truncated-probe",
         ),
         pytest.param(
             users(),
-            IsolationStub(uid="1000"),
+            lambda: IsolationStub(uid="1000"),
             RuntimeError,
             "users isolation needs root in sandbox 'default' to create users; its root access is unusable (commands run as uid 1000, not as root)",
             id="no-root",
         ),
         pytest.param(
             users(),
-            IsolationStub(
+            lambda: IsolationStub(
                 fail=ExecResult(
                     False,
                     3,
@@ -337,12 +372,12 @@ async def test_members_of_a_swarm_without_isolation_run_as_the_default_user() ->
 )
 async def test_setup_refusals(
     isolation: UserIsolation,
-    stub: IsolationStub,
+    stub: Callable[[], IsolationStub],
     error: type[Exception],
     message: str,
 ) -> None:
     seen: dict[str, dict[str, str | None]] = {}
-    with environments(default=stub), pytest.raises(error) as raised:
+    with environments(default=stub()), pytest.raises(error) as raised:
         await run_swarm(swarm(_scoped(seen), channels=[], isolation=isolation))
     assert str(raised.value).startswith(message)
     assert seen == {}
@@ -576,6 +611,27 @@ def test_users_refuses_unsafe_or_ambiguous_paths(
             "swarm(): the filesystem channel's shared directory ('/shared') is not a read-write share under users isolation (none)",
             id="filesystem-shared-ro",
         ),
+        *(
+            pytest.param(
+                lambda notes=notes: swarm(
+                    member(scoped, args={"seen": {}}, name="w"),
+                    channels=[filesystem(notes=notes)],
+                    isolation=users(
+                        shared=[
+                            Share(path="/shared", access="rw"),
+                            Share(path="/data", access="ro"),
+                        ]
+                    ),
+                ),
+                f"swarm(): the filesystem channel's notes file ({path!r}) is not inside a read-write share under users isolation ('/shared')",
+                id=f"filesystem-notes-{case}",
+            )
+            for case, notes, path in [
+                ("absolute", "/notes.md", "/notes.md"),
+                ("escaping", "../notes.md", "/shared/../notes.md"),
+                ("ro-share", "/data/notes.md", "/data/notes.md"),
+            ]
+        ),
         pytest.param(
             lambda: swarm(
                 member(scoped, args={"seen": {}}, name="w"),
@@ -603,6 +659,19 @@ def test_swarm_refuses_rosters_and_channels_users_isolation_cannot_serve(
     assert str(raised.value).startswith(message)
 
 
+def test_the_notes_file_may_be_in_any_read_write_share() -> None:
+    swarm(
+        member(scoped, args={"seen": {}}, name="w"),
+        channels=[filesystem(notes="/notes/team.md")],
+        isolation=users(
+            shared=[
+                Share(path="/shared", access="rw"),
+                Share(path="/notes", access="rw"),
+            ]
+        ),
+    )
+
+
 def test_isolation_resolves_from_a_name_or_its_fields() -> None:
     default = users()
     assert default == UserIsolation()
@@ -625,7 +694,115 @@ async def test_ids_the_probe_reports_taken_are_skipped() -> None:
     stub = IsolationStub(probe="begin\nid 61000\nid 61002\nend\n")
     with environments(default=stub):
         await run_swarm(swarm(_scoped(seen), channels=[], isolation="users"))
-        record = store().get("inspect_swarm:isolation")
-    assert record == {
-        "default": {"gid": 61001, "users": {"swarm-w-1": 61003, "swarm-w-2": 61004}}
-    }
+    assert stub.group == 61001
+    assert stub.users == {"swarm-w-1": 61003, "swarm-w-2": 61004}
+
+
+def _team(
+    seen: dict[str, dict[str, str | None]], name: str, sandbox: str = "default"
+) -> Agent:
+    return swarm(
+        member(scoped, args={"seen": seen}, name=name, count=2),
+        channels=[],
+        isolation=users(sandbox=sandbox),
+    )
+
+
+@pytest.mark.anyio
+async def test_concurrent_runs_in_one_sandbox_set_it_up_in_turn() -> None:
+    seen: dict[str, dict[str, str | None]] = {}
+    # each probe waits for the other: run together, both would find no group and
+    # both would create it
+    stub = IsolationStub(probes_together=2)
+    with environments(default=stub):
+        async with sample():
+            async with anyio.create_task_group() as tg:
+                for name in ("a", "b"):
+                    tg.start_soon(run, _team(seen, name), "task")
+    assert stub.group == 61000
+    assert sorted(stub.users) == ["swarm-a-1", "swarm-a-2", "swarm-b-1", "swarm-b-2"]
+    assert len(set(stub.users.values())) == 4
+
+
+@pytest.mark.anyio
+async def test_runs_in_subtasks_forks_and_their_parent_share_what_setup_made() -> None:
+    # each subtask and each fork has a store of its own; the sandbox is the sample's
+    seen: dict[str, dict[str, str | None]] = {}
+    stub = IsolationStub()
+
+    @subtask
+    async def child(name: str) -> str:
+        await run(_team(seen, name), "task")
+        return name
+
+    async def generate(state: TaskState, *args: Any, **kwargs: Any) -> TaskState:
+        return state
+
+    state = TaskState(
+        model=ModelName("mockllm/model"),
+        sample_id=1,
+        epoch=1,
+        input="task",
+        messages=[ChatMessageUser(content="task")],
+    )
+    with environments(default=stub):
+        async with sample():
+            set_task_generate(generate)
+            await child("a")
+            await child("b")
+            await fork(state, as_solver(_team(seen, "c")))
+            await fork(state, as_solver(_team(seen, "d")))
+            await run(_team(seen, "e"), "task")
+    assert stub.group == 61000
+    assert len(stub.users) == 10
+    assert {s["user"] for s in seen.values()} == set(stub.users)
+
+
+@pytest.mark.anyio
+async def test_concurrent_runs_in_two_sandboxes_keep_what_each_made() -> None:
+    seen: dict[str, dict[str, str | None]] = {}
+    stubs = {"default": IsolationStub(), "other": IsolationStub()}
+    with environments(**stubs):
+        async with sample():
+            async with anyio.create_task_group() as tg:
+                for name, sandbox in (("a", "default"), ("b", "other")):
+                    tg.start_soon(run, _team(seen, name, sandbox), "task")
+            # each takes over the group the first run in its sandbox made
+            await run(_team(seen, "c", "default"), "task")
+            await run(_team(seen, "d", "other"), "task")
+    assert sorted(stubs["default"].users) == [
+        "swarm-a-1",
+        "swarm-a-2",
+        "swarm-c-1",
+        "swarm-c-2",
+    ]
+    assert sorted(stubs["other"].users) == [
+        "swarm-b-1",
+        "swarm-b-2",
+        "swarm-d-1",
+        "swarm-d-2",
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("isolated", [True, False])
+async def test_users_isolation_is_refused_inside_an_identity_scope(
+    isolated: bool,
+) -> None:
+    seen: dict[str, dict[str, str | None]] = {}
+    stub = IsolationStub()
+    team = swarm(_scoped(seen), channels=[], isolation="users" if isolated else None)
+    with environments(default=stub), sandbox_identity("outer", cwd="/outer"):
+        if isolated:
+            with pytest.raises(
+                RuntimeError,
+                match="users isolation cannot start inside a sandbox identity scope",
+            ):
+                await run_swarm(team)
+        else:
+            await run_swarm(team)
+    # refused before setup runs anything
+    assert stub.calls == []
+    if not isolated:
+        # a swarm without isolation keeps the scope it runs in
+        assert {(s["user"], s["cwd"]) for s in seen.values()} == {("outer", "/outer")}

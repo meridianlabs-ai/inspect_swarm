@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -212,6 +213,42 @@ async def test_isolation_setup_time_comes_out_of_the_derived_time_cap(
     )
     assert stop.reason == "swarm_time"
     assert statuses(stop) == {"sleeper": "cancelled"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("setup_time,warned", [(0.2, True), (0, False)])
+async def test_an_explicit_time_cap_is_checked_after_isolation_setup(
+    setup_time: float,
+    warned: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # a 0.9 s cap fits a 1 s sample until setup takes 0.2 s of it, after which the
+    # sample's limit ends the swarm first, as the warning says
+    async def slow_setup(isolation: object, names: Sequence[str]) -> dict[str, Any]:
+        await anyio.sleep(setup_time)
+        return {}
+
+    monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", slow_setup)
+    with (
+        caplog.at_level(logging.WARNING, logger="inspect_swarm"),
+        pytest.raises(LimitExceededError) if warned else nullcontext(),
+    ):
+        await run_swarm(
+            swarm(
+                sleeper(),
+                channels=[],
+                isolation="users",
+                budget=Budget(time=0.9, grace=0),
+            ),
+            time=1,
+        )
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if "is above the sample's remaining time limit" in r.getMessage()
+    ]
+    assert len(warnings) == (1 if warned else 0)
 
 
 @pytest.mark.anyio

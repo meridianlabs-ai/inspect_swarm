@@ -1,19 +1,20 @@
 import posixpath
 import re
+import weakref
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import anyio
 from inspect_ai.tool._sandbox_tools_utils.sandbox import resolve_root_access
-from inspect_ai.util import ExecResult, SandboxEnvironment, sandbox, store
+from inspect_ai.util import ExecResult, SandboxEnvironment, sandbox
 from inspect_ai.util._sandbox._privileged import privileged_shell
 from inspect_ai.util._sandbox.context import (
     sandbox_default_context_var,  # pyright: ignore[reportPrivateUsage]
     sandbox_environments_context_var,  # pyright: ignore[reportPrivateUsage]
 )
-from inspect_ai.util._sandbox.identity import sandbox_identity
+from inspect_ai.util._sandbox.identity import sandbox_identity, sandbox_identity_active
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 from pydantic import BaseModel, ConfigDict
 
@@ -126,7 +127,7 @@ def resolve_isolation(value: object) -> UserIsolation | None:
 
 
 def check_isolation(isolation: UserIsolation, where: str) -> None:
-    for path, field in [
+    for path, argument in [
         (isolation.home, "home"),
         *((share.path, "shared") for share in isolation.shared),
     ]:
@@ -139,7 +140,7 @@ def check_isolation(isolation: UserIsolation, where: str) -> None:
             or any(c == "\\" or not c.isprintable() for c in path)
         ):
             raise ValueError(
-                f"{where}: {field} must be an absolute, normalised path with no '..', '.', repeated or trailing '/', backslash, or character that is not printable (such as a newline, tab or other control character, or a line separator), got {path!r}."
+                f"{where}: {argument} must be an absolute, normalised path with no '..', '.', repeated or trailing '/', backslash, or character that is not printable (such as a newline, tab or other control character, or a line separator), got {path!r}."
             )
     home = isolation.home
     last = posixpath.basename(home)
@@ -180,7 +181,7 @@ def check_isolated_roster(
     isolation: UserIsolation,
     roster: Sequence["MemberInfo"],
     own_sandboxes: bool,
-    filesystem: tuple[str, str] | None,
+    filesystem: tuple[str, str, str] | None,
 ) -> None:
     for info in roster:
         if not _NAME.fullmatch(info.name):
@@ -197,7 +198,7 @@ def check_isolated_roster(
         )
     if filesystem is None:
         return
-    shared, scratch = filesystem
+    shared, notes, scratch = filesystem
     if scratch != isolation.home:
         raise ValueError(
             f"swarm(): the filesystem channel's scratch ({scratch!r}) is not the members' home under users isolation ({isolation.home!r}), so the preamble would describe a directory the member cannot use. Give filesystem(scratch=...) and users(home=...) the same value."
@@ -206,6 +207,13 @@ def check_isolated_roster(
     if shared not in rw:
         raise ValueError(
             f"swarm(): the filesystem channel's shared directory ({shared!r}) is not a read-write share under users isolation ({', '.join(repr(p) for p in rw) or 'none'}), so members could not write it. Add Share(path={shared!r}, access='rw') to users(shared=...), or give filesystem(shared=...) one of them."
+        )
+    # here: at import time the channel's module would import the runtime
+    from ._channel.filesystem import _inside  # pyright: ignore[reportPrivateUsage]
+
+    if not any(_inside(notes, path) for path in rw):
+        raise ValueError(
+            f"swarm(): the filesystem channel's notes file ({notes!r}) is not inside a read-write share under users isolation ({', '.join(repr(p) for p in rw)}), so members could not add to it. Give filesystem(notes=...) a path inside one of them."
         )
 
 
@@ -268,9 +276,6 @@ _GROUP = "inspect-swarm"
 _FIRST_ID = 61000
 _LAST_ID = 61999
 
-# what the swarm made in each sandbox, by sandbox name: the group's gid and each
-# user's uid, so that a later swarm run in the sample accepts them
-_RECORD_KEY = "inspect_swarm:isolation"
 
 # Refusals in the scripts below exit with this status and a message on stderr, as
 # their last line.
@@ -301,9 +306,21 @@ find / -maxdepth 0 -writable -printf '' >/dev/null 2>&1 || fail "users isolation
 if [ "$acl" = 1 ]; then
   command -v setfacl >/dev/null 2>&1 && command -v getfacl >/dev/null 2>&1 || fail "users isolation needs setfacl and getfacl in the sandbox for shared directories (package acl)"
 fi
-gid=$(awk -F: -v g="$group" '$1 == g { print $3 }' /etc/group)
+gid=$(awk -F: -v g="$group" '$1 == g { print $3 }' /etc/group) || fail "users isolation could not read /etc/group"
 dir=$(mktemp -d) || fail "users isolation could not create a temporary directory"
 trap 'rm -rf "$dir"' EXIT
+
+# find "$@" into $dir/found, refusing with $1 on any error but a removed entry: a scan of
+# a live sandbox meets files and directories that processes remove while it runs, such
+# as the sandbox tools' request files, and those take no id and hold nothing to refuse
+scan() {
+  what=$1
+  shift
+  find "$@" >"$dir/found" 2>"$dir/errors" && return 0
+  grep -v ': No such file or directory$' "$dir/errors" >"$dir/other"
+  [ $? -le 1 ] || fail "$what"
+  [ ! -s "$dir/other" ] || fail "$what: $(head -n 1 "$dir/other")"
+}
 
 # a mount point strictly inside $1, as /proc/self/mountinfo writes it (\040 for a space;
 # configured paths have no backslash, which awk -v would read as an escape, and no tab
@@ -355,29 +372,32 @@ foreign_acl() {
 inherits_acl() {
   a=$1
   while [ ! -e "$a" ] && [ ! -L "$a" ]; do a=$(dirname -- "$a"); done
-  case $(ls -ld -- "$a") in
+  l=$(ls -ld -- "$a") || fail "users isolation could not inspect $a"
+  case $l in
     ??????????+*) fail "users isolation would create $1 inside $a, whose ACL its new directories would inherit; remove it (setfacl -b)" ;;
   esac
 }
 
 [ -r /proc/self/mountinfo ] || fail "users isolation needs /proc/self/mountinfo to check for mounts inside its directories"
 if [ -e "$parent" ]; then
-  m=$(mount_inside "$parent")
+  m=$(mount_inside "$parent") || fail "users isolation could not read /proc/self/mountinfo"
   [ -z "$m" ] || fail "users isolation does not support a mount under the members' homes' parent $parent, as at $m"
-  case $(ls -ld -- "$parent") in
+  l=$(ls -ld -- "$parent") || fail "users isolation could not inspect $parent"
+  case $l in
     ??????????+*) fail "users isolation does not support ACLs on the members' homes' parent $parent, which homes would inherit; remove them (setfacl -b)" ;;
   esac
 else
   inherits_acl "$parent"
 fi
-awk -F: '{ print $3 }' /etc/passwd /etc/group >"$dir/ids"
+awk -F: '{ print $3 }' /etc/passwd /etc/group >"$dir/ids" || fail "users isolation could not read the ids in /etc/passwd and /etc/group"
 while [ "$1" != -- ]; do
   root=$1
   shift
   [ -d "$root" ] || continue
   # an incomplete scan could miss an id a file takes
-  find -P "$root" -xdev \( \( -uid +$((lo - 1)) -uid -$((hi + 1)) \) -o \( -gid +$((lo - 1)) -gid -$((hi + 1)) \) \) -printf '%U\n%G\n' >>"$dir/ids" 2>"$dir/errors" \
-    || fail "users isolation could not scan all of $root for the user ids its files take, so it cannot choose ids that own nothing: $(head -n 1 "$dir/errors")"
+  scan "users isolation could not scan all of $root for the user ids its files take, so it cannot choose ids that own nothing" \
+    -P "$root" -xdev -ignore_readdir_race \( \( -uid +$((lo - 1)) -uid -$((hi + 1)) \) -o \( -gid +$((lo - 1)) -gid -$((hi + 1)) \) \) -printf '%U\n%G\n'
+  cat -- "$dir/found" >>"$dir/ids" || fail "users isolation could not keep the ids it found"
 done
 shift
 while [ $# -gt 0 ]; do
@@ -388,32 +408,38 @@ while [ $# -gt 0 ]; do
     continue
   fi
   [ -d "$share" ] || continue
-  m=$(mount_inside "$share")
+  m=$(mount_inside "$share") || fail "users isolation could not read /proc/self/mountinfo"
   [ -z "$m" ] || fail "users isolation does not support a mount inside the shared directory $share, as at $m"
   acls=$(getfacl -R -P -n -p -E --skip-base -- "$share" 2>&1) \
     || fail "users isolation could not read the ACLs in $share: $(printf '%s' "$acls" | grep -v '^#' | head -n 1)"
-  bad=$(printf '%s\n' "$acls" | foreign_acl "$gid")
+  bad=$(printf '%s\n' "$acls" | foreign_acl "$gid") || fail "users isolation could not check the ACLs in $share"
   [ -z "$bad" ] || fail "users isolation does not support ACL entries it did not set in a shared directory: $bad; remove them (setfacl -b)"
   # setup changes each entry's inode, which a hard link shares with a name outside
-  linked=$(find -P "$share" -xdev ! -type d -links +1 -printf '%p has %n links' -quit 2>&1) \
-    || fail "users isolation could not scan the files in $share: $(printf '%s' "$linked" | head -n 1)"
+  scan "users isolation could not scan the files in $share" \
+    -P "$share" -xdev -ignore_readdir_race ! -type d -links +1 -printf '%p has %n links' -quit
+  linked=$(cat -- "$dir/found") || fail "users isolation could not scan the files in $share"
   [ -z "$linked" ] || fail "users isolation does not support a hard-linked file in a shared directory: $linked; setup's changes to its mode, group and ACLs would reach its other names"
   if [ "$access" = rw ]; then
     # the default ACL setup writes takes its owner entry from the directory's owner
     # bits, and an owner entry beats the group's grant, so a member could not edit
     # the files it creates in a directory whose owner lacks rwx
-    narrow=$(find -P "$share" -xdev -type d ! -perm -u=rwx -printf '%p is mode %m' -quit 2>&1) \
-      || fail "users isolation could not scan the directories in $share: $(printf '%s' "$narrow" | head -n 1)"
+    scan "users isolation could not scan the directories in $share" \
+      -P "$share" -xdev -ignore_readdir_race -type d ! -perm -u=rwx -printf '%p is mode %m' -quit
+    narrow=$(cat -- "$dir/found") || fail "users isolation could not scan the directories in $share"
     [ -z "$narrow" ] || fail "users isolation does not support a directory without owner rwx in a read-write shared directory: $narrow; its owner bits would become the default ACL of the files members create there"
   fi
 done
 # the answer: at most one line per id in the window, between markers, so that output a
-# provider cut short is found out rather than read as fewer taken ids
-echo begin
-awk -F: -v g="$group" '$1 == g { print "groupname", $3 }' /etc/group
-awk -F: '$1 ~ /^swarm-/ { print "username", $1 }' /etc/passwd
-awk -v lo="$lo" -v hi="$hi" '$1 >= lo && $1 <= hi { print "id", $1 }' "$dir/ids" | sort -u
-echo end
+# provider cut short is found out rather than read as fewer taken ids. Each step is
+# checked, since a step that fails would otherwise leave out ids or users.
+awk -F: -v g="$group" '$1 == g { print "groupname", $3 }' /etc/group >"$dir/answer" \
+  || fail "users isolation could not read /etc/group"
+awk -F: '$1 ~ /^swarm-/ { print "username", $1 }' /etc/passwd >>"$dir/answer" \
+  || fail "users isolation could not read /etc/passwd"
+awk -v lo="$lo" -v hi="$hi" '$1 >= lo && $1 <= hi { print "id", $1 }' "$dir/ids" >"$dir/window" \
+  || fail "users isolation could not list the ids it found"
+sort -u "$dir/window" >>"$dir/answer" || fail "users isolation could not list the ids it found"
+echo begin && cat "$dir/answer" && echo end || fail "users isolation could not write the ids it found"
 exit 0
 """
 )
@@ -583,15 +609,15 @@ if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
 fi
 while [ $# -gt 0 ]; do
   # every entry readable and every directory, the share's ancestors included, searchable
-  unreadable=$(find -P "$2" -xdev ! -type l \( ! -readable -o -type d ! -executable \) -printf '%p\n' -quit 2>&1) \
+  unreadable=$(find -P "$2" -xdev -ignore_readdir_race ! -type l \( ! -readable -o -type d ! -executable \) -printf '%p\n' -quit 2>&1) \
     || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$unreadable" | head -n 1)"
   [ -z "$unreadable" ] || fail "the member cannot read $unreadable in the shared directory $2"
   if [ "$1" = rw ]; then
-    w=$(find -P "$2" -xdev ! -type l ! -writable -printf '%p\n' -quit 2>&1) \
+    w=$(find -P "$2" -xdev -ignore_readdir_race ! -type l ! -writable -printf '%p\n' -quit 2>&1) \
       || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$w" | head -n 1)"
     [ -z "$w" ] || fail "the member cannot write $w in the read-write shared directory $2"
   else
-    w=$(find -P "$2" -xdev -writable -print -quit 2>&1) \
+    w=$(find -P "$2" -xdev -ignore_readdir_race -writable -print -quit 2>&1) \
       || fail "the member cannot read all of the shared directory $2: $(printf '%s' "$w" | head -n 1)"
     [ -z "$w" ] || fail "the member can write $w in the read-only shared directory $2"
   fi
@@ -664,6 +690,10 @@ done
 async def setup_isolation(
     isolation: UserIsolation, names: Sequence[str]
 ) -> dict[str, MemberIdentity]:
+    if sandbox_identity_active():
+        raise RuntimeError(
+            "users isolation cannot start inside a sandbox identity scope, such as a member of a swarm with users isolation: identity scopes cannot be nested. Run this swarm without isolation, or outside the scope."
+        )
     env, env_name = _environment(isolation.sandbox)
     if _is_local(env):
         raise RuntimeError(
@@ -674,10 +704,21 @@ async def setup_isolation(
         raise RuntimeError(
             f"users isolation needs root in sandbox {env_name!r} to create users; its root access is {access.state} ({access.reason})."
         )
-    records = _records()
-    record = records.get(env_name, {})
-    recorded_gid = cast(int | None, record.get("gid"))
-    recorded_users = cast(dict[str, int], record.get("users", {}))
+    record = _record(env)
+    # one setup at a time in a sandbox, so that each sees what the one before made
+    async with record.lock:
+        return await _setup(env, env_name, isolation, names, record)
+
+
+async def _setup(
+    env: SandboxEnvironment,
+    env_name: str,
+    isolation: UserIsolation,
+    names: Sequence[str],
+    record: "_Record",
+) -> dict[str, MemberIdentity]:
+    recorded_gid = record.gid
+    recorded_users = record.users
     users_ = [(name, member_user(name), member_home(isolation, name)) for name in names]
     parent = posixpath.dirname(isolation.home)
 
@@ -760,14 +801,8 @@ async def setup_isolation(
         " ".join(str(i) for i in member_ids),
         *items,
     )
-    records[env_name] = {
-        "gid": gid,
-        "users": {
-            **recorded_users,
-            **{i.user: i.uid for i in identities.values()},
-        },
-    }
-    store().set(_RECORD_KEY, records)
+    record.gid = gid
+    record.users = {**recorded_users, **{i.user: i.uid for i in identities.values()}}
 
     await _self_test(env, env_name, isolation, list(identities.values()))
     return identities
@@ -838,6 +873,7 @@ async def _check_members(
                     own(identity),
                     *args,
                     user=identity.user,
+                    cwd=identity.home,
                 )
             except Exception as ex:
                 results[identity.user] = ex
@@ -873,6 +909,7 @@ async def _check_members(
             isolation.peers,
             *(f"{probes[path]}/probe" for path in rw),
             user=second.user,
+            cwd=second.home,
         )
         _check_result(result, env_name, second.user)
 
@@ -935,6 +972,24 @@ def _is_local(env: SandboxEnvironment) -> bool:
     return True
 
 
-def _records() -> dict[str, dict[str, Any]]:
-    records: dict[str, dict[str, Any]] = store().get(_RECORD_KEY) or {}
-    return dict(records)
+# What the swarm made in a sandbox, the group's gid and each user's uid, so that a later
+# swarm run in the sample accepts them, and the lock its setups take. Kept with the
+# sandbox's object in the host process rather than in the store, which a subtask or
+# fork has its own copy of: every run in the sample that uses the sandbox shares it.
+@dataclass
+class _Record:
+    lock: anyio.Lock = field(default_factory=anyio.Lock)
+    gid: int | None = None
+    users: dict[str, int] = field(default_factory=lambda: {})
+
+
+_RECORDS: "weakref.WeakKeyDictionary[SandboxEnvironment, _Record]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _record(env: SandboxEnvironment) -> _Record:
+    # the provider's object, behind the sample's event-recording proxy
+    while (inner := env.as_type(SandboxEnvironment)) is not env:
+        env = inner
+    return _RECORDS.setdefault(env, _Record())

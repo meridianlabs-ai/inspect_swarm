@@ -206,7 +206,10 @@ _DATA = "mkdir -p /data && echo data > /data/existing"
 @pytest.mark.slow
 def test_members_run_as_their_users_with_ids_that_own_no_file(tmp_path: Path) -> None:
     steps: list[Step] = [
-        ("bash", "id -un; id -u; pwd; echo $HOME $TMPDIR"),
+        (
+            "bash",
+            "id -un; id -u; pwd; echo $HOME $TMPDIR; getent group inspect-swarm | cut -d: -f3",
+        ),
         ("python", "import getpass, os; print(getpass.getuser(), os.getcwd())"),
         ("session", "id -un; pwd"),
         ("edit", "note.txt"),
@@ -220,23 +223,23 @@ def test_members_run_as_their_users_with_ids_that_own_no_file(tmp_path: Path) ->
             setup=f"{_DATA} && touch /dev/shm/a /scratch/b && chown 61002 /dev/shm/a && chown 61003 /scratch/b",
         )
     }
-    samples = _eval(tmp_path, cases)
+    _eval(tmp_path, cases)
     results = cases["tools"].results
     uids: set[int] = set()
+    gids: set[int] = set()
     for name in ("w-1", "w-2"):
         user, home = f"swarm-{name}", f"/scratch/{name}"
         bash_out, python_out, session_out, edit_out, stat_out = results[name]
-        who, uid, pwd, env = _ok(bash_out).splitlines()
+        who, uid, pwd, env, gid = _ok(bash_out).splitlines()
         assert (who, pwd, env) == (user, home, f"{home} {home}/tmp")
         uids.add(int(uid))
+        gids.add(int(gid))
         assert _ok(python_out) == f"{user} {home}"
         assert f"{user}\n{home}" in _ok(session_out)
         assert _ok(edit_out) == f"File created successfully at: {home}/note.txt"
         assert _ok(stat_out) == f"{user} 644"
-    assert not uids & {0, 1000, 61000, 61001, 61002, 61003}
-    record = samples["tools"].store["inspect_swarm:isolation"]
-    assert set(record["default"]["users"].values()) == uids
-    assert record["default"]["gid"] not in {61000, 61001, 61002, 61003}
+    assert len(uids) == 2 and len(gids) == 1
+    assert not (uids | gids) & {0, 1000, 61000, 61001, 61002, 61003}
 
 
 @pytest.mark.slow
@@ -244,14 +247,20 @@ def test_members_get_their_own_home_when_the_image_sets_another(
     tmp_path: Path,
 ) -> None:
     # the container's HOME is root's, which commands run as another user keep unless
-    # the tool sets it
+    # the tool sets it; its working directory is root's too, which no member can enter
     steps: list[Step] = [
         ("bash", "echo $HOME $TMPDIR"),
         ("python", "import os; print(os.environ['HOME'], os.environ['TMPDIR'])"),
         ("session", "echo $HOME $TMPDIR"),
     ]
-    cases = {"home": Case(runs=[Run({"shared": []}, {"w-1": steps})])}
-    _eval(tmp_path, cases, compose_extra="    environment:\n      HOME: /root\n")
+    # with a share, so that the self-test scans it, from the member's home
+    rw = {"shared": [{"path": "/shared", "access": "rw"}]}
+    cases = {"home": Case(runs=[Run(rw, {"w-1": steps})])}
+    _eval(
+        tmp_path,
+        cases,
+        compose_extra="    working_dir: /root\n    environment:\n      HOME: /root\n",
+    )
     bash_out, python_out, session_out = cases["home"].results["w-1"]
     # nothing on stderr either, such as bash failing to read /root/.bash_profile
     assert _ok(bash_out) == "/scratch/w-1 /scratch/w-1/tmp"
@@ -591,6 +600,14 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             setup="mkdir /shared && ln /etc/profile /shared/profile",
             error=f"{refused}users isolation does not support a hard-linked file in a shared directory: /shared/profile has 2 links",
         ),
+        "id-filter-fails": Case(
+            runs=[Run({"shared": []}, idle, before=_failing("awk", "*lo=*"))],
+            error=f"{refused}users isolation could not list the ids it found",
+        ),
+        "id-sort-fails": Case(
+            runs=[Run({"shared": []}, idle, before=_failing("sort", "*window*"))],
+            error=f"{refused}users isolation could not list the ids it found",
+        ),
         "hard-link-in-ro-share": Case(
             runs=[Run({"shared": [{"path": "/data", "access": "ro"}]}, idle)],
             setup="mkdir /outside /data && touch /outside/file && chmod 666 /outside/file && ln /outside/file /data/file",
@@ -617,6 +634,22 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
         "the member cannot read all of the shared directory /inputs/data: find: "
         in unreadable.message
     )
+
+
+@pytest.mark.slow
+def test_files_removed_while_setup_scans_do_not_refuse_it(tmp_path: Path) -> None:
+    # processes that keep creating and removing files under a scanned root, as the
+    # sandbox tools' request files or a process an earlier member left running do; a
+    # scan meets a removed file about one time in five, so the case sets up eight runs
+    churn = " ".join(
+        f"nohup sh -c 'while :; do mkdir -p /tmp/churn-{d}; i=0;"
+        f" while [ $i -lt 300 ]; do : > /tmp/churn-{d}/$i; i=$((i+1)); done;"
+        f" rm -rf /tmp/churn-{d}; done' >/dev/null 2>&1 &"
+        for d in "abcdefgh"
+    )
+    runs = [Run({"shared": []}, {f"c{i}": []}) for i in range(8)]
+    runs[0].before = churn
+    _eval(tmp_path, {"churn": Case(runs=runs)})
 
 
 @pytest.mark.slow
