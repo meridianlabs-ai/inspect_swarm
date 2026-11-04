@@ -478,60 +478,70 @@ def test_mounts_inside_shares_and_under_the_homes_parent_are_refused(
 
 
 @pytest.mark.slow
-def test_a_second_run_takes_over_the_first_runs_share(tmp_path: Path) -> None:
-    first = Run(
-        {"shared": [{"path": "/shared", "access": "rw"}]},
-        {
-            "a-1": [("bash", "echo one > /shared/f && mkdir /shared/d")],
-            "a-2": [("bash", "echo two >> /shared/f && touch /shared/d/g")],
-        },
-    )
-    # an ACL that grants the first run's group write, which a ro share must remove
-    grant = "setfacl -m g:inspect-swarm:rw /shared/f"
+def test_a_second_swarm_with_users_isolation_in_a_sample_is_refused(
+    tmp_path: Path,
+) -> None:
+    rw = {"shared": [{"path": "/shared", "access": "rw"}]}
     cases = {
-        "rw": Case(
+        "second": Case(
             runs=[
-                first,
+                Run(rw, {"a-1": [("bash", "echo one > /shared/f")]}),
                 Run(
-                    {"shared": [{"path": "/shared", "access": "rw"}]},
-                    {
-                        "b-1": [
-                            ("bash", "echo three >> /shared/f && echo b > /shared/b")
-                        ],
-                        "b-2": [
-                            (
-                                "bash",
-                                "echo four >> /shared/f && echo c >> /shared/b && cat /shared/f",
-                            )
-                        ],
-                    },
+                    rw,
+                    {"b-1": [("bash", "echo two >> /shared/f")]},
+                    after="cat /shared/f && getent passwd swarm-b-1",
                 ),
             ]
-        ),
-        "ro": Case(
-            runs=[
-                first,
-                Run(
-                    {"shared": [{"path": "/shared", "access": "ro"}]},
-                    {
-                        "b-1": [
-                            ("bash", "echo three >> /shared/f"),
-                            ("bash", "touch /shared/d/h"),
-                            ("bash", "rm /shared/d/g"),
-                            ("bash", "cat /shared/f"),
-                        ]
-                    },
-                    before=grant,
-                ),
-            ]
-        ),
+        )
     }
     _eval(tmp_path, cases)
-    assert _ok(cases["rw"].results["b-2"][0]) == "one\ntwo\nthree\nfour"
-    append, create, remove, read = cases["ro"].results["b-1"]
-    for result in (append, create, remove):
-        _refused(result)
-    assert _ok(read) == "one\ntwo"
+    results = cases["second"].results
+    [error] = results["error"]
+    assert error.startswith(
+        "users isolation sets up a sandbox once per sample, and another swarm with users isolation in this sample has set up sandbox 'default', or tried to."
+    ), error
+    # the second made no user and its member did not run
+    assert results["after"] == ["one\n"]
+    assert "b-1" not in results
+
+
+@pytest.mark.slow
+def test_an_input_mounted_read_only_is_shared_as_it_is(tmp_path: Path) -> None:
+    # one volume, mounted read-write at /seed, where the sample's setup fills it, and
+    # read-only at the share; root-owned, with no ACL or hard link
+    ro = {"shared": [{"path": "/data", "access": "ro"}]}
+    seed = "mkdir /seed/dir && echo data > /seed/dir/f && chmod 755 /seed /seed/dir"
+    read = "cat /data/dir/f && stat -c '%a %U %G' /data /data/dir /data/dir/f"
+    cases = {
+        "safe": Case(
+            runs=[
+                Run(
+                    ro,
+                    {"w-1": [("bash", read), ("bash", "touch /data/new")], "w-2": []},
+                )
+            ],
+            setup=f"{seed} && chmod 644 /seed/dir/f",
+        ),
+        # a mode setup must change, which it cannot on a read-only filesystem
+        "private-file": Case(
+            runs=[Run(ro, {"w-1": [], "w-2": []})],
+            setup=f"{seed} && chmod 600 /seed/dir/f",
+            error="users isolation could not set up sandbox 'default': users isolation could not change the modes of the files in /data",
+        ),
+    }
+    _eval(
+        tmp_path,
+        cases,
+        compose_extra="    volumes:\n      - input:/seed\n      - input:/data:ro\nvolumes:\n  input:\n",
+    )
+    read_out, create = cases["safe"].results["w-1"]
+    assert _ok(read_out).splitlines() == [
+        "data",
+        "755 root root",
+        "755 root root",
+        "644 root root",
+    ]
+    assert "Read-only file system" in _ok(create), create
 
 
 @pytest.mark.slow
@@ -571,7 +581,7 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
         "named-acl-on-a-file": Case(
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
             setup="mkdir /shared && touch /shared/existing && setfacl -m u:61003:r-- /shared/existing",
-            error=f"{refused}users isolation does not support ACL entries it did not set in a shared directory: /shared/existing: user:61003:r--",
+            error=f"{refused}users isolation does not support ACLs in a shared directory: /shared/existing: user:61003:r--",
         ),
         "named-default-acl": Case(
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
@@ -581,7 +591,7 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
         "default-owner-acl": Case(
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
             setup="mkdir -p /shared/inherited && setfacl -d -m u::r-x /shared/inherited",
-            error=f"{refused}users isolation does not support ACL entries it did not set in a shared directory: /shared/inherited: default:user::r-x",
+            error=f"{refused}users isolation does not support ACLs in a shared directory: /shared/inherited: default:user::r-x",
         ),
         "missing-share-under-acl": Case(
             runs=[Run({"shared": [{"path": "/work/shared", "access": "rw"}]}, idle)],
@@ -690,22 +700,28 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
 def test_files_removed_while_setup_scans_do_not_refuse_it(tmp_path: Path) -> None:
     # processes that keep creating and removing files under a scanned root, as the
     # sandbox tools' request files or a process an earlier member left running do; a
-    # scan meets a removed file about one time in five, so the case sets up eight runs
+    # scan meets a removed file about one time in five, so eight samples set up with it
     churn = " ".join(
         f"nohup sh -c 'while :; do mkdir -p /tmp/churn-{d}; i=0;"
         f" while [ $i -lt 300 ]; do : > /tmp/churn-{d}/$i; i=$((i+1)); done;"
         f" rm -rf /tmp/churn-{d}; done' >/dev/null 2>&1 &"
         for d in "abcdefgh"
     )
-    runs = [Run({"shared": []}, {f"c{i}": []}) for i in range(8)]
-    runs[0].before = churn
+    cases = {
+        f"churn-{i}": Case(runs=[Run({"shared": []}, {"w-1": []}, before=churn)])
+        for i in range(8)
+    }
     # a removed entry reported in the image's own language, which setup reads in C
-    localized = Run(
-        {"shared": []}, {"w-1": []}, before=_failing("find", "*-uid*", _REMOVED)
+    cases["localized"] = Case(
+        runs=[
+            Run(
+                {"shared": []}, {"w-1": []}, before=_failing("find", "*-uid*", _REMOVED)
+            )
+        ]
     )
     _eval(
         tmp_path,
-        {"churn": Case(runs=runs), "localized": Case(runs=[localized])},
+        cases,
         compose_extra="    environment:\n      LANG: de_DE.UTF-8\n      LC_ALL: de_DE.UTF-8\n",
     )
 

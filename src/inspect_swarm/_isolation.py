@@ -3,7 +3,7 @@ import re
 import weakref
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import anyio
@@ -77,6 +77,7 @@ def users(
     - The sandbox must let commands run as root and as other users: Docker, or Kubernetes with a root container. The `local` sandbox is refused.
     - The image needs `useradd` and `groupadd` (package `passwd`) and GNU `find`; with any share, also `setfacl` and `getfacl` (package `acl`), which the default Inspect image and `python:3.12-bookworm` lack.
     - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, hard-linked files in a share, and mounts inside a share or under the homes' parent are refused.
+    - One swarm with users isolation per sandbox in a sample. Another is refused, whether it runs after the first, beside it, in a subtask or in a fork.
     - Members are not root: they cannot install system packages or write system directories. Tasks that need root while the members work are unsuitable.
     - Custom tools that call `sandbox().exec()` directly run as the sandbox's default user, usually root, unless they pass the member's user themselves. `computer()`, `web_browser()` and `skill()` raise inside the scope, and so do tools built with another `user`.
     - Bridged members (inspect_swe agents) need inspect_ai and inspect_swe versions with bridge support for users isolation, which they do not have yet.
@@ -292,9 +293,9 @@ fail() { printf '%s\n' "$*" >&2; exit 3; }
 # exist, and which ids in the window are taken, by a passwd or group entry or by the
 # owner or group of a file on any filesystem the homes, shares or world-writable
 # directories are on. Setup does not reconcile permission state it did not make, so it
-# refuses ACL entries other than its own in a share or on the homes' parent, a hard-
-# linked file in a share, and a mount inside a share or under the homes' parent, whose
-# files it would not reach.
+# refuses any ACL in a share or on the homes' parent, a hard-linked file in a share,
+# and a mount inside a share or under the homes' parent, whose files it would not
+# reach.
 # $1 group, $2 first id, $3 last id, $4 1 when there are shares, $5 the homes' parent,
 # then the roots, `--`, and each share's access and path.
 _PROBE = (
@@ -309,7 +310,6 @@ find / -maxdepth 0 -writable -printf '' >/dev/null 2>&1 || fail "users isolation
 if [ "$acl" = 1 ]; then
   command -v setfacl >/dev/null 2>&1 && command -v getfacl >/dev/null 2>&1 || fail "users isolation needs setfacl and getfacl in the sandbox for shared directories (package acl)"
 fi
-gid=$(awk -F: -v g="$group" '$1 == g { print $3 }' /etc/group) || fail "users isolation could not read /etc/group"
 dir=$(mktemp -d) || fail "users isolation could not create a temporary directory"
 trap 'rm -rf "$dir"' EXIT
 
@@ -350,27 +350,20 @@ mount_inside() {
   ' /proc/self/mountinfo
 }
 
-# the first ACL entry in getfacl's output (-n -p -E) that setup did not write: in an
-# access ACL, a named entry other than group $1's; in a default ACL, anything but
-# user::rwx, group $1 with rwx, mask::rwx and the group and other classes
+# the first ACL entry in getfacl's output (-n -p -E --skip-base) beyond the owner,
+# group and other classes: a named entry in an access or default ACL, or else a file's
+# first default entry
 foreign_acl() {
-  awk -v g="$1" '
+  awk '
     function finish() {
-      if (file != "" && defaults && !ours) { print file ": a default ACL setup did not write"; done = 1; exit }
+      if (first != "") { print first; done = 1; exit }
     }
-    /^# file: / { finish(); file = substr($0, 9); defaults = 0; ours = 0; next }
+    /^# file: / { finish(); file = substr($0, 9); first = ""; next }
     /^#/ || NF == 0 { next }
     {
-      n = split($0, f, ":")
-      if (f[1] == "default") { d = 1; t = f[2]; q = f[3]; m = f[4] } else { d = 0; t = f[1]; q = f[2]; m = f[3] }
-      bad = 0
-      if (d) {
-        defaults = 1
-        if (t == "user") bad = (q != "" || m != "rwx")
-        else if (t == "group" && q != "") { if (g != "" && q == g && m == "rwx") ours = 1; else bad = 1 }
-        else if (t == "mask") bad = (m != "rwx")
-      } else if (q != "" && !(t == "group" && g != "" && q == g)) bad = 1
-      if (bad) { print file ": " $0; done = 1; exit }
+      split($0, f, ":")
+      if (f[1] == "default") { q = f[3]; if (first == "") first = file ": " $0 } else q = f[2]
+      if (q != "") { print file ": " $0; done = 1; exit }
     }
     END { if (!done) finish() }
   '
@@ -421,8 +414,8 @@ while [ $# -gt 0 ]; do
   [ -z "$m" ] || fail "users isolation does not support a mount inside the shared directory $share, as at $m"
   acls=$(getfacl -R -P -n -p -E --skip-base -- "$share" 2>&1) \
     || fail "users isolation could not read the ACLs in $share: $(printf '%s' "$acls" | grep -v '^#' | head -n 1)"
-  bad=$(printf '%s\n' "$acls" | foreign_acl "$gid") || fail "users isolation could not check the ACLs in $share"
-  [ -z "$bad" ] || fail "users isolation does not support ACL entries it did not set in a shared directory: $bad; remove them (setfacl -b)"
+  bad=$(printf '%s\n' "$acls" | foreign_acl) || fail "users isolation could not check the ACLs in $share"
+  [ -z "$bad" ] || fail "users isolation does not support ACLs in a shared directory: $bad; remove them (setfacl -b)"
   # setup changes each entry's inode, which a hard link shares with a name outside
   scan "users isolation could not scan the files in $share" \
     -P "$share" -xdev -ignore_readdir_race ! -type d -links +1 -printf '%p has %n links' -quit
@@ -480,16 +473,16 @@ check_chain() {
 }
 """
 
-# Creates the group, the users and their homes, and prepares the shares.
-# $1 group, $2 its gid, $3 1 to create it, $4 peers, $5 the homes' parent, $6 the uids
-# of every member user in the sandbox (this run's and earlier runs'), then
-# `user <name> <uid> <home>` and `share <rw|ro> <path>` items.
+# Creates the group, the users and their homes, and prepares the shares. It runs once
+# per sandbox, before any member exists, so no member can change a share while it does.
+# $1 group, $2 its gid, $3 peers, $4 the homes' parent, then `user <name> <uid> <home>`
+# and `share <rw|ro> <path>` items.
 _SETUP = (
     _PRELUDE
     + _CHECKS
     + r"""
-group=$1 gid=$2 newgroup=$3 peers=$4 parent=$5 ids=$6
-shift 6
+group=$1 gid=$2 peers=$3 parent=$4
+shift 4
 
 check_paths() {
   check_chain "$parent" "a member's home"
@@ -564,21 +557,13 @@ rw_share() {
   fi
 }
 
+# no member owns an entry or is in its group, and the probe refused ACLs, so only the
+# other bits need a change: no w, and r, and x where chmod's X gives it. Entries that
+# have them already are left alone, so an input mounted read-only passes.
 ro_share() {
   s=$1
-  set --
-  for id in $ids; do
-    [ $# -eq 0 ] || set -- "$@" -o
-    set -- "$@" -uid "$id"
-  done
-  if [ $# -gt 0 ]; then
-    find -P "$s" -xdev \( "$@" \) -exec chown -h 0 {} + || fail "users isolation could not change the owner of the members' files in $s"
-  fi
-  set -- -group "$group"
-  for id in $ids; do set -- "$@" -o -gid "$id"; done
-  find -P "$s" -xdev \( "$@" \) -exec chgrp -h 0 {} + || fail "users isolation could not change the group of the members' files in $s"
-  find -P "$s" -xdev ! -type l -exec setfacl -P -b {} + || fail "users isolation could not remove the ACLs in $s"
-  find -P "$s" -xdev ! -type l -exec chmod o-w,o+rX {} + || fail "users isolation could not change the modes of the files in $s"
+  find -P "$s" -xdev ! -type l \( -perm /o=w -o ! -perm -o=r -o \( -type d -o -perm /111 \) ! -perm -o=x \) \
+    -exec chmod o-w,o+rX {} + || fail "users isolation could not change the modes of the files in $s"
 }
 
 shares() {
@@ -593,9 +578,7 @@ shares() {
 }
 
 check_paths "$@"
-if [ "$newgroup" = 1 ]; then
-  groupadd -g "$gid" "$group" || fail "users isolation could not create the group $group"
-fi
+groupadd -g "$gid" "$group" || fail "users isolation could not create the group $group"
 add_users "$@"
 shares "$@"
 """
@@ -708,15 +691,21 @@ async def setup_isolation(
         raise RuntimeError(
             "users isolation needs a sandbox that can run commands as other users; 'local' runs everything as the host user."
         )
+    # once per sandbox: a later setup would rewrite shares that the members of the first
+    # can change while it runs. The claim comes before any await, so of two concurrent
+    # setups the second is refused.
+    provider = _provider(env)
+    if provider in _SET_UP:
+        raise RuntimeError(
+            f"users isolation sets up a sandbox once per sample, and another swarm with users isolation in this sample has set up sandbox {env_name!r}, or tried to. Run the other swarms without isolation, or give them another sandbox."
+        )
+    _SET_UP.add(provider)
     access = await resolve_root_access(env)
     if access.state != "usable":
         raise RuntimeError(
             f"users isolation needs root in sandbox {env_name!r} to create users; its root access is {access.state} ({access.reason})."
         )
-    record = _record(env)
-    # one setup at a time in a sandbox, so that each sees what the one before made
-    async with record.lock:
-        return await _setup(env, env_name, isolation, names, record)
+    return await _setup(env, env_name, isolation, names)
 
 
 async def _setup(
@@ -724,10 +713,7 @@ async def _setup(
     env_name: str,
     isolation: UserIsolation,
     names: Sequence[str],
-    record: "_Record",
 ) -> dict[str, MemberIdentity]:
-    recorded_gid = record.gid
-    recorded_users = record.users
     users_ = [(name, member_user(name), member_home(isolation, name)) for name in names]
     parent = posixpath.dirname(isolation.home)
 
@@ -753,10 +739,8 @@ async def _setup(
         "--",
         *(item for share in isolation.shared for item in (share.access, share.path)),
     )
-    taken: set[int] = set(recorded_users.values())
-    if recorded_gid is not None:
-        taken.add(recorded_gid)
-    existing_gid: int | None = None
+    taken: set[int] = set()
+    existing_group = False
     existing_users: set[str] = set()
     lines = probe.stdout.splitlines()
     if lines[:1] != ["begin"] or lines[-1:] != ["end"]:
@@ -767,21 +751,21 @@ async def _setup(
         kind, _, value = line.partition(" ")
         if kind == "id" and value.isdigit():
             taken.add(int(value))
-        elif kind == "groupname" and value.isdigit():
-            existing_gid = int(value)
+        elif kind == "groupname":
+            existing_group = True
         elif kind == "username":
             existing_users.add(value)
-    if existing_gid is not None and existing_gid != recorded_gid:
+    if existing_group:
         raise RuntimeError(
-            f"users isolation: the group {_GROUP} already exists in sandbox {env_name!r}, and no swarm in this sample made it."
+            f"users isolation: the group {_GROUP} already exists in sandbox {env_name!r}. Users isolation creates it, so the image must not have it."
         )
     for _, user, _ in users_:
         if user in existing_users:
             raise RuntimeError(
-                f"users isolation: the user {user} already exists in sandbox {env_name!r}. Member names must be unique across the swarm runs in a sample, and the image must not have users named swarm-<member>."
+                f"users isolation: the user {user} already exists in sandbox {env_name!r}. Users isolation creates its members' users, so the image must not have users named swarm-<member>."
             )
     free = (i for i in range(_FIRST_ID, _LAST_ID + 1) if i not in taken)
-    gid = existing_gid if existing_gid is not None else next(free, None)
+    gid = next(free, None)
     uids = [next(free, None) for _ in users_]
     if gid is None or None in uids:
         raise RuntimeError(
@@ -792,7 +776,6 @@ async def _setup(
         for (name, user, home), uid in zip(users_, uids, strict=True)
     }
 
-    member_ids = [*recorded_users.values(), *(i.uid for i in identities.values())]
     items: list[str] = []
     for identity in identities.values():
         items += ["user", identity.user, str(identity.uid), identity.home]
@@ -804,14 +787,10 @@ async def _setup(
         _SETUP,
         _GROUP,
         str(gid),
-        "1" if existing_gid is None else "0",
         isolation.peers,
         parent,
-        " ".join(str(i) for i in member_ids),
         *items,
     )
-    record.gid = gid
-    record.users = {**recorded_users, **{i.user: i.uid for i in identities.values()}}
 
     await _self_test(env, env_name, isolation, list(identities.values()))
     return identities
@@ -981,24 +960,14 @@ def _is_local(env: SandboxEnvironment) -> bool:
     return True
 
 
-# What the swarm made in a sandbox, the group's gid and each user's uid, so that a later
-# swarm run in the sample accepts them, and the lock its setups take. Kept with the
-# sandbox's object in the host process rather than in the store, which a subtask or
-# fork has its own copy of: every run in the sample that uses the sandbox shares it.
-@dataclass
-class _Record:
-    lock: anyio.Lock = field(default_factory=anyio.Lock)
-    gid: int | None = None
-    users: dict[str, int] = field(default_factory=lambda: {})
+# The sandboxes users isolation has set up, or started to. Kept with the sandbox's
+# object in the host process rather than in the store, which a subtask or fork has its
+# own copy of: every swarm run in the sample that uses the sandbox sees it.
+_SET_UP: "weakref.WeakSet[SandboxEnvironment]" = weakref.WeakSet()
 
 
-_RECORDS: "weakref.WeakKeyDictionary[SandboxEnvironment, _Record]" = (
-    weakref.WeakKeyDictionary()
-)
-
-
-def _record(env: SandboxEnvironment) -> _Record:
-    # the provider's object, behind the sample's event-recording proxy
+# the provider's object, behind the sample's event-recording proxy
+def _provider(env: SandboxEnvironment) -> SandboxEnvironment:
     while (inner := env.as_type(SandboxEnvironment)) is not env:
         env = inner
-    return _RECORDS.setdefault(env, _Record())
+    return env

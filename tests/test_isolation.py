@@ -48,16 +48,11 @@ class IsolationStub(SandboxEnvironment):
         fail_on: str = "add_users()",
         probe: str = "begin\nend\n",
         stall_on: str | None = None,
-        probes_together: int = 1,
     ) -> None:
         super().__init__()
-        # the group and users setup made, which later probes report
+        # the group and users setup made
         self.group: int | None = None
         self.users: dict[str, int] = {}
-        # the probe waits, for a while, until this many probes are running at once
-        self.probes_together = probes_together
-        self.probes_running = 0
-        self.probes_met: anyio.Event | None = None
         self.stall_on = stall_on
         self.stall_timeouts: list[int | None] = []
         self.calls: list[tuple[str | None, str, list[str]]] = []
@@ -89,23 +84,7 @@ class IsolationStub(SandboxEnvironment):
                 True, 0, _ROOT_PROBE.replace("Uid:\t0", f"Uid:\t{self.uid}"), ""
             )
         if "echo begin" in cmd[2]:
-            self.probes_met = self.probes_met or anyio.Event()
-            self.probes_running += 1
-            if self.probes_running >= self.probes_together:
-                self.probes_met.set()
-            with anyio.move_on_after(0.5):
-                await self.probes_met.wait()
-            self.probes_running -= 1
-            made = "".join(
-                [
-                    *([] if self.group is None else [f"groupname {self.group}\n"]),
-                    *(f"username {user}\n" for user in self.users),
-                    *(f"id {i}\n" for i in [self.group, *self.users.values()] if i),
-                ]
-            )
-            return ExecResult(
-                True, 0, self.probe.replace("begin\n", f"begin\n{made}"), ""
-            )
+            return ExecResult(True, 0, self.probe, "")
         if "reserve()" in cmd[2]:
             # the probes print the directories they reserve, in the member's home and in
             # each rw share, as mktemp names them; a failing one reserves only the first
@@ -124,13 +103,8 @@ class IsolationStub(SandboxEnvironment):
         if self.fail is not None and self.fail_on in cmd[2]:
             return self.fail
         if "add_users()" in cmd[2]:
-            # setup: $2 the gid, $3 1 to create the group, then the users from $7
-            gid, create, items = int(cmd[5]), cmd[6] == "1", cmd[10:]
-            if create and self.group is not None:
-                return ExecResult(
-                    False, 9, "", "groupadd: group 'inspect-swarm' already exists\n"
-                )
-            self.group = gid
+            # setup: $2 the gid, then the users from $5
+            self.group, items = int(cmd[5]), cmd[8:]
             while items:
                 if items[0] == "user":
                     self.users[items[1]] = int(items[2])
@@ -308,10 +282,8 @@ async def test_each_member_runs_as_its_user_after_setup_and_self_test() -> None:
     assert args == [
         "inspect-swarm",
         "61000",
-        "1",
         "none",
         "/scratch",
-        "61001 61002",
         *("user", "swarm-w-1", "61001", "/scratch/w-1"),
         *("user", "swarm-w-2", "61002", "/scratch/w-2"),
         *("share", "rw", "/shared"),
@@ -346,6 +318,20 @@ async def test_members_of_a_swarm_without_isolation_run_as_the_default_user() ->
             RuntimeError,
             "users isolation: the id scan's output in sandbox 'default' came back incomplete",
             id="truncated-probe",
+        ),
+        pytest.param(
+            users(),
+            lambda: IsolationStub(probe="begin\ngroupname 1000\nend\n"),
+            RuntimeError,
+            "users isolation: the group inspect-swarm already exists in sandbox 'default'. Users isolation creates it, so the image must not have it.",
+            id="existing-group",
+        ),
+        pytest.param(
+            users(),
+            lambda: IsolationStub(probe="begin\nusername swarm-w-2\nend\n"),
+            RuntimeError,
+            "users isolation: the user swarm-w-2 already exists in sandbox 'default'. Users isolation creates its members' users, so the image must not have users named swarm-<member>.",
+            id="existing-user",
         ),
         pytest.param(
             users(),
@@ -708,32 +694,22 @@ def _team(
     )
 
 
-@pytest.mark.anyio
-async def test_concurrent_runs_in_one_sandbox_set_it_up_in_turn() -> None:
-    seen: dict[str, dict[str, str | None]] = {}
-    # each probe waits for the other: run together, both would find no group and
-    # both would create it
-    stub = IsolationStub(probes_together=2)
-    with environments(default=stub):
-        async with sample():
-            async with anyio.create_task_group() as tg:
-                for name in ("a", "b"):
-                    tg.start_soon(run, _team(seen, name), "task")
-    assert stub.group == 61000
-    assert sorted(stub.users) == ["swarm-a-1", "swarm-a-2", "swarm-b-1", "swarm-b-2"]
-    assert len(set(stub.users.values())) == 4
+_ONCE = "users isolation sets up a sandbox once per sample, and another swarm with users isolation in this sample has set up sandbox 'default', or tried to."
 
 
 @pytest.mark.anyio
-async def test_runs_in_subtasks_forks_and_their_parent_share_what_setup_made() -> None:
+@pytest.mark.parametrize("how", ["after", "subtask", "fork"])
+async def test_a_second_swarm_with_users_isolation_in_a_sandbox_is_refused(
+    how: str,
+) -> None:
     # each subtask and each fork has a store of its own; the sandbox is the sample's
     seen: dict[str, dict[str, str | None]] = {}
     stub = IsolationStub()
 
     @subtask
-    async def child(name: str) -> str:
-        await run(_team(seen, name), "task")
-        return name
+    async def child() -> str:
+        await run(_team(seen, "b"), "task")
+        return "b"
 
     async def generate(state: TaskState, *args: Any, **kwargs: Any) -> TaskState:
         return state
@@ -748,18 +724,52 @@ async def test_runs_in_subtasks_forks_and_their_parent_share_what_setup_made() -
     with environments(default=stub):
         async with sample():
             set_task_generate(generate)
-            await child("a")
-            await child("b")
-            await fork(state, as_solver(_team(seen, "c")))
-            await fork(state, as_solver(_team(seen, "d")))
-            await run(_team(seen, "e"), "task")
-    assert stub.group == 61000
-    assert len(stub.users) == 10
-    assert {s["user"] for s in seen.values()} == set(stub.users)
+            await run(_team(seen, "a"), "task")
+            calls = len(stub.calls)
+            with pytest.raises(RuntimeError) as raised:
+                if how == "after":
+                    await run(_team(seen, "b"), "task")
+                elif how == "subtask":
+                    await child()
+                else:
+                    await fork(state, as_solver(_team(seen, "b")))
+    assert str(raised.value).startswith(_ONCE)
+    # refused before it runs anything in the sandbox
+    assert len(stub.calls) == calls
+    assert sorted(stub.users) == ["swarm-a-1", "swarm-a-2"]
+    assert sorted(seen) == ["a-1", "a-2"]
 
 
 @pytest.mark.anyio
-async def test_concurrent_runs_in_two_sandboxes_keep_what_each_made() -> None:
+async def test_one_of_two_swarms_starting_together_in_a_sandbox_is_refused() -> None:
+    seen: dict[str, dict[str, str | None]] = {}
+    stub = IsolationStub()
+    errors: dict[str, str] = {}
+
+    async def attempt(name: str) -> None:
+        try:
+            await run(_team(seen, name), "task")
+        except RuntimeError as ex:
+            errors[name] = str(ex)
+
+    with environments(default=stub):
+        async with sample():
+            async with anyio.create_task_group() as tg:
+                for name in ("a", "b"):
+                    tg.start_soon(attempt, name)
+    [(refused, error)] = errors.items()
+    assert error.startswith(_ONCE)
+    made = "b" if refused == "a" else "a"
+    assert sorted(stub.users) == [f"swarm-{made}-1", f"swarm-{made}-2"]
+    assert sorted(seen) == [f"{made}-1", f"{made}-2"]
+    # one root-access check, one probe and one setup in the sandbox
+    scripts = [script for _, script, _ in stub.calls]
+    for part in ("/proc/self/status", "echo begin", "add_users()"):
+        assert sum(part in script for script in scripts) == 1
+
+
+@pytest.mark.anyio
+async def test_swarms_in_two_sandboxes_each_set_up_their_own() -> None:
     seen: dict[str, dict[str, str | None]] = {}
     stubs = {"default": IsolationStub(), "other": IsolationStub()}
     with environments(**stubs):
@@ -767,21 +777,8 @@ async def test_concurrent_runs_in_two_sandboxes_keep_what_each_made() -> None:
             async with anyio.create_task_group() as tg:
                 for name, sandbox in (("a", "default"), ("b", "other")):
                     tg.start_soon(run, _team(seen, name, sandbox), "task")
-            # each takes over the group the first run in its sandbox made
-            await run(_team(seen, "c", "default"), "task")
-            await run(_team(seen, "d", "other"), "task")
-    assert sorted(stubs["default"].users) == [
-        "swarm-a-1",
-        "swarm-a-2",
-        "swarm-c-1",
-        "swarm-c-2",
-    ]
-    assert sorted(stubs["other"].users) == [
-        "swarm-b-1",
-        "swarm-b-2",
-        "swarm-d-1",
-        "swarm-d-2",
-    ]
+    assert sorted(stubs["default"].users) == ["swarm-a-1", "swarm-a-2"]
+    assert sorted(stubs["other"].users) == ["swarm-b-1", "swarm-b-2"]
 
 
 @pytest.mark.anyio
