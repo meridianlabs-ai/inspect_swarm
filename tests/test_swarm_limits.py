@@ -15,17 +15,21 @@ from inspect_ai.event import SwarmEvent
 from inspect_ai.log import EvalSample
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import (
+    ChatMessage,
     ChatMessageTool,
     ChatMessageUser,
+    CompactionNative,
+    GenerateConfig,
     Model,
     ModelCost,
     ModelInfo,
     ModelOutput,
+    ModelUsage,
     execute_tools,
     get_model,
     set_model_info,
 )
-from inspect_ai.tool import Tool, tool
+from inspect_ai.tool import Tool, ToolInfo, tool
 from inspect_ai.util import (
     Limit,
     LimitExceededError,
@@ -1528,3 +1532,98 @@ async def test_overlapping_bridged_calls_keep_a_sample_limit_after_a_cap() -> No
     [line] = ledger.members
     # the sample limit it raised is a foreign error, as for a native member
     assert line.bridged and line.status == "errored"
+
+
+# what one native compaction of the cli's conversation uses
+COMPACTION_TOKENS = 30
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "limits,budget,expected,generations",
+    [
+        # the first request's compaction crosses each token limit, so it makes no
+        # generation
+        pytest.param([], Budget(tokens=25), "swarm_cap", 0, id="cap"),
+        # a 25-token share each
+        pytest.param([], Budget(tokens=50, split="equal"), "share", 0, id="share"),
+        pytest.param(
+            [token_limit(25)], Budget(), "member_limit:token", 0, id="member-token"
+        ),
+        # the member's two input messages fill it; the bridge tracking the first
+        # request's reply exceeds it
+        pytest.param(
+            [message_limit(2)],
+            Budget(),
+            "member_limit:message",
+            1,
+            id="member-message",
+        ),
+    ],
+)
+async def test_a_retrying_bridged_member_spends_nothing_after_its_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    limits: list[Limit],
+    budget: Budget,
+    expected: str,
+    generations: int,
+) -> None:
+    script = Script()
+    model = scripted_model(script)
+    compactions = 0
+
+    async def compact(
+        input: list[ChatMessage],
+        tools: list[ToolInfo],
+        config: GenerateConfig,
+        instructions: str | None = None,
+    ) -> tuple[list[ChatMessage], ModelUsage]:
+        nonlocal compactions
+        compactions += 1
+        usage = ModelUsage(
+            input_tokens=10, output_tokens=20, total_tokens=COMPACTION_TOKENS
+        )
+        return [ChatMessageUser(content="compacted")], usage
+
+    # the mock model compacts natively
+    monkeypatch.setattr(model.api, "compact", compact)
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("cli")
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    # a split needs a second member, which is never started
+    sibling = [member(sleeper(), name="sibling")] if budget.split != "pool" else []
+    stop = await run_swarm(
+        swarm(
+            [
+                member(
+                    cli(
+                        model,
+                        calls=None,
+                        compaction=CompactionNative(threshold=3),
+                        retries=2,
+                    ),
+                    name="cli",
+                    bridged=True,
+                    limits=limits,
+                ),
+                *sibling,
+            ],
+            controller=_controller(
+                run, f"limits_test_bridged_retry_{expected.replace(':', '_')}"
+            ),
+            channels=[],
+            budget=budget,
+        )
+    )
+    assert statuses(stop)["cli"] == expected
+    # the CLI's two retries after the limit's error reply made no model call:
+    # neither a compaction nor a generation
+    assert (compactions, script.calls) == (1, generations)
+    line = next(m for m in _written_ledger(stop.transcript).members if m.name == "cli")
+    assert line.meter.usage.total_tokens == (
+        COMPACTION_TOKENS + generations * TOKENS_PER_CALL
+    )

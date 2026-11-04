@@ -27,6 +27,7 @@ from inspect_ai.log._transcript import Transcript, _transcript
 from inspect_ai.model import (
     ChatMessage,
     ChatMessageUser,
+    CompactionStrategy,
     GenerateConfig,
     Model,
     ModelCost,
@@ -150,31 +151,42 @@ async def bridged_generate(model: Model, messages: list[ChatMessage]) -> ModelOu
 
 
 @agent
-def cli(model: Model, calls: int | None = 1, requests: int = 1) -> Agent:
-    """A CLI agent run as inspect_ai's sandbox bridge runs one: `calls` turns (`None`: until stopped) of `requests` overlapping generations, each served through the bridge service's error forwarding. A limit a generation reaches is answered with an error reply, on which the CLI exits, and the bridge then raises the limit it kept."""
+def cli(
+    model: Model,
+    calls: int | None = 1,
+    requests: int = 1,
+    compaction: CompactionStrategy | None = None,
+    retries: int = 0,
+) -> Agent:
+    """A CLI agent run as inspect_ai's sandbox bridge runs one: `calls` turns (`None`: until stopped) of `requests` overlapping generations, each served through the bridge service's error forwarding, compacted with `compaction` and tracked into the agent's state as the bridge's dialects track it. A limit a generation reaches is answered with an error reply, after which the CLI makes `retries` more requests, one at a time, and exits; the bridge then raises the limit it kept."""
 
     async def execute(state: AgentState) -> AgentState:
         bridge = SandboxAgentBridge(
             state=state,
             filter=None,
             retry_refusals=None,
-            compaction=None,
+            compaction=compaction,
             port=13131,
             model=None,
         )
 
+        # the CLI's own conversation, which it sends with each request
+        conversation = list(state.messages)
+
         async def generate(
             json_data: dict[str, JsonValue], headers: dict[str, str] | None = None
         ) -> dict[str, JsonValue]:
-            state.output, _ = await bridge_generate(
+            output, _ = await bridge_generate(
                 bridge,
                 model,
-                state.messages,
+                conversation,
                 [],
                 None,
                 GenerateConfig(),
                 requested_model=None,
             )
+            # the bridge's dialects track the agent's state from each generation
+            await bridge._track_state(conversation, output)  # pyright: ignore[reportPrivateUsage]
             return {}
 
         forward = _forward_provider_errors(generate, bridge)
@@ -189,8 +201,10 @@ def cli(model: Model, calls: int | None = 1, requests: int = 1) -> Agent:
                 for _ in range(requests):
                     tg.start_soon(request)
             if any(PROVIDER_ERROR_KEY in reply for reply in replies):
+                for _ in range(retries):
+                    await request()
                 break
-            state.messages.append(state.output.message)
+            conversation.append(state.output.message)
             n += 1
         error = await _error_after_unwind(bridge, None)
         if error is not None:
