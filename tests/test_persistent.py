@@ -362,7 +362,7 @@ async def test_a_wake_once_the_swarm_is_stopping_ends_the_controller_with_the_st
 @pytest.mark.anyio
 async def test_idle_and_member_idle_are_published_together() -> None:
     script = _Recording([_submit("one"), _submit("two")])
-    published: list[tuple[str, bool]] = []
+    published: list[tuple[bool, str, bool]] = []
     yielded: list[Any] = []
 
     async def run(control: SwarmControl) -> StopReason:
@@ -370,13 +370,17 @@ async def test_idle_and_member_idle_are_published_together() -> None:
         a = runtime._lookup("a")  # pyright: ignore[reportPrivateUsage]
         publish_idle = a.gate.publish_idle
 
-        # checked as soon as the gate's publication returns, before the member awaits
-        # again, so no other task can have run in between
+        def holds() -> bool:
+            # an idle member's event is already published
+            seen = [*runtime._queue, *yielded]  # pyright: ignore[reportPrivateUsage]
+            return a.state != "idle" or MemberIdle("a", a.answers - 1, False) in seen
+
+        # checked as the gate's publication starts and as soon as it returns, before
+        # the member awaits again, so no other task can have run in between
         def checked() -> None:
+            before = holds()
             publish_idle()
-            published.append(
-                (a.state, MemberIdle("a", a.answers - 1, False) in runtime._queue)  # pyright: ignore[reportPrivateUsage]
-            )
+            published.append((before, a.state, holds()))
 
         a.gate.publish_idle = checked
         control.start("a")
@@ -388,7 +392,7 @@ async def test_idle_and_member_idle_are_published_together() -> None:
         return "quiescence"
 
     await _run([member(_react(script), name="a", persistent=True)], run)
-    assert published == [("idle", True), ("idle", True)]
+    assert published == [(True, "idle", True), (True, "idle", True)]
     assert yielded == [MemberIdle("a", 0, False), MemberIdle("a", 1, False)]
 
 
