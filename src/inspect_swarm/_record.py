@@ -71,9 +71,6 @@ class MemberResult(BaseModel):
     end_origin: str | None = None
     """Who asked the member to end, when an end request decided how it ended: `operator` for `inspect ctl sample agent stop`, or the origin a caller gave `MemberHandle.end()`. `None` when no end request did, as for a submission, a member limit or the swarm's own stop."""
 
-    withdrawn: bool = False
-    """Whether an end request with origin `operator` withdrew the member's answers, as `inspect ctl sample agent stop` makes, so that none of them can be the swarm's answer. Set from the request, even when something else, such as a member limit, then decides how the member ends."""
-
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""

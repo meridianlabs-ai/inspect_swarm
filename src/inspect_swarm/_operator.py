@@ -27,8 +27,8 @@ _T = TypeVar("_T")
 # the origin of the operator's end requests
 OPERATOR = "operator"
 
-# a stop after the swarm's runtime has ended
-_ENDED = "The swarm has ended, and its members still running are being cancelled."
+# a stop once an error or a cancellation has begun to end the swarm's runtime
+_ENDED = "The swarm is ending after an error or a cancellation, and its members still running are being cancelled."
 
 # pause and resume come with the operator's turn-seam callback
 _NO_PAUSE = "Pausing is not supported yet."
@@ -68,15 +68,12 @@ class SwarmOperator:
         stop_reason: Callable[[], str | None],
         stop: Callable[[str], None],
         in_wait: Callable[[str], bool],
-        settle: Callable[[], None],
         active: Callable[[], bool],
     ) -> None:
         self._stop_reason = stop_reason
         self._stop = stop
-        # recomputes the provisional answer, once a stop withdraws a member's answers
-        self.settle = settle
-        # whether the swarm's runtime is running: false while a swarm that ended
-        # unwinds its members, which are being cancelled
+        # whether the swarm's runtime can take a stop: false once an error or a
+        # cancellation has begun to end it, while it unwinds its members
         self.active = active
         self.in_wait = in_wait
         # set by the run when it registers the group
@@ -364,18 +361,23 @@ class MemberOperator:
             )
         if not self._swarm.active():
             return OperatorOutcome(changed=False, detail=_dry(dry_run, _ENDED))
+        # before the request, which sets an idle member `ending`
+        detail = _stop_detail(m)
         if not dry_run:
             m.end(origin=OPERATOR)
-            self._swarm.settle()
-        return OperatorOutcome(
-            changed=True,
-            detail=_dry(
-                dry_run,
-                "The member ends when it is started."
-                if m.state == "pending"
-                else "The member ends at its next turn boundary, or is cancelled when the swarm's grace period runs out.",
-            ),
-        )
+        return OperatorOutcome(changed=True, detail=_dry(dry_run, detail))
+
+
+# What a stop does to the member, by where it is. A stop ends work only: answers the
+# member has already given stay eligible (decision: Ransom, 2026-11-04).
+def _stop_detail(m: "MemberRun") -> str:
+    if m.state == "pending":
+        return "The member ends when it is started."
+    if m.state == "idle":
+        return "The member is idle: it ends, and its answers are kept."
+    if m.gate.draining:
+        return "The member's agent has returned: it ends once its background work drains, and keeps a submission it returned."
+    return "The member ends at its next turn boundary, or is cancelled when the swarm's grace period runs out."
 
 
 def _refused(reason: str) -> OperatorOutcome:

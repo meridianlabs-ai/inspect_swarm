@@ -39,17 +39,15 @@ def check_final(final: object) -> None:
 
 # Every candidate, in roster order and, within a persistent member, answer order: each
 # answer of a persistent member, whatever its status, and the submission of any other
-# member that ended with one; none of a member the operator stopped.
+# member that ended with one.
 def candidates(members: Sequence[MemberResult]) -> list[Candidate]:
     found: list[Candidate] = []
     for m in members:
         if m.persistent:
-            if m.withdrawn:
-                continue
             found.extend(
                 Candidate(m.name, i, time) for i, time in enumerate(m.answer_times)
             )
-        elif m.submitted and not m.withdrawn:
+        elif m.submitted:
             assert m.time is not None
             found.append(Candidate(m.name, None, m.time))
     return found
@@ -70,8 +68,7 @@ def last(members: Sequence[MemberResult]) -> Candidate | None:
 
 
 # The answer from the members' results so far: the controller's pick when it made one,
-# unless the operator has since stopped that member, else `final`'s rule over the
-# candidates. `final=None` is the default, `first`.
+# else `final`'s rule over the candidates. `final=None` is the default, `first`.
 def answer(
     members: Sequence[MemberResult],
     final: FinalName | None,
@@ -79,9 +76,7 @@ def answer(
     *,
     provisional: bool,
 ) -> FinalRecord:
-    if pick is not None and not any(
-        m.withdrawn for m in members if m.name == pick.member
-    ):
+    if pick is not None:
         return FinalRecord(
             mode="controller",
             member=pick.member,

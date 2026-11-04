@@ -490,13 +490,14 @@ class MemberOutcome:
 # the state the agent returned, inside the member's span when the span was entered. The
 # caller keeps `state`, as as_solver() does, for the output of a member that does not
 # return; when its own loop reached the gate, the loop's state at its last boundary is
-# used instead. An end requested through the gate makes a normal return `stopped`, one
-# requested while its background work drains included; a member ended while pending
-# ends `stopped` as soon as it is started, before any setup. A member whose callbacks never ran because its loop never reached the gate ends
-# `errored` when it produced its ending itself. No error whose
-# source is a swarm node leaves it: a cap becomes a stop of the swarm, and the member's
-# own nodes a status, as does a sourceless custom limit error, which the agent raised
-# to stop itself. Anything else (a foreign error) is raised, without the swarm's
+# used instead. An end requested through the gate makes a normal return `stopped`, and
+# so does one requested while its background work drains unless the agent returned a
+# submission, which is kept; a member ended while pending ends `stopped` as soon as it
+# is started, before any setup. A member whose callbacks never ran because its loop
+# never reached the gate ends `errored` when it produced its ending itself. No error
+# whose source is a swarm node leaves it: a cap becomes a stop of the swarm, and the
+# member's own nodes a status, as does a sourceless custom limit error, which the agent
+# raised to stop itself. Anything else (a foreign error) is raised, without the swarm's
 # leaves, after `end` with `errored`; a cancellation from outside ends the member as
 # `cancelled`.
 async def run_member(
@@ -693,13 +694,10 @@ async def _run_member(
         # reach here
         gate.honoured = True
         return status
-    if (
-        returned
-        and gate.end_origin is not None
-        and status in ("submitted", "unsubmitted")
-    ):
+    if returned and gate.end_origin is not None and status == "unsubmitted":
         # an end requested while its background work drained, checked after the drain
-        # and the member's cleanup, with nothing awaited before its end
+        # and the member's cleanup, with nothing awaited before its end; a submission
+        # the agent returned is kept (decision: Ransom, 2026-11-04)
         gate.honoured = True
         return "stopped"
     return status

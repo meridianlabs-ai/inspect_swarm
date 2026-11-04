@@ -48,9 +48,10 @@ An interrupt loses what the turn was doing. The cancelled tool calls return no r
 - A member held at a turn boundary ends at once, `stopped`.
 - A member in a turn or still setting up ends `stopped` at its next turn boundary. Its next model call is refused. If it is still running after the swarm's grace period (`Budget.grace`), it is cancelled and ends `cancelled`.
 - A member that has not started ends `stopped` as soon as the controller starts it, before its setup and with no model call.
-- A member whose agent has returned and whose background work is still finishing ends `stopped` once that work is done.
+- A member whose agent has returned and whose background work is still finishing ends once that work is done. It keeps its submission; without one, it ends `stopped`.
+- An idle [persistent member](members.qmd#persistent-members) ends `submitted`, with its last answer as its output.
 
-A stopped member's output is never the swarm's answer. A [persistent member](members.qmd#persistent-members) you stop ends `stopped` even when it is idle, and none of its answers can be the swarm's answer, including one the controller already chose. If the controller has not yet read the member's `MemberIdle`, it never gets it. A controller that calls `end(origin="operator")` stops a member the same way. A second `stop`, a stop of a member that has ended, and a stop sent while a swarm that has already ended is cancelling its members change nothing. `stop` works for every member, bridged ones included.
+`stop` ends work only. Answers a member has already given stay: a persistent member's earlier answers and a submission returned before the stop can still be the swarm's answer, under the controller's `final` rule or its choice, as when a controller ends the member. A member stopped before it answered has no answer. A second `stop`, a stop of a member that has ended, and a stop sent while the swarm is ending after an error or a cancellation change nothing. `stop` works for every member, bridged ones included.
 
 ## Stopping the swarm
 

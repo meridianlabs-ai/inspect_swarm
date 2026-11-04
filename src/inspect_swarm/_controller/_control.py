@@ -53,7 +53,7 @@ from .._metrics import (
     gate_checks,
     swarm_metrics,
 )
-from .._operator import OPERATOR, SwarmOperator
+from .._operator import SwarmOperator
 from .._record import (
     MemberResult,
     MemberState,
@@ -144,9 +144,7 @@ class MemberHandle(Protocol):
     def end(self, *, origin: str) -> None:
         """End the member `stopped`, with the reason `ended by <origin>`.
 
-        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary. A pending member ends as soon as it is started, before its setup and with no model call. If the member is still running when the swarm's grace period has passed since the request, its turn, setup or cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output, and so does one whose background work is draining after its agent returned (the drain keeps its own grace period). A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
-
-        An end with origin `operator` is an operator stop, as `inspect ctl sample agent stop` makes: none of the member's answers can be the swarm's answer, and a persistent member ends `stopped` even when idle.
+        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary. A pending member ends as soon as it is started, before its setup and with no model call. If the member is still running when the swarm's grace period has passed since the request, its turn, setup or cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output. A member whose background work is draining after its agent returned keeps its submission (the drain keeps its own grace period); one that returned without a submission ends `stopped`. A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
 
         Args:
             origin: Names the caller in the evidence, as for `on_boundary()`.
@@ -173,10 +171,7 @@ class MemberEnded:
 
 @dataclass(frozen=True)
 class MemberIdle:
-    """A persistent member answered and is idle, held until `SwarmControl.wake()` gives it more work.
-
-    If the operator stops the member before the controller reads this event, the controller never gets it: the stop withdrew the answer, and the member's `MemberEnded` follows.
-    """
+    """A persistent member answered and is idle, held until `SwarmControl.wake()` gives it more work."""
 
     member: str
     """The member's name."""
@@ -283,7 +278,7 @@ class SwarmControl(Protocol):
     ) -> None:
         """Make this member's submission the swarm's answer, in place of the controller's `final` rule.
 
-        The choice is the provisional answer from now on and the final answer when the swarm ends, unless the operator stops the member (`inspect ctl sample agent stop`), which withdraws its answers. The result record and the `final` event give the mode `controller`, the member and `reason`. Choose once, from a member that has ended with a submission, or a persistent member that has answered: its latest answer at the time of the call, kept if it answers again.
+        The choice is the provisional answer from now on and the final answer when the swarm ends. The result record and the `final` event give the mode `controller`, the member and `reason`. Choose once, from a member that has ended with a submission, or a persistent member that has answered: its latest answer at the time of the call, kept if it answers again.
 
         Args:
             member: The member, or its name.
@@ -291,7 +286,7 @@ class SwarmControl(Protocol):
 
         Raises:
             KeyError: If no member has this name.
-            RuntimeError: If the member has not ended with a submission (a persistent member: has not answered yet), the operator stopped it, or the controller has already chosen.
+            RuntimeError: If the member has not ended with a submission (a persistent member: has not answered yet), or the controller has already chosen.
         """
         ...
 
@@ -446,8 +441,6 @@ class MemberRun:
             persistent=self.persistent,
             answer_times=[a.time for a in self.answer_list],
             end_origin=self.end_origin,
-            # from the request, whatever then decides how the member ends
-            withdrawn=self.gate.end_origin == OPERATOR,
         )
 
 
@@ -503,8 +496,7 @@ class SwarmRun:
             lambda: self.stop_reason,
             self.stop,
             self.bus.waits.in_wait,
-            self._settle,
-            lambda: self._runtime_tg is not None,
+            self._active,
         )
         for m in self._members:
             m.gate.loop_bound = self.operator.members[m.name].loop_bound
@@ -526,6 +518,8 @@ class SwarmRun:
         self._controller_scope = anyio.CancelScope()
         self._members_tg: TaskGroup | None = None
         self._runtime_tg: TaskGroup | None = None
+        # set when the supervisor returns or is cancelled
+        self._supervisor_ended = False
         self._member_ctx: contextvars.Context | None = None
         self._queue: deque[ControlEvent] = deque()
         self._changed = anyio.Event()
@@ -608,15 +602,7 @@ class SwarmRun:
         try:
             while True:
                 if self._queue:
-                    event = self._queue.popleft()
-                    if (
-                        isinstance(event, MemberIdle)
-                        and self._lookup(event.member).gate.end_origin == OPERATOR
-                    ):
-                        # an answer the operator withdrew before the controller read
-                        # it: the member's MemberEnded follows
-                        continue
-                    yield event
+                    yield self._queue.popleft()
                 elif not self._live():
                     return
                 else:
@@ -628,10 +614,6 @@ class SwarmRun:
         self, member: str | MemberHandle, reason: str | None = None
     ) -> None:
         m = self._lookup(member if isinstance(member, str) else member.name)
-        if m.gate.end_origin == OPERATOR:
-            raise RuntimeError(
-                f"choose_answer({m.name!r}): the operator stopped the member, so none of its answers can be the swarm's answer."
-            )
         if self._pick is not None:
             raise RuntimeError(
                 f"choose_answer({m.name!r}): the controller has already chosen {self._pick.member!r}, and it chooses once."
@@ -972,15 +954,6 @@ class SwarmRun:
 
     async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
         def end(status: str, state: AgentState) -> None:
-            if (
-                status == "submitted"
-                and m.gate.answered
-                and m.gate.end_origin == OPERATOR
-            ):
-                # a persistent member the operator stopped after an answer: stopped, and
-                # its answers withdrawn, even when another stop closed the lever first
-                m.gate.honoured = True
-                status = "stopped"
             if m.answer_list and status == "submitted":
                 # a persistent member ended after an answer: its last answer
                 state.output = m.answer_list[-1].output
@@ -1103,13 +1076,24 @@ class SwarmRun:
     # the effective grace. A pending member's starts when it is started.
     def _ending(self, m: MemberRun) -> None:
         # a draining member's drain has a grace of its own, and once the runtime has
-        # ended the members still unwinding are being cancelled
-        if (
-            m.state in ("running", "ending")
-            and not m.gate.draining
-            and self._runtime_tg is not None
-        ):
+        # begun to end the members still unwinding are being cancelled
+        if m.state in ("running", "ending") and not m.gate.draining and self._active():
             self._end_timer(m)
+
+    # Whether the runtime can still take a stop: false before it starts, once it has
+    # ended, and from the moment an error (a member's or the controller's) or a
+    # cancellation from outside begins to tear it down, while its members unwind. A
+    # stop then would change the ledger's stop reason or start a timer in a task group
+    # that is closing.
+    def _active(self) -> bool:
+        runtime, members = self._runtime_tg, self._members_tg
+        return (
+            runtime is not None
+            and members is not None
+            and not self._supervisor_ended
+            and not runtime.cancel_scope.cancel_called
+            and not members.cancel_scope.cancel_called
+        )
 
     # end()'s grace: the member is cancelled, as the hard stop cancels one, if it is
     # still running when the effective grace has passed. The deadline is fixed now, so
@@ -1138,17 +1122,23 @@ class SwarmRun:
         self.stop("swarm_time")
 
     async def _supervise(self, runtime_tg: TaskGroup) -> None:
-        await self._stopped.wait()
-        # grace: members finish the calls they have in flight and are refused the next
-        with anyio.move_on_after(self._effective_grace):
+        try:
+            await self._stopped.wait()
+            # grace: members finish the calls they have in flight and are refused the
+            # next
+            with anyio.move_on_after(self._effective_grace):
+                await self._until_quiet()
+            # hard stop
+            for m in self._members:
+                if m.started_not_ended:
+                    m.context.scope.cancel()
             await self._until_quiet()
-        # hard stop
-        for m in self._members:
-            if m.started_not_ended:
-                m.context.scope.cancel()
-        await self._until_quiet()
-        # ends the time cap's timer
-        runtime_tg.cancel_scope.cancel()
+            # ends the time cap's timer
+            runtime_tg.cancel_scope.cancel()
+        finally:
+            # once every member has ended, or when a cancellation reaches the runtime,
+            # whichever scope it comes from
+            self._supervisor_ended = True
 
     def _grace_now(self) -> float:
         # the final step keeps at least half the sample's remaining time

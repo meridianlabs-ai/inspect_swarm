@@ -783,28 +783,35 @@ async def test_a_running_member_stopped_ends_at_a_boundary_or_by_the_grace(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stop", [True, False])
-async def test_a_member_stopped_while_its_background_work_drains(stop: bool) -> None:
+@pytest.mark.parametrize("submits", [True, False])
+async def test_a_member_stopped_while_its_background_work_drains(submits: bool) -> None:
     returning = anyio.Event()
 
     @agent
-    def submits_with_background() -> Agent:
+    def returns_with_background() -> Agent:
         async def execute(state: AgentState) -> AgentState:
             background(anyio.sleep, 0.5)
-            state.output = ModelOutput.from_content("mockllm", "answer")
+            # an output cut off at the model's length is no submission
+            state.output = ModelOutput.from_content(
+                "mockllm", "answer", stop_reason="stop" if submits else "model_length"
+            )
             returning.set()
             return state
 
         return execute
 
     async def drive(group: OperatorGroup) -> None:
+        a = group.agents["a"]
         await returning.wait()
-        if stop:
-            assert _act(group.agents["a"].stop, dry_run=False).changed
+        # once its drain has begun, after its status was worked out
+        await _until(
+            lambda: "background work drains" in _act(a.stop, dry_run=True).detail
+        )
+        assert _act(a.stop, dry_run=False).changed
 
     ran = await _run(
         swarm(
-            [member(submits_with_background(), name="a")],
+            [member(returns_with_background(), name="a")],
             controller=leaderless(stop_on_submission=False),
             channels=[],
             budget=Budget(grace=5),
@@ -812,23 +819,24 @@ async def test_a_member_stopped_while_its_background_work_drains(stop: bool) -> 
         drive,
     )
 
-    if stop:
-        assert ran.status("a") == "stopped"
-        assert ran.record.final.member is None
-        assert ran.end_origins() == {"a": ("operator", "operator", "operator")}
-    else:
+    if submits:
+        # the stop ends work only: the submission it returned stands, and decided how
+        # it ended
         assert ran.status("a") == "submitted"
         assert ran.record.final.member == "a"
         assert ran.end_origins() == {"a": (None, None, None)}
+    else:
+        assert ran.status("a") == "stopped"
+        assert ran.record.final.member is None
+        assert ran.end_origins() == {"a": ("operator", "operator", "operator")}
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("when", ["idle", "after_wake"])
-async def test_a_persistent_member_the_operator_stops_gives_no_answer(
+async def test_a_persistent_member_the_operator_stops_keeps_its_answer(
     when: str,
 ) -> None:
     idle, stopped, started = anyio.Event(), anyio.Event(), anyio.Event()
-    refusals: list[str] = []
     script = Script([_submit("first"), _call("slow", seconds=30)])
 
     async def run_controller(control: SwarmControl) -> str:
@@ -838,17 +846,16 @@ async def test_a_persistent_member_the_operator_stops_gives_no_answer(
             async for event in events:
                 if isinstance(event, MemberIdle):
                     if when == "idle":
-                        # chosen before the stop, and withdrawn by it
+                        # chosen before the stop, and kept by it
                         control.choose_answer("p")
                     else:
                         control.wake("p", "More.")
                     idle.set()
         await stopped.wait()
         await _drain(control)
-        try:
+        if when == "after_wake":
+            # chosen once the stop has ended it
             control.choose_answer("p")
-        except RuntimeError as ex:
-            refusals.append(str(ex))
         return "all_done"
 
     async def drive(group: OperatorGroup) -> None:
@@ -870,17 +877,17 @@ async def test_a_persistent_member_the_operator_stops_gives_no_answer(
         drive,
     )
 
-    assert ran.status("p") == ("stopped" if when == "idle" else "cancelled")
+    # an idle member ends with its last answer, as for a controller's end()
+    assert ran.status("p") == ("submitted" if when == "idle" else "cancelled")
     assert ran.end_origins()["p"] == ("operator", "operator", "operator")
-    # the first rule over the remaining submissions
-    assert (ran.record.final.mode, ran.record.final.member) == ("first", "q")
-    assert refusals and "the operator stopped the member" in refusals[0]
+    final = ran.record.final
+    assert (final.mode, final.member, final.answer) == ("controller", "p", 0)
 
 
 @pytest.mark.anyio
 @pytest.mark.usefixtures("warm_inspect_caches")
 @pytest.mark.parametrize("picked", [False, True])
-async def test_a_stopped_member_whose_limit_ends_it_first_gives_no_answer(
+async def test_a_stopped_member_whose_limit_ends_it_first_keeps_its_answer(
     picked: bool,
 ) -> None:
     idle, started = anyio.Event(), anyio.Event()
@@ -923,10 +930,15 @@ async def test_a_stopped_member_whose_limit_ends_it_first_gives_no_answer(
     )
 
     assert ran.status("p") == "member_limit:time"
-    # the limit decided its ending; the stop still withdrew its answer
-    assert (ran.record.final.mode, ran.record.final.member) == ("first", "q")
+    # the limit decided its ending, and its answer stands
+    final = ran.record.final
+    assert (final.mode, final.member, final.answer) == (
+        "controller" if picked else "first",
+        "p",
+        0,
+    )
     [p] = [m for m in ran.record.members if m.name == "p"]
-    assert (p.end_origin, p.withdrawn, len(p.answer_times)) == (None, True, 1)
+    assert (p.end_origin, len(p.answer_times)) == (None, 1)
 
 
 @agent
@@ -949,19 +961,37 @@ def holds_in_cleanup(
 
 
 @pytest.mark.anyio
-async def test_a_stop_while_the_ended_swarm_unwinds_its_members_changes_nothing() -> (
-    None
-):
+@pytest.mark.parametrize("by", ["controller", "member", "caller"])
+async def test_a_stop_while_the_ended_swarm_unwinds_its_members_changes_nothing(
+    by: str,
+) -> None:
     entered, cleaning, release = anyio.Event(), anyio.Event(), anyio.Event()
+    # the caller's scope around the swarm
+    scope = anyio.CancelScope()
+
+    @agent
+    def cancellable(inner: Agent) -> Agent:
+        async def execute(state: AgentState) -> AgentState:
+            with scope:
+                state = await inner(state)
+            return state
+
+        return execute
 
     async def run_controller(control: SwarmControl) -> str:
-        control.start("a")
+        for m in control.members:
+            control.start(m)
         await entered.wait()
-        raise ValueError("controller failed")
+        if by == "controller":
+            raise ValueError("controller failed")
+        return await _drain(control)
 
     async def drive(group: OperatorGroup) -> None:
-        # the controller's error ended the runtime, which cancelled the member: it is
-        # still running its cleanup, and still listed
+        await entered.wait()
+        if by == "caller":
+            scope.cancel()
+        # the error or the cancellation is ending the runtime, which cancelled the
+        # member: it is still running its cleanup, and still listed
         await cleaning.wait()
         a = group.agents["a"]
         try:
@@ -971,25 +1001,28 @@ async def test_a_stop_while_the_ended_swarm_unwinds_its_members_changes_nothing(
                 _act(group.stop, dry_run=False),
             ):
                 assert (outcome.changed, outcome.refused) == (False, None)
-                assert "The swarm has ended" in outcome.detail
+                assert "ending after an error or a cancellation" in outcome.detail
         finally:
             # a shielded cleanup that never ends would hold the test
             release.set()
 
+    members = [member(holds_in_cleanup(entered, cleaning, release), name="a")]
+    if by == "member":
+        # fails once a is running
+        members.append(member(_after(entered, fails_now()), name="b"))
     ran = await _run(
-        _swarm(
-            [member(holds_in_cleanup(entered, cleaning, release), name="a")],
-            run_controller,
-            grace=60,
-        ),
+        cancellable(_swarm(members, run_controller, grace=60)),
         drive,
         errors=True,
     )
 
-    assert ran.sample.error is not None
-    assert "controller failed" in ran.sample.error.message
+    error = {"controller": "controller failed", "member": "sibling failed"}.get(by)
+    if error is None:
+        assert ran.sample.error is None
+    else:
+        assert ran.sample.error is not None and error in ran.sample.error.message
     assert ran.status("a") == "cancelled"
-    assert ran.end_origins() == {"a": (None, None, None)}
+    assert ran.end_origins()["a"] == (None, None, None)
     assert ran.ledger.stop_reason is None
 
 
@@ -1058,8 +1091,6 @@ async def test_a_cancellation_that_beats_the_stop_is_not_its_doing(
     assert ran.sample.error is not None and "sibling failed" in ran.sample.error.message
     assert ran.status("a") == "cancelled"
     assert ran.end_origins()["a"] == (None, None, None)
-    [a] = [m for m in ran.record.members if m.name == "a"]
-    assert a.withdrawn
 
 
 @agent
@@ -1154,9 +1185,10 @@ async def test_a_stop_while_an_idle_member_cleans_up_after_the_swarms_stop() -> 
         drive,
     )
 
-    assert ran.status("p") == "stopped"
-    assert ran.record.final.member is None
-    assert ran.end_origins() == {"p": ("operator", "operator", "operator")}
+    # the swarm's stop decided its ending, and its answer stands
+    assert ran.status("p") == "submitted"
+    assert ran.record.final.member == "p"
+    assert ran.end_origins() == {"p": (None, None, None)}
 
 
 @pytest.mark.anyio
@@ -1205,20 +1237,14 @@ async def test_an_idle_answer_the_controller_has_not_read_yet(by: str) -> None:
     )
 
     assert ran.status("p") == "cancelled"
-    [p] = [m for m in ran.record.members if m.name == "p"]
-    if by == "controller":
-        # the answer stands: the controller hears it, and it is the swarm's answer
-        assert events == [
-            MemberIdle("p", 0, news=False),
-            MemberEnded("p", "cancelled", False),
-        ]
-        assert ran.record.final.member == "p"
-        assert (p.end_origin, p.withdrawn) == ("scheduler", False)
-    else:
-        # the operator withdrew it before the controller read it
-        assert events == [MemberEnded("p", "cancelled", False)]
-        assert ran.record.final.member is None
-        assert (p.end_origin, p.withdrawn) == ("operator", True)
+    # the answer stands: the controller hears it, and it is the swarm's answer
+    assert events == [
+        MemberIdle("p", 0, news=False),
+        MemberEnded("p", "cancelled", False),
+    ]
+    assert ran.record.final.member == "p"
+    origin = "scheduler" if by == "controller" else "operator"
+    assert ran.end_origins() == {"p": (origin, origin, origin)}
 
 
 @pytest.mark.anyio
