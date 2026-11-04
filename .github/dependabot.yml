@@ -25,7 +25,9 @@ updates:
   # SDK. inspect-ai is ignored: it is a git reference to inspect_ai main, which
   # contributors move with `uv lock --upgrade-package inspect-ai`. When
   # inspect-ai returns to a released floor, stop ignoring it, and add it to
-  # `cooldown.exclude` and to its own group, as inspect_scout does.
+  # `cooldown.exclude` and to its own group, as inspect_scout does. List that
+  # group before `python-packages`: Dependabot puts a package in the first
+  # group that matches.
   - package-ecosystem: "uv"
     versioning-strategy: lockfile-only
     directory: "/"
