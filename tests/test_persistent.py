@@ -362,35 +362,29 @@ async def test_a_wake_once_the_swarm_is_stopping_ends_the_controller_with_the_st
 @pytest.mark.anyio
 async def test_idle_and_member_idle_are_published_together() -> None:
     script = _Recording([_submit("one"), _submit("two")])
-    checks: list[bool] = []
+    yielded: list[Any] = []
 
     async def run(control: SwarmControl) -> StopReason:
         runtime = cast(SwarmRun, control)
-        yielded: list[Any] = []
-        done = anyio.Event()
-
-        async def poll() -> None:
-            while not done.is_set():
-                if control.member("a").state == "idle":
-                    answer = control.member("a").answers - 1
-                    checks.append(
-                        MemberIdle("a", answer, False) in [*runtime._queue, *yielded]  # pyright: ignore[reportPrivateUsage]
-                    )
-                await anyio.lowlevel.checkpoint()
-
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(poll)
-            control.start("a")
-            async with aclosing(control.events()) as events:
-                async for event in events:
-                    yielded.append(event)
-                    if isinstance(event, MemberIdle) and event.answer == 0:
-                        control.wake("a", "again")
-            done.set()
+        a = control.member("a")
+        control.start("a")
+        async with aclosing(control.events()) as events:
+            for answer in range(2):
+                # the member stays idle until the controller wakes it or returns, so
+                # the controller sees each idle state before it reads the event,
+                # which must already be queued
+                while a.state in ("pending", "running"):
+                    await anyio.lowlevel.checkpoint()
+                assert a.state == "idle" and a.answers == answer + 1
+                assert MemberIdle("a", answer, False) in runtime._queue  # pyright: ignore[reportPrivateUsage]
+                yielded.append(await anext(events))
+                if answer == 0:
+                    control.wake("a", "again")
+            yielded.extend([event async for event in events])
         return "quiescence"
 
     await _run([member(_react(script), name="a", persistent=True)], run)
-    assert checks and all(checks)
+    assert yielded == [MemberIdle("a", 0, False), MemberIdle("a", 1, False)]
 
 
 @pytest.mark.anyio
