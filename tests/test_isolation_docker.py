@@ -780,7 +780,7 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
         "device-in-rw-share": Case(
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
             setup="mkdir /shared && mknod -m 600 /shared/null c 1 3",
-            error=f"{refused}users isolation does not support a device or a set-user-id or set-group-id file in a shared directory: /shared/null is a device",
+            error=f"{refused}users isolation does not support a device, socket, FIFO, or set-user-id or set-group-id file in a read-write shared directory: /shared/null is a device",
         ),
         # a ro share must already be open to read and closed to write
         "ro-unreadable-file": Case(
@@ -798,10 +798,21 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             setup="mkdir /data && install -m 646 /dev/null /data/f",
             error=f"{refused}{_RO_MODES} /data/f is writable by others (mode 646); set its modes in the image",
         ),
+        # inert: nothing listens on the socket, and nothing opens the FIFO
+        "socket-in-rw-share": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir /shared && python3 -c \"import socket; socket.socket(socket.AF_UNIX).bind('/shared/sock')\" && chmod 600 /shared/sock",
+            error=f"{refused}users isolation does not support a device, socket, FIFO, or set-user-id or set-group-id file in a read-write shared directory: /shared/sock is a socket",
+        ),
+        "fifo-in-rw-share": Case(
+            runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
+            setup="mkdir /shared && mkfifo -m 600 /shared/pipe",
+            error=f"{refused}users isolation does not support a device, socket, FIFO, or set-user-id or set-group-id file in a read-write shared directory: /shared/pipe is a FIFO",
+        ),
         "setgid-in-rw-share": Case(
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
             setup="mkdir /shared && install -m 2755 /dev/null /shared/helper",
-            error=f"{refused}users isolation does not support a device or a set-user-id or set-group-id file in a shared directory: /shared/helper is set-user-id or set-group-id (mode 2755)",
+            error=f"{refused}users isolation does not support a device, socket, FIFO, or set-user-id or set-group-id file in a read-write shared directory: /shared/helper is set-user-id or set-group-id (mode 2755)",
         ),
         "hard-link-in-rw-share": Case(
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
@@ -975,17 +986,25 @@ def test_members_work_in_worktrees_of_a_shared_repository(tmp_path: Path) -> Non
             )
         return steps
 
-    # a worktree linked to the repository before setup, which a .git file marks
+    # a worktree linked to the repository before setup, which a .git file marks; and a
+    # repository whose path has a newline, whose second line is the share itself
     linked: Step = ("bash", "git -C /shared/linked status --short --branch")
+    odd: Step = (
+        "bash",
+        "git -C \"$(printf '/shared/odd\\n/shared')\" status --short --branch",
+    )
     cases = {
         "git": Case(
             runs=[
                 Run(
                     {"shared": [{"path": "/shared", "access": "rw"}]},
-                    {"w-1": [*work("w-1", None), linked], "w-2": work("w-2", "w-1")},
+                    {
+                        "w-1": [*work("w-1", None), linked, odd],
+                        "w-2": work("w-2", "w-1"),
+                    },
                 )
             ],
-            setup=f"mkdir -p /shared/repo && cd /shared/repo && git init -q -b main && echo base > base.txt && git add base.txt && {git} commit -qm base && git worktree add -q /shared/linked -b linked",
+            setup=f"mkdir -p /shared/repo && cd /shared/repo && git init -q -b main && echo base > base.txt && git add base.txt && {git} commit -qm base && git worktree add -q /shared/linked -b linked && git init -q -b odd \"$(printf '/shared/odd\\n/shared')\"",
         )
     }
     _eval(tmp_path, cases)
@@ -995,3 +1014,4 @@ def test_members_work_in_worktrees_of_a_shared_repository(tmp_path: Path) -> Non
             _ok(result)
     assert _ok(results["w-2"][2]).split() == ["base.txt", "w-1.txt", "w-2.txt"]
     assert _ok(results["w-1"][2]).startswith("## linked")
+    assert _ok(results["w-1"][3]).startswith("## No commits yet on odd")

@@ -76,7 +76,7 @@ def users(
 
     - The sandbox must let commands run as root and as other users: Docker, or Kubernetes with a root container. The `local` sandbox is refused.
     - The image needs `useradd` and `groupadd` (package `passwd`) and GNU `find`; with any share, also `setfacl` and `getfacl` (package `acl`), which the default Inspect image and `python:3.12-bookworm` lack.
-    - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, and mounts inside a share or under the homes' parent are refused. So are hard-linked files, devices and set-user-id or set-group-id files in a `rw` share, and, in a `ro` share, an entry others cannot read (or search, for a directory) or can write: setup does not change a `ro` share, so set its modes in the image.
+    - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. A share must not be `/tmp`, `/var/tmp`, `/dev/shm` or `/run/lock`, or above one. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, and mounts inside a share or under the homes' parent are refused. So are hard-linked files, devices, sockets, FIFOs and set-user-id or set-group-id files in a `rw` share, and, in a `ro` share, an entry others cannot read (or search, for a directory) or can write: setup does not change a `ro` share, so set its modes in the image.
     - One swarm with users isolation per sandbox in a sample. Another is refused, whether it runs after the first, beside it, in a subtask or in a fork.
     - Members are not root: they cannot install system packages or write system directories. Tasks that need root while the members work are unsuitable.
     - Custom tools inherit the member's user: their `sandbox().exec()`, `read_file()` and `write_file()` calls that name no user run as the member. A call that names another user, such as `user="root"`, runs as that user; that is a grant made in code. `computer()`, `web_browser()` and `skill()` raise inside the scope, and so do built-in tools built with another `user`.
@@ -93,7 +93,7 @@ def users(
         The isolation, for `swarm(isolation=...)`.
 
     Raises:
-        ValueError: If a path is not absolute and normalised, or holds a backslash or a character that is not printable (a control character or a line separator); `home` does not have `{member}` once, in its last component; or two shares, or a share and the homes' parent directory, are the same or one is inside the other.
+        ValueError: If a path is not absolute and normalised, or holds a backslash or a character that is not printable (a control character or a line separator); `home` does not have `{member}` once, in its last component; two shares, or a share and the homes' parent directory, are the same or one is inside the other; or a share is, is inside or is above `/tmp`, `/var/tmp`, `/dev/shm` or `/run/lock`.
     """
     isolation = UserIsolation(
         sandbox=sandbox,
@@ -156,6 +156,11 @@ def check_isolation(isolation: UserIsolation, where: str) -> None:
     parent = posixpath.dirname(home)
     paths = [share.path for share in isolation.shared]
     for i, path in enumerate(paths):
+        for root in _TRANSIENT:
+            if _nested(path, root):
+                raise ValueError(
+                    f"{where}: the share {path!r} overlaps {root!r}, a directory every user writes and that the swarm keeps as shared transient state; a share must not be {', '.join(_TRANSIENT)}, inside one or above one."
+                )
         if _nested(path, parent):
             raise ValueError(
                 f"{where}: the share {path!r} and the members' homes ({home!r}) overlap; a share must not be the homes' parent directory, inside it or above it."
@@ -165,6 +170,11 @@ def check_isolation(isolation: UserIsolation, where: str) -> None:
                 raise ValueError(
                     f"{where}: the shares {other!r} and {path!r} overlap; no share may be inside another, or given twice."
                 )
+
+
+# the directories every user writes, which setup scans for the ids files take and
+# which no share may overlap
+_TRANSIENT = ("/tmp", "/var/tmp", "/dev/shm", "/run/lock")
 
 
 # whether one path is the other or inside it
@@ -294,8 +304,8 @@ fail() { printf '%s\n' "$*" >&2; exit 3; }
 # owner or group of a file on any filesystem the homes, shares or world-writable
 # directories are on. Setup does not reconcile permission state it did not make, so it
 # refuses any ACL in a share or on the homes' parent, a mount inside a share or under
-# the homes' parent, whose files it would not reach, and a hard-linked file, a device or
-# a set-id file in a rw share. It does not change a ro share, so it refuses a ro share
+# the homes' parent, whose files it would not reach, and a hard-linked file, a device,
+# a socket, a FIFO or a set-id file in a rw share. It does not change a ro share, so it refuses a ro share
 # whose modes would not let members read it, or would let them write it.
 # $1 group, $2 first id, $3 last id, $4 1 when there are shares, $5 the homes' parent,
 # then the roots, `--`, and each share's access and path.
@@ -437,12 +447,15 @@ while [ $# -gt 0 ]; do
   linked=$(cat -- "$dir/found") || fail "users isolation could not scan the files in $share"
   [ -z "$linked" ] || fail "users isolation does not support a hard-linked file in a shared directory: $linked; setup's changes to its mode, group and ACLs would reach its other names"
   # setup opens entries to members: a device would become their access to the device,
-  # and a set-id file a program they could run with its owner's or group's rights
+  # a socket or FIFO their access to the process behind it, and a set-id file a
+  # program they could run with its owner's or group's rights
   scan "users isolation could not scan the files in $share" \
     -P "$share" -xdev -ignore_readdir_race \( -type b -o -type c \) -printf '%p is a device' -quit \
+    -o -type s -printf '%p is a socket' -quit \
+    -o -type p -printf '%p is a FIFO' -quit \
     -o -type f -perm /6000 -printf '%p is set-user-id or set-group-id (mode %m)' -quit
   special=$(cat -- "$dir/found") || fail "users isolation could not scan the files in $share"
-  [ -z "$special" ] || fail "users isolation does not support a device or a set-user-id or set-group-id file in a shared directory: $special; setup would give members access to it"
+  [ -z "$special" ] || fail "users isolation does not support a device, socket, FIFO, or set-user-id or set-group-id file in a read-write shared directory: $special; setup would give members access to it"
   # the default ACL setup writes takes its owner entry from the directory's owner
   # bits, and an owner entry beats the group's grant, so a member could not edit
   # the files it creates in a directory whose owner lacks rwx
@@ -551,9 +564,6 @@ add_users() {
   done
 }
 
-safe_directory() {
-  git config --system --get-all safe.directory 2>/dev/null | grep -Fxq -- "$1" || git config --system --add safe.directory "$1"
-}
 
 rw_share() {
   s=$1
@@ -566,12 +576,15 @@ rw_share() {
   find -P "$s" -xdev ! -type l -exec setfacl -P -m "g:$group:rwX,m:rwX" {} + || fail "users isolation could not set ACLs on the files in $s; its filesystem may not support them"
   find -P "$s" -xdev -type d -exec setfacl -P -d -m "g:$group:rwX,m:rwX" {} + || fail "users isolation could not set default ACLs on the directories in $s; its filesystem may not support them"
   if command -v git >/dev/null 2>&1; then
-    safe_directory "$s" || fail "users isolation could not add $s to git's safe.directory"
+    # added without checking for an equal entry: setup runs once per sandbox, and a
+    # duplicate entry is harmless, while a line-by-line match could take a path with a
+    # newline for another
+    git config --system --add safe.directory "$s" || fail "users isolation could not add $s to git's safe.directory"
     # a repository's .git directory, or the .git file of a linked worktree or a submodule
     find -P "$s" -xdev -maxdepth 4 -name .git \( -type d -prune -o -type f \) -exec sh -c '
       for g in "$@"; do
         repo=${g%/.git}
-        git config --system --get-all safe.directory 2>/dev/null | grep -Fxq -- "$repo" || git config --system --add safe.directory "$repo" || exit 1
+        git config --system --add safe.directory "$repo" || exit 1
         if [ -f "$g/config" ] && [ ! -L "$g/config" ]; then
           git config --file "$g/config" core.sharedRepository group || exit 1
         fi
@@ -741,10 +754,7 @@ async def _setup(
         "/",
         *(share.path for share in isolation.shared),
         parent,
-        "/tmp",
-        "/var/tmp",
-        "/dev/shm",
-        "/run/lock",
+        *_TRANSIENT,
     ]
     probe = await _run(
         env,

@@ -557,6 +557,21 @@ async def test_the_preamble_ends_with_the_members_user_and_directories(
             "users(): the shares '/data' and '/data' overlap",
             id="same-share",
         ),
+        *(
+            pytest.param(
+                {"shared": [Share(path=path, access="rw")]},
+                f"users(): the share {path!r} overlaps {root!r}, a directory every user writes",
+                id=f"transient-{path}",
+            )
+            for path, root in [
+                ("/tmp", "/tmp"),
+                ("/var/tmp", "/var/tmp"),
+                ("/dev/shm", "/dev/shm"),
+                ("/run/lock", "/run/lock"),
+                ("/var", "/var/tmp"),
+                ("/dev/shm/team", "/dev/shm"),
+            ]
+        ),
     ],
 )
 def test_users_refuses_unsafe_or_ambiguous_paths(
