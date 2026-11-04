@@ -1013,8 +1013,8 @@ wheels = [
 
 [[package]]
 name = "inspect-ai"
-version = "0.3.288.dev45+g325942c55"
-source = { git = "https://github.com/UKGovernmentBEIS/inspect_ai?rev=main#325942c556beeb7d57ece4f89632727a6a5d348f" }
+version = "0.3.288.dev69+g15c780b89"
+source = { git = "https://github.com/UKGovernmentBEIS/inspect_ai?rev=main#15c780b8922232e93c4aab0915d2421d6e87b91d" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "aiobotocore" },

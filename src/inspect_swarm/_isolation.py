@@ -35,7 +35,7 @@ class Share(BaseModel):
     """The directory, as an absolute path. Created if it does not exist."""
 
     access: Literal["rw", "ro"]
-    """`rw`: every member can read, create, change and delete everything in it. `ro`: every member can read it and none can write it."""
+    """`rw`: every member can read, create, change and delete everything in it. `ro`: every member can read it and none can write it. Setup does not change a `ro` share, so others must already be able to read every entry in it and search every directory, and must not be able to write any."""
 
 
 class UserIsolation(BaseModel):
@@ -68,7 +68,7 @@ def users(
 ) -> UserIsolation:
     """Run each member as its own Linux user in one shared sandbox.
 
-    When the swarm starts, before any member does, it creates a non-root user `swarm-<member>` for each member, with a new private home directory (the image's `/etc/skel` is not copied), sets up the shared directories, and checks that the boundaries hold by running commands as the members. It refuses to start if any check fails. Each member then runs inside a sandbox identity scope, so that the built-in tools that run commands in the sandbox (`bash()`, `python()`, `bash_session()`, `text_editor()`, `grep()`, `list_files()` and the `read_file()` tool) run as its user and start in its home. Its preamble tells it its user and directories.
+    When the swarm starts, before any member does, it creates a non-root user `swarm-<member>` for each member, with a new private home directory (the image's `/etc/skel` is not copied), sets up the read-write shares, checks the read-only ones, and checks that the boundaries hold by running commands as the members. It refuses to start if any check fails. Each member then runs inside a sandbox identity scope, so that the built-in tools that run commands in the sandbox (`bash()`, `python()`, `bash_session()`, `text_editor()`, `grep()`, `list_files()` and the `read_file()` tool) run as its user and start in its home, and so do custom tools' `exec()`, `read_file()` and `write_file()` calls that name no user. Its preamble tells it its user and directories.
 
     A member cannot read or change another member's home unless `peers="read"` lets it read, and cannot write a `ro` share. It can still see the other members' processes and command lines, share files through `/tmp`, and connect to their sockets on localhost. Members share one kernel and one sandbox root: this is a default boundary and a record of who made what, not containment.
 
@@ -76,17 +76,17 @@ def users(
 
     - The sandbox must let commands run as root and as other users: Docker, or Kubernetes with a root container. The `local` sandbox is refused.
     - The image needs `useradd` and `groupadd` (package `passwd`) and GNU `find`; with any share, also `setfacl` and `getfacl` (package `acl`), which the default Inspect image and `python:3.12-bookworm` lack.
-    - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, hard-linked files, devices and set-user-id or set-group-id files in a share, and mounts inside a share or under the homes' parent are refused.
+    - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, and mounts inside a share or under the homes' parent are refused. So are hard-linked files, devices and set-user-id or set-group-id files in a `rw` share, and, in a `ro` share, an entry others cannot read (or search, for a directory) or can write: setup does not change a `ro` share, so set its modes in the image.
     - One swarm with users isolation per sandbox in a sample. Another is refused, whether it runs after the first, beside it, in a subtask or in a fork.
     - Members are not root: they cannot install system packages or write system directories. Tasks that need root while the members work are unsuitable.
-    - Custom tools that call `sandbox().exec()` directly run as the sandbox's default user, usually root, unless they pass the member's user themselves. `computer()`, `web_browser()` and `skill()` raise inside the scope, and so do tools built with another `user`.
+    - Custom tools inherit the member's user: their `sandbox().exec()`, `read_file()` and `write_file()` calls that name no user run as the member. A call that names another user, such as `user="root"`, runs as that user; that is a grant made in code. `computer()`, `web_browser()` and `skill()` raise inside the scope, and so do built-in tools built with another `user`.
     - Bridged members (inspect_swe agents) need inspect_ai and inspect_swe versions with bridge support for users isolation, which they do not have yet.
     - Member names must be valid Linux user-name suffixes: lowercase letters, digits and `-`, starting with a letter, at most 26 characters.
 
     Args:
         sandbox: The sandbox environment the members share, by its name in the sample. `default` is the sample's default sandbox.
         home: Each member's private directory, which is also its `$HOME` and where its tools start. `{member}` stands for the member's name and must be in the last path component.
-        shared: The directories every member shares, each read-write (`rw`) or read-only (`ro`). A `rw` share's files stay group-writable whatever a member's umask, through a default ACL. Directories that do not exist are created.
+        shared: The directories every member shares, each read-write (`rw`) or read-only (`ro`). A `rw` share's files stay group-writable whatever a member's umask, through a default ACL. A `ro` share is used as it is. Directories that do not exist are created.
         peers: `none`: only the member can read its home. `read`: every member can read every other member's home, but not change it.
 
     Returns:
@@ -293,9 +293,10 @@ fail() { printf '%s\n' "$*" >&2; exit 3; }
 # exist, and which ids in the window are taken, by a passwd or group entry or by the
 # owner or group of a file on any filesystem the homes, shares or world-writable
 # directories are on. Setup does not reconcile permission state it did not make, so it
-# refuses any ACL in a share or on the homes' parent, a hard-linked file, a device or a
-# set-id file in a share, and a mount inside a share or under the homes' parent, whose
-# files it would not reach.
+# refuses any ACL in a share or on the homes' parent, a mount inside a share or under
+# the homes' parent, whose files it would not reach, and a hard-linked file, a device or
+# a set-id file in a rw share. It does not change a ro share, so it refuses a ro share
+# whose modes would not let members read it, or would let them write it.
 # $1 group, $2 first id, $3 last id, $4 1 when there are shares, $5 the homes' parent,
 # then the roots, `--`, and each share's access and path.
 _PROBE = (
@@ -418,6 +419,18 @@ while [ $# -gt 0 ]; do
     || fail "users isolation could not read the ACLs in $share: $(printf '%s' "$acls" | grep -v '^#' | head -n 1)"
   bad=$(printf '%s\n' "$acls" | foreign_acl) || fail "users isolation could not check the ACLs in $share"
   [ -z "$bad" ] || fail "users isolation does not support ACLs in a shared directory: $bad; remove them (setfacl -b)"
+  if [ "$access" = ro ]; then
+    # setup does not change a ro share, so with no ACL the other bits must already let
+    # members read every entry and search every directory, and write none
+    scan "users isolation could not scan the files in $share" \
+      -P "$share" -xdev -ignore_readdir_race ! -type l \( \
+        -perm /o=w -printf '%p is writable by others (mode %m)' -quit \
+        -o ! -perm -o=r -printf '%p is not readable by others (mode %m)' -quit \
+        -o -type d ! -perm -o=x -printf '%p is a directory others cannot search (mode %m)' -quit \)
+    open=$(cat -- "$dir/found") || fail "users isolation could not scan the files in $share"
+    [ -z "$open" ] || fail "users isolation does not change the read-only shared directory $share, so its modes must already let others read every entry and search every directory, and write none: $open; set its modes in the image"
+    continue
+  fi
   # setup changes each entry's inode, which a hard link shares with a name outside
   scan "users isolation could not scan the files in $share" \
     -P "$share" -xdev -ignore_readdir_race ! -type d -links +1 -printf '%p has %n links' -quit
@@ -430,15 +443,13 @@ while [ $# -gt 0 ]; do
     -o -type f -perm /6000 -printf '%p is set-user-id or set-group-id (mode %m)' -quit
   special=$(cat -- "$dir/found") || fail "users isolation could not scan the files in $share"
   [ -z "$special" ] || fail "users isolation does not support a device or a set-user-id or set-group-id file in a shared directory: $special; setup would give members access to it"
-  if [ "$access" = rw ]; then
-    # the default ACL setup writes takes its owner entry from the directory's owner
-    # bits, and an owner entry beats the group's grant, so a member could not edit
-    # the files it creates in a directory whose owner lacks rwx
-    scan "users isolation could not scan the directories in $share" \
-      -P "$share" -xdev -ignore_readdir_race -type d ! -perm -u=rwx -printf '%p is mode %m' -quit
-    narrow=$(cat -- "$dir/found") || fail "users isolation could not scan the directories in $share"
-    [ -z "$narrow" ] || fail "users isolation does not support a directory without owner rwx in a read-write shared directory: $narrow; its owner bits would become the default ACL of the files members create there"
-  fi
+  # the default ACL setup writes takes its owner entry from the directory's owner
+  # bits, and an owner entry beats the group's grant, so a member could not edit
+  # the files it creates in a directory whose owner lacks rwx
+  scan "users isolation could not scan the directories in $share" \
+    -P "$share" -xdev -ignore_readdir_race -type d ! -perm -u=rwx -printf '%p is mode %m' -quit
+  narrow=$(cat -- "$dir/found") || fail "users isolation could not scan the directories in $share"
+  [ -z "$narrow" ] || fail "users isolation does not support a directory without owner rwx in a read-write shared directory: $narrow; its owner bits would become the default ACL of the files members create there"
 done
 # the answer: at most one line per id in the window, between markers, so that output a
 # provider cut short is found out rather than read as fewer taken ids. Each step is
@@ -484,7 +495,7 @@ check_chain() {
 }
 """
 
-# Creates the group, the users and their homes, and prepares the shares. It runs once
+# Creates the group, the users and their homes, and prepares the rw shares. It runs once
 # per sandbox, before any member exists, so no member can change a share while it does.
 # $1 group, $2 its gid, $3 peers, $4 the homes' parent, then `user <name> <uid> <home>`
 # and `share <rw|ro> <path>` items.
@@ -569,21 +580,13 @@ rw_share() {
   fi
 }
 
-# no member owns an entry or is in its group, and the probe refused ACLs, so only the
-# other bits need a change: no w, and r, and x where chmod's X gives it. Entries that
-# have them already are left alone, so an input mounted read-only passes.
-ro_share() {
-  s=$1
-  find -P "$s" -xdev ! -type l \( -perm /o=w -o ! -perm -o=r -o \( -type d -o -perm /111 \) ! -perm -o=x \) \
-    -exec chmod o-w,o+rX {} + || fail "users isolation could not change the modes of the files in $s"
-}
-
+# ro shares are left as they are: the probe checked their modes
 shares() {
   while [ $# -gt 0 ]; do
     case $1 in
       user) shift 4 ;;
       share)
-        if [ "$2" = rw ]; then rw_share "$3"; else ro_share "$3"; fi
+        if [ "$2" = rw ]; then rw_share "$3"; fi
         shift 3 ;;
     esac
   done
@@ -675,8 +678,15 @@ fi
 if (printf x >>"$file") 2>/dev/null; then
   fail "a peer could write $file: $fs"
 fi
-if mv -- "$home" "$home.swarm-probe" 2>/dev/null; then
-  mv -- "$home.swarm-probe" "$home"
+# a rename to a sibling that does not exist, not into a directory (-T): one rename(2)
+# in a directory no member can write, so none can create the sibling after the check,
+# and on one filesystem, so mv does not fall back to a copy
+moved=$home.swarm-probe
+if [ -e "$moved" ] || [ -L "$moved" ]; then
+  fail "$moved already exists, so the self-test cannot check that a peer cannot rename $home; remove it from the image and the sample's files"
+fi
+if mv -T -- "$home" "$moved" 2>/dev/null; then
+  mv -T -- "$moved" "$home"
   fail "a peer could rename $home"
 fi
 for f in "$@"; do

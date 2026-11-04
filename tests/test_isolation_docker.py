@@ -45,7 +45,7 @@ services:
 {extra}"""
 
 Step = tuple[str, str]
-"""A member's step: the tool and its input. `bash`, `python`, `session` (`bash_session()`), `team` (`bash_session(instance="team")`), `root` (`bash(user="root")`) or `edit` (`text_editor()` creating the file)."""
+"""A member's step: the tool and its input. `bash`, `python`, `session` (`bash_session()`), `team` (`bash_session(instance="team")`), `root` (`bash(user="root")`) or `edit` (`text_editor()` creating the file); or, as a custom tool would, `exec` (`sandbox().exec()` of a shell command), `exec-root` (the same with `user="root"`), `write` (`sandbox().write_file()` of the path, with the text `secret`) or `read` (`sandbox().read_file()`)."""
 
 
 @dataclass
@@ -110,6 +110,15 @@ def actor(case: str, steps: dict[str, list[Step]]) -> Agent:
                     )
                 elif tool == "root":
                     output = await bash(user="root")(value)
+                elif tool in ("exec", "exec-root"):
+                    user = "root" if tool == "exec-root" else None
+                    result = await sandbox().exec(["sh", "-c", value], user=user)
+                    output = result.stdout + result.stderr
+                elif tool == "write":
+                    await sandbox().write_file(value, "secret")
+                    output = "written"
+                elif tool == "read":
+                    output = await sandbox().read_file(value)
                 else:
                     output = await text_editor()(
                         command="create", path=value, file_text="x"
@@ -200,8 +209,9 @@ _RW_RO = {
     "shared": [{"path": "/shared", "access": "rw"}, {"path": "/data", "access": "ro"}]
 }
 
-# with a setgid directory and an executable, which setup leaves as they are
-_DATA = "mkdir -p /data && echo data > /data/existing && mkdir -m 2755 /data/team && install -m 755 /dev/null /data/tool"
+# a ro share, which setup checks and does not change: with a setgid directory, an
+# executable and a hard link, which a ro share may hold
+_DATA = "mkdir -p /data && echo data > /data/existing && mkdir -m 2755 /data/team && install -m 755 /dev/null /data/tool && ln /data/existing /data/linked"
 
 
 @pytest.mark.slow
@@ -241,6 +251,56 @@ def test_members_run_as_their_users_with_ids_that_own_no_file(tmp_path: Path) ->
         assert _ok(stat_out) == f"{user} 644"
     assert len(uids) == 2 and len(gids) == 1
     assert not (uids | gids) & {0, 1000, 61000, 61001, 61002, 61003}
+
+
+@pytest.mark.slow
+def test_custom_tools_run_as_the_member_unless_they_name_a_user(
+    tmp_path: Path,
+) -> None:
+    # sandbox calls that name no user, as a custom tool makes them, run as the member;
+    # one that names root runs as root, a grant made in code
+    cases = {
+        "custom": Case(
+            runs=[
+                Run(
+                    {"shared": []},
+                    {
+                        "w-1": [
+                            ("exec", "id -un"),
+                            ("write", "/scratch/w-1/secret"),
+                            ("read", "/scratch/w-1/secret"),
+                            ("exec", "stat -c %U /scratch/w-1/secret"),
+                        ],
+                        "w-2": [
+                            ("exec", "id -un"),
+                            ("exec", "cat /scratch/w-1/secret"),
+                            ("read", "/scratch/w-1/secret"),
+                            ("write", "/scratch/w-1/planted"),
+                            ("exec-root", "id -un && cat /scratch/w-1/secret"),
+                        ],
+                    },
+                    after="ls /scratch/w-1",
+                )
+            ]
+        )
+    }
+    _eval(tmp_path, cases)
+    results = cases["custom"].results
+    assert "error" not in results
+    who, write, read, owner = results["w-1"]
+    assert (_ok(who), _ok(write), _ok(read), _ok(owner)) == (
+        "swarm-w-1",
+        "written",
+        "secret",
+        "swarm-w-1",
+    )
+    peer_who, peer_cat, peer_read, peer_write, root = results["w-2"]
+    assert _ok(peer_who) == "swarm-w-2"
+    _refused(peer_cat)
+    assert peer_read.startswith("PermissionError"), peer_read
+    assert peer_write.startswith("PermissionError"), peer_write
+    assert _ok(root).splitlines() == ["root", "secret"]
+    assert results["after"][0].split() == ["secret", "tmp"]
 
 
 @pytest.mark.slow
@@ -318,21 +378,33 @@ def test_members_cannot_reach_each_others_homes_and_share_the_shares(
             "bash",
             "rm /shared/top && mv /shared/nested/n /shared/nested/m && ls /shared/nested",
         ),
+        ("bash", "stat -c %a /data/script /data/team /data/existing"),
     ]
     cases = {
         peers: Case(
             runs=[Run({**_RW_RO, "peers": peers}, {"w-1": writer, "w-2": peer})],
             # sticky directories, which setup must make plain so that members can
-            # delete and rename each other's files
-            setup=f"{_DATA} && mkdir -p /shared/nested && chmod 1777 /shared /shared/nested",
+            # delete and rename each other's files; and a script others can read but
+            # not run, which setup leaves as it is
+            setup=f"{_DATA} && install -m 744 /dev/null /data/script && mkdir -p /shared/nested && chmod 1777 /shared /shared/nested",
         )
         for peers in ("none", "read")
     }
     _eval(tmp_path, cases)
     for peers, case in cases.items():
-        (read, read_temp, plant, write, rename, share, data, append, create, move) = (
-            case.results["w-2"]
-        )
+        (
+            read,
+            read_temp,
+            plant,
+            write,
+            rename,
+            share,
+            data,
+            append,
+            create,
+            move,
+            modes,
+        ) = case.results["w-2"]
         if peers == "read":
             assert _ok(read) == "secret"
             assert _ok(read_temp) == "temp"
@@ -344,6 +416,7 @@ def test_members_cannot_reach_each_others_homes_and_share_the_shares(
         assert _ok(share) == "one\ntwo"
         assert _ok(data) == "data"
         assert _ok(move) == "m"
+        assert _ok(modes).split() == ["744", "2755", "644"]
 
 
 @pytest.mark.slow
@@ -445,6 +518,72 @@ def test_the_self_test_removes_only_the_directories_it_reserved(
 
 
 @pytest.mark.slow
+def test_the_home_rename_check_refuses_an_existing_destination(
+    tmp_path: Path,
+) -> None:
+    # the pair check renames w-1's home to this sibling; an entry already there, which
+    # a rename into it or onto it could change, is refused and left as it was, with
+    # what it points to. peers="read" lets w-2 read w-1's home, which a copy would need.
+    moved = "/scratch/w-1.swarm-probe"
+    landing = "mkdir /scratch/landing && echo sentinel > /scratch/landing/f"
+    after = f"ls -A /scratch/landing; cat /scratch/landing/f; readlink {moved}; cat {moved} 2>/dev/null; ls -d /scratch/w-1"
+    run = Run({"shared": [], "peers": "read"}, {"w-1": [], "w-2": []}, after=after)
+    cases = {
+        "dangling-symlink": Case(
+            runs=[run], setup=f"{landing} && ln -s /scratch/none {moved}"
+        ),
+        "symlink-to-a-directory": Case(
+            runs=[run], setup=f"{landing} && ln -s /scratch/landing {moved}"
+        ),
+        "file": Case(runs=[run], setup=f"{landing} && echo sentinel > {moved}"),
+    }
+    _eval(tmp_path, cases)
+    expected = {
+        "dangling-symlink": ["/scratch/none"],
+        "symlink-to-a-directory": ["/scratch/landing"],
+        "file": ["sentinel"],
+    }
+    for name, target in expected.items():
+        results = cases[name].results
+        [error] = results["error"]
+        assert (
+            f"{moved} already exists, so the self-test cannot check that a peer cannot rename /scratch/w-1"
+            in error
+        ), error
+        # the landing directory holds only its sentinel, the entry is unchanged, and
+        # the home is in place
+        assert results["after"][0].splitlines() == [
+            "f",
+            "sentinel",
+            *target,
+            "/scratch/w-1",
+        ], (name, results["after"])
+
+
+@pytest.mark.slow
+def test_read_write_preparation_drops_file_capabilities(tmp_path: Path) -> None:
+    # changing a file's group clears its capabilities and set-id bits; the file is
+    # never run
+    after = "getcap -r /shared; find /shared -type f -perm /6000; stat -c '%a %G' /shared/tool; echo done"
+    cases = {
+        "capability": Case(
+            runs=[
+                Run(
+                    {"shared": [{"path": "/shared", "access": "rw"}]},
+                    {"w-1": []},
+                    after=after,
+                )
+            ],
+            setup="mkdir /shared && install -m 755 /dev/null /shared/tool && setcap cap_setuid+ep /shared/tool && getcap /shared/tool | grep -q cap_setuid",
+        )
+    }
+    _eval(tmp_path, cases)
+    results = cases["capability"].results
+    assert "error" not in results
+    assert results["after"] == ["775 inspect-swarm\ndone\n"]
+
+
+@pytest.mark.slow
 def test_mounts_inside_shares_and_under_the_homes_parent_are_refused(
     tmp_path: Path,
 ) -> None:
@@ -506,6 +645,9 @@ def test_a_second_swarm_with_users_isolation_in_a_sample_is_refused(
     assert "b-1" not in results
 
 
+_RO_MODES = "users isolation does not change the read-only shared directory /data, so its modes must already let others read every entry and search every directory, and write none:"
+
+
 @pytest.mark.slow
 def test_an_input_mounted_read_only_is_shared_as_it_is(tmp_path: Path) -> None:
     # one volume, mounted read-write at /seed, where the sample's setup fills it, and
@@ -523,11 +665,11 @@ def test_an_input_mounted_read_only_is_shared_as_it_is(tmp_path: Path) -> None:
             ],
             setup=f"{seed} && chmod 644 /seed/dir/f",
         ),
-        # a mode setup must change, which it cannot on a read-only filesystem
+        # a file members could not read, which setup does not change
         "private-file": Case(
             runs=[Run(ro, {"w-1": [], "w-2": []})],
             setup=f"{seed} && chmod 600 /seed/dir/f",
-            error="users isolation could not set up sandbox 'default': users isolation could not change the modes of the files in /data",
+            error=f"users isolation could not set up sandbox 'default': {_RO_MODES} /data/dir/f is not readable by others (mode 600); set its modes in the image",
         ),
     }
     _eval(
@@ -640,10 +782,21 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             setup="mkdir /shared && mknod -m 600 /shared/null c 1 3",
             error=f"{refused}users isolation does not support a device or a set-user-id or set-group-id file in a shared directory: /shared/null is a device",
         ),
-        "setuid-in-ro-share": Case(
+        # a ro share must already be open to read and closed to write
+        "ro-unreadable-file": Case(
             runs=[Run({"shared": [{"path": "/data", "access": "ro"}]}, idle)],
-            setup="mkdir /data && install -m 4750 /dev/null /data/helper",
-            error=f"{refused}users isolation does not support a device or a set-user-id or set-group-id file in a shared directory: /data/helper is set-user-id or set-group-id (mode 4750)",
+            setup="mkdir /data && install -m 640 /dev/null /data/f",
+            error=f"{refused}{_RO_MODES} /data/f is not readable by others (mode 640); set its modes in the image",
+        ),
+        "ro-unsearchable-directory": Case(
+            runs=[Run({"shared": [{"path": "/data", "access": "ro"}]}, idle)],
+            setup="mkdir -p /data/dir && chmod 754 /data/dir",
+            error=f"{refused}{_RO_MODES} /data/dir is a directory others cannot search (mode 754); set its modes in the image",
+        ),
+        "ro-writable-file": Case(
+            runs=[Run({"shared": [{"path": "/data", "access": "ro"}]}, idle)],
+            setup="mkdir /data && install -m 646 /dev/null /data/f",
+            error=f"{refused}{_RO_MODES} /data/f is writable by others (mode 646); set its modes in the image",
         ),
         "setgid-in-rw-share": Case(
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
@@ -699,11 +852,6 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             ],
             setup="mkdir /shared",
             error=f"{refused}users isolation could not scan the files in /shared: find: /shared/x: Input/output error",
-        ),
-        "hard-link-in-ro-share": Case(
-            runs=[Run({"shared": [{"path": "/data", "access": "ro"}]}, idle)],
-            setup="mkdir /outside /data && touch /outside/file && chmod 666 /outside/file && ln /outside/file /data/file",
-            error=f"{refused}users isolation does not support a hard-linked file in a shared directory: /data/file has 2 links",
         ),
         "unreadable-ro-share": Case(
             runs=[Run({"shared": [{"path": "/inputs/data", "access": "ro"}]}, idle)],
