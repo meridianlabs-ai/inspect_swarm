@@ -361,6 +361,15 @@ class MemberOperator:
             )
         if not self._swarm.active():
             return OperatorOutcome(changed=False, detail=_dry(dry_run, _ENDED))
+        if m.state == "pending" and self._swarm.stop_reason is not None:
+            # no member starts once the swarm is stopping
+            return OperatorOutcome(
+                changed=False,
+                detail=_dry(
+                    dry_run,
+                    "The member has not started, and the swarm is stopping, so it never will.",
+                ),
+            )
         # before the request, which sets an idle member `ending`
         detail = _stop_detail(m)
         if not dry_run:

@@ -648,20 +648,21 @@ class SwarmRun:
         self.operator.name = "swarm" if outer is None else f"swarm:{outer.name}"
         registration = ExitStack()
         registration.enter_context(operator_group(self.operator.name, self.operator))
+        # until the try below, whose finally unregisters the group, any error does
         try:
             timelines = MemberTimelines([m.name for m in self._members])
+            interval = self._interval = LedgerInterval(
+                roster=[m.name for m in self._members]
+            )
+            self._scorer = first_scorer()
+            self._start = anyio.current_time()
+            self.bus.waits.start = self._start
+            # the swarm's span
+            self._span_id = current_span_id()
+            self._settle()
         except BaseException:
             registration.close()
             raise
-        interval = self._interval = LedgerInterval(
-            roster=[m.name for m in self._members]
-        )
-        self._scorer = first_scorer()
-        self._start = anyio.current_time()
-        self.bus.waits.start = self._start
-        # the swarm's span
-        self._span_id = current_span_id()
-        self._settle()
         error: BaseException | None = None
         # what escaped the swarm, which the finally below must not replace
         escaping: BaseException | None = None

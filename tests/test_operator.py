@@ -1156,6 +1156,38 @@ async def test_a_stop_after_the_swarms_stop_decides_a_normal_return(
         assert ran.end_origins() == {"a": (None, None, None)}
 
 
+@pytest.mark.anyio
+async def test_a_stop_after_the_swarms_stop_leaves_a_pending_member_unchanged() -> None:
+    entered, release = anyio.Event(), anyio.Event()
+
+    async def drive(group: OperatorGroup) -> None:
+        await entered.wait()
+        try:
+            assert _act(group.stop, dry_run=False).changed
+            # no member starts once the swarm is stopping
+            for dry_run in (True, False):
+                outcome = _act(group.agents["b"].stop, dry_run=dry_run)
+                assert (outcome.changed, outcome.refused) == (False, None)
+                assert "never will" in outcome.detail
+        finally:
+            release.set()
+
+    ran = await _run(
+        _swarm(
+            [
+                member(returns_when(entered, release), name="a"),
+                member(answers_now(), name="b"),
+            ],
+            _starting(["a"]),
+            grace=60,
+        ),
+        drive,
+    )
+
+    [b] = [m for m in ran.record.members if m.name == "b"]
+    assert (b.state, b.end_origin) == ("pending", None)
+
+
 class _Cleanup(MCPServer):
     """A tool source whose teardown, when the loop exits, waits for `release`, shielded from cancellation unless `shield` is false."""
 
@@ -1448,6 +1480,53 @@ async def test_two_swarms_at_once_outside_any_member_are_refused() -> None:
     assert errors == ["The sample already has an operator group named 'swarm'."]
     assert left == [(["a"], 0)]
     assert [e.member for e in ran.swarm_events("member_result")] == ["a", "b"]
+
+
+@pytest.mark.anyio
+async def test_a_swarm_that_fails_to_start_unregisters_its_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_swarm._controller import _control
+
+    real = _control.LedgerInterval
+    # kept, with its traceback and so the failed run's frame: nothing but the run's own
+    # cleanup unregisters the group
+    errors: list[RuntimeError] = []
+    registered: list[bool] = []
+    # holds the second swarm's member until the driver has found its group
+    found = anyio.Event()
+
+    def fails_once(*args: Any, **kwargs: Any) -> Any:
+        if not errors:
+            raise RuntimeError("interval failed")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_control, "LedgerInterval", fails_once)
+
+    @agent
+    def fails_then_runs() -> Agent:
+        async def execute(state: AgentState) -> AgentState:
+            try:
+                await run(_swarm([member(answers_now(), name="a")]), "task")
+            except RuntimeError as ex:
+                errors.append(ex)
+            registered.append(
+                any("swarm" in active.operator_groups for active in active_samples())
+            )
+            # a fresh roster: the failed swarm had claimed its member's timeline
+            await run(_swarm([member(_after(found, answers_now()), name="b")]), "task")
+            return state
+
+        return execute
+
+    async def drive(group: OperatorGroup) -> None:
+        found.set()
+
+    ran = await _run(fails_then_runs(), drive)
+
+    assert [str(ex) for ex in errors] == ["interval failed"]
+    assert registered == [False]
+    assert [e.member for e in ran.swarm_events("member_result")] == ["b"]
 
 
 # ---------------------------------------------------------------------------

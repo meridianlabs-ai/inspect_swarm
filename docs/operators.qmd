@@ -51,7 +51,7 @@ An interrupt loses what the turn was doing. The cancelled tool calls return no r
 - A member whose agent has returned and whose background work is still finishing ends once that work is done. It keeps its submission; without one, it ends `stopped`.
 - An idle [persistent member](members.qmd#persistent-members) ends `submitted`, with its last answer as its output.
 
-`stop` ends work only. Answers a member has already given stay: a persistent member's earlier answers and a submission returned before the stop can still be the swarm's answer, under the controller's `final` rule or its choice, as when a controller ends the member. A member stopped before it answered has no answer. A second `stop`, a stop of a member that has ended, and a stop sent while the swarm is ending after an error or a cancellation change nothing. `stop` works for every member, bridged ones included.
+`stop` ends work only. Answers a member has already given stay: a persistent member's earlier answers and a submission returned before the stop can still be the swarm's answer, under the controller's `final` rule or its choice, as when a controller ends the member. A member stopped before it answered has no answer. A second `stop`, a stop of a member that has ended, a stop of a member that has not started once the swarm is stopping, and a stop sent while the swarm is ending after an error or a cancellation change nothing. `stop` works for every member, bridged ones included.
 
 ## Stopping the swarm
 
