@@ -986,22 +986,28 @@ async def test_a_stop_while_the_ended_swarm_unwinds_its_members_changes_nothing(
             raise ValueError("controller failed")
         return await _drain(control)
 
-    async def drive(group: OperatorGroup) -> None:
-        await entered.wait()
-        if by == "caller":
-            scope.cancel()
-        # the error or the cancellation is ending the runtime, which cancelled the
-        # member: it is still running its cleanup, and still listed
-        await cleaning.wait()
+    def refused(group: OperatorGroup) -> None:
         a = group.agents["a"]
-        try:
-            assert _act(a.info).state == "running"
+        for dry_run in (True, False):
             for outcome in (
-                _act(a.stop, dry_run=False),
-                _act(group.stop, dry_run=False),
+                _act(a.stop, dry_run=dry_run),
+                _act(group.stop, dry_run=dry_run),
             ):
                 assert (outcome.changed, outcome.refused) == (False, None)
                 assert "ending after an error or a cancellation" in outcome.detail
+
+    async def drive(group: OperatorGroup) -> None:
+        await entered.wait()
+        try:
+            if by == "caller":
+                scope.cancel()
+                # at once, before any task in the swarm has run since
+                refused(group)
+            # the error or the cancellation is ending the runtime, which cancelled the
+            # member: it is still running its cleanup, and still listed
+            await cleaning.wait()
+            assert _act(group.agents["a"].info).state == "running"
+            refused(group)
         finally:
             # a shielded cleanup that never ends would hold the test
             release.set()

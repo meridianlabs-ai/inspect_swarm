@@ -1086,13 +1086,11 @@ class SwarmRun:
     # stop then would change the ledger's stop reason or start a timer in a task group
     # that is closing.
     def _active(self) -> bool:
-        runtime, members = self._runtime_tg, self._members_tg
+        runtime = self._runtime_tg
         return (
             runtime is not None
-            and members is not None
             and not self._supervisor_ended
-            and not runtime.cancel_scope.cancel_called
-            and not members.cancel_scope.cancel_called
+            and not _cancel_reached(runtime.cancel_scope)
         )
 
     # end()'s grace: the member is cancelled, as the hard stop cancels one, if it is
@@ -1177,6 +1175,24 @@ class SwarmRun:
     def _notify(self) -> None:
         self._changed.set()
         self._changed = anyio.Event()
+
+
+# Whether a cancellation has reached `scope`: its own, or one of a scope around it that
+# no shield stops, a member's error (the members' task group) or the caller's included,
+# from the moment it is made, before any task in the scope has run. anyio answers this
+# only for the current task, and an operator's action runs in another, so this reads
+# the record each backend keeps as the cancellation is made.
+def _cancel_reached(scope: anyio.CancelScope) -> bool:
+    if scope.cancel_called:
+        return True
+    # anyio's trio scope wraps trio's, whose status trio updates for every scope inside
+    # a cancelled one
+    original = getattr(scope, "_CancelScope__original", None)
+    if original is not None:
+        status = getattr(original, "_cancel_status", None)
+        return bool(getattr(status, "effectively_cancelled", False))
+    # anyio's asyncio scope looks through its parents, up to a shield
+    return bool(getattr(scope, "_effectively_cancelled", False))
 
 
 # A wake's input as the messages to append: a string as one new user message, and each

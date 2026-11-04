@@ -149,7 +149,7 @@ A member's status says how it ended:
 
 | Status | Meaning |
 |---|---|
-| `submitted` | Its agent returned normally. Its output is its answer. A [persistent member](#persistent-members) is never `submitted` by a normal return: it ends `submitted` when it is stopped or ended while idle, or at the turn boundary after an answer, with its last answer as its output, unless an [operator](operators.qmd#stopping-a-member) stopped it. |
+| `submitted` | Its agent returned normally. Its output is its answer. A [persistent member](#persistent-members) is never `submitted` by a normal return: it ends `submitted` when it is stopped or ended while idle, or at the turn boundary after an answer, with its last answer as its output. |
 | `unsubmitted` | Its agent returned with a `content_filter` or `model_length` stop reason, as `react()` does after repeated refusals or a context overflow. A persistent member also ends `unsubmitted` when its agent returns without an answer, for example when its `on_continue` returns `False` (a cut-off). |
 | `stopped` | The swarm stopped it, for example when another member submitted or the swarm's time cap was reached, or a controller ended it ([Controllers](controllers.qmd#boundary-callbacks)). A member that reaches a turn boundary of its agent loop after the stop began ends there. |
 | `share` | It used up its share of a split budget. |
