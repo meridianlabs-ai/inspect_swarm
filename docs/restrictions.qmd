@@ -13,6 +13,8 @@ llms-description: "What the swarm does not support, the limits of bridged member
 
 A bridged member runs a CLI agent in the sandbox through Inspect's agent bridge. `inspect_swe` agents count as bridged by default; pass `member(..., bridged=True)` for other agents that use the bridge. Bridged members end with the same limit statuses as native members. A generation limit reaches the member wrapper after the CLI exits, so retries and CLI background work can delay its end. A swarm stop applies grace and a hard stop; a share or member limit alone does not start that timer.
 
+A sample limit can be lost in one rare case. When a CLI has overlapping requests and one of them reaches the sample's limit, the bridge raises that limit only when the CLI exits. If the bridged agent is cancelled before then, the limit is not raised. That happens on a swarm hard stop after grace, a controller hard stop, the member's time limit, or bridged background work cancelled at the end of the member's drain. The member ends `cancelled`, the ledger's `ended_by` is empty, and the sample goes on. The sample's next model call usually reaches the limit again.
+
 The CLI's own tool calls do not emit Inspect `ToolEvent`s, so the tool-event evidence described here does not cover them, Inspect Sentinel does not see them, and `longest_identical_tool_run` is `null` for bridged members.
 
 ### Channels for bridged members
