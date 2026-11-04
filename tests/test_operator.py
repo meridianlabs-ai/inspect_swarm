@@ -1,5 +1,6 @@
 """Operator messages and stops: the swarm's operator group, called as the control server calls it, and once over the control channel's socket."""
 
+import asyncio
 import contextvars
 import os
 import tempfile
@@ -961,17 +962,27 @@ def holds_in_cleanup(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("by", ["controller", "member", "caller"])
+@pytest.mark.parametrize("by", ["controller", "member", "caller", "task"])
 async def test_a_stop_while_the_ended_swarm_unwinds_its_members_changes_nothing(
-    by: str,
+    by: str, anyio_backend: str
 ) -> None:
+    if by == "task" and anyio_backend != "asyncio":
+        pytest.skip("cancels an asyncio task directly")
     entered, cleaning, release = anyio.Event(), anyio.Event(), anyio.Event()
-    # the caller's scope around the swarm
+    # the caller's scope around the swarm, or the asyncio task it runs in
     scope = anyio.CancelScope()
+    tasks: list[asyncio.Task[AgentState]] = []
 
     @agent
     def cancellable(inner: Agent) -> Agent:
         async def execute(state: AgentState) -> AgentState:
+            if by == "task":
+                tasks.append(asyncio.ensure_future(inner(state)))
+                try:
+                    return await tasks[0]
+                except asyncio.CancelledError:
+                    # only the swarm's task was cancelled, not this one
+                    return state
             with scope:
                 state = await inner(state)
             return state
@@ -999,8 +1010,11 @@ async def test_a_stop_while_the_ended_swarm_unwinds_its_members_changes_nothing(
     async def drive(group: OperatorGroup) -> None:
         await entered.wait()
         try:
-            if by == "caller":
-                scope.cancel()
+            if by in ("caller", "task"):
+                if by == "caller":
+                    scope.cancel()
+                else:
+                    tasks[0].cancel()
                 # at once, before any task in the swarm has run since
                 refused(group)
             # the error or the cancellation is ending the runtime, which cancelled the

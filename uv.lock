@@ -1095,7 +1095,7 @@ doc = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0" },
+    { name = "anyio", specifier = ">=4.14.2" },
     { name = "inspect-ai", git = "https://github.com/UKGovernmentBEIS/inspect_ai?rev=main" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "shortuuid" },

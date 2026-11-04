@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
 import anyio
+from anyio import TaskInfo
 from anyio.abc import TaskGroup
 from inspect_ai._control.operator import operator_group
 from inspect_ai._util.error import PrerequisiteError
@@ -520,6 +521,8 @@ class SwarmRun:
         self._runtime_tg: TaskGroup | None = None
         # set when the supervisor returns or is cancelled
         self._supervisor_ended = False
+        # the task running the swarm, set by run()
+        self._host: TaskInfo | None = None
         self._member_ctx: contextvars.Context | None = None
         self._queue: deque[ControlEvent] = deque()
         self._changed = anyio.Event()
@@ -703,6 +706,7 @@ class SwarmRun:
                         async with anyio.create_task_group() as members_tg:
                             self._members_tg = members_tg
                             self._member_ctx = contextvars.copy_context()
+                            self._host = anyio.get_current_task()
                             try:
                                 async with anyio.create_task_group() as runtime_tg:
                                     self._runtime_tg = runtime_tg
@@ -1090,7 +1094,12 @@ class SwarmRun:
         return (
             runtime is not None
             and not self._supervisor_ended
-            and not _cancel_reached(runtime.cancel_scope)
+            and not runtime.cancel_scope.cancel_called
+            # a cancellation that has reached the task running the swarm and that it has
+            # not yet seen: a member's error, a scope around the swarm, or a cancel of
+            # the task itself. An operator's action runs in another task, so it asks
+            # the swarm's task rather than its own.
+            and not (self._host is not None and self._host.has_pending_cancellation())
         )
 
     # end()'s grace: the member is cancelled, as the hard stop cancels one, if it is
@@ -1175,24 +1184,6 @@ class SwarmRun:
     def _notify(self) -> None:
         self._changed.set()
         self._changed = anyio.Event()
-
-
-# Whether a cancellation has reached `scope`: its own, or one of a scope around it that
-# no shield stops, a member's error (the members' task group) or the caller's included,
-# from the moment it is made, before any task in the scope has run. anyio answers this
-# only for the current task, and an operator's action runs in another, so this reads
-# the record each backend keeps as the cancellation is made.
-def _cancel_reached(scope: anyio.CancelScope) -> bool:
-    if scope.cancel_called:
-        return True
-    # anyio's trio scope wraps trio's, whose status trio updates for every scope inside
-    # a cancelled one
-    original = getattr(scope, "_CancelScope__original", None)
-    if original is not None:
-        status = getattr(original, "_cancel_status", None)
-        return bool(getattr(status, "effectively_cancelled", False))
-    # anyio's asyncio scope looks through its parents, up to a shield
-    return bool(getattr(scope, "_effectively_cancelled", False))
 
 
 # A wake's input as the messages to append: a string as one new user message, and each
