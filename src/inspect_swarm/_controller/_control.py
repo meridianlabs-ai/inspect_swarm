@@ -441,6 +441,8 @@ class MemberRun:
             persistent=self.persistent,
             answer_times=[a.time for a in self.answer_list],
             end_origin=self.end_origin,
+            # from the request, whatever then decides how the member ends
+            withdrawn=self.gate.end_origin == OPERATOR,
         )
 
 
@@ -496,6 +498,7 @@ class SwarmRun:
             lambda: self.stop_reason,
             self.stop,
             self.bus.waits.in_wait,
+            self._settle,
         )
         for m in self._members:
             m.gate.loop_bound = self.operator.members[m.name].loop_bound

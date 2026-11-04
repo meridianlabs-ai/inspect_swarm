@@ -65,9 +65,12 @@ class SwarmOperator:
         stop_reason: Callable[[], str | None],
         stop: Callable[[str], None],
         in_wait: Callable[[str], bool],
+        settle: Callable[[], None],
     ) -> None:
         self._stop_reason = stop_reason
         self._stop = stop
+        # recomputes the provisional answer, once a stop withdraws a member's answers
+        self.settle = settle
         self.in_wait = in_wait
         # set by the run when it registers the group
         self.name = "swarm"
@@ -349,6 +352,7 @@ class MemberOperator:
             )
         if not dry_run:
             m.end(origin=OPERATOR)
+            self._swarm.settle()
         return OperatorOutcome(
             changed=True,
             detail=_dry(

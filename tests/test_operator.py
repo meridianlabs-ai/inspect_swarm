@@ -30,7 +30,7 @@ from inspect_ai.model import (
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import TaskState
 from inspect_ai.tool import Tool, ToolChoice, ToolInfo, tool
-from inspect_ai.util import background, message_limit
+from inspect_ai.util import background, message_limit, time_limit
 
 from inspect_swarm import (
     Boundary,
@@ -788,6 +788,58 @@ async def test_a_persistent_member_the_operator_stops_gives_no_answer(
     # the first rule over the remaining submissions
     assert (ran.record.final.mode, ran.record.final.member) == ("first", "q")
     assert refusals and "the operator stopped the member" in refusals[0]
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("warm_inspect_caches")
+@pytest.mark.parametrize("picked", [False, True])
+async def test_a_stopped_member_whose_limit_ends_it_first_gives_no_answer(
+    picked: bool,
+) -> None:
+    idle, started = anyio.Event(), anyio.Event()
+    script = Script([_submit("first"), _call("slow", seconds=30)])
+
+    async def run_controller(control: SwarmControl) -> str:
+        control.start("p")
+        control.start("q")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                if isinstance(event, MemberIdle):
+                    if picked:
+                        control.choose_answer("p")
+                    control.wake("p", "More.")
+                    idle.set()
+        return "all_done"
+
+    async def drive(group: OperatorGroup) -> None:
+        await idle.wait()
+        await started.wait()
+        assert _act(group.agents["p"].stop, dry_run=False).changed
+
+    # its time limit runs out in the tool call, long before the stop's grace
+    ran = await _run(
+        _swarm(
+            [
+                member(
+                    _react(script, _slow(started)),
+                    name="p",
+                    persistent=True,
+                    limits=[time_limit(2)],
+                ),
+                # answers after p, so the first rule would choose p's answer
+                member(_after(idle, answers_now()), name="q"),
+            ],
+            run_controller,
+            grace=60,
+        ),
+        drive,
+    )
+
+    assert ran.status("p") == "member_limit:time"
+    # the limit decided its ending; the stop still withdrew its answer
+    assert (ran.record.final.mode, ran.record.final.member) == ("first", "q")
+    [p] = [m for m in ran.record.members if m.name == "p"]
+    assert (p.end_origin, p.withdrawn, len(p.answer_times)) == (None, True, 1)
 
 
 # ---------------------------------------------------------------------------
