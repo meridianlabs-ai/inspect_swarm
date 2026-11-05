@@ -933,8 +933,8 @@ class _SharedMemoryState:
             CHANNEL,
             list(dict.fromkeys(f.record for f in files)),
             depends_on=depends_on,
+            files=[_shown(f, lines) for f in files],
             listing=listing,
-            fields={"files": [_shown(f, lines) for f in files]},
         )
 
     # news: what changed since a loop last viewed it

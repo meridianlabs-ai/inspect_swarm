@@ -21,7 +21,7 @@ from .._channel._channel import (
 )
 from .._channel.messages import MessagesState
 from .._controller._controller import MemberInfo
-from .._evidence import READ_KEYS, comm_delivered, comm_read, comm_sent
+from .._evidence import comm_delivered, comm_read, comm_sent
 from ._address import resolve
 from ._record import (
     Draft,
@@ -120,7 +120,6 @@ class Bus(Protocol):
         *,
         depends_on: Sequence[str] | None = None,
         listing: bool = False,
-        fields: Mapping[str, JsonValue] | None = None,
     ) -> str:
         """Write the `read` evidence of a tool result that shows the channel's records.
 
@@ -131,13 +130,12 @@ class Bus(Protocol):
             records: The ids of the records the result concerns.
             depends_on: The ids of the records whose content or news the result showed, when they differ from `records`: a result that tells the loop a record was committed, without its content, depends on it, and a result built from several records depends on them all.
             listing: Whether the result showed what exists rather than its content. The swarm's metrics count listings apart from reads.
-            fields: More data for the evidence, written beside the bus's own.
 
         Returns:
             The read's id (`"r-5"`), numbered across the run's channels.
 
         Raises:
-            ValueError: If no channel of the swarm has the name, an id is not a record the channel committed in this run, or a key of `fields` is one the bus writes (`version`, `read`, `tool_span_id`, `depends_on`, `listing`, `via`).
+            ValueError: If no channel of the swarm has the name, or an id is not a record the channel committed in this run.
             RuntimeError: If called outside a member of this swarm.
         """
         ...
@@ -348,23 +346,19 @@ class SwarmBus:
         records: Sequence[str],
         *,
         depends_on: Sequence[str] | None = None,
+        files: list[JsonValue] | None = None,
         listing: bool = False,
-        fields: Mapping[str, JsonValue] | None = None,
     ) -> str:
         # a result of the channel's tool concerned `records` and showed the calling
         # loop the content or news of `depends_on` (by default `records`): writes its
-        # `read` evidence for the member and loop calling, as deliver() binds the sender
+        # `read` evidence for the member and loop calling, as deliver() binds the sender.
+        # `files` is the shared memory's, the versions it showed, which `Bus` leaves out
         context = self.member()
         if context is None:
             raise RuntimeError(
                 "Bus.read() was called outside a member of this swarm; channel tools report reads for the member that calls them."
             )
         self._state(channel)
-        taken = [key for key in fields or {} if key in READ_KEYS]
-        if taken:
-            raise ValueError(
-                f"{channel}: a read's fields cannot use {', '.join(taken)}, which the bus writes itself."
-            )
         loop = current_agent_span_id()
         self._check_committed(channel, records)
         depends = self.depends(
@@ -382,7 +376,7 @@ class SwarmBus:
             list(records),
             depends,
             listing,
-            fields,
+            files,
         )
         return read
 

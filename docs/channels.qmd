@@ -165,6 +165,6 @@ A tool whose result shows the channel's records reports them with `run.bus.read(
 
 A channel that reports nothing adds no dependency. Every id must be a record the channel committed in this run, or the call raises `ValueError`.
 
-`read()` returns the read's id (`r-5`), which the log's `read` event carries. Pass `listing=True` for a result that shows what exists rather than its content, which the metrics count as a listing, not a read. Pass `fields=` to add the channel's own data to the event; a key the bus writes itself, such as `read` or `depends_on`, raises `ValueError`.
+`read()` returns the read's id (`r-5`), which the log's `read` event carries. Pass `listing=True` for a result that shows what exists rather than its content, which the metrics count as a listing, not a read.
 
 See the docstrings of `Channel`, `ChannelRun`, `ChannelState`, `Bus`, `Draft`, `Delivery`, `calling_member`, `WaitingState` and `WaitNews` in the [reference](reference/index.qmd).

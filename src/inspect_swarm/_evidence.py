@@ -210,13 +210,6 @@ def comm_delivered(
     )
 
 
-# the keys of a `read` event's `data` that the bus writes, which a channel's own fields
-# cannot take
-READ_KEYS = frozenset(
-    {"version", "read", "tool_span_id", "depends_on", "listing", "via"}
-)
-
-
 def comm_read(
     span_id: str | None,
     member: str,
@@ -228,14 +221,13 @@ def comm_read(
     records: list[str],
     depends_on: list[str],
     listing: bool,
-    fields: Mapping[str, JsonValue] | None = None,
+    files: list[JsonValue] | None = None,
 ) -> None:
     # a loop's tool was shown peer content, from the channel's state, never from the
     # content: `records` are the records the result concerns, `depends_on` those whose
-    # content or news it showed that no earlier result of the loop had, and `fields`
-    # the channel's own data, such as the shared memory's `files`, the versions it
-    # showed; a copy, since the channel keeps its own
-    shown: dict[str, JsonValue] = {} if fields is None else copy.deepcopy(dict(fields))
+    # content or news it showed that no earlier result of the loop had, and the shared
+    # memory's `files` the versions it showed
+    shown: dict[str, JsonValue] = {} if files is None else {"files": files}
     _comm(
         "read",
         agent=member,

@@ -927,18 +927,13 @@ async def _report(
     channel: str = "board",
     depends_on: Sequence[str] | None = None,
     listing: bool = False,
-    fields: Mapping[str, JsonValue] | None = None,
 ) -> str:
     # as a channel's tool reports a result, in a tool span of the member's loop
     with _as(bus.stand_ins[member].context):
         async with span("agent", type="agent", id=f"{member}/{loop}"):
             async with span("tool", type="tool", id=f"{member}/{loop}/tool"):
                 return bus.read(
-                    channel,
-                    records,
-                    depends_on=depends_on,
-                    listing=listing,
-                    fields=fields,
+                    channel, records, depends_on=depends_on, listing=listing
                 )
 
 
@@ -1446,17 +1441,12 @@ async def test_calling_member_finds_a_custom_agents_nested_loop(bind: bool) -> N
 
 
 @pytest.mark.anyio
-async def test_a_read_writes_the_channels_fields_and_returns_its_id() -> None:
+async def test_a_read_writes_listing_and_returns_its_id() -> None:
     bus, _ = _bus()
-    files: list[JsonValue] = [{"file": "f-1", "version": 2}]
     async with sample() as transcript:
         await _send(bus)
-        first = await _report(
-            bus, ["b-1"], listing=True, fields={"files": files, "page": 1}
-        )
+        first = await _report(bus, ["b-1"], listing=True)
         second = await _report(bus, [])
-    # the channel keeps its own
-    files.clear()
     assert (first, second) == ("r-1", "r-2")
     reads = [c for c in _comm(transcript) if c.kind == "read"]
     assert [(r.agent, r.loop_span_id, r.record_ids) for r in reads] == [
@@ -1469,8 +1459,6 @@ async def test_a_read_writes_the_channels_fields_and_returns_its_id() -> None:
             "read": "r-1",
             "tool_span_id": "w-2/top/tool",
             "depends_on": ["b-1"],
-            "files": [{"file": "f-1", "version": 2}],
-            "page": 1,
             "listing": True,
             "via": "tool",
         },
@@ -1483,20 +1471,6 @@ async def test_a_read_writes_the_channels_fields_and_returns_its_id() -> None:
             "via": "tool",
         },
     ]
-
-
-@pytest.mark.anyio
-async def test_a_read_refuses_fields_the_bus_writes() -> None:
-    bus, _ = _bus()
-    async with sample() as transcript:
-        await _send(bus)
-        for key in ("version", "read", "tool_span_id", "depends_on", "listing", "via"):
-            with pytest.raises(ValueError, match=f"cannot use {key}, which the bus"):
-                await _report(bus, ["b-1"], fields={"note": "x", key: "x"})
-        # a refusal gives no id and marks nothing written for the loop
-        assert await _report(bus, ["b-1"]) == "r-1"
-    [read] = [c for c in _comm(transcript) if c.kind == "read"]
-    assert data(read)["depends_on"] == ["b-1"]
 
 
 @pytest.mark.anyio
