@@ -707,6 +707,8 @@ def _returned(
         # every answer was held where the loop gave it, so a loop that returns has
         # stopped without one: a cut-off, or an output that was not an answer
         return "unsubmitted"
+    # before its classification reads it; a refusal ends the member `errored`
+    gate.approve(state.output)
     return output_status(state.output)
 
 

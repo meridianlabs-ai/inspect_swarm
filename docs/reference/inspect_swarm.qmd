@@ -18,6 +18,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### Boundary
 ### BoundaryCallback
 ### MemberEnded
+### VerdictSummary
 ### MemberIdle
 ### MemberNews
 ### ControlEvent
@@ -47,7 +48,15 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### swarm_result
 ### SwarmResultRecord
 ### MemberResult
+### LeftOut
 ### FinalRecord
+### answer_result
+### artifact_result
+### ResultSpec
+### ResultKind
+### Verdict
+### Verifier
+### MemberArtifacts
 
 ## Budget view
 
