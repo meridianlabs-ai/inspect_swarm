@@ -45,7 +45,7 @@ The channel creates no directories. A sandbox image that pre-creates a directory
 - **Bridged members**: accepted with the filesystem channel or none, as for any member that chooses its name.
 - **A controller's `start(member, input=...)`**: the eval author's text, used as given. A controller sees the flag in `MemberInfo` in its `check` and in `MemberHandle.choose_name` in its `run`, so one that writes a member's input can leave names out for that member.
 
-Text the eval author gives the member is not changed and not checked: the sample input, a controller's `start(input=...)`, the member agent and its prompt, and the sample's sandbox configuration.
+Text the eval author gives the member is not changed and not checked: the sample input, a controller's `start(input=...)`, the member agent and its prompt, and the sample's sandbox configuration. A controller's `start(preamble=...)` replaces the swarm's preamble with the controller's text, used as given: the swarm adds no name to it and does not ask the member to choose one ([swarm-orbit.md S3](swarm-orbit.md#s3-a-controllers-preamble)).
 
 ## What the swarm keeps
 

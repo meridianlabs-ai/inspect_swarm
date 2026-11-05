@@ -14,7 +14,14 @@ from inspect_ai.log import EvalSample
 from inspect_ai.log._samples import (
     _sample_active,  # pyright: ignore[reportPrivateUsage]
 )
-from inspect_ai.model import ChatMessage, Model, ModelOutput, execute_tools
+from inspect_ai.model import (
+    ChatMessage,
+    ChatMessageAssistant,
+    ChatMessageSystem,
+    Model,
+    ModelOutput,
+    execute_tools,
+)
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.tool import Tool, memory, tool
@@ -171,6 +178,82 @@ async def test_a_custom_controller_starts_members_later_with_custom_input() -> N
     assert [m.text for m in worker[:-1]] == ["the task"]
     assert scout[-1].text.startswith("You are scout, one of 2 agents")
     assert worker[-1].text.startswith("You are worker, one of 2 agents")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "preamble,choose_name,expected",
+    [
+        ("We take turns.", False, ["the task", "We take turns."]),
+        ("We take turns.", True, ["the task", "We take turns."]),
+        (False, False, ["the task"]),
+    ],
+)
+async def test_a_controller_replaces_or_leaves_out_the_preamble(
+    preamble: str | bool, choose_name: bool, expected: list[str]
+) -> None:
+    inputs: list[list[ChatMessage]] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("solo", preamble=cast(Any, preamble))
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    await run_swarm(
+        swarm(
+            member(recorder(inputs), name="solo", choose_name=choose_name),
+            controller=_controller(run, "controller_test_preamble"),
+            channels=[],
+        ),
+        input="the task",
+    )
+    [messages] = inputs
+    assert [(m.role, m.text) for m in messages] == [("user", text) for text in expected]
+
+
+@pytest.mark.anyio
+async def test_a_refused_preamble_leaves_the_member_pending() -> None:
+    inputs: list[list[ChatMessage]] = []
+    refusals: list[tuple[type[Exception], str]] = []
+    no_user = [ChatMessageSystem(content="rules"), ChatMessageAssistant(content="ok")]
+
+    async def run(control: SwarmControl) -> StopReason:
+        calls: list[tuple[Any, list[ChatMessage] | None]] = [
+            ("", None),
+            ("  \n", None),
+            (False, cast(list[ChatMessage], no_user)),
+            (True, None),
+            (["We take turns."], None),
+        ]
+        for preamble, input in calls:
+            with pytest.raises((TypeError, ValueError)) as ex:
+                control.start("solo", input, preamble=preamble)
+            refusals.append((ex.type, str(ex.value)))
+            assert control.member("solo").state == "pending"
+        control.start("solo", preamble=False)
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    stop = await run_swarm(
+        swarm(
+            member(recorder(inputs), name="solo"),
+            controller=_controller(run, "controller_test_refused_preamble"),
+            channels=[],
+        ),
+        input="the task",
+    )
+    assert [(kind, "preamble=False" in text) for kind, text in refusals] == [
+        (ValueError, True),
+        (ValueError, True),
+        (ValueError, True),
+        (TypeError, False),
+        (TypeError, False),
+    ]
+    assert all(text.startswith("start('solo'): ") for _, text in refusals)
+    assert statuses(stop) == {"solo": "submitted"}
+    assert [m.text for m in inputs[0]] == ["the task"]
 
 
 @pytest.mark.anyio
