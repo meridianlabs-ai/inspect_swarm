@@ -466,34 +466,57 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
 
     def _check_self(self, raise_for_equal: bool = False) -> None:
         self.detect_bridge()
+        uncharged, self._uncharged = self._uncharged, None
         limit = self.limit
-        if limit is not None:
-            total = self._metering.value(self._usage)
-            if total > limit or (raise_for_equal and total == limit):
-                kind = "token" if self.type == "all" else f"token ({self.type})"
-                self.exceeded(
-                    "custom" if self.role == "lever" else "token",
-                    kind,
-                    total,
-                    limit,
-                    f"value: {total:,}; limit: {limit:,}",
-                    self.pair.reason if self.pair is not None else None,
-                )
-                return
+        total = self._metering.value(self._usage)
+        token_reached = limit is not None and (
+            total > limit or (raise_for_equal and total == limit)
+        )
+        if uncharged is not None and (
+            token_reached
+            or (
+                self.pair is not None and _pair_cost_reached(self.pair, raise_for_equal)
+            )
+        ):
+            self._charge_sample(uncharged)
+        if token_reached:
+            assert limit is not None
+            kind = "token" if self.type == "all" else f"token ({self.type})"
+            self.exceeded(
+                "custom" if self.role == "lever" else "token",
+                kind,
+                total,
+                limit,
+                f"value: {total:,}; limit: {limit:,}",
+                self.pair.reason if self.pair is not None else None,
+            )
+            return
         if self.pair is not None:
-            uncharged, self._uncharged = self._uncharged, None
-            if uncharged is not None and _pair_cost_reached(self.pair, raise_for_equal):
-                member = current_member.get()
-                if member is None or not member.bridged:
-                    # this check raises before Inspect charges the call to the cost
-                    # tree, so charge it here and check the pair's cost-tree ancestors,
-                    # root first: the sample's cost limit counts the call and raises
-                    # ahead of the pair. A bridged member's node does not raise, and
-                    # Inspect charges the call.
-                    record_model_cost(uncharged)
-                    if self.pair.cost_node.parent is not None:
-                        self.pair.cost_node.parent.check(raise_for_equal)
             _check_pair_cost(self.pair, self, raise_for_equal)
+
+    def _charge_sample(self, cost: float) -> None:
+        # Under Budget(derive=False) the sample's own limits end the swarm, but this
+        # node raises in the token check, before Inspect charges the call just recorded
+        # to the cost tree. So charge it here and check the pair's cost-tree ancestors,
+        # root first: the sample's cost limit counts the call and raises ahead of this
+        # node, as it would in Inspect. A bridged member's node does not raise, and
+        # Inspect charges the call itself. With derived caps nothing changes.
+        state = current_budget.get()
+        member = current_member.get()
+        if (
+            self.pair is None
+            or state is None
+            or state.budget.derive
+            or (member is not None and member.bridged)
+        ):
+            return
+        if self.stop_swarm is not None:
+            # a reached cap stops the swarm even when a tool consumes the sample's error
+            self.stop_swarm("swarm_cap")
+        record_model_cost(cost)
+        parent = self.pair.cost_node.parent
+        if parent is not None:
+            parent.check()
 
 
 class SwarmCostNode(SwarmNode, _CostLimit):

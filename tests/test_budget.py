@@ -1,3 +1,4 @@
+import contextlib
 import gc
 import logging
 import math
@@ -111,7 +112,14 @@ from inspect_swarm._budget import (
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import Calls, SwarmLedger, sample_resumed
 
-from .swarm_runtime import Script, controller, generator, sample, scripted_model
+from .swarm_runtime import (
+    Script,
+    controller,
+    generator,
+    sample,
+    scripted_model,
+    sleeper,
+)
 
 TOKENS_PER_CALL = 50
 
@@ -1571,6 +1579,12 @@ def _swarm_then_mark(
         channels=[],
         budget=budget,
     )
+    return _eval_then_mark(tmp_path, agent_swarm, model, **limits)
+
+
+def _eval_then_mark(
+    tmp_path: Path, agent_swarm: Agent, model: Model, **limits: Any
+) -> EvalSample:
     [log] = eval(
         Task(
             dataset=[Sample(input="task")],
@@ -1624,6 +1638,85 @@ def test_a_member_cost_limit_leaves_the_sample_cost_limit_to_raise(
     assert "budget_test:after_swarm" not in sample.store
     ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
     assert [m.status for m in ledger.members] == ["errored"]
+    assert ledger.calls == Calls(calls=1)
+
+
+def test_with_derived_caps_a_call_reaching_the_cap_and_the_sample_limit_stops_the_swarm(
+    tmp_path: Path,
+) -> None:
+    # the default budget is unchanged: the cap, at $1.425, stops the swarm normally,
+    # and the call is not charged to the sample's cost limit
+    gc.collect()
+    sample = _swarm_then_mark(tmp_path, Budget(), cost=2.0, cost_limit=1.5)
+    assert sample.limit is None
+    assert sample.store["budget_test:after_swarm"] is True
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert ledger.stop_reason == "swarm_cap"
+    assert [m.status for m in ledger.members] == ["swarm_cap"]
+
+
+@agent
+def _consuming(model: Model) -> Agent:
+    # a member whose one call's limit error is consumed, as a tool consumes it
+    async def execute(state: AgentState) -> AgentState:
+        with contextlib.suppress(LimitExceededError):
+            await model.generate(state.messages)
+        return state
+
+    return execute
+
+
+def test_without_derived_caps_an_explicit_cap_reached_with_the_sample_limit_stops_the_swarm(
+    tmp_path: Path,
+) -> None:
+    # one $2 call reaches the $1 cap and the $1.50 sample limit: the sample's error
+    # comes first, and is consumed, but the cap still stops the swarm and so its
+    # waiting peer
+    gc.collect()
+    model = scripted_model(cost=2.0)
+    agent_swarm = swarm(
+        [member(_consuming(model), name="spender"), member(sleeper(5), name="waiter")],
+        channels=[],
+        budget=Budget(cost=1.0, derive=False, grace=0),
+    )
+    sample = _eval_then_mark(tmp_path, agent_swarm, model, cost_limit=1.5)
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert ledger.stop_reason == "swarm_cap"
+    statuses = {m.name: m.status for m in ledger.members}
+    assert statuses == {"spender": "submitted", "waiter": "cancelled"}
+
+
+def test_without_derived_caps_a_call_completing_after_a_stop_is_charged_to_the_sample(
+    tmp_path: Path,
+) -> None:
+    # the member is ended while its $2 call is in flight: the call is charged to the
+    # sample's $1.50 cost limit, whose error escapes, so the next solver does not run
+    gc.collect()
+    script = Script(gate=anyio.Event())
+    model = scripted_model(script, cost=2.0)
+
+    async def run(control: SwarmControl) -> StopReason:
+        handle = control.members[0]
+        control.start(handle)
+        while script.started < 1:
+            await anyio.sleep(0)
+        handle.end(origin="test")
+        assert script.gate is not None
+        script.gate.set()
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    agent_swarm = swarm(
+        generator(model),
+        controller=controller(run, "budget_test_stop_in_flight"),
+        channels=[],
+        budget=Budget(derive=False),
+    )
+    sample = _eval_then_mark(tmp_path, agent_swarm, model, cost_limit=1.5)
+    assert sample.limit is not None and sample.limit.type == "cost"
+    assert "budget_test:after_swarm" not in sample.store
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
     assert ledger.calls == Calls(calls=1)
 
 
