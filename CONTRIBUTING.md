@@ -20,15 +20,30 @@ uv sync --extra dev
 
 This needs uv 0.13.4 or later. It installs the package in editable mode along with the dev tools (ruff, pyright, pytest).
 
-Inspect Swarm depends on `inspect_ai`: `pyproject.toml` sets a minimum released version, or between releases a git reference to inspect_ai `main` ([The inspect_ai version](#the-inspect_ai-version)), and `uv.lock` pins the version that development and CI use. To move to a newer inspect_ai, run `uv lock --upgrade-package inspect-ai && uv sync --extra dev`.
+### inspect_ai main
+
+Development and CI track inspect_ai's `main` branch. `[tool.uv.sources]` in `pyproject.toml` points `inspect-ai` at its git repository, and `uv.lock` records a commit. Only uv reads `[tool.uv.sources]`: the published package requires the `inspect-ai>=` floor in `[project]`.
+
+- CI moves inspect-ai to the latest `main` commit before every install (`.github/actions/uv-sync`), so it always tests against inspect_ai main. Every other package stays at its locked version.
+- `uv sync --extra dev` installs the commit in `uv.lock`. To move to the latest `main` commit, run `uv sync --upgrade-package inspect-ai --extra dev`. Committing the updated `uv.lock` is optional.
+- On the release PR, CI ignores the git source (`UV_NO_SOURCES=1`) and installs the newest inspect-ai release that has cleared its cooldown, so the release is tested against the inspect_ai users will get. `.github/workflows/release-pin-deps.yml` raises the floor to that release. Main keeps the git source. If Inspect Swarm needs an inspect_ai feature no release has yet, the release PR's checks fail, which is the signal to cut an inspect_ai release first.
+
+To work against a local inspect_ai checkout, install it over the locked one:
+
+```bash
+uv sync --extra dev
+uv pip install -e ../inspect_ai
+```
+
+Then run commands with `.venv/bin/<command>` or `uv run --no-sync <command>`. A plain `uv run` or `uv sync` reinstalls the locked inspect_ai.
 
 ### Dependencies and the cooldown
 
 `uv.lock` pins every Python dependency except the build backend (hatchling, hatch-vcs). CI's type-check, test and build jobs install their dependencies from it, and fail when `uv.lock` is out of date with `pyproject.toml`. CI's build job and the release build use the build toolchain pinned with hashes in `scripts/build-dist/requirements.txt`. When uv builds the project itself, for example for the editable install in `uv sync`, it resolves the build backend, still within the cooldown. When you change dependencies in `pyproject.toml`, run `uv lock` and commit both files.
 
-`pyproject.toml` sets `exclude-newer = "7 days"` under `[tool.uv]`, so `uv lock`, `uv sync` and `uv pip` only pick releases that have been on PyPI for at least seven days. A compromised release is usually found and removed within that time, before it reaches `uv.lock`, CI or your machine. No package has a 6-hour exception today: only a direct dependency that is a model provider SDK or an Inspect package gets one, and no direct dependency is a provider SDK. The `inspect-ai` git reference is outside the cooldown, because `exclude-newer` applies only to releases on an index. The dependencies of inspect-ai keep the cooldown.
+`pyproject.toml` sets `exclude-newer = "7 days"` under `[tool.uv]`, so `uv lock`, `uv sync` and `uv pip` only pick releases that have been on PyPI for at least seven days. A compromised release is usually found and removed within that time, before it reaches `uv.lock`, CI or your machine. Only a direct dependency that is a model provider SDK or an Inspect package gets a 6-hour cooldown instead, under `[tool.uv.exclude-newer-package]`; today that is only `inspect-ai`, and no direct dependency is a provider SDK. The 6 hours apply to inspect-ai releases, which the release PR installs. The inspect_ai `main` commit that development and CI use is outside the cooldown, because `exclude-newer` applies only to releases on an index. The dependencies of inspect-ai keep the cooldown.
 
-Dependabot proposes `uv.lock` updates daily, once a release has cleared its cooldown. It ignores `inspect-ai`. To adopt a release sooner, run `uv lock --upgrade-package <package>` and commit `uv.lock`. A release still inside its cooldown can't be locked; wait for it rather than overriding `exclude-newer`, unless it's an emergency (below).
+Dependabot proposes `uv.lock` updates daily, once a release has cleared its cooldown. It ignores `inspect-ai`, which CI moves to inspect_ai `main` on every run. To adopt a release sooner, run `uv lock --upgrade-package <package>` and commit `uv.lock`. A release still inside its cooldown can't be locked; wait for it rather than overriding `exclude-newer`, unless it's an emergency (below).
 
 In an emergency, for example a security fix, you can adopt a release that is less than seven days old with a one-time dated entry:
 
@@ -36,7 +51,7 @@ In an emergency, for example a security fix, you can adopt a release that is les
 2. Run `uv lock --upgrade-package <package>` and commit both files.
 3. Within seven days, once the normal cooldown includes the release, delete the entry, run `uv lock --upgrade-package <package>`, and commit both files. A plain `uv lock` doesn't reliably remove the entry from `uv.lock`, and CI then fails. No test checks the age of the entry, so you must remove it yourself.
 
-The nightly canary in [meridianlabs-ai/canaries](https://github.com/meridianlabs-ai/canaries) tests against the newest release of every dependency and, while `pyproject.toml` uses the git reference, against inspect_ai `main`. Inspect Swarm's own CI does not need to.
+The nightly canary in [meridianlabs-ai/canaries](https://github.com/meridianlabs-ai/canaries) tests against the newest release of every dependency. Inspect Swarm's own CI does not need to.
 
 ## Checks and tests
 
@@ -93,11 +108,6 @@ Choose the type deliberately. `feat:` and `fix:` drive the version bump and head
 
 Anything that isn't a user-facing feature or fix should avoid `feat:`/`fix:` so it stays out of the headline sections.
 
-### The inspect_ai version
-
-A release of Inspect Swarm needs a released inspect_ai, because PyPI rejects git dependencies: the `inspect-ai` dependency must be a minimum version (`inspect-ai>=X`) when Inspect Swarm is published. Raise the minimum only when code in `src/` needs a newer inspect_ai, and say in the PR which code needs it. When only tests need a newer release, update `uv.lock` instead.
-
-Work does not wait for an inspect_ai release. If a change needs an inspect_ai feature that is merged on inspect_ai `main` but not released yet, `pyproject.toml` may use a git reference to inspect_ai `main`, with `uv lock --upgrade-package inspect-ai` to lock the commit. This is a temporary workaround to unblock work: the dependency goes back to a released minimum before Inspect Swarm is published. When it does, add `inspect-ai = "6 hours"` under `[tool.uv.exclude-newer-package]` in `pyproject.toml`, and in `.github/dependabot.yml` stop ignoring inspect-ai, add it to `cooldown.exclude`, and add it to its own group listed before `python-packages`, because Dependabot puts a package in the first group that matches (see [Dependencies and the cooldown](#dependencies-and-the-cooldown)).
 
 ## Reporting issues
 

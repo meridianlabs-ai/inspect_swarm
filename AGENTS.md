@@ -32,7 +32,7 @@
 - `feat:`/`fix:` are for user-facing changes only: they headline the release notes and bump the version. `perf:`/`revert:` also appear in the notes (no bump); `docs:`, `refactor:`, `chore:`, `build:`, `ci:`, `test:`, `style:` are hidden
 - Body lines starting with `<type>:` are parsed as extra changelog entries—don't begin description lines with a conventional-commit prefix unless that's intended
 - Never edit `CHANGELOG.md`, version numbers, or `.release-please-manifest.json`—Release Please owns them
-- A release of inspect_swarm depends on a released `inspect-ai` (`inspect-ai>=X` in `pyproject.toml`), because PyPI rejects git dependencies. Between releases, never wait for an inspect_ai release: when a change needs an inspect_ai feature that is merged on inspect_ai `main` but not released, `pyproject.toml` may use a git reference to inspect_ai `main` (with `uv lock --upgrade-package inspect-ai`). That is a temporary workaround to unblock work; it goes back to a released floor before inspect_swarm is published. Raise the floor only when `src/` needs a newer release, and say in the PR which source line needs it; when only tests need a newer release, update `uv.lock` (`uv lock --upgrade-package inspect-ai`) instead
+- Keep the `inspect-ai` dependency in `pyproject.toml` a PyPI floor, never a git reference—development tracks inspect_ai `main` through `[tool.uv.sources]` (CONTRIBUTING.md), the Release Please release PR installs the newest released inspect-ai (`UV_NO_SOURCES=1`), and `release-pin-deps.yml` raises the floor on that PR
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines
 
 ## Python
@@ -63,7 +63,7 @@ Supports Python 3.11+, above `inspect-ai`'s 3.10 floor, so the swarm runtime can
 
 ### Common Pitfalls
 - Use the venv for all Python commands: either reference `.venv/bin/` directly or run `source .venv/bin/activate`
-- After changing dependencies in `pyproject.toml`, run `uv lock` and commit `uv.lock`; CI's `uv sync --locked` fails on a stale lock. Don't override the 7-day `exclude-newer` cooldown; for an emergency release, CONTRIBUTING.md describes a dated entry
+- After changing dependencies in `pyproject.toml`, run `uv lock` and commit `uv.lock`; CI's `uv lock --check` fails on a stale lock. Don't override the 7-day `exclude-newer` cooldown; for an emergency release, CONTRIBUTING.md describes a dated entry
 
 ## Reviewing other people's pull requests
 
