@@ -1263,6 +1263,67 @@ async def test_a_stop_during_teardown_leaves_a_failed_runs_record_unchanged(
         assert ran.ledger.stop_reason == "operator"
 
 
+# The rule covers the run's own ending only: each member keeps the ending it had
+# (decision: Ransom, 2026-11-05). A held member that a late stop ends records `stopped`
+# for the operator in its event, result and ledger line, while the failed run's ledger
+# has no `stop_reason`.
+@pytest.mark.anyio
+async def test_a_member_a_stop_ends_during_teardown_keeps_that_ending() -> None:
+    held, release_hold = anyio.Event(), anyio.Event()
+    started, cleaning, release = anyio.Event(), anyio.Event(), anyio.Event()
+    outcomes: list[OperatorOutcome] = []
+
+    async def hold(boundary: Boundary) -> None:
+        held.set()
+        await release_hold.wait()
+
+    async def drive(group: OperatorGroup) -> None:
+        # a is held, and b's group is raised with its background work in its cleanup
+        await held.wait()
+        await cleaning.wait()
+        try:
+            outcomes.append(_act(group.agents["a"].stop, dry_run=False))
+            await _until(lambda: _act(group.agents["a"].info).state == "ended")
+            outcomes.append(_act(group.stop, dry_run=False))
+        finally:
+            release_hold.set()
+            release.set()
+
+    ran = await _run(
+        _swarm(
+            [
+                member(_react(Script([_submit()])), name="a"),
+                member(
+                    _after(
+                        held,
+                        fails_with_background("mixed", started, cleaning, release),
+                    ),
+                    name="b",
+                ),
+            ],
+            _starting(callbacks={"a": hold}),
+            grace=60,
+        ),
+        drive,
+        errors=True,
+    )
+
+    assert [o.refused for o in outcomes] == [None, None]
+    assert outcomes[0].changed
+    assert ran.sample.error is not None
+    assert "member failed" in ran.sample.error.message
+    assert ran.ledger.interrupted
+    assert ran.ledger.stop_reason is None
+    [event] = [e for e in ran.swarm_events("member_result") if e.member == "a"]
+    [line] = [m for m in ran.ledger.members if m.name == "a"]
+    assert (event.data["status"], ran.status("a"), line.status) == ("stopped",) * 3
+    assert ran.end_origins() == {
+        "a": ("operator", "operator", "operator"),
+        "b": (None, None, None),
+    }
+    assert ran.status("b") == "errored"
+
+
 @agent
 def fails_now() -> Agent:
     """Raise an error at once."""
