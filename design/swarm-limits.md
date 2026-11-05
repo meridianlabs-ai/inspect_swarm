@@ -177,6 +177,10 @@ class Budget(BaseModel, frozen=True):
 
     grace: float = 120.0
     """Seconds members are given to finish in-flight work after a stop."""
+
+    derive: bool = True
+    """Whether a cap left None is derived from the sample's limit. False sets no
+    such cap: the sample's own limits then end the swarm as they end any solver."""
 ```
 
 `swarm(..., budget=Budget())` is the default. `Budget` is a frozen pydantic model, not a dataclass, because swarm-api.md requires every `swarm()` argument to reach the log faithfully: a pydantic model is logged as its fields, so two eval-set arms that differ only in their budget get different task identifiers, while a frozen dataclass is logged as its type name and they would be refused as "not distinct" ([swarm-api.md](swarm-api.md#logging-and-replay)). For the same reason the token cap is an `int` or a metering string, never a `TokenLimit` object, which inspect_ai logs as its class name. Replay hands `swarm()` the logged dict, which it validates with `Budget.model_validate()`, as it does for `Member`. Every field is a plain value, so a task can take each as a task parameter and sweep it with `-T`.
@@ -193,6 +197,8 @@ Checks that need the roster or the sample run at swarm start: the weight count m
 **Deriving caps.** At start the swarm reads `sample_limits()` (public, `_limit.py:225-248`). For each of cost, tokens and time where the field is `None` and the sample has a limit `L` with usage `u` so far, the cap is `L * (1 - reserve) - u`:
 - tokens: rounded down to a whole number, with the sample node's metering `type`;
 - time: in seconds from swarm start. Grace is not subtracted; instead every stop's grace is clipped when a sample time limit exists ([Stopping](#stopping)), so a short time limit never fails at start. For example, a 60-second sample limit gives a 57-second cap, and a stop at that point gets at most 1.5 seconds of grace.
+
+Under `derive=False` nothing is derived: a cap left `None` is no cap, as it is under a sample without that limit, an explicit cap is checked and applied as above, and `reserve` has no effect. A sample limit then ends the swarm with its own error, which propagates out of `swarm()` and ends the sample, so no later solver runs. A split with neither a cost nor a token cap is refused at start, as it is under a sample without those limits.
 
 A derived cap at or below zero is an error at start (`ValueError` naming the limit and the usage already spent). An explicit cap larger than the sample's remaining limit is allowed, with a warning that the sample's limit will end the swarm first, without a final step.
 

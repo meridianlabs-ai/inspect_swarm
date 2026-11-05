@@ -30,8 +30,13 @@ solver = swarm(
 | `reserve` | `0.05` | Fraction of each sample limit held back when a cap is derived. |
 | `split` | `"pool"` | How the cost and token caps are divided between members ([Splits](#splits)). |
 | `grace` | `120.0` | Seconds members have, at most, to finish calls in flight after a stop. |
+| `derive` | `True` | Whether a cap left `None` is derived from the sample's limit ([No derived caps](#no-derived-caps)). |
 
 Every field is a plain value, so each can be a task parameter. A member whose call reached a cap ends `swarm_cap`, and the swarm then stops the others ([Members](members.qmd#how-a-member-ends)). The ledger records the caps, each member's usage and what stopped the swarm ([Analysis](analysis.qmd#the-ledger)).
+
+## No derived caps
+
+With `Budget(derive=False)`, the swarm derives no caps. The sample's own cost, token and time limits then end the swarm as they end any solver: the limit's error propagates out of the swarm, and later solvers do not run. A cap you set explicitly still applies, and `reserve` has no effect. A split needs a cost or token cap, so with no explicit cap use `split="pool"`.
 
 ## Cost data
 

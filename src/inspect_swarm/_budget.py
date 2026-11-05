@@ -61,6 +61,9 @@ class Budget(BaseModel):
     grace: float = 120.0
     """Seconds members have, at most, to finish calls already in flight after a stop. If the sample has a time limit, this period is capped at half its remaining time."""
 
+    derive: bool = True
+    """Whether a cap left `None` is derived from the sample's limit. `False` sets no such cap: the sample's own limits then end the swarm as they end any solver."""
+
     @model_validator(mode="after")
     def _check_fields(self) -> "Budget":
         for name, value in (("cost", self.cost), ("time", self.time)):
@@ -137,26 +140,28 @@ def derive_caps(budget: Budget, member_count: int) -> Caps:
             _check_explicit("token", tokens, sample_tokens)
     else:
         token_type = sample_token_type
-        derived = _derived("token", sample_tokens, budget.reserve)
+        derived = (
+            _derived("token", sample_tokens, budget.reserve) if budget.derive else None
+        )
         tokens = None if derived is None else math.floor(derived)
         if tokens is not None and tokens <= 0:
             raise _not_positive("token", sample_tokens, tokens)
 
     return Caps(
-        cost=_cap("cost", budget.cost, limits.cost, budget.reserve),
+        cost=_cap("cost", budget.cost, limits.cost, budget),
         tokens=tokens,
         token_type=token_type,
-        time=_cap("time", budget.time, limits.time, budget.reserve),
+        time=_cap("time", budget.time, limits.time, budget),
     )
 
 
 def _cap(
-    kind: str, explicit: float | None, sample: Limit, reserve: float
+    kind: str, explicit: float | None, sample: Limit, budget: Budget
 ) -> float | None:
     if explicit is not None:
         _check_explicit(kind, explicit, sample)
         return explicit
-    return _derived(kind, sample, reserve)
+    return _derived(kind, sample, budget.reserve) if budget.derive else None
 
 
 def _derived(kind: str, sample: Limit, reserve: float) -> float | None:

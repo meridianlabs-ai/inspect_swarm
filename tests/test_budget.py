@@ -25,6 +25,7 @@ from inspect_ai.agent._bridge.util import (
 )
 from inspect_ai.dataset import Sample
 from inspect_ai.event import ModelEvent, SampleLimitEvent, SwarmEvent, ToolEvent
+from inspect_ai.log import EvalSample
 from inspect_ai.log._samples import (
     _sample_active,  # pyright: ignore[reportPrivateUsage]
 )
@@ -498,6 +499,7 @@ def test_budget_rejects_token_limit_objects() -> None:
         Budget(cost=10.0, tokens="output:1m", time=60.0, reserve=0.0, grace=0.0),
         Budget(tokens=500, split="equal"),
         Budget(cost=10.0, split=(1, 2)),
+        Budget(derive=False),
     ],
 )
 def test_budget_accepts_valid_fields(budget: Budget) -> None:
@@ -591,6 +593,16 @@ def _sample(
             Budget(cost=3.0, tokens="output:500", time=10.0),
             Caps(cost=3.0, tokens=500, token_type="output", time=10.0),
         ),
+        (
+            {"cost": 10.0, "tokens": 1000, "time": 600.0},
+            Budget(derive=False),
+            Caps(cost=None, tokens=None, token_type="all", time=None),
+        ),
+        (
+            {"cost": 10.0, "tokens": 1000, "time": 600.0},
+            Budget(cost=3.0, derive=False),
+            Caps(cost=3.0, tokens=None, token_type="all", time=None),
+        ),
     ],
 )
 async def test_derive_caps(
@@ -661,6 +673,15 @@ async def test_derive_caps_checks_weight_count_against_roster() -> None:
         derive_caps(Budget(split=(1, 2)), member_count=2)
         with pytest.raises(ValueError, match="2 weights but the swarm has 3 members"):
             derive_caps(Budget(split=(1, 2)), member_count=3)
+
+
+@pytest.mark.anyio
+async def test_a_split_with_no_caps_to_derive_is_refused() -> None:
+    budget = Budget(split="equal", derive=False)
+    with _sample(cost=10.0, tokens=1000):
+        caps = derive_caps(budget, member_count=2)
+    with pytest.raises(ValueError, match="has neither"):
+        share_nodes(budget, caps, ["a", "b"])
 
 
 def test_check_cost_data() -> None:
@@ -1521,6 +1542,68 @@ def _swarm_solver(agent_swarm: Agent) -> Solver:
         return state
 
     return solve
+
+
+@solver
+def _mark_ran() -> Solver:
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        state.store.set("budget_test:after_swarm", True)
+        return state
+
+    return solve
+
+
+def _swarm_then_mark(tmp_path: Path, budget: Budget, **limits: Any) -> EvalSample:
+    # a member that generates $1 calls until stopped, then a solver that marks that it ran
+    model = scripted_model(cost=1.0)
+    agent_swarm = swarm(generator(model, calls=None), channels=[], budget=budget)
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="task")],
+            solver=[_swarm_solver(agent_swarm), _mark_ran()],
+            **limits,
+        ),
+        model=model,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success" and log.samples is not None
+    return log.samples[0]
+
+
+@pytest.mark.parametrize(
+    "limits, kind",
+    [
+        pytest.param({"cost_limit": 10.5}, "cost", id="cost"),
+        pytest.param({"token_limit": 10 * TOKENS_PER_CALL + 25}, "token", id="token"),
+    ],
+)
+def test_without_derived_caps_the_sample_limit_ends_the_swarm(
+    tmp_path: Path, limits: dict[str, Any], kind: str
+) -> None:
+    gc.collect()
+    sample = _swarm_then_mark(tmp_path, Budget(derive=False), **limits)
+    assert sample.limit is not None and sample.limit.type == kind
+    assert "budget_test:after_swarm" not in sample.store
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert ledger.caps == {"cost": None, "tokens": None, "time": None}
+    # the sample's limit error ended the member, not a swarm cap
+    assert ledger.stop_reason != "swarm_cap"
+    assert [m.status for m in ledger.members] == ["errored"]
+    assert ledger.calls == Calls(calls=11)
+
+
+def test_an_explicit_cap_without_derived_caps_stops_the_swarm(
+    tmp_path: Path,
+) -> None:
+    gc.collect()
+    sample = _swarm_then_mark(tmp_path, Budget(cost=3.0, derive=False), cost_limit=10.5)
+    assert sample.limit is None
+    assert sample.store["budget_test:after_swarm"] is True
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert ledger.caps == {"cost": 3.0, "tokens": None, "time": None}
+    assert ledger.stop_reason == "swarm_cap"
+    assert [m.status for m in ledger.members] == ["swarm_cap"]
 
 
 @pytest.mark.parametrize(
