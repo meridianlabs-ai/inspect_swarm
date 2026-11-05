@@ -23,6 +23,7 @@ from inspect_ai.util._limit import (
     _TimeLimit,  # pyright: ignore[reportPrivateUsage]
     _TokenLimit,  # pyright: ignore[reportPrivateUsage]
     _TurnLimit,  # pyright: ignore[reportPrivateUsage]
+    record_model_cost,
     token_limit_fields,
     token_limit_tree,
 )
@@ -197,8 +198,13 @@ def share_nodes(
     if budget.split == "pool":
         return {}
     if caps.cost is None and caps.tokens is None:
+        remedy = (
+            "Set a cost or token limit on the sample or in the Budget"
+            if budget.derive
+            else "Set Budget.cost or Budget.tokens"
+        )
         raise ValueError(
-            f"Budget.split={budget.split!r} divides the swarm's cost and token caps, but the swarm has neither. Set a cost or token limit on the sample or in the Budget, or use split='pool'."
+            f"Budget.split={budget.split!r} divides the swarm's cost and token caps, but the swarm has neither. {remedy}, or use split='pool'."
         )
     fractions = _fractions(budget.split, len(names))
     costs = None if caps.cost is None else _cost_shares(caps.cost, fractions)
@@ -441,6 +447,9 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
         self.role = role
         self.pair = pair
         self.unpriced_calls = 0
+        # the cost of the call just recorded, which Inspect charges to the cost tree
+        # only after the token check; cleared by the next check
+        self._uncharged: float | None = None
 
     @property
     def model_usage(self) -> ModelUsage:
@@ -453,6 +462,7 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
             self.unpriced_calls += 1
         elif self.pair is not None:
             self.pair.cost += usage.total_cost
+            self._uncharged = usage.total_cost
 
     def _check_self(self, raise_for_equal: bool = False) -> None:
         self.detect_bridge()
@@ -471,6 +481,18 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
                 )
                 return
         if self.pair is not None:
+            uncharged, self._uncharged = self._uncharged, None
+            if uncharged is not None and _pair_cost_reached(self.pair, raise_for_equal):
+                member = current_member.get()
+                if member is None or not member.bridged:
+                    # this check raises before Inspect charges the call to the cost
+                    # tree, so charge it here and check the pair's cost-tree ancestors,
+                    # root first: the sample's cost limit counts the call and raises
+                    # ahead of the pair. A bridged member's node does not raise, and
+                    # Inspect charges the call.
+                    record_model_cost(uncharged)
+                    if self.pair.cost_node.parent is not None:
+                        self.pair.cost_node.parent.check(raise_for_equal)
             _check_pair_cost(self.pair, self, raise_for_equal)
 
 
@@ -510,11 +532,18 @@ class SwarmCostNode(SwarmNode, _CostLimit):
         _check_pair_cost(self.pair, self, raise_for_equal)
 
 
-def _check_pair_cost(pair: "CostPair", node: SwarmNode, raise_for_equal: bool) -> None:
-    # the pair's cost check, run by whichever of its two nodes is being checked
+def _pair_cost_reached(pair: "CostPair", raise_for_equal: bool) -> bool:
     cost = pair.cost
     limit = pair.cost_node.limit
-    if limit is not None and (cost > limit or (raise_for_equal and cost == limit)):
+    return limit is not None and (cost > limit or (raise_for_equal and cost == limit))
+
+
+def _check_pair_cost(pair: "CostPair", node: SwarmNode, raise_for_equal: bool) -> None:
+    # the pair's cost check, run by whichever of its two nodes is being checked
+    if _pair_cost_reached(pair, raise_for_equal):
+        cost = pair.cost
+        limit = pair.cost_node.limit
+        assert limit is not None
         node.exceeded(
             "cost", "cost", cost, limit, f"value: ${cost:,.4f}; limit: ${limit:,.4f}"
         )

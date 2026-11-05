@@ -680,7 +680,10 @@ async def test_a_split_with_no_caps_to_derive_is_refused() -> None:
     budget = Budget(split="equal", derive=False)
     with _sample(cost=10.0, tokens=1000):
         caps = derive_caps(budget, member_count=2)
-    with pytest.raises(ValueError, match="has neither"):
+    # the sample's limits cannot give the swarm caps, so the remedy names the Budget's
+    with pytest.raises(
+        ValueError, match=r"neither\. Set Budget\.cost or Budget\.tokens, or use"
+    ):
         share_nodes(budget, caps, ["a", "b"])
 
 
@@ -1553,10 +1556,21 @@ def _mark_ran() -> Solver:
     return solve
 
 
-def _swarm_then_mark(tmp_path: Path, budget: Budget, **limits: Any) -> EvalSample:
-    # a member that generates $1 calls until stopped, then a solver that marks that it ran
-    model = scripted_model(cost=1.0)
-    agent_swarm = swarm(generator(model, calls=None), channels=[], budget=budget)
+def _swarm_then_mark(
+    tmp_path: Path,
+    budget: Budget,
+    cost: float = 1.0,
+    member_limits: Sequence[Limit] = (),
+    **limits: Any,
+) -> EvalSample:
+    # a member that generates calls of `cost` dollars until stopped, then a solver that
+    # marks that it ran
+    model = scripted_model(cost=cost)
+    agent_swarm = swarm(
+        member(generator(model, calls=None), limits=list(member_limits)),
+        channels=[],
+        budget=budget,
+    )
     [log] = eval(
         Task(
             dataset=[Sample(input="task")],
@@ -1591,6 +1605,26 @@ def test_without_derived_caps_the_sample_limit_ends_the_swarm(
     assert ledger.stop_reason != "swarm_cap"
     assert [m.status for m in ledger.members] == ["errored"]
     assert ledger.calls == Calls(calls=11)
+
+
+def test_a_member_cost_limit_leaves_the_sample_cost_limit_to_raise(
+    tmp_path: Path,
+) -> None:
+    # a $2 call reaches the member's $1 limit and the sample's $1.50 one at once; as in
+    # Inspect, the sample is charged and its limit raises
+    gc.collect()
+    sample = _swarm_then_mark(
+        tmp_path,
+        Budget(derive=False),
+        cost=2.0,
+        member_limits=[cost_limit(1.0)],
+        cost_limit=1.5,
+    )
+    assert sample.limit is not None and sample.limit.type == "cost"
+    assert "budget_test:after_swarm" not in sample.store
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert [m.status for m in ledger.members] == ["errored"]
+    assert ledger.calls == Calls(calls=1)
 
 
 def test_an_explicit_cap_without_derived_caps_stops_the_swarm(
