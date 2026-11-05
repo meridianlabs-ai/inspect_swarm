@@ -1236,6 +1236,8 @@ class _PostsState:
     def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
         self.posts.append(record)
         readers = [name for name in self.roster if name != record.sender]
+        # member state is the runtime's, not the public bus's: read it from the run's bus
+        assert isinstance(self.bus, SwarmBus)
         running = [name for name in self.roster if self.bus.running(name)]
         self.applied.append((record.id, len(self.posts), running))
         return readers, {"readers": list[JsonValue](readers), "number": len(self.posts)}

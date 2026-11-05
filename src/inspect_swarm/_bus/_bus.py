@@ -82,19 +82,6 @@ class Bus(Protocol):
         """Whether the swarm has begun to stop. Once it has, every `deliver()` is refused."""
         ...
 
-    def running(self, name: str) -> bool:
-        """Whether a member is in the `running` state.
-
-        Pending, idle, ending and ended members return `False`. An idle persistent member can still receive explicitly addressed records.
-
-        Args:
-            name: The member's name.
-
-        Raises:
-            KeyError: If no member of the swarm has the name.
-        """
-        ...
-
     async def deliver(self, draft: Draft) -> Delivery:
         """Make a record from a draft and deliver it through the channel.
 
