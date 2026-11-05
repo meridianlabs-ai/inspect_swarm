@@ -1404,22 +1404,30 @@ async def test_calling_member_names_the_member_from_its_own_and_a_nested_loop(
 
 
 @agent
-def bus_test_caller(callers: list[Caller | None], children: int) -> Agent:
+def bus_test_caller(callers: list[Caller | None], children: int, bind: bool) -> Agent:
+    # a custom agent, which opens no agent channel, so its run() child keeps its own
     async def execute(state: AgentState) -> AgentState:
+        if bind:
+            await swarm_tools().tools()
         callers.append(calling_member())
         for _ in range(children):
-            await run(bus_test_caller(callers, 0), "go")
+            await run(bus_test_caller(callers, 0, False), "go")
         return state
 
     return execute
 
 
 @pytest.mark.anyio
-async def test_calling_member_finds_a_nested_loop_without_swarm_tools() -> None:
+@pytest.mark.parametrize("bind", [False, True], ids=["unbound", "bound"])
+async def test_calling_member_finds_a_custom_agents_nested_loop(bind: bool) -> None:
     callers: list[Caller | None] = []
     outcome = await run_swarm(
         swarm(
-            member(bus_test_caller, args={"callers": callers, "children": 1}, name="w"),
+            member(
+                bus_test_caller,
+                args={"callers": callers, "children": 1, "bind": bind},
+                name="w",
+            ),
             channels=[],
         )
     )

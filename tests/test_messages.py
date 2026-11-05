@@ -49,6 +49,8 @@ class _Run:
         self.members = {name: _Member(name) for name in members}
         for m in self.members.values():
             m.context.loop = current_agent_channel()
+            # and its agent span, as swarm_tools() binds them
+            m.context.loop_span = f"{m.name}/top"
         self.bus = SwarmBus(
             list(self.members.values()),
             {name: m.context for name, m in self.members.items()},

@@ -74,6 +74,8 @@ class _Run:
         for m in self.members.values():
             # the own loop is the one outside any agent channel
             m.context.loop = current_agent_channel()
+            # and its agent span, as swarm_tools() binds them
+            m.context.loop_span = f"{m.name}/top"
         self.bus = SwarmBus(
             list(self.members.values()),
             {name: m.context for name, m in self.members.items()},
