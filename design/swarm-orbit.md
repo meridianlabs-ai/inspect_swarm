@@ -235,7 +235,7 @@ class Bus(Protocol):
 
     @property
     def stopping(self) -> bool: ...                       # once true, every deliver() is refused
-    def running(self, name: str) -> bool: ...             # started and not ended
+    def running(self, name: str) -> bool: ...             # in the running state: not pending, idle, ending or ended
     async def deliver(self, draft: Draft) -> Delivery: ...
     def read(
         self,

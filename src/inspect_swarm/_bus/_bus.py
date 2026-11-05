@@ -83,7 +83,9 @@ class Bus(Protocol):
         ...
 
     def running(self, name: str) -> bool:
-        """Whether a member has started and not ended.
+        """Whether a member is in the `running` state.
+
+        Pending, idle, ending and ended members return `False`. An idle persistent member can still receive explicitly addressed records.
 
         Args:
             name: The member's name.
@@ -398,7 +400,7 @@ class SwarmBus:
         return new
 
     def running(self, name: str) -> bool:
-        # whether the member has started and not yet ended
+        # whether the member is in the running state: not pending, idle, ending or ended
         return self._by_name[name].state == "running"
 
     def idle(self, name: str) -> bool:
