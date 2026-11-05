@@ -65,7 +65,7 @@ class Caller:
     """The member's name."""
 
     nested: bool
-    """Whether the calling loop is not the member's own, such as a subagent's."""
+    """Whether the calling loop is not the member's own, such as a subagent's. The member's own loop is the first in which it resolves `swarm_tools()`, or until then the loop its agent runs directly. A bridged member's CLI is one loop, its own."""
 
     loop_span_id: str | None
     """The agent span of the calling loop."""
@@ -438,9 +438,15 @@ class SwarmBus:
 
     def nested(self, context: MemberContext) -> bool:
         # whether the caller runs in a loop other than the member's own, such as a
-        # subagent's. A bridged member binds no loop, so its CLI is one loop, its own,
-        # whichever of its conversations calls
-        return context.loop is not None and current_agent_channel() is not context.loop
+        # subagent's. The own loop is the one swarm_tools() bound; until a loop binds,
+        # it is the one the member's agent runs in directly, in the member's agent span,
+        # since run() gives a nested agent a span of its own. A bridged member binds no
+        # loop, so its CLI is one loop, its own, whichever of its conversations calls
+        if context.loop is not None:
+            return current_agent_channel() is not context.loop
+        if context.bridged or context.bridge_used:
+            return False
+        return current_agent_span_id() != context.span_id
 
     def status(self, context: MemberContext) -> str | None:
         # the line that ends the results of the swarm's own tools in the member's own

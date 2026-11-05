@@ -759,6 +759,8 @@ async def test_comm_evidence_names_the_members_span_and_the_record_the_loops(
     sent, delivered = _comm(outcome.transcript)
     assert (sent.agent_span_id, delivered.agent_span_id) == (member_span, member_span)
     assert (sent.agent, delivered.agent) == ("w", "w")
+    # nested by its span, though no loop of the member resolved swarm_tools()
+    assert (sent.nested, delivered.nested) == (nested, nested)
     loop_span = data(sent)["record"]["sender_span_id"]
     assert sent.loop_span_id == loop_span
     assert spans[loop_span] == ("bus_test_child" if nested else "w")
@@ -944,7 +946,9 @@ async def _report(
 async def test_a_read_names_its_records_and_writes_each_dependency_once_per_loop() -> (
     None
 ):
-    bus, _ = _bus()
+    bus, members = _bus()
+    # w-2's own loop runs in its agent span, as a member's agent does
+    members["w-2"].context.span_id = "w-2/top"
     async with sample() as transcript:
         await _send(bus)
         await _send(bus)
@@ -1397,6 +1401,40 @@ async def test_calling_member_names_the_member_from_its_own_and_a_nested_loop(
     assert sent[1].loop_span_id is not None
     assert spans[sent[1].loop_span_id] == "general"
     assert calling_member() is None
+
+
+@agent
+def bus_test_caller(callers: list[Caller | None], children: int) -> Agent:
+    async def execute(state: AgentState) -> AgentState:
+        callers.append(calling_member())
+        for _ in range(children):
+            await run(bus_test_caller(callers, 0), "go")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_calling_member_finds_a_nested_loop_without_swarm_tools() -> None:
+    callers: list[Caller | None] = []
+    outcome = await run_swarm(
+        swarm(
+            member(bus_test_caller, args={"callers": callers, "children": 1}, name="w"),
+            channels=[],
+        )
+    )
+    [result] = swarm_events(outcome.transcript, "member_result")
+    member_span = result.data["span_id"]
+    assert isinstance(member_span, str)
+    child = next(
+        e.id
+        for e in outcome.transcript.events
+        if isinstance(e, SpanBeginEvent) and e.name == "bus_test_caller"
+    )
+    assert callers == [
+        Caller(member="w", nested=False, loop_span_id=member_span),
+        Caller(member="w", nested=True, loop_span_id=child),
+    ]
 
 
 @pytest.mark.anyio

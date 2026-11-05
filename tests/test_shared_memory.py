@@ -70,6 +70,9 @@ class _Board:
     # each loop is an agent span named after the member and the loop
     def __init__(self, channel: Channel, members: Sequence[str]) -> None:
         self.members = {name: _Member(name) for name in members}
+        for m in self.members.values():
+            # the own loop runs in the member's agent span, as a member's agent does
+            m.context.span_id = f"{m.name}/top"
         self.bus = SwarmBus(
             list(self.members.values()),
             {name: m.context for name, m in self.members.items()},
@@ -1325,7 +1328,7 @@ async def test_each_view_writes_one_read_and_nothing_else_does() -> None:
             (
                 "w-2",
                 "w-2/child",
-                False,
+                True,
                 True,
                 [
                     {
