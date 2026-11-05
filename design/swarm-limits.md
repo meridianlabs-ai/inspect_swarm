@@ -198,7 +198,7 @@ Checks that need the roster or the sample run at swarm start: the weight count m
 - tokens: rounded down to a whole number, with the sample node's metering `type`;
 - time: in seconds from swarm start. Grace is not subtracted; instead every stop's grace is clipped when a sample time limit exists ([Stopping](#stopping)), so a short time limit never fails at start. For example, a 60-second sample limit gives a 57-second cap, and a stop at that point gets at most 1.5 seconds of grace.
 
-Under `derive=False` nothing is derived: a cap left `None` is no cap, as it is under a sample without that limit, an explicit cap is checked and applied as above, and `reserve` has no effect. A sample limit then ends the swarm with its own error, which propagates out of `swarm()` and ends the sample, so no later solver runs. A split with neither a cost nor a token cap is refused at start, as it is under a sample without those limits.
+Under `derive=False` nothing is derived: a cap left `None` is no cap, as it is under a sample without that limit, an explicit cap is checked and applied as above, and `reserve` has no effect. A sample limit then ends the swarm with its own error, which propagates out of `swarm()` and ends the sample, so no later solver runs. A split with neither a cost nor a token cap is refused at start, as it is under a sample without those limits. A sample cost limit still needs cost data for every member's model (**Cost data** below), since an unpriced call never advances it.
 
 A derived cap at or below zero is an error at start (`ValueError` naming the limit and the usage already spent). An explicit cap larger than the sample's remaining limit is allowed, with a warning that the sample's limit will end the swarm first, without a final step.
 
@@ -208,7 +208,7 @@ This is what makes the cap one sample-level number: a task sets `cost_limit=B` o
 - a sample **message limit** applies to each member's conversation separately (leaf-only);
 - a sample **working limit** is accepted but is unreliable under a swarm ([Each limit kind](#each-limit-kind)), so the swarm logs a warning at start when one is set.
 
-**Cost data.** When a cost cap applies, the swarm checks at start that every member's configured model has cost data (`_get_model_info_direct(model).cost`), mirroring Inspect's own check for the task's models, and raises `PrerequisiteError` otherwise. A model a member resolves at run time (a subagent's model, for example) cannot be checked in advance. Its calls are counted as unpriced ([The ledger](#the-ledger)) and never charged to a cost cap.
+**Cost data.** When a cost cap applies, or under `derive=False` a sample cost limit, the swarm checks at start that every member's configured model has cost data (`_get_model_info_direct(model).cost`), mirroring Inspect's own check for the task's models, and raises `PrerequisiteError` otherwise. A model a member resolves at run time (a subagent's model, for example) cannot be checked in advance. Its calls are counted as unpriced ([The ledger](#the-ledger)) and never charged to a cost cap.
 
 ### Swarm nodes
 

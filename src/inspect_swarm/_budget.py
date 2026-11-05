@@ -44,13 +44,13 @@ class Budget(BaseModel):
     )
 
     cost: float | None = None
-    """Swarm cost cap in dollars. `None` derives it from the sample's cost limit."""
+    """Swarm cost cap in dollars. `None` derives it from the sample's cost limit when `derive` is `True`, and sets no cap when it is `False`."""
 
     tokens: int | str | None = None
-    """Swarm token cap. A string such as `"output:1m"` is parsed by `parse_token_limit()` and keeps its metering type. `None` derives it from the sample's token limit, with that limit's metering type."""
+    """Swarm token cap. A string such as `"output:1m"` is parsed by `parse_token_limit()` and keeps its metering type. `None` derives it from the sample's token limit, with that limit's metering type, when `derive` is `True`, and sets no cap when it is `False`."""
 
     time: float | None = None
-    """Seconds after which the swarm stops its members. `None` derives it from the sample's time limit."""
+    """Seconds after which the swarm stops its members. `None` derives it from the sample's time limit when `derive` is `True`, and sets no cap when it is `False`."""
 
     reserve: float = 0.05
     """Fraction of each sample limit held back when a cap is derived."""
@@ -273,7 +273,7 @@ def _token_shares(cap: int, fractions: Sequence[Fraction]) -> list[int]:
 def check_cost_data(
     models: Sequence[str | Model], *, built: Set[str] = frozenset()
 ) -> None:
-    # run at swarm start when a cost cap applies, as Inspect does for the task's models.
+    # run at swarm start when a swarm cost cap or a sample cost limit applies, as Inspect does for the task's models.
     # The lookup is the one metering uses at generation time, cached by the model's
     # string, so the check and the price charged agree. Two configurations that share
     # a model string share that cached price, as they do under Inspect's cost_limit.
@@ -290,7 +290,7 @@ def check_cost_data(
         if any(name in built for name in missing):
             remedy += " A built member's model is looked up by its name alone; to look it up as configured, use the member's factory form, member(factory, args={'model': ...})."
         raise PrerequisiteError(
-            f"A swarm cost cap requires cost data for every member's model. Missing cost data for: {', '.join(missing)}. {remedy}"
+            f"A swarm cost cap or a sample cost limit requires cost data for every member's model. Missing cost data for: {', '.join(missing)}. {remedy}"
         )
 
 
@@ -719,7 +719,7 @@ current_budget: ContextVar[BudgetState | None] = ContextVar(
 def swarm_budget() -> SwarmBudget:
     """The budget of the swarm the caller runs in.
 
-    Reports the swarm's cap per kind and how much of it the whole swarm has used, and, when the budget is split and the caller is a member, the member's share and its usage. The caps are the ones that stop the swarm, which `sample_limits()` does not show: the swarm holds back part of each sample limit.
+    Reports the swarm's cap per kind and how much of it the whole swarm has used, and, when the budget is split and the caller is a member, the member's share and its usage. The caps are the ones that stop the swarm, which `sample_limits()` does not show: by default the swarm holds back part of each sample limit. Under `Budget(derive=False)` the swarm has only the caps given explicitly, and the sample's limits, which `sample_limits()` reports, can still end the run.
 
     Returns:
         The budget as the caller sees it.
