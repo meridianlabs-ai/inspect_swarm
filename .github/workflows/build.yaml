@@ -23,9 +23,8 @@ jobs:
         with:
           persist-credentials: false
       # Ruff only reads the source, so the project itself does not install.
-      - uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # main
+      - uses: ./.github/actions/uv-sync
         with:
-          versions: locked
           python-version: "3.11"
           project-install: skip
           extras: dev
@@ -49,9 +48,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # main
+      - uses: ./.github/actions/uv-sync
         with:
-          versions: locked
           python-version: ${{ matrix.python-version }}
           extras: dev
       - name: Run pyright
@@ -72,9 +70,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # main
+      - uses: ./.github/actions/uv-sync
         with:
-          versions: locked
           python-version: ${{ matrix.python-version }}
           extras: dev
       - name: Run tests
@@ -115,9 +112,8 @@ jobs:
           echo "wheel=./${wheels[0]}" >> "$GITHUB_OUTPUT"
       # The locked runtime dependencies, without the dev group and without the
       # project, then the wheel with --no-deps.
-      - uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # main
+      - uses: ./.github/actions/uv-sync
         with:
-          versions: locked
           python-version: ${{ matrix.python-version }}
           project-install: skip
           default-dependency-groups: exclude

@@ -6,7 +6,10 @@ updates:
   # cooldown. The cooldown gives a compromised release time to be caught
   # before it is proposed; security updates skip it.
   - package-ecosystem: "github-actions"
-    directory: "/"
+    # / covers the workflows; the local composite actions pin actions too.
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "weekly"
     cooldown:
@@ -20,14 +23,14 @@ updates:
     # out of the release notes.
     commit-message:
       prefix: "ci"
-  # Bumps uv.lock. The cooldown matches `exclude-newer` in pyproject.toml. No
-  # package gets a 6-hour cooldown: no direct dependency is a model provider
-  # SDK. inspect-ai is ignored: it is a git reference to inspect_ai main, which
-  # contributors move with `uv lock --upgrade-package inspect-ai`. When
-  # inspect-ai returns to a released floor, stop ignoring it, and add it to
-  # `cooldown.exclude` and to its own group, as inspect_scout does. List that
-  # group before `python-packages`: Dependabot puts a package in the first
-  # group that matches.
+  # Bumps uv.lock. The cooldown matches `exclude-newer` in pyproject.toml. Its
+  # only "6 hours" entry in `exclude-newer-package` is inspect-ai, which is
+  # ignored: it comes from inspect_ai main, which CI moves to the latest commit
+  # on every run. So no package needs `cooldown.exclude` or a 6-hour group.
+  # When a direct dependency gets a "6 hours" entry, add it to
+  # `cooldown.exclude` and to a `six-hour-cooldown` group listed before
+  # `python-packages`, as inspect_scout does: Dependabot's cooldown counts
+  # whole days, and puts a package in the first group that matches.
   - package-ecosystem: "uv"
     versioning-strategy: lockfile-only
     directory: "/"
