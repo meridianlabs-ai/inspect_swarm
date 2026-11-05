@@ -177,7 +177,7 @@ class SwarmLedger(BaseModel):
     """How far usage at the end went past each cap, keyed by `cost`, `tokens` and `time`. Only kinds over their cap appear."""
 
     stop_reason: str | None
-    """The reason the swarm stopped its members, from the first stop begun. `None` when no stop began."""
+    """The reason the swarm stopped its members, from the first stop begun. `None` when no stop began, and in place of `operator` when the swarm failed or was cancelled."""
 
     ended_by: str | None
     """The sample limit (`sample_limit:<type>`) or operator interrupt (`operator`) that ended the swarm, even during its own stop. `unknown` when an outside cause may have ended it but cannot be named. `None` when nothing from outside ended it."""

@@ -55,7 +55,7 @@ from .._metrics import (
     gate_checks,
     swarm_metrics,
 )
-from .._operator import SwarmOperator
+from .._operator import OPERATOR, SwarmOperator
 from .._record import (
     MemberResult,
     MemberState,
@@ -849,7 +849,12 @@ class SwarmRun:
                 runtime=self._runtime_lever,
                 final=self._final_meter,
                 swarm=self._swarm_meter,
-                stop_reason=self.stop_reason,
+                # a run that failed or was cancelled keeps that ending: an operator's
+                # stop is not recorded, as one can reach the run while it tears down,
+                # before the stop guard knows (decision: Ransom, 2026-11-05)
+                stop_reason=None
+                if not ended and self.stop_reason == OPERATOR
+                else self.stop_reason,
                 ended_by=None if ended else _exhaustion(error),
                 interrupted=not ended,
                 # M1's final step does not await, so nothing can cancel it
@@ -1114,8 +1119,8 @@ class SwarmRun:
     # Whether the runtime can still take a stop: false before it starts, once it has
     # ended, and from the moment an error (a member's or the controller's) or a
     # cancellation from outside begins to tear it down, while its members unwind. A
-    # stop then would change the ledger's stop reason or start a timer in a task group
-    # that is closing.
+    # stop then would start a timer in a task group that is closing. Best effort: a stop
+    # it misses is accepted, and _account() keeps the failure in the ledger.
     def _active(self) -> bool:
         runtime = self._runtime_tg
         return (

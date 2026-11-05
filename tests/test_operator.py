@@ -1118,11 +1118,22 @@ async def test_a_stop_once_an_error_is_known_changes_nothing(
     assert ran.ledger.stop_reason is None
 
 
+# A cancellation raised by this backend, caught in the scope that was cancelled.
+async def _cancellation() -> BaseException:
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        try:
+            await anyio.sleep(0)
+        except anyio.get_cancelled_exc_class() as ex:
+            return ex
+    raise AssertionError("the scope was not cancelled")
+
+
 @agent
 def fails_with_background(
     where: str, started: anyio.Event, cleaning: anyio.Event, release: anyio.Event
 ) -> Agent:
-    """Start background work whose cancellation runs a shielded cleanup that waits for `release`, then fail: the agent itself, another background task while the agent runs, or one while its background work drains."""
+    """Start background work whose cancellation runs a shielded cleanup that waits for `release`, then fail: the agent itself, another background task while the agent runs, one while its background work drains, or the agent with a group of an error and a cancellation (`mixed`) or of the cancellation alone (`cancelled`)."""
 
     async def cleans_up() -> None:
         try:
@@ -1141,6 +1152,12 @@ def fails_with_background(
         await started.wait()
         if where == "agent":
             raise ValueError("member failed")
+        if where in ("mixed", "cancelled"):
+            # a group with a real cancellation of this backend, and for "mixed" an error
+            leaves: list[BaseException] = [await _cancellation()]
+            if where == "mixed":
+                leaves.insert(0, ValueError("member failed"))
+            raise BaseExceptionGroup("member failed", leaves)
         background(fails)
         if where == "worker":
             await anyio.sleep_forever()
@@ -1191,6 +1208,59 @@ async def test_a_stop_while_a_failing_member_cleans_up_changes_nothing(
     assert "member failed" in ran.sample.error.message
     assert (ran.status("a"), ran.status("b")) == ("cancelled", "errored")
     assert ran.ledger.stop_reason is None
+
+
+# Stops during teardown are best effort: one that reaches the run before the stop guard
+# knows of the failure is accepted, and a failed run's record keeps that ending
+# (decision: Ransom, 2026-11-05). Here b's agent raises a group of an error and a
+# cancellation, which the guard does not see before b's background cleanup ends. The
+# control raises the cancellation alone: b ends cancelled, the run does not fail, and
+# the swarm's stop is recorded.
+@pytest.mark.anyio
+@pytest.mark.parametrize("leaves", ["mixed", "cancelled"])
+async def test_a_stop_during_teardown_leaves_a_failed_runs_record_unchanged(
+    leaves: str,
+) -> None:
+    started, cleaning, release = anyio.Event(), anyio.Event(), anyio.Event()
+    outcomes: list[OperatorOutcome] = []
+
+    async def drive(group: OperatorGroup) -> None:
+        # the group is raised, and the member's background work is in its cleanup
+        await cleaning.wait()
+        try:
+            for name in ("a", "b"):
+                outcomes.append(_act(group.agents[name].stop, dry_run=False))
+            outcomes.append(_act(group.stop, dry_run=False))
+        finally:
+            release.set()
+
+    ran = await _run(
+        _swarm(
+            [
+                member(sleeper(), name="a"),
+                member(
+                    fails_with_background(leaves, started, cleaning, release), name="b"
+                ),
+            ],
+            grace=60,
+        ),
+        drive,
+        errors=True,
+    )
+
+    assert [o.refused for o in outcomes] == [None, None, None]
+    assert ran.end_origins() == {"a": (None, None, None), "b": (None, None, None)}
+    if leaves == "mixed":
+        assert ran.sample.error is not None
+        assert "member failed" in ran.sample.error.message
+        assert (ran.status("a"), ran.status("b")) == ("cancelled", "errored")
+        assert ran.ledger.interrupted
+        assert ran.ledger.stop_reason is None
+    else:
+        assert ran.sample.error is None
+        assert (ran.status("a"), ran.status("b")) == ("cancelled", "cancelled")
+        assert not ran.ledger.interrupted
+        assert ran.ledger.stop_reason == "operator"
 
 
 @agent
