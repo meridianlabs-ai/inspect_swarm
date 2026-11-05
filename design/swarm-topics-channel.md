@@ -124,7 +124,7 @@ class Topic(BaseModel, frozen=True):
     """A topic: a room that its readers read and its writers post to."""
 
     name: str
-    """The topic's name, addressed as `#<name>`: a lowercase letter, then at most 47 lowercase letters, digits, `_` or `-`."""
+    """The topic's name, addressed as `#<name>`: a lowercase letter, then at most 47 lowercase letters, digits, `_` or `-`, and not `c-` followed only by digits, which is reserved for swarm-assigned ids."""
 
     readers: Literal["all"] | list[str] = "all"
     """The members that read it: `"all"`, every member of the swarm, or a list of member names."""
@@ -150,7 +150,7 @@ def topics(
 
 - **The string `"topics"`** in `channels=` gives the default: one public topic, `#general`, that every member reads and writes, with no wake. `-T channels=filesystem,topics` selects it from the command line.
 - **Logging.** `Topic` is a pydantic model, so a list of them is logged as their fields and two arms that differ in any topic are distinct; replay passes the logged dicts back, which `topics()` validates into `Topic`s, as `swarm()` does for `Member` records ([Channel arguments in the log](#channel-arguments-in-the-log)). `Topic` is exported from `inspect_swarm`.
-- **Validation when `topics()` is called** (`ValueError`, naming the topic): at least one topic; each name in the grammar; no two topics with one name; `readers` and `writers` either `"all"` or a non-empty list without repeats; `max_bytes`, `max_wait` at least 1 and `rate` as the messages channel checks them (`_channel/_params.py`).
+- **Validation when `topics()` is called** (`ValueError`, naming the topic): at least one topic, each a `Topic` or a mapping validated into one; each name in the grammar and not in the reserved form `c-<digits>` (`c-3`; `c-red` and `orders` are valid), `topic name c-3 is reserved for swarm-assigned ids`; no two topics with one name; `readers` and `writers` either `"all"` or a non-empty list without repeats; `max_bytes`, `max_wait` at least 1 and `rate` as the messages channel checks them (`_channel/_params.py`).
 - **`check(roster)`** at `swarm()` construction (`ValueError`): every member name in the address grammar and not reserved, as the messages channel requires, since names appear in fences; every name a topic lists is a member; and each topic has a writer with at least one reader other than itself, since otherwise no post could reach anyone (a topic whose only reader is its only writer).
 - **Channel attributes.** `name = "topics"`, `prefix = "p"` (record ids `p-1`, `p-2`), `reach = "loop"`: a read marks posts read for the member, so a member's topics have one reader, its own loop, as its inbox does ([swarm-communication.md Members and identity](swarm-communication.md#members-and-identity)). `storm = StormControls(max_bytes=max_bytes, rate=rate)`; `max_wait` as given, so the channel always wakes waits and `swarm_wait` comes with it.
 - **Refused combinations**, by today's rules and no new code: a bridged member beside `topics` ([Current behaviour](#bridged-members-and-custom-channels)); a member with `choose_name=True` beside `topics`. Each names the channel in its error.
@@ -378,7 +378,7 @@ The topics channel posts through the operation S2 makes public ([swarm-orbit.md 
 
 All async tests are `@pytest.mark.anyio` and run on asyncio and trio through the repository's fixture; members are mockllm `react()` agents with scripted tool calls. Nothing needs network, Docker or a model provider.
 
-- **`tests/test_topics_channel.py`** (construction): the default is one public `#general` for all; each `ValueError` of `topics()` and `check()` with its message (bad and repeated names, empty or repeated readers, an unknown member, a topic no post could leave, bounds); a list of `Topic`s and a list of mappings give the same channel; logging and replay round-trip, and two arms that differ in one topic's `private` or `wake` have different task identifiers (in `tests/test_api_log.py`); instructions name the member's own topics and access and no private topic it is not in; `swarm()` refuses a bridged member and a member with `choose_name=True` beside `topics`.
+- **`tests/test_topics_channel.py`** (construction): the default is one public `#general` for all; each `ValueError` of `topics()` and `check()` with its message (bad and repeated names, a reserved `c-3` given as a `Topic` and as a mapping beside an accepted `c-red`, empty or repeated readers, an unknown member, a topic no post could leave, bounds); a list of `Topic`s and a list of mappings give the same channel; logging and replay round-trip, and two arms that differ in one topic's `private` or `wake` have different task identifiers (in `tests/test_api_log.py`); instructions name the member's own topics and access and no private topic it is not in; `swarm()` refuses a bridged member and a member with `choose_name=True` beside `topics`.
 - **`tests/test_topics.py`** (runtime):
   - a post reaches readers and not the poster; a reader's `read_topics()` returns it fenced, marks it read, and writes a `read` event with its id; `sent` and `delivered` name `to=["#orders"]` and the readers;
   - membership delivery: a post to a pending reader is unread when a controller starts it later; to an ended reader, delivered and never read; a post by a member that has ended is refused with liveness evidence;
