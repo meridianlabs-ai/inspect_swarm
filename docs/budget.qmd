@@ -36,7 +36,11 @@ Every field is a plain value, so each can be a task parameter. A member whose ca
 
 ## No derived caps
 
-With `Budget(derive=False)`, the swarm derives no caps. The sample's own cost, token and time limits then end the swarm as they end any solver: the limit's error propagates out of the swarm, and later solvers do not run. A cap you set explicitly still applies, and `reserve` has no effect. A split needs a cost or token cap, so with no explicit cap use `split="pool"`.
+With `Budget(derive=False)`, the swarm derives no caps. The sample's own cost, token and time limits then end the swarm as they end any solver: the limit's error propagates out of the swarm, and later solvers do not run. A cap you set explicitly still applies, and `reserve` has no effect.
+
+As in any solver, a limit error that a tool or handoff turns into a tool message does not end the run. The member's next model call raises the error again, as does any other member's. A swarm cap, by contrast, stops the swarm even when a tool turns its error into a message.
+
+A split needs a cost or token cap, so with no explicit cap use `split="pool"`.
 
 ## Cost data
 
