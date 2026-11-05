@@ -1569,13 +1569,14 @@ def _swarm_then_mark(
     budget: Budget,
     cost: float = 1.0,
     member_limits: Sequence[Limit] = (),
+    calls: int | None = None,
     **limits: Any,
 ) -> EvalSample:
-    # a member that generates calls of `cost` dollars until stopped, then a solver that
-    # marks that it ran
+    # a member that generates `calls` calls of `cost` dollars (None: until stopped),
+    # then a solver that marks that it ran
     model = scripted_model(cost=cost)
     agent_swarm = swarm(
-        member(generator(model, calls=None), limits=list(member_limits)),
+        member(generator(model, calls=calls), limits=list(member_limits)),
         channels=[],
         budget=budget,
     )
@@ -1621,23 +1622,95 @@ def test_without_derived_caps_the_sample_limit_ends_the_swarm(
     assert ledger.calls == Calls(calls=11)
 
 
+@pytest.mark.parametrize(
+    "cost, member_limit, calls, sample_raises, status, made",
+    [
+        # one call reaches the member's limit and the sample's at once
+        pytest.param(2.0, 1.0, None, True, "errored", 1, id="lower"),
+        # one call reaches both exactly; the next call is refused by both
+        pytest.param(1.5, 1.5, None, True, "errored", 1, id="equal-then-retry"),
+        pytest.param(1.5, 2.0, None, True, "errored", 1, id="higher"),
+        pytest.param(1.5, 1.5, 1, False, "submitted", 1, id="equal-no-retry"),
+    ],
+)
 def test_a_member_cost_limit_leaves_the_sample_cost_limit_to_raise(
     tmp_path: Path,
+    cost: float,
+    member_limit: float,
+    calls: int | None,
+    sample_raises: bool,
+    status: str,
+    made: int,
 ) -> None:
-    # a $2 call reaches the member's $1 limit and the sample's $1.50 one at once; as in
-    # Inspect, the sample is charged and its limit raises
+    # under a $1.50 sample cost limit, as in Inspect: the sample is charged and its
+    # limit, checked root first, raises ahead of the member's own
     gc.collect()
     sample = _swarm_then_mark(
         tmp_path,
         Budget(derive=False),
-        cost=2.0,
-        member_limits=[cost_limit(1.0)],
+        cost=cost,
+        member_limits=[cost_limit(member_limit)],
+        calls=calls,
         cost_limit=1.5,
     )
+    if sample_raises:
+        assert sample.limit is not None and sample.limit.type == "cost"
+        assert "budget_test:after_swarm" not in sample.store
+    else:
+        assert sample.limit is None
+        assert sample.store["budget_test:after_swarm"] is True
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert [m.status for m in ledger.members] == [status]
+    assert ledger.calls == Calls(calls=made)
+
+
+@agent
+def _paused(model: Model, name: str) -> Agent:
+    # two calls, with a pause between them that the test named `name` controls
+    async def execute(state: AgentState) -> AgentState:
+        paused, resume = _PAUSES[name]
+        state.output = await model.generate(state.messages)
+        paused.set()
+        await resume.wait()
+        state.output = await model.generate(state.messages)
+        return state
+
+    return execute
+
+
+_PAUSES: dict[str, tuple[anyio.Event, anyio.Event]] = {}
+
+
+def test_without_derived_caps_a_stop_between_calls_leaves_the_sample_cost_limit_to_raise(
+    tmp_path: Path,
+) -> None:
+    # a $1.50 call reaches the $1.50 sample limit exactly; the member is then ended,
+    # and its next call is refused by the sample's limit before its closed lever
+    gc.collect()
+    model = scripted_model(cost=1.5)
+    name = "budget_test_stop_between_calls"
+
+    async def run(control: SwarmControl) -> StopReason:
+        paused, resume = _PAUSES[name] = (anyio.Event(), anyio.Event())
+        handle = control.members[0]
+        control.start(handle)
+        await paused.wait()
+        handle.end(origin="test")
+        resume.set()
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    agent_swarm = swarm(
+        _paused(model, name),
+        controller=controller(run, name),
+        channels=[],
+        budget=Budget(derive=False),
+    )
+    sample = _eval_then_mark(tmp_path, agent_swarm, model, cost_limit=1.5)
     assert sample.limit is not None and sample.limit.type == "cost"
     assert "budget_test:after_swarm" not in sample.store
     ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
-    assert [m.status for m in ledger.members] == ["errored"]
     assert ledger.calls == Calls(calls=1)
 
 
