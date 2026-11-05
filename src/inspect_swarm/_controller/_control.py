@@ -487,6 +487,12 @@ class SwarmRun:
         # final meter around its final step
         self._swarm_meter = CostPair(owner=None, role="meter")
         self._final_meter = CostPair(owner=None, role="meter")
+        if not budget.derive:
+            # the sample's limits end this swarm: its nodes charge the sample for a call
+            # before they raise for it
+            for node in self._nodes():
+                if isinstance(node, SwarmNode):
+                    node.charge_sample = True
         self._controller_scope = anyio.CancelScope()
         self._members_tg: TaskGroup | None = None
         self._runtime_tg: TaskGroup | None = None

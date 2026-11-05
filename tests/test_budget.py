@@ -1720,6 +1720,48 @@ def test_without_derived_caps_a_call_completing_after_a_stop_is_charged_to_the_s
     assert ledger.calls == Calls(calls=1)
 
 
+@agent
+def _nested(inner: Agent) -> Agent:
+    # a member that runs a swarm of its own
+    async def execute(state: AgentState) -> AgentState:
+        await run(inner, "inner task")
+        return state
+
+    return execute
+
+
+@pytest.mark.parametrize(
+    "inner_derive", [True, False], ids=["inner-derive", "inner-no"]
+)
+@pytest.mark.parametrize(
+    "outer_derive", [True, False], ids=["outer-derive", "outer-no"]
+)
+def test_the_swarm_that_owns_a_node_decides_whether_it_charges_the_sample(
+    tmp_path: Path, outer_derive: bool, inner_derive: bool
+) -> None:
+    # a $2 call inside a nested swarm, under the outer member's $1 cost limit and a
+    # $1.50 sample cost limit: the outer budget alone decides the outcome
+    gc.collect()
+    model = scripted_model(cost=2.0)
+    inner = swarm(generator(model), channels=[], budget=Budget(derive=inner_derive))
+    outer = swarm(
+        member(_nested(inner), name="outer", limits=[cost_limit(1.0)]),
+        channels=[],
+        budget=Budget(derive=outer_derive),
+    )
+    sample = _eval_then_mark(tmp_path, outer, model, cost_limit=1.5)
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    if outer_derive:
+        # the outer cap, derived at $1.425, stops the outer swarm normally
+        assert sample.limit is None
+        assert sample.store["budget_test:after_swarm"] is True
+        assert ledger.stop_reason == "swarm_cap"
+    else:
+        # the outer member's limit charges the sample, whose error escapes
+        assert sample.limit is not None and sample.limit.type == "cost"
+        assert "budget_test:after_swarm" not in sample.store
+
+
 def test_an_explicit_cap_without_derived_caps_stops_the_swarm(
     tmp_path: Path,
 ) -> None:

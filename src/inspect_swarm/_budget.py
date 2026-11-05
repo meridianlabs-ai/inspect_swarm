@@ -365,6 +365,8 @@ class SwarmNode(Limit):
     role: NodeRole
     # set by the runtime on the swarm's caps
     stop_swarm: Callable[[str], None] | None = None
+    # set by the runtime on every node of a swarm whose budget has derive=False
+    charge_sample: bool = False
 
     def detect_bridge(self) -> None:
         # every check, met or not, so a member found bridged by the bridge's mark stays
@@ -500,13 +502,12 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
         # to the cost tree. So charge it here and check the pair's cost-tree ancestors,
         # root first: the sample's cost limit counts the call and raises ahead of this
         # node, as it would in Inspect. A bridged member's node does not raise, and
-        # Inspect charges the call itself. With derived caps nothing changes.
-        state = current_budget.get()
+        # Inspect charges the call itself. With derived caps nothing changes. The swarm
+        # that owns this node decides, not a nested swarm the call runs in.
         member = current_member.get()
         if (
             self.pair is None
-            or state is None
-            or state.budget.derive
+            or not self.charge_sample
             or (member is not None and member.bridged)
         ):
             return
