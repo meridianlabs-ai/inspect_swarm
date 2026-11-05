@@ -1375,7 +1375,11 @@ def notes(model: Model, steps: int, channel: str = "shared_memory") -> Agent:
             [],
             [],
             False,
-            [{"file": "f-99", "version": 7, "lines": None, "deleted": False}],
+            {
+                "files": [
+                    {"file": "f-99", "version": 7, "lines": None, "deleted": False}
+                ]
+            },
         )
         return state
 

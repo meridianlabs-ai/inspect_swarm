@@ -30,7 +30,7 @@ from inspect_swarm import (
     swarm_tools,
 )
 from inspect_swarm._budget import current_member
-from inspect_swarm._bus._bus import Bus, current_bus
+from inspect_swarm._bus._bus import SwarmBus, current_bus
 from inspect_swarm._bus._tools import loop_tools
 from inspect_swarm._channel.messages import MessagesState
 from inspect_swarm._fence import utf8_bytes
@@ -49,7 +49,7 @@ class _Run:
         self.members = {name: _Member(name) for name in members}
         for m in self.members.values():
             m.context.loop = current_agent_channel()
-        self.bus = Bus(
+        self.bus = SwarmBus(
             list(self.members.values()),
             {name: m.context for name, m in self.members.items()},
             channels,

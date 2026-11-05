@@ -15,7 +15,7 @@ from inspect_ai.util._span import span
 
 from inspect_swarm import Channel, MemberInfo, MemberState, WaitSpec, shared_memory
 from inspect_swarm._budget import MemberContext, current_member
-from inspect_swarm._bus._bus import Bus
+from inspect_swarm._bus._bus import SwarmBus
 from inspect_swarm._channel.shared_memory import (
     _SharedMemoryState,  # pyright: ignore[reportPrivateUsage]
 )
@@ -70,7 +70,7 @@ class _Board:
     # each loop is an agent span named after the member and the loop
     def __init__(self, channel: Channel, members: Sequence[str]) -> None:
         self.members = {name: _Member(name) for name in members}
-        self.bus = Bus(
+        self.bus = SwarmBus(
             list(self.members.values()),
             {name: m.context for name, m in self.members.items()},
             [channel],

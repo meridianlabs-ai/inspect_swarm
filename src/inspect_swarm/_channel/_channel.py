@@ -86,9 +86,9 @@ class ChannelRun:
     """What `Channel.open()` gets for one run of the swarm."""
 
     bus: "Bus"
-    """The run's bus, which the channel's tools deliver records through.
+    """The run's bus, which the channel's tools deliver records through with `bus.deliver(Draft(...))`.
 
-    A tool whose result shows the channel's records also reports them with `bus.read(name, records)`, where `name` is the channel's `name` and `records` are the ids of the records the result concerns. The log records the read, and the records the calling member's later work depends on, which the swarm's critical path links. Pass `depends_on=` when the result depends on other records than it concerns: a result that tells the loop a record was committed, without its content, depends on it, and a result built from several records depends on them all. Every id must be one the channel committed in this run, and the call must come from a member's tool call; otherwise it raises `ValueError` or `RuntimeError`.
+    A tool whose result shows the channel's records also reports them with `bus.read(name, records)`, where `name` is the channel's `name` and `records` are the ids of the records the result concerns. The log records the read, and the records the calling member's later work depends on, which the swarm's critical path links. Pass `depends_on=` when the result depends on other records than it concerns: a result that tells the loop a record was committed, without its content, depends on it, and a result built from several records depends on them all. Every id must be one the channel committed in this run, and the call must come from a member's tool call; otherwise it raises `ValueError` or `RuntimeError`. `read()` returns the read's id. See `Bus`.
     """
 
     roster: Sequence[MemberInfo]

@@ -1,7 +1,7 @@
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from inspect_ai.tool import Tool, ToolDef, ToolError
 from inspect_ai.util._span import current_agent_span_id
@@ -22,6 +22,9 @@ from ._channel import (
     swarm_channel,
 )
 from ._params import check_bound, check_rate
+
+if TYPE_CHECKING:
+    from .._bus._bus import SwarmBus
 
 CHANNEL = "shared_memory"
 ROOT = "/shared_memory"
@@ -295,7 +298,9 @@ class _Args:
 class _SharedMemoryState:
     def __init__(self, limits: _Limits, run: ChannelRun) -> None:
         self._limits = limits
-        self._bus = run.bus
+        # the run's own bus, whose members beyond the public `Bus` the built-in
+        # channels use
+        self._bus = cast("SwarmBus", run.bus)
         self._roster = [info.name for info in run.roster]
         # by id, tombstones included, in the order the files were created
         self._files: dict[str, _BoardFile] = {}
@@ -928,8 +933,8 @@ class _SharedMemoryState:
             CHANNEL,
             list(dict.fromkeys(f.record for f in files)),
             depends_on=depends_on,
-            files=[_shown(f, lines) for f in files],
             listing=listing,
+            fields={"files": [_shown(f, lines) for f in files]},
         )
 
     # news: what changed since a loop last viewed it

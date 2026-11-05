@@ -2,7 +2,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.agent._channel import current_agent_channel
@@ -21,7 +21,7 @@ from .._channel._channel import (
 )
 from .._channel.messages import MessagesState
 from .._controller._controller import MemberInfo
-from .._evidence import comm_delivered, comm_read, comm_sent
+from .._evidence import READ_KEYS, comm_delivered, comm_read, comm_sent
 from ._address import resolve
 from ._record import (
     Draft,
@@ -40,21 +40,131 @@ if TYPE_CHECKING:
 _STOPPING = "the swarm is stopping; nothing more is delivered."
 
 
-# What `Bus.deliver()` returns for a delivered record: the record as delivered, its
-# commit sequence number, and what the channel's `apply()` returned.
 @dataclass(frozen=True)
 class Delivery:
+    """What `Bus.deliver()` returns for a delivered record."""
+
     record: Record
+    """The record as delivered."""
+
     seq: int
+    """The record's commit sequence number, across the run's channels. It is `delivery.seq` in the record's `delivered` evidence."""
+
     notify: list[str]
+    """The members whose own loop the record is news to, as the channel's `apply()` returned them."""
+
     result: Mapping[str, JsonValue] | None
+    """What the channel's `apply()` returned for the evidence."""
 
 
-# The communication bus of one swarm run. Every sanctioned communication is a record
-# that a channel's tool hands to `deliver()`; nothing else changes channel state. The
-# bus, and the channel states it opens, live for one run and are reached through
-# `current_bus`, so concurrent samples never share them.
-class Bus:
+@dataclass(frozen=True)
+class Caller:
+    """The member a channel's tool acts for, from `calling_member()`."""
+
+    member: str
+    """The member's name."""
+
+    nested: bool
+    """Whether the calling loop is not the member's own, such as a subagent's."""
+
+    loop_span_id: str | None
+    """The agent span of the calling loop."""
+
+
+class Bus(Protocol):
+    """A swarm run's bus, as `ChannelRun.bus` gives it to a channel.
+
+    Every record of a channel goes through `deliver()`, and a tool whose result shows the channel's records reports them with `read()`. Call both from the channel's tools: they act for the calling member.
+    """
+
+    @property
+    def stopping(self) -> bool:
+        """Whether the swarm has begun to stop. Once it has, every `deliver()` is refused."""
+        ...
+
+    def running(self, name: str) -> bool:
+        """Whether a member has started and not ended.
+
+        Args:
+            name: The member's name.
+
+        Raises:
+            KeyError: If no member of the swarm has the name.
+        """
+        ...
+
+    async def deliver(self, draft: Draft) -> Delivery:
+        """Make a record from a draft and deliver it through the channel.
+
+        The bus binds the sender from the calling member, resolves the addresses, and calls the channel's `validate()`. It then checks the sender is still running and the channel's storm controls, calls `admit()`, writes the `sent` evidence, calls `apply()` and writes the `delivered` evidence, with no `await` between the checks and `apply()`.
+
+        Args:
+            draft: The record to make.
+
+        Returns:
+            The delivered record, its commit sequence number and what `apply()` returned.
+
+        Raises:
+            ToolError: If the swarm is stopping, an address is refused, or a check refuses the record. The calling tool's result is the error.
+            ValueError: If no channel of the swarm has `draft.channel` as its `name`.
+            RuntimeError: If called outside a member of this swarm.
+        """
+        ...
+
+    def read(
+        self,
+        channel: str,
+        records: Sequence[str],
+        *,
+        depends_on: Sequence[str] | None = None,
+        listing: bool = False,
+        fields: Mapping[str, JsonValue] | None = None,
+    ) -> str:
+        """Write the `read` evidence of a tool result that shows the channel's records.
+
+        The evidence names the calling member and loop, the records, and the read's id. The records the calling loop has not depended on before are written as its `depends_on`, which the swarm's critical path links.
+
+        Args:
+            channel: The channel's `name`.
+            records: The ids of the records the result concerns.
+            depends_on: The ids of the records whose content or news the result showed, when they differ from `records`: a result that tells the loop a record was committed, without its content, depends on it, and a result built from several records depends on them all.
+            listing: Whether the result showed what exists rather than its content. The swarm's metrics count listings apart from reads.
+            fields: More data for the evidence, written beside the bus's own.
+
+        Returns:
+            The read's id (`"r-5"`), numbered across the run's channels.
+
+        Raises:
+            ValueError: If no channel of the swarm has the name, an id is not a record the channel committed in this run, or a key of `fields` is one the bus writes (`version`, `read`, `tool_span_id`, `depends_on`, `listing`, `via`).
+            RuntimeError: If called outside a member of this swarm.
+        """
+        ...
+
+
+def calling_member() -> Caller | None:
+    """The member of the current swarm run that the caller runs in or descends from.
+
+    A channel's tool calls it to learn which member it acts for. The answer comes from the runtime, never from model output.
+
+    Returns:
+        The member, or `None` outside a member of a swarm run.
+    """
+    bus = current_bus.get()
+    context = None if bus is None else bus.member()
+    if bus is None or context is None:
+        return None
+    return Caller(
+        member=context.name,
+        nested=bus.nested(context),
+        loop_span_id=current_agent_span_id(),
+    )
+
+
+# The communication bus of one swarm run, which implements `Bus`. Every sanctioned
+# communication is a record that a channel's tool hands to `deliver()`; nothing else
+# changes channel state. The bus, and the channel states it opens, live for one run and
+# are reached through `current_bus`, so concurrent samples never share them.
+class SwarmBus:
     def __init__(
         self,
         members: Sequence["MemberHandle"],
@@ -236,9 +346,9 @@ class Bus:
         records: Sequence[str],
         *,
         depends_on: Sequence[str] | None = None,
-        files: list[JsonValue] | None = None,
         listing: bool = False,
-    ) -> None:
+        fields: Mapping[str, JsonValue] | None = None,
+    ) -> str:
         # a result of the channel's tool concerned `records` and showed the calling
         # loop the content or news of `depends_on` (by default `records`): writes its
         # `read` evidence for the member and loop calling, as deliver() binds the sender
@@ -248,24 +358,31 @@ class Bus:
                 "Bus.read() was called outside a member of this swarm; channel tools report reads for the member that calls them."
             )
         self._state(channel)
+        taken = [key for key in fields or {} if key in READ_KEYS]
+        if taken:
+            raise ValueError(
+                f"{channel}: a read's fields cannot use {', '.join(taken)}, which the bus writes itself."
+            )
         loop = current_agent_span_id()
         self._check_committed(channel, records)
         depends = self.depends(
             channel, loop, records if depends_on is None else depends_on
         )
+        read = self.read_id()
         comm_read(
             context.span_id,
             context.name,
             channel,
-            self.read_id(),
+            read,
             loop,
             self.nested(context),
             current_span_id(),
             list(records),
             depends,
             listing,
-            files,
+            fields,
         )
+        return read
 
     def depends(
         self, channel: str, loop: str | None, depends_on: Sequence[str]
@@ -425,6 +542,6 @@ def _unencodable(record: Record) -> tuple[str, str] | None:
     return None
 
 
-current_bus: ContextVar[Bus | None] = ContextVar(
+current_bus: ContextVar[SwarmBus | None] = ContextVar(
     "inspect_swarm_current_bus", default=None
 )

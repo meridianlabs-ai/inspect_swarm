@@ -63,7 +63,7 @@ from .._record import (
 from .._seam import BoundaryCallback, MemberGate, check_origin
 
 if TYPE_CHECKING:
-    from .._bus._bus import Bus
+    from .._bus._bus import SwarmBus
     from .._bus._record import Record
     from .._channel._channel import Channel
 
@@ -445,7 +445,7 @@ class SwarmRun:
         final: FinalName | None = None,
     ) -> None:
         # deferred: the bus imports the channels, which import this module's package
-        from .._bus._bus import Bus
+        from .._bus._bus import SwarmBus
 
         self._shares = shares or {}
         self._members = [
@@ -453,7 +453,7 @@ class SwarmRun:
             for record, name in records
         ]
         # the channel states open here, before any member starts
-        self.bus = Bus(
+        self.bus = SwarmBus(
             self._members,
             {m.name: m.context for m in self._members},
             channels,
@@ -626,7 +626,7 @@ class SwarmRun:
         escaping: BaseException | None = None
         started = False
         ended = False
-        bus_token: "contextvars.Token[Bus | None] | None" = None
+        bus_token: "contextvars.Token[SwarmBus | None] | None" = None
         budget_token: contextvars.Token[BudgetState | None] | None = None
         running: int | None = None
         try:
