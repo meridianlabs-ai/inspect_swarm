@@ -4,7 +4,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import anyio
 from anyio.abc import TaskGroup
@@ -224,18 +224,27 @@ class SwarmControl(Protocol):
         ...
 
     def start(
-        self, member: str | MemberHandle, input: str | list[ChatMessage] | None = None
+        self,
+        member: str | MemberHandle,
+        input: str | list[ChatMessage] | None = None,
+        *,
+        preamble: str | Literal[False] | None = None,
     ) -> None:
         """Start a member, and return at once.
 
-        The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm's input when `input` is `None`, followed by the member's preamble: its name unless `choose_name=True`, its role and the roster size, how the budget is split, and each channel's instructions.
+        The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm's input when `input` is `None`, followed by the member's preamble as a user message. The swarm's preamble gives the member's name unless `choose_name=True`, its role and the roster size, how the budget is split, and each channel's instructions.
+
+        A controller that does not run its members at the same time can replace the swarm's preamble or leave it out. Text passed as `preamble` replaces all of it, channel instructions included, and is used as given, also for a member with `choose_name=True`.
 
         Args:
             member: The member, or its name.
             input: The member's input. `None` gives it the swarm's input.
+            preamble: The member's preamble, a user message after its input. `None` gives it the swarm's preamble; a string replaces the swarm's preamble with that text; `False` leaves it out.
 
         Raises:
             KeyError: If no member has this name.
+            TypeError: If `preamble` is not a string, `False` or `None`.
+            ValueError: If `preamble` is an empty or blank string, or is `False` and the input holds no user message.
             RuntimeError: If the member has already started (a member runs once; `wake()` gives an idle persistent member more work), or the swarm is stopping.
         """
         ...
@@ -519,18 +528,16 @@ class SwarmRun:
         return self._lookup(name)
 
     def start(
-        self, member: str | MemberHandle, input: str | list[ChatMessage] | None = None
+        self,
+        member: str | MemberHandle,
+        input: str | list[ChatMessage] | None = None,
+        *,
+        preamble: str | Literal[False] | None = None,
     ) -> None:
         m = self._lookup(member if isinstance(member, str) else member.name)
-        if self.stop_reason is not None:
-            raise _Stopping(
-                f"start({m.name!r}): the swarm is stopping ({self.stop_reason}), so no member can start."
-            )
-        if m.state != "pending":
-            raise RuntimeError(
-                f"start({m.name!r}): the member has already started, and a member runs once."
-            )
-        assert self._members_tg is not None and self._member_ctx is not None
+        call = f"start({m.name!r})"
+        # checked before anything changes, so a refused call leaves the member pending
+        _check_preamble(preamble, call)
         messages: list[ChatMessage] = (
             list(self._input)
             if input is None
@@ -538,7 +545,27 @@ class SwarmRun:
             if isinstance(input, str)
             else list(input)
         )
-        messages.append(ChatMessageUser(content=self._preambles[m.name]))
+        if preamble is False and not any(
+            isinstance(message, ChatMessageUser) for message in messages
+        ):
+            raise ValueError(
+                f"{call}: the input has no user message, and preamble=False adds none; pass an input with a user message, or a preamble."
+            )
+        if self.stop_reason is not None:
+            raise _Stopping(
+                f"{call}: the swarm is stopping ({self.stop_reason}), so no member can start."
+            )
+        if m.state != "pending":
+            raise RuntimeError(
+                f"{call}: the member has already started, and a member runs once."
+            )
+        assert self._members_tg is not None and self._member_ctx is not None
+        if preamble is not False:
+            messages.append(
+                ChatMessageUser(
+                    content=self._preambles[m.name] if preamble is None else preamble
+                )
+            )
         m.state = "running"
         m.started = anyio.current_time() - self._start
         self._settle()
@@ -1100,6 +1127,19 @@ class SwarmRun:
     def _notify(self) -> None:
         self._changed.set()
         self._changed = anyio.Event()
+
+
+def _check_preamble(preamble: object, call: str) -> None:
+    if preamble is None or preamble is False:
+        return
+    if not isinstance(preamble, str):
+        raise TypeError(
+            f"{call}: preamble must be a string, False or None, not {type(preamble).__name__}."
+        )
+    if not preamble.strip():
+        raise ValueError(
+            f"{call}: preamble is empty or blank; pass preamble=False to leave the preamble out."
+        )
 
 
 # A wake's input as the messages to append: a string as one new user message, and each
