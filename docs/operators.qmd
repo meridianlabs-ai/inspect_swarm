@@ -1,0 +1,64 @@
+---
+title: Operators
+llms-description: "Reaching a running swarm's members from `inspect ctl sample agent`: listing them, sending one a message, stopping one, and stopping the whole swarm; read it to steer or stop a member while an eval runs."
+---
+
+## Overview
+
+While an eval runs, you can reach any member of a swarm by name with `inspect ctl sample agent`:
+
+```bash
+inspect ctl sample agent list    TASK SAMPLE_ID [EPOCH]
+inspect ctl sample agent message TASK SAMPLE_ID [EPOCH] --agent NAME --text TEXT [--interrupt]
+inspect ctl sample agent stop    TASK SAMPLE_ID [EPOCH] --agent NAME
+inspect ctl sample agent stop    TASK SAMPLE_ID [EPOCH] --group swarm
+```
+
+`list` shows each member with its state, its status once it has ended, what it is doing, and which actions it takes now. `message` gives one member a message from you. `stop` ends one member, or with `--group` stops the whole swarm.
+
+These commands use Inspect's control channel, which every eval runs on asyncio by default. On trio the control channel does not start, so they are not available.
+
+Pausing members is not supported yet: `pause` and `resume` are refused.
+
+## Names
+
+A member is addressed by its roster name, the name the swarm records it under. A member that chose its own name (`choose_name=True`) is still addressed by its roster name.
+
+Each swarm is a group. A swarm run directly in the sample is the group `swarm`. A swarm run inside a member's work, such as a member whose tool runs a swarm, is the group `swarm:<member>`, named after that member. Its members are addressed by their own names. Two swarms that run at the same time in one sample, both outside any member or both inside the same member, would have the same group name, so the second one raises an error when it starts.
+
+## Messages
+
+`message` gives a member a user message with `source="operator"`. The member is not told who sent it.
+
+- A member in a turn takes the message at its next turn, once the current turn's tool calls and subagents finish. A member in `swarm_wait` takes it when the wait returns.
+- With `--interrupt`, the member's turn is cancelled: its model call, tool calls and subagents. It continues at once with a cancelled result for each unfinished tool call, then your message.
+- A member between turns, or held at a turn boundary by a controller, takes it at its next turn.
+- A member that is still setting up, before its agent loop starts, takes it at its first turn. A member whose agent never starts an agent loop never takes it.
+
+`message` is refused for a member that has not started, has ended, or whose agent loop has ended, and for a bridged member: its CLI does not read the messages, so it takes only `stop`.
+
+Several messages that reach a member together are merged into one user message.
+
+An interrupt loses what the turn was doing. The cancelled tool calls return no result, though a command they started in the sandbox may keep running. A cancelled model call's usage is not known. A cancelled subagent returns nothing. If the member's tool was running a swarm, that swarm is cancelled, and since its member names are already taken in the sample, the same roster cannot be run again there. The member's background work is not part of its turn and goes on.
+
+## Stopping a member
+
+`stop --agent NAME` ends one member. The rest of the swarm goes on.
+
+- A member held at a turn boundary ends at once, `stopped`.
+- A member in a turn or still setting up ends `stopped` at its next turn boundary. Its next model call is refused. If it is still running after the swarm's grace period (`Budget.grace`), it is cancelled and ends `cancelled`.
+- A member that has not started ends `stopped` as soon as the controller starts it, before its setup and with no model call.
+- A member whose agent has returned and whose background work is still finishing ends once that work is done, with the status its return gave. Only a return without a submission (`unsubmitted`) becomes `stopped`; a submission, a member limit or the member's own stop is kept.
+- An idle [persistent member](members.qmd#persistent-members) ends `submitted`, with its last answer as its output.
+
+`stop` ends work only. Answers a member has already given stay: a persistent member's earlier answers and a submission returned before the stop can still be the swarm's answer, under the controller's `final` rule or its choice, as when a controller ends the member. A member stopped before it answered has no answer. A second `stop`, a stop of a member that has ended, a stop of a member that has not started once the swarm is stopping, and a stop sent while the swarm is ending after an error or a cancellation change nothing. That last check is best effort: a stop sent while the swarm is ending may still be accepted, but a swarm that fails or is cancelled is recorded that way. This holds for the swarm's own ending only: a member that such a stop ends keeps that ending in its own record. `stop` works for every member, bridged ones included.
+
+## Stopping the swarm
+
+`stop --group swarm` stops the swarm as its own stopping rules do. The controller is cancelled, members end at their next boundary or are cancelled after the grace period, and the swarm chooses its answer from the members that submitted. The sample then goes on to its scorers. The ledger's `stop_reason` is `operator` ([The ledger](analysis.qmd#the-ledger)). If the swarm fails or is cancelled instead, before or after the stop, its ledger records that ending and `stop_reason` is `null`.
+
+To end the sample itself instead, use `inspect ctl sample cancel`.
+
+## Evidence
+
+Each message the swarm accepts is an `operator_message` event in the member's span, and every member's result records `end_origin`. It is `operator` when your stop decided how the member ended, and `null` when something else did, such as a submission it kept or a member limit ([Operator actions](analysis.qmd#operator-actions)).

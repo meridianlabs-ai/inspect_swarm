@@ -43,6 +43,7 @@ inspect-docs:
       contents:
         - href: scoring.qmd
         - href: analysis.qmd
+        - href: operators.qmd
         - href: restrictions.qmd
   sidebar: unified
   external_refs:

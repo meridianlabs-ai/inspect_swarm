@@ -68,6 +68,9 @@ class MemberResult(BaseModel):
     answer_times: list[float] = []
     """The swarm times of a persistent member's answers, in order. Empty for other members, whose answer is their submission at `time`."""
 
+    end_origin: str | None = None
+    """Who asked the member to end, when an end request decided how it ended: `operator` for `inspect ctl sample agent stop`, or the origin a caller gave `MemberHandle.end()`. `None` when no end request did, as for a submission, a member limit or the swarm's own stop."""
+
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
