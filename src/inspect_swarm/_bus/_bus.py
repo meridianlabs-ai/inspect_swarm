@@ -16,10 +16,12 @@ from .._channel._channel import (
     Channel,
     ChannelRun,
     ChannelState,
+    ResolvingState,
     WaitingState,
     WaitSpec,
 )
 from .._channel.messages import MessagesState
+from .._channel.topics import TopicsState, builtin_topics
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_read, comm_sent
 from ._address import resolve
@@ -85,7 +87,7 @@ class Bus(Protocol):
     async def deliver(self, draft: Draft) -> Delivery:
         """Make a record from a draft and deliver it through the channel.
 
-        The bus binds the sender from the calling member, resolves the addresses, and calls the channel's `validate()`. It then checks the sender is still running and the channel's storm controls, calls `admit()`, writes the `sent` evidence, calls `apply()` and writes the `delivered` evidence, with no `await` between the checks and `apply()`.
+        The bus binds the sender from the calling member, resolves the addresses (with the channel state's `resolve()` when it has one, see `ResolvingState`), and calls the channel's `validate()`. It then checks the sender is still running and the channel's storm controls, calls `admit()`, writes the `sent` evidence, calls `apply()` and writes the `delivered` evidence, with no `await` between the checks and `apply()`.
 
         Args:
             draft: The record to make.
@@ -95,7 +97,7 @@ class Bus(Protocol):
 
         Raises:
             ToolError: If the swarm is stopping, an address is refused, or a check refuses the record. The calling tool's result is the error.
-            ValueError: If no channel of the swarm has `draft.channel` as its `name`.
+            ValueError: If no channel of the swarm has `draft.channel` as its `name`, or the channel's `resolve()` returns a name that is not a member, a name twice or the sender.
             RuntimeError: If called outside a member of this swarm.
         """
         ...
@@ -275,7 +277,13 @@ class SwarmBus:
         if self._stopping:
             raise ToolError(_STOPPING)
         state = self._state(draft.channel)
-        recipients = resolve(sender, draft.to, self._by_name)
+        # a channel state that resolves its own addresses does so in place of the
+        # member resolver
+        if callable(getattr(state, "resolve", None)):
+            recipients = tuple(cast(ResolvingState, state).resolve(sender, draft.to))
+            self._check_recipients(draft.channel, sender, recipients)
+        else:
+            recipients = resolve(sender, draft.to, self._by_name)
         number = self._ids.get(draft.channel, 0) + 1
         record = Record(
             id=f"{self._prefixes[draft.channel]}-{number}",
@@ -437,16 +445,37 @@ class SwarmBus:
         return current_agent_span_id() != context.span_id
 
     def status(self, context: MemberContext) -> str | None:
-        # the line that ends the results of the swarm's own tools in the member's own
-        # loop, after the channel's own: its unread messages, with the messages channel;
-        # nested loops cannot read them, so they are not told. Other channels' tools
-        # carry no count (decision: Ransom, 2026-10-30).
+        # the lines that end the results of the swarm's own tools in the member's own
+        # loop, after the channel's own: its unread messages, with the messages channel,
+        # and its unread posts by topic, with the topics channel, always ending with one
+        # short line of totals, which truncation keeps; nested loops cannot read them,
+        # so they are not told. Other channels' tools carry no count (decision: Ransom,
+        # 2026-10-30).
         if self.nested(context):
             return None
-        for state in self._states.values():
-            if isinstance(state, MessagesState):
-                return state.unread_line(context.name)
-        return None
+        messages = next(
+            (s for s in self._states.values() if isinstance(s, MessagesState)), None
+        )
+        topics = builtin_topics(self._states)
+        posts = (
+            None
+            if topics is None
+            else topics.status(
+                context.name,
+                None if messages is None else messages.unread_count(context.name),
+            )
+        )
+        if posts is not None:
+            return posts
+        return None if messages is None else messages.unread_line(context.name)
+
+    def unread(self, member: str, channel: str) -> int:
+        # the member's unread records in a channel that counts them in the status line,
+        # the messages or the topics channel; 0 for another channel
+        state = self._states[channel]
+        if isinstance(state, MessagesState | TopicsState):
+            return state.unread_count(member)
+        return 0
 
     def read_id(self) -> str:
         # the id of a read's evidence, numbered across the run's channels
@@ -484,6 +513,24 @@ class SwarmBus:
                 raise ValueError(
                     f"{channel}: a result names {record}, which is not a record this channel committed in this run."
                 )
+
+    def _check_recipients(
+        self, channel: str, sender: str, recipients: Sequence[str]
+    ) -> None:
+        # a channel's resolve() names members other than the sender, each once; anything
+        # else is a bug in the channel's code. Their state is not checked.
+        for i, name in enumerate(recipients):
+            if name not in self._by_name:
+                problem = "which is not a member of the swarm"
+            elif name in recipients[:i]:
+                problem = "more than once"
+            elif name == sender:
+                problem = "which is the sender"
+            else:
+                continue
+            raise ValueError(
+                f"{channel}: resolve() returned the recipient {name!r}, {problem}."
+            )
 
     def _liveness(self, record: Record) -> tuple[str, str] | None:
         # step 0 checked the recipients and the stopping flag, and nothing has awaited

@@ -4,11 +4,12 @@ from typing import TYPE_CHECKING, cast
 from inspect_ai.tool import Tool, ToolDef, ToolError, ToolParams
 from pydantic import JsonValue
 
+from .._budget import MemberContext
 from .._bus._address import MEMBER_NAME, RESERVED
 from .._bus._record import Draft, Record
 from .._bus._storm import StormControls
 from .._controller._controller import MemberInfo
-from .._fence import fence, utf8_bytes, with_lines
+from .._fence import fence, pack, utf8_bytes, with_lines
 from ._channel import (
     Channel,
     ChannelRun,
@@ -104,11 +105,7 @@ class _Messages(Channel):
         self.max_wait = max_wait
 
     def check(self, roster: Sequence[MemberInfo]) -> None:
-        for info in roster:
-            if not MEMBER_NAME.fullmatch(info.name) or info.name in RESERVED:
-                raise ValueError(
-                    f"messages(): member {info.name!r} has a name the channel cannot use: names must start with a lowercase letter, followed by at most 47 lowercase letters, digits, _ or -, and must not be {' or '.join(RESERVED)}. Give the member such a name with member(..., name=...)."
-                )
+        check_member_names(CHANNEL, roster)
 
     def open(self, run: ChannelRun) -> ChannelState | None:
         return MessagesState(self, run)
@@ -265,7 +262,7 @@ class MessagesState:
         senders = ", ".join(sorted({r.sender for r in unread}))
         return WaitNews(
             lines=[
-                f"{_count(len(unread))} (from {senders}). Call read_messages() to read them."
+                f"{unread_messages(len(unread))} (from {senders}). Call read_messages() to read them."
             ],
             files=[{"record": r.id, "from": r.sender} for r in unread],
             # the line counts every unread message and names every sender
@@ -283,7 +280,7 @@ class MessagesState:
         ) -> str:
             # an ended member's send reaches the bus; if it passes the initial checks,
             # the bus refuses it with liveness evidence
-            name = self._caller("send_message", running=False)
+            context = own_caller(self._bus, "send_message", running=False)
             addresses = (to,) if isinstance(to, str) else tuple(to)
             delivery = await self._bus.deliver(
                 Draft(
@@ -298,7 +295,7 @@ class MessagesState:
             record = delivery.record
             return with_lines(
                 f"Sent {record.id} to {', '.join(record.recipients)}.",
-                self.unread_line(name),
+                self._bus.status(context),
             )
 
         return ToolDef(
@@ -312,7 +309,7 @@ class MessagesState:
     def _read_tool(self) -> Tool:
         async def execute() -> str:
             """Read your unread messages."""
-            return self._read(self._caller("read_messages"))
+            return self._read(own_caller(self._bus, "read_messages").name)
 
         return ToolDef(
             execute,
@@ -328,7 +325,8 @@ class MessagesState:
     def _list_tool(self) -> Tool:
         async def execute() -> str:
             """List the members of the swarm."""
-            name = self._caller("list_members")
+            context = own_caller(self._bus, "list_members")
+            name = context.name
             lines = [
                 f"{m.name}{' (you)' if m.name == name else ''}"
                 f"{f', role {m.role}' if m.role else ''}: {m.state}"
@@ -337,7 +335,7 @@ class MessagesState:
             ]
             return with_lines(
                 "\n".join(lines),
-                self.unread_line(name) or "You have no unread messages.",
+                self._bus.status(context) or "You have no unread messages.",
             )
 
         return ToolDef(
@@ -348,34 +346,13 @@ class MessagesState:
             parallel=True,
         ).as_tool()
 
-    def _caller(self, tool: str, running: bool = True) -> str:
-        context = self._bus.member()
-        if context is None:
-            raise RuntimeError(
-                f"The {tool} tool was called outside a member of its swarm."
-            )
-        if self._bus.nested(context):
-            raise ToolError(
-                f"{tool} is for {context.name}'s own loop; a subagent cannot use it."
-            )
-        if running and not self._bus.running(context.name):
-            raise ToolError(f"{context.name} has ended.")
-        return context.name
-
     def _read(self, name: str) -> str:
         # synchronous from the inbox to the mark, so what is shown is what is marked
         unread = self._unread[name]
         if not unread:
             return "You have no unread messages."
         size = self._header_max + len("\n\n") + len("\n") + self._trailer_max
-        shown: list[str] = []
-        for record in unread:
-            fenced = _fenced(record)
-            grown = size + utf8_bytes(fenced) + (len("\n") if shown else 0)
-            if shown and grown > self.budget:
-                break
-            shown.append(fenced)
-            size = grown
+        shown = pack(map(_fenced, unread), size, self.budget)
         read = unread[: len(shown)]
         del unread[: len(shown)]
         self._known[name].update(r.id for r in read)
@@ -385,10 +362,38 @@ class MessagesState:
             text += "\n" + _trailer(len(unread))
         return text
 
+    def unread_count(self, member: str) -> int:
+        return len(self._unread[member])
+
     def unread_line(self, member: str) -> str | None:
         # the status line: a count, never a payload
         count = len(self._unread[member])
-        return f"You have {_count(count)}." if count else None
+        return f"You have {unread_messages(count)}." if count else None
+
+
+# The member a channel tool of the member's own loop acts for, from the bus: a nested
+# loop's call is refused, and, with `running`, a call of a member that is not running.
+def own_caller(bus: "SwarmBus", tool: str, running: bool = True) -> MemberContext:
+    context = bus.member()
+    if context is None:
+        raise RuntimeError(f"The {tool} tool was called outside a member of its swarm.")
+    if bus.nested(context):
+        raise ToolError(
+            f"{tool} is for {context.name}'s own loop; a subagent cannot use it."
+        )
+    if running and not bus.running(context.name):
+        raise ToolError(f"{context.name} has ended.")
+    return context
+
+
+# Member names appear in fences and status lines as they are, so a channel that shows
+# them needs every name in the addressing grammar.
+def check_member_names(factory: str, roster: Sequence[MemberInfo]) -> None:
+    for info in roster:
+        if not MEMBER_NAME.fullmatch(info.name) or info.name in RESERVED:
+            raise ValueError(
+                f"{factory}(): member {info.name!r} has a name the channel cannot use: names must start with a lowercase letter, followed by at most 47 lowercase letters, digits, _ or -, and must not be {' or '.join(RESERVED)}. Give the member such a name with member(..., name=...)."
+            )
 
 
 # The record name of the built-in messages channel among a run's open channel states, by
@@ -416,7 +421,7 @@ def _fenced(record: Record) -> str:
     return fence(TAG, attributes, record.payload)
 
 
-def _count(count: int) -> str:
+def unread_messages(count: int) -> str:
     return "1 unread message" if count == 1 else f"{count} unread messages"
 
 

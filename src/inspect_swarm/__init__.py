@@ -12,6 +12,7 @@ from ._channel._channel import (
     Channel,
     ChannelRun,
     ChannelState,
+    ResolvingState,
     WaitingState,
     WaitNews,
     WaitSpec,
@@ -20,6 +21,7 @@ from ._channel._channel import (
 from ._channel.filesystem import filesystem
 from ._channel.messages import messages
 from ._channel.shared_memory import shared_memory
+from ._channel.topics import Topic, topics
 from ._controller._control import (
     ControlEvent,
     MemberEnded,
@@ -74,10 +76,12 @@ __all__ = [
     "MemberResult",
     "MemberState",
     "Record",
+    "ResolvingState",
     "StopReason",
     "SwarmBudget",
     "SwarmControl",
     "SwarmResultRecord",
+    "Topic",
     "WaitNews",
     "WaitSpec",
     "WaitingState",
@@ -96,4 +100,5 @@ __all__ = [
     "swarm_resources",
     "swarm_result",
     "swarm_tools",
+    "topics",
 ]

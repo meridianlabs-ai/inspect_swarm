@@ -42,6 +42,7 @@ from inspect_swarm import (
     MemberInfo,
     MemberState,
     Record,
+    ResolvingState,
     StopReason,
     SwarmControl,
     WaitNews,
@@ -363,6 +364,95 @@ async def test_a_refusal_at_step_0_leaves_no_record(
         # no id was given
         delivery = await _send(bus)
         assert delivery.record.id == "b-1"
+
+
+# A channel written with public names whose state resolves its own addresses: `#room`
+# is every other member of the roster, whatever its state, unless the test sets what
+# `resolve()` returns.
+class _RoomState:
+    def __init__(self, run: ChannelRun, returns: tuple[str, ...] | None) -> None:
+        self.roster = [m.name for m in run.roster]
+        self.returns = returns
+
+    def tools(self) -> list[Tool]:
+        return []
+
+    def resolve(self, sender: str, to: tuple[str, ...]) -> tuple[str, ...]:
+        if to != ("#room",):
+            raise ToolError("post to #room")
+        if self.returns is not None:
+            return self.returns
+        return tuple(name for name in self.roster if name != sender)
+
+    def validate(self, record: Record) -> None:
+        pass
+
+    def admit(self, record: Record) -> None:
+        pass
+
+    def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
+        return list(record.recipients), None
+
+
+class _Room(Channel):
+    name = "room"
+    prefix = "r"
+
+    def __init__(self, returns: tuple[str, ...] | None = None) -> None:
+        self.returns = returns
+
+    def open(self, run: ChannelRun) -> ResolvingState:
+        return _RoomState(run, self.returns)
+
+
+@pytest.mark.anyio
+async def test_a_state_that_resolves_its_addresses_names_recipients_in_any_state() -> (
+    None
+):
+    bus, _ = _bus(channels=[_Room()], states={"w-2": "pending", "w-3": "ended"})
+    async with sample() as transcript:
+        with pytest.raises(ToolError, match="^post to #room$"):
+            await _send(bus, channel="room", to=("w-2",))
+        # nothing was recorded
+        assert _comm(transcript) == []
+        delivered = await _send(bus, channel="room", to=("#room",))
+    # and no id was given to the refusal
+    assert (delivered.record.id, delivered.record.recipients) == ("r-1", ("w-2", "w-3"))
+    sent, done = _comm(transcript)
+    assert (send(sent).record.to, send(sent).record.recipients) == (
+        ["#room"],
+        ["w-2", "w-3"],
+    )
+    assert delivery(done).recipients == ["w-2", "w-3"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "returns,error",
+    [
+        pytest.param(
+            ("w-9",), "'w-9', which is not a member of the swarm", id="unknown"
+        ),
+        pytest.param(("w-2", "w-2"), "'w-2', more than once", id="twice"),
+        pytest.param(("w-2", "w-1"), "'w-1', which is the sender", id="sender"),
+    ],
+)
+async def test_recipients_resolve_returns_wrongly_are_a_bug_in_the_channel(
+    returns: tuple[str, ...], error: str
+) -> None:
+    bus, _ = _bus(channels=[_Room(returns)])
+    async with sample() as transcript:
+        with pytest.raises(ValueError) as raised:
+            await _send(bus, channel="room", to=("#room",))
+    assert str(raised.value) == f"room: resolve() returned the recipient {error}."
+    assert _comm(transcript) == []
+
+
+@pytest.mark.anyio
+async def test_a_state_without_resolve_keeps_the_member_resolver() -> None:
+    bus, _ = _bus(channels=[_Board(), _Room()])
+    with pytest.raises(ToolError, match="^'#room' is not a member of the swarm"):
+        await _send(bus, to=("#room",))
 
 
 @pytest.mark.anyio
