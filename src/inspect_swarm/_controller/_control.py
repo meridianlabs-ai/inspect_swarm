@@ -811,7 +811,12 @@ class SwarmRun:
                     except Exception as ex:
                         failures.append(ex)
                     failures += self._account(
-                        interval, timelines, record, ended=ended, error=error
+                        interval,
+                        timelines,
+                        record,
+                        ended=ended,
+                        error=error,
+                        failed=not ended or bool(failures),
                     )
                     # the error or cancellation that ended the swarm stays the one
                     # raised, else the first failure here; the others become its notes
@@ -848,7 +853,8 @@ class SwarmRun:
 
     # The ledger and the metrics of a swarm that started, written however it ends, even
     # when its record could not be; returns what failed rather than raising it, so that
-    # the error that ended the swarm stays the one raised.
+    # the error that ended the swarm stays the one raised. `failed` says whether the run
+    # already fails: it did not complete its final step, or its record was not written.
     def _account(
         self,
         interval: LedgerInterval,
@@ -857,6 +863,7 @@ class SwarmRun:
         *,
         ended: bool,
         error: BaseException | None,
+        failed: bool,
     ) -> list[Exception]:
         wall_clock = anyio.current_time() - self._start
         try:
@@ -882,12 +889,8 @@ class SwarmRun:
                 runtime=self._runtime_lever,
                 final=self._final_meter,
                 swarm=self._swarm_meter,
-                # a run that failed or was cancelled keeps that ending: an operator's
-                # stop is not recorded, as one can reach the run while it tears down,
-                # before the stop guard knows (decision: Ransom, 2026-11-05)
-                stop_reason=None
-                if not ended and self.stop_reason == OPERATOR
-                else self.stop_reason,
+                # the operator's stop is settled below, once the metrics write is known
+                stop_reason=self.stop_reason,
                 ended_by=None if ended else _exhaustion(error),
                 interrupted=not ended,
                 # M1's final step does not await, so nothing can cancel it
@@ -896,10 +899,8 @@ class SwarmRun:
         except Exception as ex:
             return [ex]
         failures: list[Exception] = []
-        try:
-            write_ledger(ledger)
-        except Exception as ex:
-            failures.append(ex)
+        # the metrics first, so that a failure to write them is known before the ledger
+        # records how the run ended
         try:
             spans = {
                 m.name: m.context.span_id
@@ -940,6 +941,16 @@ class SwarmRun:
                 )
             )
             timelines.fill(places)
+        except Exception as ex:
+            failures.append(ex)
+        if (failed or failures) and ledger.stop_reason == OPERATOR:
+            # a run that failed or was cancelled keeps that ending: an operator's stop
+            # is not recorded, as one can reach the run while it tears down, before the
+            # stop guard knows (decision: Ransom, 2026-11-05). The metrics do not read
+            # the stop reason.
+            ledger = ledger.model_copy(update={"stop_reason": None})
+        try:
+            write_ledger(ledger)
         except Exception as ex:
             failures.append(ex)
         return failures

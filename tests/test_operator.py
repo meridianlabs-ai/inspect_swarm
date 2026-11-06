@@ -1663,6 +1663,78 @@ async def test_stopping_the_swarm_is_its_own_stop_in_its_own_context() -> None:
     assert ran.end_origins() == {"a": (None, None, None), "b": (None, None, None)}
 
 
+# A run whose result record or metrics cannot be written fails with that error, so its
+# ledger has no operator `stop_reason` either (decision: Ransom, 2026-11-05). The
+# controller has chosen a's answer, with a reason the record may reject, and b still
+# works when the operator stops the swarm.
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["none", "record", "metrics"])
+async def test_a_stopped_swarm_whose_record_or_metrics_fail_keeps_that_failure(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    started, chosen = anyio.Event(), anyio.Event()
+
+    async def run_controller(control: SwarmControl) -> str:
+        for m in control.members:
+            control.start(m)
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                if isinstance(event, MemberEnded) and event.member == "a":
+                    break
+        # an attachment reference, which the record's guard refuses
+        control.choose_answer(
+            "a", reason="tc://artifact" if failure == "record" else "ok"
+        )
+        chosen.set()
+        await anyio.sleep_forever()
+        return "unreachable"
+
+    def fail(*args: Any) -> None:
+        raise OSError("disk full")
+
+    if failure == "metrics":
+        monkeypatch.setattr("inspect_swarm._controller._control.write_metrics", fail)
+
+    async def drive(group: OperatorGroup) -> None:
+        await started.wait()
+        await chosen.wait()
+        assert _act(group.stop, dry_run=False).changed
+
+    ran = await _run(
+        _swarm(
+            [
+                member(_react(Script([_submit("42")])), name="a"),
+                member(
+                    _react(Script([_call("slow", seconds=30)]), _slow(started)),
+                    name="b",
+                ),
+            ],
+            run_controller,
+            grace=0.5,
+        ),
+        drive,
+        errors=True,
+    )
+
+    error = ran.sample.error
+    ledger = ran.ledger
+    assert ledger.ended_by is None and not ledger.interrupted
+    assert [(m.name, m.status) for m in ledger.members] == [
+        ("a", "submitted"),
+        ("b", "cancelled"),
+    ]
+    if failure == "none":
+        assert error is None
+        assert ledger.stop_reason == "operator"
+        assert ran.record.final.member == "a" and ran.record.final.reason == "ok"
+    else:
+        assert error is not None
+        assert ("disk full" if failure == "metrics" else "cannot be written") in (
+            error.message
+        )
+        assert ledger.stop_reason is None
+
+
 @pytest.mark.anyio
 async def test_the_list_shows_roster_names_and_what_each_member_is_doing() -> None:
     started = anyio.Event()
