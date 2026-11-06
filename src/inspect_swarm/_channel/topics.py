@@ -523,7 +523,10 @@ class TopicsState:
         listed = (
             f"your topics are {_tags(visible)}" if visible else "you are in no topic"
         )
-        raise ToolError(f"no topic #{name}; {listed}.")
+        # a name outside the grammar is model output that may not be valid text, so it
+        # is shown escaped
+        shown = f"#{name}" if MEMBER_NAME.fullmatch(name) else repr(f"#{name}")
+        raise ToolError(f"no topic {shown}; {listed}.")
 
     def _counts(self, records: Sequence[Record]) -> list[tuple[str, int]]:
         # the unread posts by topic, in declaration order, for topics with any

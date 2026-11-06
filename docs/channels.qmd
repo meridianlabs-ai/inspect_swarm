@@ -155,7 +155,23 @@ def notices() -> Channel:
 
 Members get the tools from `swarm_tools()`, as with the built-in channels. A tool hands the bus a `Draft`, and `run.bus.deliver()` makes the `Record`, binds the sender from the calling member, checks it, and calls the state's `validate()`, then `admit()` and `apply()` with no `await` between them, so what `admit()` checks still holds when `apply()` runs. After address resolution and validation, the log records accepted sends and refusals by liveness, payload and storm checks or `admit()` as `sent` events. Each delivered record also has a `delivered` event. Earlier refusals, including a stopping swarm, produce no communication event. A refusal raises `ToolError`, which the member sees as the tool's result.
 
-A draft with no `to` is unaddressed: it reaches nobody directly, and the channel decides whom it concerns. `apply()` returns the members the record is news to and a JSON mapping, both written in the `delivered` event, and may name members that have not started or have ended. A draft addressed with `to=` is refused if a member it names has not started, is ending or has ended.
+A draft with no `to` is unaddressed: it reaches nobody directly, and the channel decides whom it concerns. `apply()` returns the members the record is news to and a JSON mapping, both written in the `delivered` event, and may name members that have not started or have ended. A draft addressed with `to=` names members by default, and is refused if a member it names has not started, is ending or has ended.
+
+A channel with addresses of its own, such as rooms, gives its state a `resolve()` method (`ResolvingState`). The bus then calls it in place of the member resolver, before a record exists. It returns the recipients, which the `sent` and `delivered` events name, or raises `ToolError` to refuse the draft with no record. Recipients may be in any state: pending, idle, ending or ended. They must be members other than the sender, each once; anything else raises `ValueError`, since it is a bug in the channel. `resolve()` must not await. This state posts notices to rooms of members:
+
+```python
+class RoomsState(NoticesState):
+    def __init__(self, bus: Bus, rooms: dict[str, list[str]]) -> None:
+        super().__init__(bus)
+        self.rooms = rooms
+
+    def resolve(self, sender: str, to: tuple[str, ...]) -> tuple[str, ...]:
+        if len(to) != 1 or to[0] not in self.rooms:
+            raise ToolError(f"Post to one room: {', '.join(self.rooms)}.")
+        return tuple(name for name in self.rooms[to[0]] if name != sender)
+```
+
+Its post tool delivers `Draft("notices", "notice", to=("#red",), payload=text)`.
 
 `calling_member()` tells a tool which member it acts for: a `Caller` with the member's name, whether the calling loop is a nested one, and that loop's agent span. It comes from the runtime, never from model output, and is `None` outside a member of a swarm.
 
@@ -168,4 +184,4 @@ A channel that reports nothing adds no dependency. Every id must be a record the
 
 `read()` returns the read's id (`r-5`), which the log's `read` event carries. Pass `listing=True` for a result that shows what exists rather than its content, which the metrics count as a listing, not a read.
 
-See the docstrings of `Channel`, `ChannelRun`, `ChannelState`, `Bus`, `Draft`, `Delivery`, `calling_member`, `WaitingState` and `WaitNews` in the [reference](reference/index.qmd).
+See the docstrings of `Channel`, `ChannelRun`, `ChannelState`, `ResolvingState`, `Bus`, `Draft`, `Delivery`, `calling_member`, `WaitingState` and `WaitNews` in the [reference](reference/index.qmd).

@@ -39,6 +39,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### Channel
 ### ChannelRun
 ### ChannelState
+### ResolvingState
 ### WaitingState
 ### WaitSpec
 ### WaitNews

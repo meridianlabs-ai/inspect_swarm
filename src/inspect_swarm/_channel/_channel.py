@@ -139,11 +139,28 @@ class ChannelState(Protocol):
         ...
 
 
-# The state of a built-in channel that resolves its own records' addresses: the bus
-# calls `resolve()` in place of its member resolver, before a record exists. It returns
-# the recipients, whatever their state, or raises `ToolError`. Internal to the package.
 class ResolvingState(ChannelState, Protocol):
-    def resolve(self, sender: str, to: tuple[str, ...]) -> tuple[str, ...]: ...
+    """The state of a channel that resolves its own records' addresses.
+
+    When the state of `draft.channel` has `resolve()`, `Bus.deliver()` calls it in place of the member resolver, before a record exists. The recipients it returns are the record's `recipients`, which the `sent` and `delivered` evidence name, whatever their state: members that are pending, idle, ending or ended are accepted. The sender must still be running, and nothing is delivered once the swarm is stopping.
+    """
+
+    def resolve(self, sender: str, to: tuple[str, ...]) -> tuple[str, ...]:
+        """Resolve a draft's addresses to its recipients.
+
+        It must not await: `deliver()` runs from this call to `apply()` with no `await`, so that the recipients agree with what `apply()` sees.
+
+        Args:
+            sender: The member delivering the record, bound by the bus.
+            to: The draft's addresses, as the channel's tool gave them.
+
+        Returns:
+            The recipients: members of the swarm, each once, not the sender. Anything else is a bug in the channel, and `deliver()` raises `ValueError`.
+
+        Raises:
+            ToolError: If the addresses are refused. No record is made and no evidence is written.
+        """
+        ...
 
 
 # A channel tool as a run declares it, without the run: what swarm_bridged_tools()

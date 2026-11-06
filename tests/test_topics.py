@@ -212,6 +212,26 @@ async def test_a_refused_post_or_read_leaves_no_record(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("tool", ["post_topic", "read_topics"])
+@pytest.mark.parametrize("name", ["\ud800", "#\udfff", "or\ud800ders"])
+async def test_a_topic_name_that_is_not_valid_text_is_shown_escaped(
+    tool: str, name: str
+) -> None:
+    # model output can hold a lone surrogate, which no request to a provider can carry
+    args = {"topic": name, **({"message": "x"} if tool == "post_topic" else {})}
+    async with run() as (r, transcript):
+        with pytest.raises(ToolError) as raised:
+            await r.call("w-1", tool, **args)
+        error = raised.value.message
+        error.encode("utf-8")
+        shown = repr(name if name.startswith("#") else f"#{name}")
+        assert error == (
+            f"no topic {shown}; your topics are #orders-w-1, #reports, #general."
+        )
+        assert comm_events(transcript, "sent") == []
+
+
+@pytest.mark.anyio
 async def test_a_post_is_addressed_to_one_topic_with_a_reader() -> None:
     channel = topics([Topic(name="solo", readers=["a"], writers=["a", "b"])])
     async with run(("a", "b"), channel) as (r, transcript):
