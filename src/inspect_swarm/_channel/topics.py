@@ -120,7 +120,8 @@ class _Topics(Channel):
         for topic in self.topics:
             for field in ("readers", "writers"):
                 listed = cast(Literal["all"] | list[str], getattr(topic, field))
-                unknown = [n for n in _members(listed, names) if n not in names]
+                given = names if listed == "all" else listed
+                unknown = [n for n in given if n not in names]
                 if unknown:
                     raise ValueError(
                         f"topics(): topic {topic.name} lists {unknown[0]!r} in its {field}, which is not a member of the swarm; the members are {', '.join(names)}."
@@ -491,7 +492,7 @@ class TopicsState:
                 )
                 unread = counts.get(name, 0)
                 lines.append(
-                    f"#{name}{' (private)' if topic.private else ''}: readers {_listed(topic.readers)}; writers {_listed(topic.writers)}; {access}."
+                    f"#{name}{' (private)' if topic.private else ''}: readers {_listed(topic.readers, self._readers[name])}; writers {_listed(topic.writers, self._writers[name])}; {access}."
                     + (f" {unread} unread." if unread else "")
                 )
             return with_lines(
@@ -570,8 +571,8 @@ def builtin_topics(states: Mapping[str, ChannelState]) -> TopicsState | None:
 
 
 def _members(listed: Literal["all"] | list[str], roster: Sequence[str]) -> list[str]:
-    # a topic's readers or writers, in roster order for "all"
-    return list(roster) if listed == "all" else list(listed)
+    # a topic's readers or writers, in roster order however they were listed
+    return [name for name in roster if listed == "all" or name in listed]
 
 
 def _name(topic: str) -> str:
@@ -579,8 +580,9 @@ def _name(topic: str) -> str:
     return topic[1:] if topic.startswith("#") else topic
 
 
-def _listed(listed: Literal["all"] | list[str]) -> str:
-    return "all members" if listed == "all" else ", ".join(listed)
+def _listed(listed: Literal["all"] | list[str], members: Sequence[str]) -> str:
+    # a topic's readers or writers as configured, "all" or its members in roster order
+    return "all members" if listed == "all" else ", ".join(members)
 
 
 def _tags(names: Sequence[str], last: str = ", ") -> str:

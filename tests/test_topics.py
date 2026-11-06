@@ -115,6 +115,22 @@ async def test_a_post_reaches_its_readers_and_is_read_once_fenced() -> None:
 
 
 @pytest.mark.anyio
+async def test_readers_and_writers_are_named_in_roster_order() -> None:
+    channel = topics([Topic(name="t", readers=["b", "a"], writers=["lead", "a"])])
+    async with run(("a", "b", "lead"), channel) as (r, transcript):
+        assert await post(r, "lead", "t", "x") == "Posted p-1 to #t, read by a, b."
+        assert send(comm_events(transcript, "sent")[0]).record.recipients == [
+            "a",
+            "b",
+        ]
+        assert await r.call("b", "list_topics") == (
+            "#t: readers a, b; writers a, lead; you read. 1 unread.\n"
+            "Unread posts: #t 1.\n"
+            "You have 1 unread post."
+        )
+
+
+@pytest.mark.anyio
 async def test_a_post_reaches_readers_whatever_their_state() -> None:
     members = ("lead", "w-1", "w-2", "w-3")
     channel = topics([Topic(name="orders", writers=["lead"])], rate=None)

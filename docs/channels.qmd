@@ -155,9 +155,9 @@ def notices() -> Channel:
 
 Members get the tools from `swarm_tools()`, as with the built-in channels. A tool hands the bus a `Draft`, and `run.bus.deliver()` makes the `Record`, binds the sender from the calling member, checks it, and calls the state's `validate()`, then `admit()` and `apply()` with no `await` between them, so what `admit()` checks still holds when `apply()` runs. After address resolution and validation, the log records accepted sends and refusals by liveness, payload and storm checks or `admit()` as `sent` events. Each delivered record also has a `delivered` event. Earlier refusals, including a stopping swarm, produce no communication event. A refusal raises `ToolError`, which the member sees as the tool's result.
 
-A draft with no `to` is unaddressed: it reaches nobody directly, and the channel decides whom it concerns. `apply()` returns the members the record is news to and a JSON mapping, both written in the `delivered` event, and may name members that have not started or have ended. A draft addressed with `to=` names members by default, and is refused if a member it names has not started, is ending or has ended.
+Unless the channel's state resolves its own addresses (below), a draft with no `to` is unaddressed: it reaches nobody directly, and the channel decides whom it concerns. `apply()` returns the members the record is news to and a JSON mapping, both written in the `delivered` event, and may name members that have not started or have ended. A draft addressed with `to=` names members by default, and is refused if a member it names has not started, is ending or has ended.
 
-A channel with addresses of its own, such as rooms, gives its state a `resolve()` method (`ResolvingState`). The bus then calls it in place of the member resolver, before a record exists. It returns the recipients, which the `sent` and `delivered` events name, or raises `ToolError` to refuse the draft with no record. Recipients may be in any state: pending, idle, ending or ended. They must be members other than the sender, each once; anything else raises `ValueError`, since it is a bug in the channel. `resolve()` must not await. This state posts notices to rooms of members:
+A channel with addresses of its own, such as rooms, gives its state a `resolve()` method (`ResolvingState`). The bus then calls it in place of the member resolver for every draft of the channel, `to=()` included, before a record exists. It returns the recipients, which the `sent` and `delivered` events name, or raises `ToolError` to refuse the draft with no record. Recipients may be in any state: pending, idle, ending or ended. They must be members other than the sender, each once; anything else raises `ValueError`, since it is a bug in the channel. `resolve()` must not await. This state posts notices to rooms of members, such as `{"#red": ["red-1", "red-2"]}`, and each member reads the notices posted to its rooms:
 
 ```python
 class RoomsState(NoticesState):
@@ -165,13 +165,34 @@ class RoomsState(NoticesState):
         super().__init__(bus)
         self.rooms = rooms
 
+    def tools(self) -> list[Tool]:
+        async def post_to_room(room: str, text: str) -> str:
+            """Post a notice to the members of a room.
+
+            Args:
+                room: The room, such as #red.
+                text: The notice.
+            """
+            draft = Draft("notices", "notice", to=(room,), payload=text)
+            delivery = await self.bus.deliver(draft)
+            return f"Posted {delivery.record.id} to {', '.join(delivery.record.recipients)}."
+
+        async def read_room_notices() -> str:
+            """Read the notices posted to your rooms."""
+            caller = calling_member()
+            assert caller is not None
+            shown = [r for r in self.notices if caller.member in r.recipients]
+            self.bus.read("notices", [r.id for r in shown])
+            lines = [f"{r.id} from {r.sender}: {r.payload}" for r in shown]
+            return "\n".join(lines) or "No notices."
+
+        return [ToolDef(post_to_room).as_tool(), ToolDef(read_room_notices).as_tool()]
+
     def resolve(self, sender: str, to: tuple[str, ...]) -> tuple[str, ...]:
         if len(to) != 1 or to[0] not in self.rooms:
             raise ToolError(f"Post to one room: {', '.join(self.rooms)}.")
         return tuple(name for name in self.rooms[to[0]] if name != sender)
 ```
-
-Its post tool delivers `Draft("notices", "notice", to=("#red",), payload=text)`.
 
 `calling_member()` tells a tool which member it acts for: a `Caller` with the member's name, whether the calling loop is a nested one, and that loop's agent span. It comes from the runtime, never from model output, and is `None` outside a member of a swarm.
 

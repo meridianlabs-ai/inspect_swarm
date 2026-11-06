@@ -152,7 +152,7 @@ class ResolvingState(ChannelState, Protocol):
 
         Args:
             sender: The member delivering the record, bound by the bus.
-            to: The draft's addresses, as the channel's tool gave them.
+            to: The draft's addresses, as the channel's tool gave them. A state with `resolve()` gets every draft of its channel, including one with no addresses (`()`).
 
         Returns:
             The recipients: members of the swarm, each once, not the sender. Anything else is a bug in the channel, and `deliver()` raises `ValueError`.

@@ -249,7 +249,7 @@ All three are offered to the member's own loop only and refuse a call from anoth
 **`read_topics(topic: str | None = None) -> str`**
 
 - Without `topic`, the caller's unread posts in every topic it reads, in commit order; with it, those in that topic, which the caller must read (a topic it does not read is `you do not read #reports.`; a private one it is not in, the unknown-topic error).
-- Packs whole posts up to the read budget, marks exactly those read, in the synchronous step that builds the result, and reports them with the bus's in-package `Bus.read("topics", ids)`, as `read_messages` does, which writes the `read` event and the critical path's links ([How this sits on S2](#how-this-sits-on-s2)). Built with `max_output=0`, as `read_messages` is, so no output limit cuts a fence.
+- Packs whole posts up to the read budget, marks exactly those read, in the synchronous step that builds the result, and reports them with the bus's `Bus.read("topics", ids)`, as `read_messages` does, which writes the `read` event and the critical path's links ([How this sits on S2](#how-this-sits-on-s2)). Built with `max_output=0`, as `read_messages` is, so no output limit cuts a fence.
 - Never blocks; a reader with nothing unread waits with `swarm_wait`.
 
 **`list_topics() -> str`**
@@ -331,7 +331,7 @@ No new event or field. Posts write `sent`, `delivered` and `read` events with `c
 
 ### How this sits on S2
 
-The topics channel posts through the operation S2 makes public ([swarm-orbit.md S2](swarm-orbit.md#s2-a-public-bus-api-for-channels)), `deliver(Draft)`, finds its caller with `calling_member()`, and resolves its addresses with the public `ResolvingState` this design adds ([Channel-resolved addresses](#channel-resolved-addresses)). It lives in the package and uses three integrations S2 does not publish, each a built-in channel's, as the messages channel's are today: the in-package `Bus.read()` (S2's `record_read()` writes the same `read` event but takes no `depends_on`, and a read must link the posts it showed for the critical path, as `read_messages` does), the status line and the `swarm_wait` description. ORBIT's channel posts addressed records whose recipients its own `resolve()` computes, calls `record_read()`, and takes no part in the status line.
+The topics channel uses the public `deliver(Draft)`, `Bus.read()` and `ResolvingState` operations. As a built-in channel, it also uses three in-package integrations: the member/loop and lifecycle guards shared with messages, the status lines, and the `swarm_wait` description. The status integration includes the unread counts used by the wait's trailing-count rule. ORBIT's channel resolves its own recipients and reports reads with the public `Bus.read()`; it does not use the built-in status lines.
 
 ## Alternatives considered
 
