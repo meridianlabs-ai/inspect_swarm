@@ -19,6 +19,8 @@ First, when a bridged generation reaches the sample's limit, the bridge raises t
 
 Second, a bridge filter can make parallel model calls in one request. If those calls reach a swarm limit and the sample's limit together, the bridge keeps only the first limit error. When that is the swarm limit, the member ends with that limit's status (`swarm_cap`, `share`, `member_limit:<type>` or `stopped`) and `ended_by` is empty. Nothing is cancelled and the sample continues: a later model call that reaches the limit again ends it, and otherwise the sample is scored as a normal completion. None of the `inspect_swe` agents' own filters make parallel calls.
 
+A CLI retry can change how a bridged member ends. When the member reaches its own member limit or share, the bridge keeps that error and answers the CLI with it. If the CLI retries after an enclosing swarm limit has also been reached, such as the swarm cap or a share, the bridge's check before the retry raises that limit instead. The member then ends `swarm_cap` or `share` rather than `member_limit:<type>`, and the swarm stops with that reason when the retry arrives, not at the next native member's call. A controller soft stop between the error reply and the retry has the same effect: the member ends `stopped`. No tokens are spent after the first call.
+
 The CLI's own tool calls do not emit Inspect `ToolEvent`s, so the tool-event evidence described here does not cover them, Inspect Sentinel does not see them, and `longest_identical_tool_run` is `null` for bridged members.
 
 ### Channels for bridged members
