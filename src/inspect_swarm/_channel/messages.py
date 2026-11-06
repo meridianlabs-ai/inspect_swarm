@@ -352,7 +352,7 @@ class MessagesState:
         if not unread:
             return "You have no unread messages."
         size = self._header_max + len("\n\n") + len("\n") + self._trailer_max
-        shown = pack([_fenced(r) for r in unread], size, self.budget)
+        shown = pack(map(_fenced, unread), size, self.budget)
         read = unread[: len(shown)]
         del unread[: len(shown)]
         self._known[name].update(r.id for r in read)

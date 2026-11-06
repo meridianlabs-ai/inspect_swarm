@@ -1,6 +1,8 @@
+import importlib
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, cast
+from unittest.mock import patch
 
 import anyio
 import pytest
@@ -401,6 +403,44 @@ async def test_every_post_fits_in_one_read_within_the_budget(filtered: bool) -> 
                 + ", ".join(f"#{t.name} 1" for t in declared[1:])
                 + ")."
             )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "channel,post_tool,read_tool,args",
+    [
+        pytest.param(
+            topics(rate=None), "post_topic", "read_topics", {"topic": "general"}
+        ),
+        pytest.param(
+            messages(rate=None, dedupe=False),
+            "send_message",
+            "read_messages",
+            {"to": "b"},
+        ),
+    ],
+    ids=["topics", "messages"],
+)
+async def test_a_read_formats_no_more_of_a_backlog_than_it_shows(
+    channel: Channel, post_tool: str, read_tool: str, args: dict[str, Any]
+) -> None:
+    # each read shows one record of a long backlog, and renders at most the next
+    module = importlib.import_module(f"inspect_swarm._channel.{channel.name}")
+    rendered: list[str] = []
+    original = module._fenced
+
+    def counted(record: Any) -> str:
+        rendered.append(record.id)
+        return original(record)
+
+    async with run(("a", "b"), channel) as (r, _):
+        for _ in range(20):
+            await r.call("a", post_tool, message="x" * 6_000, **args)
+        with patch.object(module, "_fenced", counted):
+            for _ in range(2):
+                rendered.clear()
+                assert (await r.call("b", read_tool)).startswith("1 ")
+                assert len(rendered) == 2
 
 
 @pytest.mark.anyio

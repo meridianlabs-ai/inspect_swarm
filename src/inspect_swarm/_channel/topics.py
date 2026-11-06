@@ -543,7 +543,7 @@ class TopicsState:
         selected = [r for r in unread if topic is None or r.to[0] == f"#{topic}"]
         if selected:
             size = self._header_max + len("\n\n") + len("\n") + self._trailer_max
-            shown = pack([_fenced(r) for r in selected], size, self.budget)
+            shown = pack(map(_fenced, selected), size, self.budget)
             read = selected[: len(shown)]
             ids = {r.id for r in read}
             unread[:] = [r for r in unread if r.id not in ids]
