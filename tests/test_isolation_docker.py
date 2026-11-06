@@ -230,8 +230,9 @@ def test_members_run_as_their_users_with_ids_that_own_no_file(tmp_path: Path) ->
         "tools": Case(
             runs=[Run(_RW_RO, {"w-1": steps, "w-2": steps})],
             # ids in the window taken by files on other filesystems: /dev/shm, and the
-            # tmpfs at the homes' parent; the image has files of 1000, 61000 and 61001
-            setup=f"{_DATA} && touch /dev/shm/a /scratch/b && chown 61002 /dev/shm/a && chown 61003 /scratch/b",
+            # tmpfs at the homes' parent; the image has files of 1000, 61000 and 61001.
+            # 61004 is only a user's primary group id, with no group entry or file.
+            setup=f"{_DATA} && touch /dev/shm/a /scratch/b && chown 61002 /dev/shm/a && chown 61003 /scratch/b && echo 'svc:x:998:61004::/:/bin/false' >> /etc/passwd",
         )
     }
     _eval(tmp_path, cases)
@@ -250,7 +251,7 @@ def test_members_run_as_their_users_with_ids_that_own_no_file(tmp_path: Path) ->
         assert _ok(edit_out) == f"File created successfully at: {home}/note.txt"
         assert _ok(stat_out) == f"{user} 644"
     assert len(uids) == 2 and len(gids) == 1
-    assert not (uids | gids) & {0, 1000, 61000, 61001, 61002, 61003}
+    assert not (uids | gids) & {0, 1000, 61000, 61001, 61002, 61003, 61004}
 
 
 @pytest.mark.slow
@@ -722,6 +723,17 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
             ],
             setup="groupadd swarm-w-1",
         ),
+        # refused before setup changes anything: a member's user would join the group
+        "listed-in-a-group": Case(
+            runs=[
+                Run(
+                    {"shared": [{"path": "/shared", "access": "rw"}]},
+                    idle,
+                    after="ls -d /shared 2>&1; getent group inspect-swarm; echo done",
+                )
+            ],
+            setup="groupadd legacy && sed -i '/^legacy:/s/$/root,swarm-w-1/' /etc/group",
+        ),
         "no-setfacl": Case(
             runs=[Run({"shared": [{"path": "/shared", "access": "rw"}]}, idle)],
             setup="rm /usr/bin/setfacl",
@@ -883,6 +895,11 @@ def test_unsafe_paths_and_unsupported_images_are_refused(tmp_path: Path) -> None
     assert group["after"] == [
         "ls: cannot access '/shared': No such file or directory\ndone\n"
     ]
+    listed = cases["listed-in-a-group"].results
+    assert listed["error"] == [
+        "users isolation: the group legacy already lists swarm-w-1 as a member in sandbox 'default'. Users isolation creates its members' users, so the image's groups must not list users named swarm-<member>."
+    ]
+    assert listed["after"] == group["after"]
     sudo = samples["sudo"].error
     assert sudo is not None
     assert "the member can become root with sudo" in sudo.message

@@ -78,6 +78,7 @@ def users(
     - The image needs `useradd` and `groupadd` (package `passwd`) and GNU `find`; with any share, also `setfacl` and `getfacl` (package `acl`), which the default Inspect image and `python:3.12-bookworm` lack.
     - Homes and shares must sit under directories owned by root and not writable by group or others, so a share under `/tmp` is refused. A share must not be `/tmp`, `/var/tmp`, `/dev/shm` or `/run/lock`, or above one. Homes must not exist yet. ACLs that setup did not set, in a share or on the homes' parent, and mounts inside a share or under the homes' parent are refused. So are hard-linked files, devices, sockets, FIFOs and set-user-id or set-group-id files in a `rw` share, and, in a `ro` share, an entry others cannot read (or search, for a directory) or can write: setup does not change a `ro` share, so set its modes in the image.
     - One swarm with users isolation per sandbox in a sample. Another is refused, whether it runs after the first, beside it, in a subtask or in a fork.
+    - The image and sandbox configuration are trusted, like task code that runs before the swarm. Setup makes the checks listed here, and refuses an existing `inspect-swarm` group, `swarm-<member>` user or group, or a group that lists a `swarm-<member>` user, but it does not audit the image for every setting that could give a member authority. The image must also meet these conditions, which setup does not check: the same storage is not mounted at two shares, or at a share and in the homes' tree; member users have no sudo rules (setup only checks that `sudo -n true` fails); and the storage of a `rw` share or of the homes is not shared with another sandbox that uses users isolation. A `ro` input may be shared.
     - Members are not root: they cannot install system packages or write system directories. Tasks that need root while the members work are unsuitable.
     - Custom tools inherit the member's user: their `sandbox().exec()`, `read_file()` and `write_file()` calls that name no user run as the member. A call that names another user, such as `user="root"`, runs as that user; that is a grant made in code. `computer()`, `web_browser()` and `skill()` raise inside the scope, and so do built-in tools built with another `user`.
     - Bridged members (inspect_swe agents) need inspect_ai and inspect_swe versions with bridge support for users isolation, which they do not have yet.
@@ -299,8 +300,9 @@ export LC_ALL=C
 fail() { printf '%s\n' "$*" >&2; exit 3; }
 """
 
-# Whether the image has what setup needs and a layout it supports, which users and group
-# exist, and which ids in the window are taken, by a passwd or group entry or by the
+# Whether the image has what setup needs and a layout it supports, which users and groups
+# exist or are listed as group members, and which ids in the window are taken, by a
+# passwd entry's user or primary group id, a group entry or the
 # owner or group of a file on any filesystem the homes, shares or world-writable
 # directories are on. Setup does not reconcile permission state it did not make, so it
 # refuses any ACL in a share or on the homes' parent, a mount inside a share or under
@@ -404,7 +406,9 @@ if [ -e "$parent" ]; then
 else
   inherits_acl "$parent"
 fi
-awk -F: '{ print $3 }' /etc/passwd /etc/group >"$dir/ids" || fail "users isolation could not read the ids in /etc/passwd and /etc/group"
+# a user's primary group id is taken even when no group entry has it
+awk -F: '{ print $3 } FILENAME == "/etc/passwd" { print $4 }' /etc/passwd /etc/group >"$dir/ids" \
+  || fail "users isolation could not read the ids in /etc/passwd and /etc/group"
 while [ "$1" != -- ]; do
   root=$1
   shift
@@ -472,6 +476,9 @@ awk -F: -v g="$group" '$1 == g { print "groupname", $3 }' /etc/group >"$dir/answ
 awk -F: '$1 ~ /^swarm-/ { print "username", $1 }' /etc/passwd >>"$dir/answer" \
   || fail "users isolation could not read /etc/passwd"
 awk -F: '$1 ~ /^swarm-/ { print "membergroup", $1 }' /etc/group >>"$dir/answer" \
+  || fail "users isolation could not read /etc/group"
+# a user created with a name a group already lists would join that group
+awk -F: '{ n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] ~ /^swarm-/) print "listedmember", m[i], $1 }' /etc/group >>"$dir/answer" \
   || fail "users isolation could not read /etc/group"
 awk -v lo="$lo" -v hi="$hi" '$1 >= lo && $1 <= hi { print "id", $1 }' "$dir/ids" >"$dir/window" \
   || fail "users isolation could not list the ids it found"
@@ -773,6 +780,8 @@ async def _setup(
     existing_group = False
     existing_users: set[str] = set()
     existing_groups: set[str] = set()
+    # the groups that list each swarm-* user name as a member
+    listed: dict[str, str] = {}
     lines = probe.stdout.splitlines()
     if lines[:1] != ["begin"] or lines[-1:] != ["end"]:
         raise RuntimeError(
@@ -788,6 +797,9 @@ async def _setup(
             existing_users.add(value)
         elif kind == "membergroup":
             existing_groups.add(value)
+        elif kind == "listedmember":
+            listed_user, _, listed_group = value.partition(" ")
+            listed.setdefault(listed_user, listed_group)
     if existing_group:
         raise RuntimeError(
             f"users isolation: the group {_GROUP} already exists in sandbox {env_name!r}. Users isolation creates it, so the image must not have it."
@@ -800,6 +812,10 @@ async def _setup(
         if user in existing_groups:
             raise RuntimeError(
                 f"users isolation: the group {user} already exists in sandbox {env_name!r}. Users isolation creates each member's own group, so the image must not have groups named swarm-<member>."
+            )
+        if user in listed:
+            raise RuntimeError(
+                f"users isolation: the group {listed[user]} already lists {user} as a member in sandbox {env_name!r}. Users isolation creates its members' users, so the image's groups must not list users named swarm-<member>."
             )
     free = (i for i in range(_FIRST_ID, _LAST_ID + 1) if i not in taken)
     gid = next(free, None)
