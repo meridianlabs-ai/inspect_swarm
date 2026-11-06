@@ -16,10 +16,12 @@ from .._channel._channel import (
     Channel,
     ChannelRun,
     ChannelState,
+    ResolvingState,
     WaitingState,
     WaitSpec,
 )
 from .._channel.messages import MessagesState
+from .._channel.topics import TopicsState, builtin_topics
 from .._controller._controller import MemberInfo
 from .._evidence import comm_delivered, comm_read, comm_sent
 from ._address import resolve
@@ -275,7 +277,13 @@ class SwarmBus:
         if self._stopping:
             raise ToolError(_STOPPING)
         state = self._state(draft.channel)
-        recipients = resolve(sender, draft.to, self._by_name)
+        # a channel state that resolves its own addresses does so in place of the
+        # member resolver
+        recipients = (
+            cast(ResolvingState, state).resolve(sender, draft.to)
+            if callable(getattr(state, "resolve", None))
+            else resolve(sender, draft.to, self._by_name)
+        )
         number = self._ids.get(draft.channel, 0) + 1
         record = Record(
             id=f"{self._prefixes[draft.channel]}-{number}",
@@ -437,16 +445,37 @@ class SwarmBus:
         return current_agent_span_id() != context.span_id
 
     def status(self, context: MemberContext) -> str | None:
-        # the line that ends the results of the swarm's own tools in the member's own
-        # loop, after the channel's own: its unread messages, with the messages channel;
-        # nested loops cannot read them, so they are not told. Other channels' tools
-        # carry no count (decision: Ransom, 2026-10-30).
+        # the lines that end the results of the swarm's own tools in the member's own
+        # loop, after the channel's own: its unread messages, with the messages channel,
+        # and its unread posts by topic, with the topics channel, always ending with one
+        # short line of totals, which truncation keeps; nested loops cannot read them,
+        # so they are not told. Other channels' tools carry no count (decision: Ransom,
+        # 2026-10-30).
         if self.nested(context):
             return None
-        for state in self._states.values():
-            if isinstance(state, MessagesState):
-                return state.unread_line(context.name)
-        return None
+        messages = next(
+            (s for s in self._states.values() if isinstance(s, MessagesState)), None
+        )
+        topics = builtin_topics(self._states)
+        posts = (
+            None
+            if topics is None
+            else topics.status(
+                context.name,
+                None if messages is None else messages.unread_count(context.name),
+            )
+        )
+        if posts is not None:
+            return posts
+        return None if messages is None else messages.unread_line(context.name)
+
+    def unread(self, member: str, channel: str) -> int:
+        # the member's unread records in a channel that counts them in the status line,
+        # the messages or the topics channel; 0 for another channel
+        state = self._states[channel]
+        if isinstance(state, MessagesState | TopicsState):
+            return state.unread_count(member)
+        return 0
 
     def read_id(self) -> str:
         # the id of a read's evidence, numbered across the run's channels

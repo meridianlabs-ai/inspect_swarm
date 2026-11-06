@@ -365,6 +365,33 @@ async def test_a_refusal_at_step_0_leaves_no_record(
         assert delivery.record.id == "b-1"
 
 
+class _RoomState(_BoardState):
+    # a channel state that resolves its own addresses: `#room` is every member but the
+    # sender, whatever its state
+    def resolve(self, sender: str, to: tuple[str, ...]) -> tuple[str, ...]:
+        if to != ("#room",):
+            raise ToolError("only #room")
+        return tuple(name for name in MEMBERS if name != sender)
+
+
+class _Room(_Board):
+    def open(self, run: ChannelRun) -> ChannelState | None:
+        return _RoomState(self.capacity)
+
+
+@pytest.mark.anyio
+async def test_a_state_that_resolves_addresses_replaces_the_member_resolver() -> None:
+    bus, _ = _bus(channels=[_Room()], states={"w-2": "pending", "w-3": "ended"})
+    async with sample() as transcript:
+        with pytest.raises(ToolError, match="^only #room$"):
+            await _send(bus, to=("w-2",))
+        # nothing was recorded and no id was given
+        assert (_comm(transcript), _board(bus).applied) == ([], [])
+        delivery = await _send(bus, to=("#room",))
+    assert (delivery.record.id, delivery.record.recipients) == ("b-1", ("w-2", "w-3"))
+    assert send(_comm(transcript)[0]).record.to == ["#room"]
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "payload,error",

@@ -139,6 +139,13 @@ class ChannelState(Protocol):
         ...
 
 
+# The state of a built-in channel that resolves its own records' addresses: the bus
+# calls `resolve()` in place of its member resolver, before a record exists. It returns
+# the recipients, whatever their state, or raises `ToolError`. Internal to the package.
+class ResolvingState(ChannelState, Protocol):
+    def resolve(self, sender: str, to: tuple[str, ...]) -> tuple[str, ...]: ...
+
+
 # A channel tool as a run declares it, without the run: what swarm_bridged_tools()
 # declares for it, since a bridged member's tools are fixed when its agent is built.
 @dataclass(frozen=True)
