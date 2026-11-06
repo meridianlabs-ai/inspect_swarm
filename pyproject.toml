@@ -16,7 +16,9 @@ classifiers = [
 ]
 dependencies = [
     # Development tracks inspect_ai's `main`: the swarm writes its evidence as
-    # CommunicationEvent and SwarmEvent (UKGovernmentBEIS/inspect_ai#6164),
+    # CommunicationEvent and SwarmEvent (UKGovernmentBEIS/inspect_ai#6164), and
+    # users isolation needs sandbox_identity() (UKGovernmentBEIS/inspect_ai#6190),
+    # the member's HOME (#6276) and the proxy's default user in a scope (#6316),
     # which no release has yet. That is done by [tool.uv.sources] below, not by
     # this line: only uv reads it, and the published package requires this
     # floor. Only the Release Please release PR ignores the sources, so a
