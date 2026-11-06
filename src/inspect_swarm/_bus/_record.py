@@ -41,7 +41,7 @@ class Record:
     """The sending member's name, bound by the runtime, never taken from model output."""
 
     to: tuple[str, ...]
-    """The addresses as written. `()` for an unaddressed record, such as a write to shared state, which reaches nobody directly."""
+    """The addresses as written in the draft, interpreted by the channel's resolver when it has one, otherwise by the member resolver. Without a channel resolver, `()` is an unaddressed record, such as a write to shared state, which reaches nobody directly."""
 
     recipients: tuple[str, ...]
     """The member names the addresses resolved to."""
@@ -85,7 +85,7 @@ class Draft:
     """What the record does, in the channel's terms (`"message"`, `"create"`)."""
 
     to: tuple[str, ...] = ()
-    """The addresses: member names, each of a member that has started and is not ending or ended, and `"all"` for every other running member. `deliver()` refuses any other address. `()` (the default) for an unaddressed record, which reaches nobody directly: the channel's `apply()` decides whom it concerns, and may name members that have not started or have ended."""
+    """The channel's addresses. By default, these are member names, each of a member that has started and is not ending or ended, or `"all"` for every other running member. Without a channel resolver, `()` (the default) is unaddressed and reaches nobody directly: the channel's `apply()` decides whom it concerns, and may name members that have not started or have ended. A state with `resolve()` defines its own address grammar and receives every tuple, including `()`; see `ResolvingState`."""
 
     payload: str = ""
     """The text the record carries."""
