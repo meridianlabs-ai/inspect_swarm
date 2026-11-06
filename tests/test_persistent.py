@@ -362,35 +362,38 @@ async def test_a_wake_once_the_swarm_is_stopping_ends_the_controller_with_the_st
 @pytest.mark.anyio
 async def test_idle_and_member_idle_are_published_together() -> None:
     script = _Recording([_submit("one"), _submit("two")])
-    checks: list[bool] = []
+    published: list[tuple[bool, str, bool]] = []
+    yielded: list[Any] = []
 
     async def run(control: SwarmControl) -> StopReason:
         runtime = cast(SwarmRun, control)
-        yielded: list[Any] = []
-        done = anyio.Event()
+        a = runtime._lookup("a")  # pyright: ignore[reportPrivateUsage]
+        publish_idle = a.gate.publish_idle
 
-        async def poll() -> None:
-            while not done.is_set():
-                if control.member("a").state == "idle":
-                    answer = control.member("a").answers - 1
-                    checks.append(
-                        MemberIdle("a", answer, False) in [*runtime._queue, *yielded]  # pyright: ignore[reportPrivateUsage]
-                    )
-                await anyio.lowlevel.checkpoint()
+        def holds() -> bool:
+            # an idle member's event is already published
+            seen = [*runtime._queue, *yielded]  # pyright: ignore[reportPrivateUsage]
+            return a.state != "idle" or MemberIdle("a", a.answers - 1, False) in seen
 
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(poll)
-            control.start("a")
-            async with aclosing(control.events()) as events:
-                async for event in events:
-                    yielded.append(event)
-                    if isinstance(event, MemberIdle) and event.answer == 0:
-                        control.wake("a", "again")
-            done.set()
+        # checked as the gate's publication starts and as soon as it returns, before
+        # the member awaits again, so no other task can have run in between
+        def checked() -> None:
+            before = holds()
+            publish_idle()
+            published.append((before, a.state, holds()))
+
+        a.gate.publish_idle = checked
+        control.start("a")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                yielded.append(event)
+                if isinstance(event, MemberIdle) and event.answer == 0:
+                    control.wake("a", "again")
         return "quiescence"
 
     await _run([member(_react(script), name="a", persistent=True)], run)
-    assert checks and all(checks)
+    assert published == [(True, "idle", True), (True, "idle", True)]
+    assert yielded == [MemberIdle("a", 0, False), MemberIdle("a", 1, False)]
 
 
 @pytest.mark.anyio

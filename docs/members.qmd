@@ -76,7 +76,7 @@ These are `react-1` to `react-3`. Names you give with `name` are not numbered ac
 
 ### Members that choose their names
 
-With `choose_name=True` a member is not told its name. Its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:
+With `choose_name=True` a member is not told its name. The swarm's preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:
 
 ```python
 from inspect_ai.agent import react
@@ -95,7 +95,7 @@ A roster can mix the two, for example a lead you name and workers that name them
 
 A swarm in which any member chooses its name can use only the `filesystem` channel or no channel (`channels=[]`). Other channels, including [shared memory](shared-memory.qmd) and your own, show members to each other by name, so `swarm()` refuses them.
 
-The swarm does not change text you give the member yourself: the sample input, a controller's `start(input=...)`, the agent's prompt, and the sandbox configuration.
+The swarm does not change text you give the member yourself: the sample input, a controller's `start(input=...)` and `start(preamble=...)`, the agent's prompt, and the sandbox configuration. A controller's `start(preamble=...)` uses its text as given, and `preamble=False` leaves the preamble out ([Controllers](controllers.qmd)). Neither adds a request to choose a name.
 
 ## Limits
 

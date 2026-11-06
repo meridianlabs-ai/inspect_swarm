@@ -14,7 +14,7 @@ from .._evidence import comm_waited
 from ._record import Record, current_via
 
 if TYPE_CHECKING:
-    from ._bus import Bus
+    from ._bus import SwarmBus
 
 Outcome = Literal[
     "news", "all_waiting", "stopping", "member_ending", "timeout", "cancelled"
@@ -122,7 +122,7 @@ class _Waiter:
 class Waits:
     def __init__(
         self,
-        bus: "Bus",
+        bus: "SwarmBus",
         contexts: Mapping[str, MemberContext],
         states: Mapping[str, WaitingState],
         max_wait: int | None,

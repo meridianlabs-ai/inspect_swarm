@@ -12,7 +12,7 @@ from inspect_ai._util.registry import (
 )
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.model import Model, get_model
-from inspect_ai.util import Limit
+from inspect_ai.util import Limit, sample_limits
 from inspect_ai.util._sandbox.context import (
     sandbox_environments_context_var,  # pyright: ignore[reportPrivateUsage]
 )
@@ -130,7 +130,9 @@ def swarm(
         caps = derive_caps(
             resolved_budget, len(roster), check_time=resolved_isolation is None
         )
-        if caps.cost is not None:
+        # under derive=False the sample's cost limit can apply with no swarm cap, and an
+        # unpriced member's calls would never advance it
+        if caps.cost is not None or sample_limits().cost.limit is not None:
             models = [_model(record) for record in records]
             check_cost_data(
                 [model for model, _ in models],
@@ -245,7 +247,7 @@ def _model(record: Member) -> tuple[str | Model, bool]:
         # agent defaults its model to anything but None
         name = registry_info(record.agent or factory).name
         raise PrerequisiteError(
-            f"A swarm cost cap requires cost data for every member's model, and {name} uses the default of its model parameter, which the swarm does not check. Give the member its model explicitly."
+            f"A swarm cost cap or a sample cost limit requires cost data for every member's model, and {name} uses the default of its model parameter, which the swarm does not check. Give the member its model explicitly."
         )
     model = params.get("model")
     if is_model_dict(model):
@@ -256,7 +258,7 @@ def _model(record: Member) -> tuple[str | Model, bool]:
         # an agent or other object the member delegates its calls to
         name = registry_info(record.agent or factory).name
         raise PrerequisiteError(
-            f"A swarm cost cap requires cost data for every member's model, and {name} is given a model argument that is not a model name or Model, which the swarm cannot check. Give the member a model name or Model."
+            f"A swarm cost cap or a sample cost limit requires cost data for every member's model, and {name} is given a model argument that is not a model name or Model, which the swarm cannot check. Give the member a model name or Model."
         )
     return get_model(), False
 

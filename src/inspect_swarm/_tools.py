@@ -9,7 +9,7 @@ from ._budget import BudgetUsage, swarm_budget
 def swarm_resources() -> Tool:
     """A tool that reports the swarm's budget to the member that calls it.
 
-    It shows the caps that will stop the swarm, how much all members have used, the member's own share when the budget is split, and the time cap. Use it in place of a tool that reads `sample_limits()`, which shows the sample's limits rather than the swarm's caps.
+    It shows the caps that will stop the swarm, how much all members have used, the member's own share when the budget is split, and the time cap. It reports swarm caps only. Sample limits can still end the run; read `sample_limits()` for those limits.
 
     Returns:
         The tool.

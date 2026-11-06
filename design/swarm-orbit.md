@@ -180,7 +180,7 @@ This design uses the seam's contract as [swarm-turn-seam.md](swarm-turn-seam.md)
 | Pre-turn defences (`dual_llm`) | ORBIT's `orbit:defense` callback | The seam |
 | Channels, communication edges, capacity, cursors, secret channels, `step_start` visibility | ORBIT's `@swarm_channel`, with read cutoffs in ORBIT's run state | The public bus API ([S2](#s2-a-public-bus-api-for-channels)) |
 | `notify` and `auto` delivery | ORBIT's delivery `Model` wrapper, unchanged | None needed |
-| Exposure observer | ORBIT's observer, unchanged, writing ORBIT's own events | Read evidence from `record_read()` ([S2](#s2-a-public-bus-api-for-channels)) |
+| Exposure observer | ORBIT's observer, unchanged, writing ORBIT's own events | Read evidence from `read()` ([S2](#s2-a-public-bus-api-for-channels)) |
 | Tool gates, `dual_llm`'s tool wrapper | ORBIT's tool wrappers, unchanged, applied by the member builder to its own tools and, through an ORBIT tool source, to the channel tools `swarm_tools()` resolves ([Members](#members)) | None needed |
 | Input filters, output checks and resampling | ORBIT's filter and output-check wrappers, unchanged | None needed ([ORBIT's model defences stay wrappers](#orbits-model-defences-stay-wrappers)) |
 | Submission order (`last_submitted`) | ORBIT's submit tool behind its defence chain, given to `react()`; the registry in ORBIT's run state | `AgentSubmit(tool=)` |
@@ -211,10 +211,10 @@ A channel with records needs the bus, and every name it needs is private. ORBIT 
 # inspect_swarm (public, experimental)
 
 @dataclass(frozen=True)
-class Draft: ...            # moved from _bus/_record.py, unchanged: channel, kind, to, payload, op, wake, reply_to
+class Draft: ...            # exported from _bus/_record.py, unchanged: channel, kind, to, payload, op, wake, reply_to
 
 @dataclass(frozen=True)
-class Delivery: ...         # moved from _bus/_bus.py, unchanged: record, seq, notify, result
+class Delivery: ...         # exported from _bus/_bus.py, unchanged: record, seq, notify, result
 
 
 @dataclass(frozen=True)
@@ -235,22 +235,21 @@ class Bus(Protocol):
 
     @property
     def stopping(self) -> bool: ...                       # once true, every deliver() is refused
-    def running(self, member: str) -> bool: ...           # started and not ended
     async def deliver(self, draft: Draft) -> Delivery: ...
-    def record_read(
+    def read(
         self,
         channel: str,
+        records: Sequence[str],
         *,
+        depends_on: Sequence[str] | None = None,
         listing: bool = False,
-        records: Sequence[str] | None = None,
-        fields: Mapping[str, JsonValue] | None = None,
     ) -> str: ...                                         # writes the `read` event; returns its read id
 ```
 
 - **`deliver()`** is today's, unchanged: it binds the sender from the calling member, resolves addresses, runs the channel's `validate()`, the storm controls, `admit()`, the `sent` evidence, `apply()` and the `delivered` evidence, and returns the `Delivery`. Called outside a member of the run, it raises `RuntimeError` as today.
-- **`record_read()`** writes the `read` evidence `comm_read()` writes today, in today's shape, for the calling member: an `InfoEvent` with the member, its span, the loop and `nested` taken from the caller, the channel, a new read id, the current tool span and `listing` as top-level fields, and each of `fields` beside them too. `records`, when the channel passes it, is written beside them as `comm_read()` writes it today for `messages`, an empty list included; a channel that passes no `records` gets no `records` key, as `shared_memory`'s reads, which carry `files`, have none today. It returns the read id (`r-5`). `listing` says the read showed what exists rather than its content, which the ledger and the metrics count apart, as today; `records` names the bus records whose content the read showed. A key of `fields` that is one of the event's own (`version`, `type`, `kind`, `member`, `span_id`, `loop`, `nested`, `channel`, `read`, `tool_span_id`, `listing`, `records`) raises `ValueError`, as does a channel name the run has not opened; outside a member of this run it raises `RuntimeError`. `shared_memory` calls it with `listing=` and `fields={"files": files}`, which writes exactly the event it writes now, so the ledger's `_comm_record()` and the listing and read metrics read it unchanged. The typed-event migration maps the event later, as it maps shared memory's reads ([swarm-event-types.md](swarm-event-types.md#how-inspect_swarm-writes-them)); S2 does not depend on it.
-- **`calling_member()`** is the public form of `Bus.member()`, for channel tools and for any code in a member's context that needs to know which member it acts for. It returns a frozen `Caller`, never the runtime's mutable context.
-- **`ChannelRun.bus`** stays the run's bus, which implements the `Bus` protocol; a channel outside the package relies on the protocol alone. `Draft`'s fields and addressing (member names and `"all"`) are today's. `shared_memory` moves onto the public names, with no change in behaviour, and `messages` keeps the bus members it reads from inside the package beyond the protocol's `running()` (`roster`, `member()`, `nested()`, `read_id()`), unchanged and typed as today; the protocol adds none of them.
+- **`read()`** is the bus's report of a result that shows a channel's records ([swarm-critical-path.md What channels report](swarm-critical-path.md#what-channels-report)): it writes the `read` `CommunicationEvent` for the calling member, with the member, its span, the loop and `nested` taken from the caller, the channel and `records` as `record_ids`, and in `data` a new read id, the current tool span, the records the loop newly depends on (`depends_on`, by default `records`), `listing` and `via`. It returns the read id (`r-5`). `listing` says the read showed what exists rather than its content, which the ledger and the metrics count apart, as today. A channel name the run has not opened or a record id the channel did not commit in this run raises `ValueError`; outside a member of this run it raises `RuntimeError`. The protocol takes no channel data for the event: nothing needs it (ORBIT's read passes only records), and a channel that does can add it later with a check that the log can keep it. `shared_memory` keeps passing its `files` with the `files=` keyword of the run's `SwarmBus`, which the protocol leaves out, so its events, the ledger and the listing and read metrics are unchanged.
+- **`calling_member()`** is the public form of `Bus.member()`, for channel tools and for any code in a member's context that needs to know which member it acts for. It returns a frozen `Caller`, never the runtime's mutable context. `nested` does not depend on the member resolving `swarm_tools()`: the member's own loop is the one `swarm_tools()` bound, matched by both its agent channel and its agent span (a custom agent run with `run()` gets a span of its own but may open no channel), or until a loop binds, the one its agent runs in directly, in the member's agent span. A bridged member's CLI is one loop, its own. The bus's `sent`, `delivered` and `read` events take `nested` from the same rule.
+- **`ChannelRun.bus`** stays the run's bus, typed as the `Bus` protocol; the run's bus class, `SwarmBus`, implements it, and a channel outside the package relies on the protocol alone. `Draft`'s fields and addressing (member names and `"all"`) are today's. The built-in channels keep using the private `SwarmBus`. A custom agent's `run()` descendants get the nested-loop treatment `calling_member()` describes, which affects message restrictions, shared memory's own-loop tracking and status lines, and wait ownership; shared memory's `read` events keep their schema, and the channels' ordinary metrics are unchanged. Both built-in channels keep the bus members they use from inside the package beyond the protocol (`member()`, `nested()`, `status()`, `running()`, `roster`, `idle()`, `idle_spec()`, and `read()`'s `files=`), unchanged, on the run's `SwarmBus`; the protocol adds none of them. The protocol has no `running()`: a member's lifecycle state is the runtime's, not the bus's, ORBIT's channel delivers by membership, and `deliver()` already refuses a sender that is not running. A channel that later needs lifecycle state gets a runtime query beside `calling_member()`, not a bus method.
 
 Two things ORBIT's channel needs are deliberately not added, because the channel interface already gives them:
 
@@ -370,7 +369,7 @@ ORBIT's `channel_post`, `channel_read` and `channel_list` become the tools of on
 
 - **Delivery.** A post is an unaddressed `deliver()` whose recipients ORBIT computes and `apply()` returns ([S2](#s2-a-public-bus-api-for-channels)). Capacity is checked in `admit()`, and ORBIT's counter is incremented in `apply()`, with no `await` between them, so two concurrent posts cannot both take the last place.
 - **The caller.** The tools find the posting or reading member with `calling_member()`. No ported member has a nested loop that uses the channel, since configurations with delegation edges stay on ORBIT's executor.
-- **Evidence.** A read calls `record_read("orbit", records=[...])` with the bus record ids of the messages it rendered, beside ORBIT's own read evidence under the tool call id its provenance captures (`ORBIT: orbit/communication/runtime.py:300-327`). The bus writes the swarm's `sent`, `delivered` and `read` events for ORBIT's records, which the swarm's ledger and communication metrics count; ORBIT keeps writing its own `orbit.communication` events and `CommunicationState`, each carrying the swarm's record id, so the two join. The collusion scorer and the viewer overview read ORBIT's state as now.
+- **Evidence.** A read calls `read("orbit", [...])` with the bus record ids of the messages it rendered, beside ORBIT's own read evidence under the tool call id its provenance captures (`ORBIT: orbit/communication/runtime.py:300-327`). The bus writes the swarm's `sent`, `delivered` and `read` events for ORBIT's records, which the swarm's ledger and communication metrics count; ORBIT keeps writing its own `orbit.communication` events and `CommunicationState`, each carrying the swarm's record id, so the two join. The collusion scorer and the viewer overview read ORBIT's state as now.
 - **Waking.** `wake=False`: no ORBIT record wakes a wait or activates a member.
 
 #### Delivery, exposure and filters
@@ -549,7 +548,7 @@ ORBIT's port refuses each of these with a `ValueError` naming the setting, and t
 
 ## Compatibility and migration
 
-- **inspect_swarm** is experimental throughout. S2 adds public names (`Draft`, `Delivery`, `Caller`, `calling_member`, `Bus`), with `Draft`'s fields and addressing as today; `messages` is unchanged, and `shared_memory` moves onto them, writing the same events, so stored logs, the ledger and the metrics are unchanged. S3 adds a keyword argument to `start()`, and S4 a `Budget` field, each defaulting to today's behaviour. The seam's, the result record's and the member outputs' compatibility is their designs'.
+- **inspect_swarm** is experimental throughout. S2 adds public names (`Draft`, `Delivery`, `Caller`, `calling_member`, `Bus`), with `Draft`'s fields and addressing as today; the built-in channels keep using the private `SwarmBus`, and `shared_memory` writes `read` events with the same schema, so stored logs, the ledger and the ordinary metrics are unchanged. A custom agent's `run()` descendants now count as nested loops, which changes message restrictions, shared memory's own-loop tracking and status lines, and wait ownership for them. S3 adds a keyword argument to `start()`, and S4 a `Budget` field, each defaulting to today's behaviour. The seam's, the result record's and the member outputs' compatibility is their designs'.
 - **inspect_ai**: I1 as the seam designs it, nothing else.
 - **ORBIT logs.** Logs already written keep their readers. A ported run writes ORBIT's events as today, plus the swarm's communication and swarm events and ORBIT's answer record; ORBIT's store models and its viewer overview are unchanged.
 - **Dependencies.** ORBIT declares its inspect_ai requirement in its packaging configuration (`ORBIT: pyproject.toml:16-19`). A port adds inspect_swarm, and so the inspect_ai inspect_swarm requires.
@@ -564,7 +563,7 @@ ORBIT's port refuses each of these with a `ValueError` naming the setting, and t
 - **Callbacks, the controller and the channel are trusted ORBIT code** in the runner process, as ORBIT's extensions are ("Registration and channel permissions are not a plugin sandbox", `ORBIT: docs/security-extensions.md:159-160`). None is reachable from a member's tools, and no model output decides a schedule (`plans.py:1-6`).
 - **Peer text in a conversation.** The swarm's rules for peer text govern its own channels. ORBIT's experiments put attacker text in user and system roles on purpose (injections, compromise prompts, `auto` inboxes); that is ORBIT's experiment design. Every change at a boundary is a `changed` event with its origin and hashes; per-request text (notices, inboxes) is in the `ModelEvent` input.
 - **Sender identity.** `deliver()` binds the sender from the calling member; ORBIT's channel cannot set it. `calling_member()` reads the same context, never model output.
-- **Read evidence.** `record_read()` refuses a caller outside the run and a key that would overwrite one of the event's own fields, and writes only ids and the channel's fields; it carries no model text unless the channel puts some in `fields`, which ORBIT's does not.
+- **Read evidence.** `read()` refuses a caller outside the run and writes only ids and flags; it carries no model text.
 - **The preamble** a controller passes is controller code's text, as `input` is; nothing a member wrote reaches it through the swarm. `start()` checks only its type and that it is not blank.
 - **Members' outputs on the result record** are read by ORBIT's solver wrapper after the swarm; who can read the record, and when, is [swarm-result-record.md Security](swarm-result-record.md#security)'s.
 - **ORBIT's run state** (final conversations, the submission order, read cutoffs) is never in the sample's store, so no member's tool, such as a store tool a model drives, can read a peer's private conversation or reorder submissions to change the answer scored. The submit tool records the member it was built for, never a name from its arguments, and runs behind the member's defence chain.
@@ -576,12 +575,11 @@ In inspect_swarm, with mockllm, on asyncio and trio, no network or Docker, with 
 
 - **The public bus API** (`tests/test_bus.py`):
   - a user channel written only with public names delivers a record, and its `sent` and `delivered` events match a built-in channel's;
-  - `calling_member()` names the member from a tool in its own loop and from a nested loop's tool (`nested` true), and is `None` outside a swarm;
-  - `record_read()` writes the `read` event in the tool span with the caller, `listing`, `records` and the channel's fields at the top level, writes `records=[]` when passed an empty list and no `records` key when passed none, returns increasing read ids, and raises `RuntimeError` outside a member and `ValueError` for an unopened channel and for a `fields` key that is one of the event's own;
+  - `calling_member()` names the member from a tool in its own loop and from a nested loop's tool (`nested` true), also for a member that never resolves `swarm_tools()`, and is `None` outside a swarm;
+  - `read()` writes the `read` event in the tool span with the caller, `listing` and the records, writes `record_ids=[]` when passed no records, returns increasing read ids, and raises `RuntimeError` outside a member and `ValueError` for an unopened channel;
   - an unaddressed record whose `apply()` names pending and ended members in `notify` and `result` is delivered while they are pending, held at boundary 0, and ended, and the `delivered` event carries them;
   - a counter incremented in `apply()` follows the order of the accepted `apply()` calls across concurrent deliveries, and has no gap where a delivery between them was refused by the rate control or by `admit()`, though that refusal consumed a record id;
-  - `messages`'s tests pass unchanged, `reply_to` and `"all"` included;
-  - `shared_memory`'s tests pass unchanged on the public names, and a run that views a file and lists the board has the same `read` events and the same `listings` and `reads` metrics as before.
+  - the built-in channel tests initialize their stand-in member and bound-loop spans as the runtime does, and the shared-memory child-read expectation records `nested=True`; message addressing (`reply_to` and `"all"` included), shared memory's `read` fields and the `listings` and `reads` metrics stay covered.
 - **The preamble** (`tests/test_controller.py`): `start()` with no `preamble` gives today's input and preamble; a string replaces the preamble with that text, for a member with `choose_name=True` too; `False` adds none; an empty or blank string and `False` with an input that has no user message raise `ValueError`, and `True` or a list `TypeError`, each leaving the member pending.
 - **A budget that sets no caps** (`tests/test_budget.py`): under `Budget(derive=False)` and a sample with token, cost and time limits, `derive_caps()` gives no caps; a priced call over the sample's cost limit, and calls over its token limit, raise the sample's limit error out of the swarm, with no member `swarm_cap`, and a solver after the swarm does not run; an explicit cost cap under `derive=False` still stops the swarm at that cap.
 - **ORBIT-shaped conformance** (`tests/test_orbit_shape.py`), on the seam:
@@ -601,7 +599,7 @@ In ORBIT, by its port, with its own test setup (mockllm, no network):
 
 inspect_swarm:
 
-1. **The public bus API (S2).** `src/inspect_swarm/_bus/_record.py` and `_bus/_bus.py` (`Draft`, `Delivery`, `Caller`, `calling_member()`, `record_read()`, the `Bus` protocol), `src/inspect_swarm/_channel/_channel.py` (`ChannelRun.bus`), `src/inspect_swarm/_evidence.py` (`comm_read()` taking the channel's fields beside the `files` or `records` it writes today, behind `record_read()`), `src/inspect_swarm/_channel/shared_memory.py` (the public names), `src/inspect_swarm/__init__.py`; `docs/channels.qmd` (writing a channel with records); `tests/test_bus.py`.
+1. **The public bus API (S2).** `src/inspect_swarm/_bus/_record.py` and `_bus/_bus.py` (`Draft`, `Delivery`, `Caller`, `calling_member()`, `read()` returning its id, the `Bus` protocol, and the run's bus as `SwarmBus`), `src/inspect_swarm/_channel/_channel.py` (`ChannelRun.bus`), `src/inspect_swarm/_channel/messages.py` and `shared_memory.py` (the run's `SwarmBus`), `src/inspect_swarm/__init__.py`; `docs/channels.qmd` (writing a channel with records); `tests/test_bus.py`.
 2. **A controller's preamble (S3).** `src/inspect_swarm/_controller/_control.py` (`SwarmControl.start()` and its docstring, `SwarmRun.start()`); `docs/controllers.qmd` (`start()`'s arguments); `tests/test_controller.py`. Independent of step 1.
 3. **A budget that sets no caps (S4).** `src/inspect_swarm/_budget.py` (`Budget.derive`, `derive_caps()`); `docs/budget.qmd` (the field); `tests/test_budget.py`. Independent of steps 1 and 2.
 4. **ORBIT-shaped conformance tests.** `tests/test_orbit_shape.py`. Needs the seam ([swarm-turn-seam.md Implementation plan](swarm-turn-seam.md#implementation-plan)) and steps 1 and 2.
