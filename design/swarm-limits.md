@@ -549,7 +549,7 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
 
 **Inspect's `cost_limit()` as the swarm's cost cap.**
 - No subclassing.
-- It never sees a call that trips a token node below it, and with child token limits that happens on every call ([Each limit kind](#each-limit-kind)). A cost cap that can be bypassed indefinitely cannot be a stopping rule, so the cap is metered in the token tree.
+- A call that trips a token node is charged, but the cost check is deferred until the next dispatch. Metering cost in the token tree lets the swarm stop on the call that crosses its cap.
 
 **Detect bridged members from the bridge's generate mark alone.**
 - No declaration and no registry lookup.

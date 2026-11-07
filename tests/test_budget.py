@@ -78,6 +78,7 @@ from inspect_ai.util._limit import (
     record_model_cost,
     record_model_usage,
     record_turn,
+    sample_limits,
     suspend_token_limit,
 )
 from pydantic import ValidationError
@@ -1755,6 +1756,46 @@ def test_with_derived_caps_a_call_reaching_the_cap_and_the_sample_limit_stops_th
     ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
     assert ledger.stop_reason == "swarm_cap"
     assert [m.status for m in ledger.members] == ["swarm_cap"]
+
+
+@solver
+def _generate_after_swarm(model: Model) -> Solver:
+    # records the sample cost limit's usage, then makes the solver's next call
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        state.store.set("budget_test:sample_cost_usage", sample_limits().cost.usage)
+        state.output = await model.generate(state.messages)
+        state.store.set("budget_test:after_swarm", True)
+        return state
+
+    return solve
+
+
+def test_with_derived_caps_the_call_reaching_the_cap_refuses_the_next_sample_call(
+    tmp_path: Path,
+) -> None:
+    # the $2 call that reaches the $1.425 cap is charged to the $1.50 sample cost
+    # limit without being checked against it, so the solver's next call is refused
+    # by the sample's limit before it reaches the provider
+    gc.collect()
+    script = Script()
+    model = scripted_model(script, cost=2.0)
+    agent_swarm = swarm(member(generator(model, calls=None)), channels=[])
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="task")],
+            solver=[_swarm_solver(agent_swarm), _generate_after_swarm(model)],
+            cost_limit=1.5,
+        ),
+        model=model,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success" and log.samples is not None
+    sample = log.samples[0]
+    assert sample.store["budget_test:sample_cost_usage"] == pytest.approx(2.0)
+    assert sample.limit is not None and sample.limit.type == "cost"
+    assert "budget_test:after_swarm" not in sample.store
+    assert script.started == 1
 
 
 @agent
