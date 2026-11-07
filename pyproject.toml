@@ -22,7 +22,7 @@ dependencies = [
     # floor. Only the Release Please release PR ignores the sources, so a
     # release is tested against PyPI, after release-pin-deps.yml raises this
     # floor to the release it was tested against.
-    "inspect-ai>=0.3.286",
+    "inspect-ai>=0.3.288",
     # imported directly; inspect-ai depends on them too, but a transitive
     # dependency is not a promise
     "anyio>=4.0",
