@@ -882,7 +882,7 @@ class SwarmRun:
                     record.final.answer,
                 )
             )
-            timeline.fill(places)
+            timeline.fill(places, spans.values())
         except Exception as ex:
             failures.append(ex)
         return failures

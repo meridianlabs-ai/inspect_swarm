@@ -135,7 +135,7 @@ So `SwarmLedger.model_validate(event.data)` reads a ledger event, as it reads th
 - **The critical path.** `PathLog` (`_critical_path.py`) takes `delivered` events as commits (`agent`, `record_ids`), `read` and `waited` events as results (`data["depends_on"]`, and a wait's `data["ended"]`), and `member_result` and `answer` `SwarmEvent`s as ends ([swarm-critical-path.md](swarm-critical-path.md)).
 - **The result record.** `swarm_result()` matches the `SwarmEvent` of kind `result_record`, and also the `InfoEvent` with source `inspect_swarm` and `type: "result_record"` that inspect_swarm wrote before the swarm's evidence had its own types, so an older log still gives its record. Its check for a swarm's events in a sample whose store lost the record's id accepts any `SwarmEvent` or any `InfoEvent` with source `inspect_swarm`, whatever its data, so a sample with even one older communication or member-result event and no record id raises rather than returning `None` ([swarm-result-record.md](swarm-result-record.md#samples-whose-store-lost-the-id)).
 - **Analysis after a run** reads the store entries, not the events: `swarm_ledger()` and the samples-dataframe columns.
-- **The swarm's timeline.** `SwarmTimeline` builds the swarm's timeline from the events in its span, the evidence included, with each member as a lane; inspect_ai's timeline builder treats both types as ordinary events.
+- **The swarm's timeline.** `SwarmTimeline` builds the swarm's timeline from the events in its span, the evidence included, with each member as a lane, never marked utility; inspect_ai's timeline builder treats both types as ordinary events.
 
 ## In inspect_ai besides the types
 

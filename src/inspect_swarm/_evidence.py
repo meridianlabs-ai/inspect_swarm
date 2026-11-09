@@ -1,5 +1,5 @@
 import copy
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
@@ -374,7 +374,7 @@ class SwarmTimeline:
         if self._begin is not None:
             _active_spans.discard(self._begin.id)
 
-    def fill(self, places: SpanPlaces) -> None:
+    def fill(self, places: SpanPlaces, member_spans: Collection[str]) -> None:
         if self._timeline is None or self._begin is None:
             return
         events = [self._begin] + [
@@ -392,6 +392,18 @@ class SwarmTimeline:
             ),
             self._timeline.root,
         )
+        # Inspect's builder marks a short agent with a prompt of its own, under a
+        # parent that calls tools, as a utility helper, which the viewer hides; a
+        # member is one of the swarm's agents however short its run
+        _show_members(self._timeline.root, set(member_spans))
+
+
+def _show_members(node: TimelineSpan, member_spans: set[str]) -> None:
+    for item in node.content:
+        if isinstance(item, TimelineSpan):
+            if item.id in member_spans:
+                item.utility = False
+            _show_members(item, member_spans)
 
 
 # The begin event of the span `span_id`, which the swarm runs in, searched back from the

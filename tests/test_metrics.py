@@ -33,6 +33,8 @@ from inspect_ai.model import (
     ChatCompletionChoice,
     ChatMessage,
     ChatMessageAssistant,
+    ChatMessageSystem,
+    ChatMessageUser,
     Model,
     ModelOutput,
 )
@@ -673,6 +675,71 @@ def test_two_swarms_in_one_span_each_get_a_timeline_of_their_own(
             if isinstance(e, SwarmEvent) and e.kind == "swarm_start"
         ]
         assert len(starts) == 1
+
+
+@agent
+def prompted(model: Model) -> Agent:
+    """Generate once under a system prompt of its own."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(
+            [ChatMessageSystem(content="You are a member."), *state.messages]
+        )
+        state.messages.append(state.output.message)
+        return state
+
+    return execute
+
+
+def _planning(planner: Model) -> Controller:
+    # calls a tool in the swarm's span, then starts every member and waits for them
+    async def run(control: SwarmControl) -> str:
+        await planner.generate(
+            [
+                ChatMessageSystem(content="You are the planner."),
+                ChatMessageUser(content="plan"),
+            ]
+        )
+        for m in control.members:
+            control.start(m)
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    return controller(run, f"planning-{uuid4().hex}")
+
+
+def test_a_short_member_under_a_tool_calling_controller_keeps_its_lane(
+    tmp_path: Path,
+) -> None:
+    planner = scripted_model(
+        Script([ModelOutput.for_tool_call("mockllm", "plan", {"step": 1})])
+    )
+    model = scripted_model()
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="task")],
+            solver=swarm(
+                [member(prompted(model), name="a"), member(generator(model), name="b")],
+                controller=_planning(planner),
+                channels=[],
+            ),
+        ),
+        model=model,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success" and log.samples is not None
+    [sample_log] = log.samples
+    assert sample_log.timelines is not None
+    [timeline] = sample_log.timelines
+    # Inspect would mark a's one turn under its own prompt a utility helper, which the
+    # viewer hides by default
+    lanes = _lanes(timeline)
+    assert {name: lane.utility for name, lane in lanes.items()} == {
+        "a": False,
+        "b": False,
+    }
 
 
 @pytest.mark.anyio
