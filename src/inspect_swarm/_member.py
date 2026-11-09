@@ -67,6 +67,7 @@ from ._budget import (
     SwarmTurnNode,
     current_member,
 )
+from ._isolation import MemberIdentity, member_identity
 from ._seam import MemberGate
 
 AgentFactory = Callable[..., Agent]
@@ -484,15 +485,16 @@ class MemberOutcome:
 
 
 # The member wrapper. Runs the member on `state` with `input` as its conversation, in
-# its tool-state scope, cancel scope and agent span, under its nodes and the swarm's
-# caps, with its background work owned by the member and its turn gate installed;
-# drains that work once the agent has returned; then calls `end` with its status and
-# the state the agent returned, inside the member's span when the span was entered. The
-# caller keeps `state`, as as_solver() does, for the output of a member that does not
-# return; when its own loop reached the gate, the loop's state at its last boundary is
-# used instead. An end requested through the gate makes a normal return `stopped`, and
-# a member whose callbacks never ran because its loop never reached the gate ends
-# `errored` when it produced its ending itself. No error whose
+# its tool-state scope, its sandbox identity scope under users isolation, cancel scope
+# and agent span, under its nodes and the swarm's caps, with its background work owned
+# by the member and its turn gate installed; drains that work once the agent has
+# returned; then calls `end` with its status and the state the agent returned, inside
+# the member's span when the span was entered. The caller keeps `state`, as as_solver()
+# does, for the output of a member that does not return; when its own loop reached the
+# gate, the loop's state at its last boundary is used instead. An end requested through
+# the gate makes a normal return `stopped`, and a member whose callbacks never ran
+# because its loop never reached the gate ends `errored` when it produced its ending
+# itself. No error whose
 # source is a swarm node leaves it: a cap becomes a stop of the swarm, and the member's
 # own nodes a status, as does a sourceless custom limit error, which the agent raised
 # to stop itself. Anything else (a foreign error) is raised, without the swarm's
@@ -511,6 +513,7 @@ async def run_member(
     outcome: MemberOutcome,
     gate: MemberGate,
     end: Callable[[str, AgentState], None],
+    identity: MemberIdentity | None = None,
 ) -> None:
     status = "cancelled"
     # holds the member's span open after its limits and cancel scope have exited, so
@@ -530,6 +533,7 @@ async def run_member(
                 outcome,
                 gate,
                 member_span,
+                identity,
             )
         except Exception:
             status = "errored"
@@ -560,6 +564,7 @@ async def _run_member(
     outcome: MemberOutcome,
     gate: MemberGate,
     member_span: AsyncExitStack,
+    identity: MemberIdentity | None,
 ) -> str:
     token = current_member.set(context)
     status: str | None = None
@@ -574,6 +579,7 @@ async def _run_member(
         with (
             tool_state_scope(name),
             _member_sandboxes(member_sandbox(record, name), record.visible_sandboxes),
+            member_identity(identity),
             context.scope,
         ):
             # inside the member's scopes, so the hard stop cancels its background work

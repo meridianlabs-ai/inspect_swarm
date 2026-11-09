@@ -1,6 +1,6 @@
 import inspect
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Literal, cast
 
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import (
@@ -24,6 +24,7 @@ from ._budget import (
     check_cost_data,
     derive_caps,
     is_bridged,
+    rederive_time_cap,
     share_nodes,
     split_sentence,
 )
@@ -33,6 +34,13 @@ from ._channel.messages import is_builtin_messages
 from ._channel.shared_memory import is_builtin_board
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
+from ._isolation import (
+    UserIsolation,
+    check_isolated_roster,
+    isolation_preamble,
+    resolve_isolation,
+    setup_isolation,
+)
 from ._member import (
     Member,
     is_factory,
@@ -52,6 +60,7 @@ def swarm(
     controller: str | Controller = "leaderless",
     channels: str | Channel | Sequence[str | Channel] = ("filesystem",),
     budget: Budget = Budget(),  # noqa: B008
+    isolation: UserIsolation | Literal["users"] | None = None,
 ) -> Agent:
     """A swarm of agents working on one sample.
 
@@ -62,6 +71,7 @@ def swarm(
         controller: How the swarm runs: who starts, when and with what input, and when the swarm is done. A name resolves to a registered controller with its default parameters.
         channels: How members share information. A name resolves to a registered channel with its default parameters. `[]` means none: members get no channel instructions, though a shared sandbox is still shared.
         budget: The swarm-wide cap.
+        isolation: How members are kept apart in the sandbox they share. `None`: members share it with no enforcement. `users()`, or `"users"` for its defaults: each member runs as its own Linux user, with a private home and the shared directories it lists (see `users()`). Not with members that have their own sandboxes.
 
     Returns:
         The swarm, as an agent.
@@ -69,7 +79,8 @@ def swarm(
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
         PrerequisiteError: If the returned agent runs in a sample with checkpointing on: checkpoint and resume are not supported for swarms yet.
-        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
+        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; under users isolation, if a member name is not a valid user-name suffix, a member chooses its own name or has its own sandbox, or the `filesystem` channel's `scratch` is not `home`, its `shared` is not a `rw` share or its notes file is in none; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
+        RuntimeError: Under users isolation, when the returned agent runs, if it runs inside a sandbox identity scope (such as a member of a swarm with users isolation), another swarm with users isolation in the sample has set up the same sandbox, the sandbox cannot run commands as other users, the image lacks a tool setup needs, a path is unsafe, or the self-test finds a boundary that does not hold.
     """
     records = _members(members)
     names = member_names(records)
@@ -96,13 +107,29 @@ def swarm(
         for name in record_names
     ]
     own_sandboxes = _check_member_sandboxes(runs, resolved_channels)
+    resolved_isolation = resolve_isolation(isolation)
+    if resolved_isolation is not None:
+        filesystems = [c for c in resolved_channels if isinstance(c, FilesystemChannel)]
+        check_isolated_roster(
+            resolved_isolation,
+            roster,
+            own_sandboxes,
+            (
+                (filesystems[0].shared, filesystems[0].notes, filesystems[0].scratch)
+                if filesystems
+                else None
+            ),
+        )
 
     async def execute(state: AgentState) -> AgentState:
         # first, before anything this run can fail at, so that it never leaves an
         # earlier swarm's record as its own
         forget_record()
         _check_sandbox_names(runs)
-        caps = derive_caps(resolved_budget, len(roster))
+        # under users isolation the time cap is checked after setup, which takes time
+        caps = derive_caps(
+            resolved_budget, len(roster), check_time=resolved_isolation is None
+        )
         # under derive=False the sample's cost limit can apply with no swarm cap, and an
         # unpriced member's calls would never advance it
         if caps.cost is not None or sample_limits().cost.limit is not None:
@@ -128,9 +155,16 @@ def swarm(
                 own_sandboxes,
                 choosers,
                 split_sentence(resolved_budget, caps, i, len(roster)),
+                resolved_isolation,
             )
             for i, info in enumerate(roster)
         }
+        identities = None
+        if resolved_isolation is not None:
+            identities = await setup_isolation(
+                resolved_isolation, [info.name for info in roster]
+            )
+            caps = rederive_time_cap(resolved_budget, caps)
         await SwarmRun(
             runs,
             state=state,
@@ -143,6 +177,7 @@ def swarm(
             shares=shares,
             channels=resolved_channels,
             final=resolved_controller.final,
+            identities=identities,
         ).run(resolved_controller.run)
         return state
 
@@ -156,6 +191,7 @@ def _preamble(
     own_sandboxes: bool,
     choosers: bool,
     split: str | None,
+    isolation: UserIsolation | None,
 ) -> str:
     if member.choose_name:
         intro = (
@@ -192,6 +228,8 @@ def _preamble(
             text = channel.instructions(member)
         if text:
             parts.append(text)
+    if isolation is not None:
+        parts.append(isolation_preamble(isolation, member.name))
     return "\n\n".join(parts)
 
 
