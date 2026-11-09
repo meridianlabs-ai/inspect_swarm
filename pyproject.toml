@@ -15,15 +15,11 @@ classifiers = [
     "Development Status :: 3 - Alpha",
 ]
 dependencies = [
-    # 0.3.288 is the first release with everything the swarm uses: its evidence
-    # as CommunicationEvent and SwarmEvent (UKGovernmentBEIS/inspect_ai#6164),
-    # and for users isolation sandbox_identity() (#6190), the member's HOME
-    # (#6276) and the proxy's default user in a scope (#6316). Development
-    # still tracks inspect_ai's `main` through [tool.uv.sources] below, which
-    # only uv reads; the published package requires this floor. Only the
-    # Release Please release PR ignores the sources, so a release is tested
-    # against PyPI, after release-pin-deps.yml raises this floor to the release
-    # it was tested against.
+    # The published package's floor. Development and CI track inspect_ai's
+    # `main` through [tool.uv.sources] below, which only uv reads. The Release
+    # Please release PR ignores the sources and is tested against PyPI, after
+    # release-pin-deps.yml raises this floor to the release it was tested
+    # against.
     "inspect-ai>=0.3.288",
     # imported directly; inspect-ai depends on them too, but a transitive
     # dependency is not a promise
