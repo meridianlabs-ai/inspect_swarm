@@ -106,15 +106,12 @@ class MemberGate:
     # the member's time limits, which pause while it is held
     time_nodes: list[SwarmTimeNode] = field(default_factory=list[SwarmTimeNode])
     # set by the runtime: the swarm's stop reason once it is stopping, the bus's
-    # all-waiting check, the model calls in flight now (the ledger's event ids), what
-    # an end request starts (the grace timer that bounds the member's ending), and what
-    # checks an output before its status is read (raising `TypeError` for one that holds
-    # an object from task code)
+    # all-waiting check, the model calls in flight now (the ledger's event ids), and
+    # what an end request starts (the grace timer that bounds the member's ending)
     stopping: Callable[[], str | None] = lambda: None
     recheck: Callable[[], None] = lambda: None
     in_flight: Callable[[], list[str]] = lambda: []
     ending: Callable[[], None] = lambda: None
-    approve: Callable[[ModelOutput], None] = lambda output: None
     # a persistent member's: set by the runtime, whether the swarm has a channel that
     # wakes waits, what records an answer (the output given), what sets the member
     # `idle` and publishes it, and what sets it `ending` when its hold is refused
@@ -230,8 +227,6 @@ class MemberGate:
         # deferred: the member wrapper imports this module
         from ._member import output_status
 
-        # before its classification reads it
-        self.approve(state.output)
         if output_status(state.output) != "submitted":
             # the loop returns from the exit it was at, and the member ends
             # `unsubmitted`

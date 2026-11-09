@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import Any, Literal, Self, cast
 
 import anyio
 import pytest
@@ -1013,14 +1013,11 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
 async def test_an_object_the_task_put_in_an_output_fails_the_sample(
     odd: Callable[[], ModelOutput], where: str
 ) -> None:
-    _hook_calls.clear()
     async with sample():
         with pytest.raises(
             TypeError, match=f"output of member 'odd' holds a value of {where}"
         ):
             await run_agent(_plain_then(odd, "result_test_author_object"), "task")
-    # no method or property of the task's classes ran, `__class__` included
-    assert _hook_calls == []
 
 
 class _RewrittenOutput(ModelOutput):
@@ -1036,18 +1033,6 @@ class _RaisingOutput(ModelOutput):
 
     def __copy__(self) -> Self:
         raise _ran("__copy__")
-
-
-class _GetterOutput(ModelOutput):
-    """A `ModelOutput` subtype whose getters, which classifying an output reads, are its own."""
-
-    @property
-    def empty(self) -> bool:
-        raise _ran("empty")
-
-    @property
-    def stop_reason(self) -> Any:
-        raise _ran("stop_reason")
 
 
 class _TaskZone(_Hooked, tzinfo):
@@ -1091,8 +1076,7 @@ def _raising_message() -> ModelOutput:
     return output
 
 
-# The member's output is checked when it ends, before its status is classified from
-# it or anything copies it, and the sample fails with the member `errored` and the
+# The member's output is checked when it ends, before anything copies it, and the sample fails with the member `errored` and the
 # record, the ledger and the metrics kept.
 @pytest.mark.anyio
 @pytest.mark.parametrize(
@@ -1112,16 +1096,6 @@ def _raising_message() -> ModelOutput:
             _raising_message,
             r"type _RaisingMessage at output\.choices\[0\]\.message\. ",
             id="answer-message-copy-raises",
-        ),
-        # what classifying an output reads: its choices' length and first item, and
-        # its own getters
-        pytest.param(
-            _choices_in_a_list_subclass,
-            r"type _List at output\.choices\. ",
-            id="choices-length-and-item",
-        ),
-        pytest.param(
-            _subtype(_GetterOutput), r"type _GetterOutput at output\. ", id="getters"
         ),
         # a timestamp whose time zone, or its offset or name, is from task code
         pytest.param(
@@ -1143,7 +1117,7 @@ def _raising_message() -> ModelOutput:
         ),
     ],
 )
-async def test_an_output_is_checked_before_anything_reads_it(
+async def test_an_output_is_checked_before_anything_copies_it(
     odd: Callable[[], ModelOutput], where: str
 ) -> None:
     _hook_calls.clear()
@@ -1169,12 +1143,17 @@ class _Uncopyable:
         raise _ran("__deepcopy__")
 
 
+# An answer is checked when it is recorded; a reply that is not one, when the member
+# ends. Either way the sample fails as for a returned output.
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "stop_reason", ["stop", "model_length"], ids=["answer", "not-an-answer"]
+)
 async def test_a_persistent_answer_is_checked_before_it_is_kept(
-    tmp_path: Path,
+    tmp_path: Path, stop_reason: Literal["stop", "model_length"]
 ) -> None:
     _hook_calls.clear()
-    reply = ModelOutput.from_content("mockllm", "41")
+    reply = ModelOutput.from_content("mockllm", "41", stop_reason=stop_reason)
     reply.metadata = {"diagnostic": _Uncopyable()}
     persistent = member(
         react(model=scripted_model(Script(outputs=[reply])), submit=False),

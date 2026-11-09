@@ -512,7 +512,6 @@ class SwarmRun:
             m.gate.recheck = self.bus.recheck
             m.gate.in_flight = self._in_flight
             m.gate.ending = functools.partial(self._ending, m)
-            m.gate.approve = functools.partial(self._approve, m)
             m.gate.waiting = self.bus.waits.max_wait is not None
             m.gate.record_answer = functools.partial(self._answer, m)
             m.gate.publish_idle = functools.partial(self._idle, m)
@@ -1092,10 +1091,9 @@ class SwarmRun:
             self._queue.append(MemberEnded(m.name, status, m.submitted))
         self._notify()
 
-    # An output from a member, checked before the runtime classifies, settles or
-    # records it (the member gate calls it before a returned output's or an answer's
-    # status is read, and `_end()` for any other): only Inspect's output classes and
-    # model data. One that holds anything else fails the sample with a `TypeError`, and
+    # An output from a member, checked before the runtime settles or records it (by
+    # `_answer()` for a persistent member's answer, and `_end()` for its ending
+    # output): only Inspect's output classes and model data. One that holds anything else fails the sample with a `TypeError`, and
     # the member's outputs are not read again. Task code is trusted, so this promises
     # the error and the partial record, not that none of the object's own methods ran
     # before it (decision: Ransom, 2026-11-04).
