@@ -39,6 +39,7 @@ from ._controller._controller import (
 )
 from ._controller.leaderless import leaderless
 from ._final import FinalName
+from ._isolation import Share, UserIsolation, users
 from ._member import Member, member
 from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
 from ._seam import Boundary, BoundaryCallback
@@ -77,11 +78,13 @@ __all__ = [
     "MemberState",
     "Record",
     "ResolvingState",
+    "Share",
     "StopReason",
     "SwarmBudget",
     "SwarmControl",
     "SwarmResultRecord",
     "Topic",
+    "UserIsolation",
     "WaitNews",
     "WaitSpec",
     "WaitingState",
@@ -101,4 +104,5 @@ __all__ = [
     "swarm_result",
     "swarm_tools",
     "topics",
+    "users",
 ]

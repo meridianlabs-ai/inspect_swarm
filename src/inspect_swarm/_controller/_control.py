@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from .._bus._bus import SwarmBus
     from .._bus._record import Record
     from .._channel._channel import Channel
+    from .._isolation import MemberIdentity
 
 
 class MemberHandle(Protocol):
@@ -452,6 +453,7 @@ class SwarmRun:
         shares: Mapping[str, Sequence[Limit]] | None = None,
         channels: Sequence["Channel"] = (),
         final: FinalName | None = None,
+        identities: Mapping[str, "MemberIdentity"] | None = None,
     ) -> None:
         # deferred: the bus imports the channels, which import this module's package
         from .._bus._bus import SwarmBus
@@ -487,6 +489,8 @@ class SwarmRun:
         # the controller's choice of the answer, once it has made one
         self._pick: Pick | None = None
         self._preambles = preambles
+        # each member's Linux user, under users isolation
+        self._identities = identities or {}
         self._caps = caps
         self._time = time
         self._grace = grace
@@ -954,6 +958,7 @@ class SwarmRun:
             m.outcome,
             m.gate,
             end,
+            self._identities.get(m.name),
         )
 
     # A persistent member's answer, from its gate: recorded with its swarm time, as
