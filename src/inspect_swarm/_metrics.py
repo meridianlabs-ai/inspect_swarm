@@ -306,8 +306,8 @@ def _steps_to_answer(
 
 
 # Each member's communication over each of the channels, from the evidence events that
-# name one of the members. Swarms running at the same time in a sample have distinct
-# member names, so a nested swarm's events never name these members.
+# name one of the members. Member names are unique across the swarms in a sample, so
+# another swarm's events never name these members.
 def _comm_metrics(
     events: EventLog, members: Sequence[str], channels: Sequence[str]
 ) -> dict[str, dict[str, CommMetrics]]:

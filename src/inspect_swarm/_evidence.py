@@ -1,6 +1,7 @@
 import copy
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
 
 from inspect_ai.event import (
     CommunicationDelivery,
@@ -16,7 +17,7 @@ from inspect_ai.event import (
     TimelineSpan,
     timeline_build,
 )
-from inspect_ai.log import transcript
+from inspect_ai.log import Transcript, transcript
 from inspect_ai.util import store
 from pydantic import JsonValue
 
@@ -327,7 +328,10 @@ class SwarmTimeline:
         self._timeline: Timeline | None = None
         if span_id is None:
             return
-        self._begin, self._start = _span_begin(span_id)
+        self._begin = _span_begin(span_id)
+        # this swarm's events are those reported from here on: the span may hold an
+        # earlier swarm's too, as when one agent awaits two swarms
+        self._start = transcript().history.event_count
         taken = {t.name for t in transcript().timelines}
         name, n = self._begin.name, 1
         while name in taken:
@@ -343,7 +347,7 @@ class SwarmTimeline:
     def fill(self, places: SpanPlaces) -> None:
         if self._timeline is None:
             return
-        events = [
+        events = [self._begin] + [
             event
             for event in transcript().history.events_from(self._start)
             if places(event.span_id)[0]
@@ -360,46 +364,34 @@ class SwarmTimeline:
         )
 
 
-# The begin event of the span `span_id`, which the swarm runs in, and its index in the
-# transcript, searched back from the latest event.
-def _span_begin(span_id: str) -> tuple[SpanBeginEvent, int]:
+# The begin event of the span `span_id`, which the swarm runs in, searched back from the
+# latest event.
+def _span_begin(span_id: str) -> SpanBeginEvent:
     history = transcript().history
     end = history.event_count
     while end > 0:
         start = max(0, end - 64)
-        events = history.events_from(start, end - start)
-        for i in range(len(events) - 1, -1, -1):
-            event = events[i]
+        for event in reversed(history.events_from(start, end - start)):
             if isinstance(event, SpanBeginEvent) and event.id == span_id:
-                return event, start + i
+                return event
         end = start
     raise RuntimeError(
         f"The swarm's span {span_id!r} has no begin event in the sample."
     )
 
 
-# The member names of the swarms running in each sample, by the id of the sample's
-# transcript, which the running swarms' contexts keep alive, so the id is not reused while
-# held. The analyses tell a swarm's evidence from a nested swarm's by its member names,
-# so no two swarms running at once in a sample share one.
-_running_members: dict[int, set[str]] = {}
+# The member names of every swarm that has started in each sample, by the sample's
+# transcript. A member name is the member's own across the sample: the analyses tell a
+# swarm's evidence from a nested swarm's by member name, and a member's default tool
+# state is scoped by its name.
+_member_names: WeakKeyDictionary[Transcript, set[str]] = WeakKeyDictionary()
 
 
-def claim_member_names(members: Sequence[str]) -> int:
-    key = id(transcript())
-    held = _running_members.get(key, set())
-    taken = [name for name in members if name in held]
+def claim_member_names(members: Sequence[str]) -> None:
+    claimed = _member_names.setdefault(transcript(), set())
+    taken = [name for name in members if name in claimed]
     if taken:
         raise ValueError(
-            f"A swarm running in this sample already has a member named {', '.join(repr(n) for n in taken)}, as when a member runs a nested swarm with its own members' names. Member names must differ between swarms that run at the same time in a sample, because the swarm's metrics tell their evidence apart by member name. Give the members other names with member(..., name=...)."
+            f"The sample already has a swarm member named {', '.join(repr(n) for n in taken)}, as when two swarms with the same member names run in one sample. Give the members other names with member(..., name=...)."
         )
-    _running_members[key] = held | set(members)
-    return key
-
-
-def release_member_names(key: int, members: Sequence[str]) -> None:
-    held = _running_members[key] - set(members)
-    if held:
-        _running_members[key] = held
-    else:
-        del _running_members[key]
+    claimed.update(members)

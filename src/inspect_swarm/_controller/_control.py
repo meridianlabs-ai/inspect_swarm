@@ -33,7 +33,6 @@ from .._budget import (
 from .._evidence import (
     SwarmTimeline,
     claim_member_names,
-    release_member_names,
     swarm_event,
     write_ledger,
     write_metrics,
@@ -651,13 +650,8 @@ class SwarmRun:
         from .._bus._bus import current_bus
 
         _refuse_checkpointing()
-        names = [m.name for m in self._members]
-        claimed = claim_member_names(names)
-        try:
-            timeline = SwarmTimeline(current_span_id())
-        except BaseException:
-            release_member_names(claimed, names)
-            raise
+        claim_member_names([m.name for m in self._members])
+        timeline = SwarmTimeline(current_span_id())
         interval = self._interval = LedgerInterval(
             roster=[m.name for m in self._members]
         )
@@ -796,7 +790,6 @@ class SwarmRun:
                     current_bus.reset(bus_token)
                 if running is not None:
                     _swarm_ended(running)
-                release_member_names(claimed, names)
         if error is not None:
             raise error
 

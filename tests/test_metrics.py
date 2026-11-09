@@ -11,7 +11,6 @@ from inspect_ai.agent import (
     Agent,
     AgentState,
     agent,
-    as_solver,
     deepagent,
     general,
     react,
@@ -631,16 +630,28 @@ def test_the_swarm_has_one_timeline_rooted_at_its_span(
     assert _model_events(lanes["a"])[0].uuid == first.uuid
 
 
-def test_a_second_swarm_in_a_sample_gets_a_numbered_timeline(tmp_path: Path) -> None:
+@agent
+def pair(first: Agent, second: Agent) -> Agent:
+    """Run `first`, then `second`, in this agent's own span."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state = await first(state)
+        return await second(state)
+
+    return execute
+
+
+def test_two_swarms_in_one_span_each_get_a_timeline_of_their_own(
+    tmp_path: Path,
+) -> None:
     model = scripted_model()
-    # one after the other, so the second may reuse the first's member names
     [log] = eval(
         Task(
             dataset=[Sample(input="task")],
-            solver=[
-                as_solver(swarm(member(generator(model), name="a"), channels=[])),
-                as_solver(swarm(member(generator(model), name="a"), channels=[])),
-            ],
+            solver=pair(
+                swarm(member(generator(model), name="a"), channels=[]),
+                swarm(member(generator(model), name="b"), channels=[]),
+            ),
         ),
         model=model,
         log_dir=str(tmp_path),
@@ -649,13 +660,19 @@ def test_a_second_swarm_in_a_sample_gets_a_numbered_timeline(tmp_path: Path) -> 
     assert log.status == "success" and log.samples is not None
     [sample_log] = log.samples
     assert sample_log.timelines is not None
-    assert [(t.name, t.root.name) for t in sample_log.timelines] == [
-        ("swarm", "swarm"),
-        ("swarm-2", "swarm"),
-    ]
-    assert len({t.root.id for t in sample_log.timelines}) == 2
-    for timeline in sample_log.timelines:
-        assert len(_model_events(_lanes(timeline)["a"])) == 1
+    # both are rooted at the span they share, and hold only their own events
+    [first, second] = sample_log.timelines
+    assert (first.name, second.name) == ("pair", "pair-2")
+    assert first.root.id == second.root.id
+    for timeline, name in [(first, "a"), (second, "b")]:
+        assert list(_lanes(timeline)) == [name]
+        assert len(_model_events(timeline.root)) == 1
+        starts = [
+            e
+            for e in _events(timeline.root)
+            if isinstance(e, SwarmEvent) and e.kind == "swarm_start"
+        ]
+        assert len(starts) == 1
 
 
 @pytest.mark.anyio
@@ -722,13 +739,23 @@ def test_a_member_named_like_a_sample_phase_is_refused(name: str) -> None:
         swarm(member(generator(scripted_model()), name=name), channels=[])
 
 
+@pytest.mark.anyio
+async def test_a_member_name_taken_by_an_earlier_swarm_is_refused() -> None:
+    async with sample():
+        await run(swarm(member(generator(scripted_model()), name="a"), channels=[]), [])
+        with pytest.raises(ValueError, match="already has a swarm member named 'a'"):
+            await run(
+                swarm(member(generator(scripted_model()), name="a"), channels=[]), []
+            )
+
+
 @agent
 def nesting(model: Model, ending: str) -> Agent:
     """Act, run a swarm whose member has this member's name, then fail or wait as `ending` says."""
 
     async def execute(state: AgentState) -> AgentState:
         state.output = await model.generate(state.messages)
-        with pytest.raises(ValueError, match="already has a member named 'a'"):
+        with pytest.raises(ValueError, match="already has a swarm member named 'a'"):
             await swarm(member(generator(model), name="a"), channels=[])(
                 AgentState(messages=[])
             )
