@@ -234,7 +234,7 @@ After swarm-api.md's steps 2 to 4 (registry plumbing, `Member` and the `swarm()`
 
 ## Part 2: after M2 (optional)
 
-Everything in this part is optional follow-up work after M2, in any order with the rest of swarm.md's menu (decision: Ransom, 2026-10-08). It keeps the detail it was designed with, so whoever builds a piece needs no further decision except [Open question 1](#open-questions), which only the chain needs. Its parts depend on each other as follows:
+Everything in this part is optional follow-up work after M2, in any order with the rest of swarm.md's menu (decision: Ransom, 2026-10-08). It keeps the detail it was designed with, so whoever builds a piece needs no further decision; [Open question 1](#open-questions), which only the chain needed, is decided. Its parts depend on each other as follows:
 
 - The result contract comes first. The chain's `verify` and `vote` need it, `synthesize` needs the chain, and `member_scores` needs the contract.
 - `attempt_rows` and select@k need the record's additions, `baseline()` and `member_scores`.
@@ -327,7 +327,7 @@ In inspect_ai unless noted, in addition to [what M1 relies on](#current-behaviou
 #### What the other designs fix for Part 2
 
 - **Where the chain is passed.** `final=` is a controller parameter: `leaderless(final=..., stop_on_verified=..., stop_on_submission=...)`. `Controller(run, final=...)` holds it, and `final=None` means this design's default chain for the task's `result` ([Controllers](swarm-api.md#controllers)). `swarm(result=)` stays on `swarm()`.
-  - M1's `stop_on_submission` (on by default) is meaningful only with the `first` chain: with `verify` or `vote` a later member can still change the answer. How it combines with them, and its default once the default chain is not `first` alone, is for Part 2 to settle; refusing the combination is the likely answer. M2 refuses it with `last` ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)).
+  - M1's `stop_on_submission` (on by default) is meaningful only with the `first` chain: with `verify` or `vote` a later member can still change the answer. `leaderless()` refuses (`ValueError`) an explicit `final` other than `first` with `stop_on_submission=True`, as M2 refuses `last` ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)), and `stop_on_verified=True` with it, since the first submission would stop the swarm whether or not it passed. The default stays on: `final=None` is accepted with it, since `leaderless()` does not know the task's result, and the default chain then chooses from the submissions made before the members stopped (the first, and any made during grace).
   - swarm-api.md types the chain as `FinalSpec = str | FinalMode | Sequence[str | FinalMode]`; this design narrows `str` to the mode names.
   - Every `FinalMode` must be a pydantic model with a discriminator, so a mixed chain is logged faithfully and validates back from JSON ([Logging and replay](swarm-api.md#logging-and-replay)).
 - **What controllers see of a verdict.** `VerdictSummary(passed, value)`, on `MemberHandle.verdict` and `MemberEnded.verdict`. A member counts as running until the runtime has taken its submission's verdict and queued its `MemberEnded`. The explanation stays in the result record.
@@ -459,9 +459,9 @@ class MemberResult(BaseModel):        # adds
     verdict_time: float | None        # swarm time when the verdict was taken
     left_out: list[LeftOut]           # values the record cannot hold, left out; [] by default
 
-class FinalRecord(BaseModel):         # adds; reason gains e.g. "none_verified"
+class FinalRecord(BaseModel):         # adds; reason gains "none_verified" and "no_answer_keys"
     chain: list[str] | None           # mode names, e.g. ["verify", "vote", "first"]; parameters are in the plan
-    votes: dict[str, int] | None      # answer key -> members, when vote ran
+    votes: dict[str, int] | None      # answer key -> members, when vote ran, from the keys the record holds
     tie: bool                         # vote's plurality was tied and broken by time
     synthesize_error: str | None      # a recovered synthesize failure, when one occurred
 
@@ -469,8 +469,11 @@ class SwarmResultRecord(BaseModel):   # adds
     kind: ResultKind | None
     verifier: str | None              # verifier label, for audit
     final_verdict: Verdict | None     # artifact kind: verifier on the drained environment
+    left_out: list[LeftOut]           # the record's own values left out: "explanation", final_verdict's; [] by default
 ```
 
+- **The chain's reasons.** With no answer, `reason` is `no_submissions` when nothing was submitted; otherwise the chain's last mode gave nothing, and it is `none_verified` for `verify` and `no_answer_keys` for `vote`.
+- **Model text in the final record.** The vote's answer keys and the final verdict's explanation come from model output, like the members' values below. `votes` counts the members' keys as the record holds them, so a key the record leaves out of its member is not counted, and the final verdict's explanation is kept or left out (`None`, named in the record's own `left_out`) by the same round trip as a member's.
 - **Why `output` comes here.** `member_scores` scores each member's output, in final scoring and in re-scoring, and reads the outputs from the record with `swarm_result(state)`. M1 needs neither ([No outputs in M1](#what-the-swarm-records)). Its tests: an output is kept after the member's own limit, and after a hard stop for an agent that updates its state in place.
 - **When they are written.** The runtime keeps them on its run as they arise: a member's output when it ends, with or without a contract, its key and verdict when its submission is recorded and verified, and the chain fields with the provisional answer and the final selection. They enter the record when it is written, as the swarm exits ([When it is written](#what-the-swarm-records)), so no member can read a peer's output, key or verdict from it during the run. The record holds a copy of each output, with its `completion` as the member returned it: validating a `ModelOutput` fills an empty `completion` from its message, so the record keeps an empty one both when it is made and when it is read.
 - **Persistent members.** A persistent member gives a submission at each answer ([swarm-persistent-members.md](swarm-persistent-members.md)), while the record holds one `answer_key` and one `verdict` per member, and the runtime keys and verifies a submission when its member ends. Until each answer is keyed and verified as it arrives, with its key and verdict in the record and its verdict on `MemberIdle`, `swarm()` refuses a persistent member with a contract that has an `answer_key` or a `verifier` (`ValueError`). No task uses the two together yet; per-answer keying and verification is #158 (decision: Ransom, 2026-11-03).
@@ -511,7 +514,7 @@ def final_chain(final: FinalSpec | None, result: ResultSpec | None) -> list[Fina
 
 | Mode | Needs | Produces | Produces nothing when |
 |---|---|---|---|
-| `verify` | `result.verifier` | The passed submission with the highest `Verdict.value` (`None` ranks below any number), earliest swarm time on ties, then roster order | no submission passed |
+| `verify` | `result.verifier` | The passed submission with the highest `Verdict.value` (`None` and NaN rank below any number), earliest swarm time on ties, then roster order | no submission passed |
 | `vote` | `result.answer_key` | The earliest submission in the plurality group of answer keys; one vote per member; `None` keys do not vote. A tied plurality goes to the group whose first submission is earliest, and `tie` is recorded | no submission has a key |
 | `first` | nothing | As in M1 ([The final answer](#the-final-answer-first)) | there are no submissions |
 | `last` | nothing | As in M2 ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)) | there are no submissions |
@@ -524,7 +527,7 @@ def final_chain(final: FinalSpec | None, result: ResultSpec | None) -> list[Fina
 - then `vote` if there is an answer key;
 - then `first`.
 
-So a task with both gets `["verify", "vote", "first"]`, and one with neither gets `["first"]`, M1's behaviour (decision: Ransom, 2026-10-07, for the order). This design reads the decision as a chain that falls through: when nothing verifies, the swarm votes, and when nothing can vote, it takes the first submission. A single mode, `leaderless(final="verify")`, is strict: no verified submission means no answer. [Open question 1](#open-questions) asks Ransom to confirm the fall-through reading.
+So a task with both gets `["verify", "vote", "first"]`, and one with neither gets `["first"]`, M1's behaviour (decision: Ransom, 2026-10-07, for the order). The chain falls through: when nothing verifies, the swarm votes, and when nothing can vote, it takes the first submission (decision: Ransom, 2026-11-09; [Open question 1](#open-questions)). A single mode, `leaderless(final="verify")`, is strict: no verified submission means no answer.
 
 **Validation.**
 
@@ -911,7 +914,8 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
 2. **Final-answer chain.**
    - `src/inspect_swarm/_final.py` widens M2's `FinalName` and gains `Synthesize`, `Reporter`, `FinalMode`, `FinalSpec` and `final_chain()`.
    - Validation against the result, called from `swarm()`'s construction checks.
-   - `leaderless(stop_on_verified=)`, and `final=` on `leaderless()` and `Controller` widened from M2's single `first` or `last` to `FinalSpec` (`_controller/_controller.py`, `_controller/leaderless.py`); `leaderless()` validates its `final` with the `TypeAdapter`, and settles how M1's `stop_on_submission` combines with a chain other than `first` (M2 already refuses it with `last`). The controller's choice keeps its M2 meaning, ahead of the chain.
+   - `leaderless(stop_on_verified=)`, and `final=` on `leaderless()` and `Controller` widened from M2's single `first` or `last` to `FinalSpec` (`_controller/_controller.py`, `_controller/leaderless.py`); `Controller` and `leaderless()` validate `final` with the `TypeAdapter`, and `leaderless()` refuses an explicit chain other than `first`, and `stop_on_verified`, with `stop_on_submission=True` ([What the other designs fix](#what-the-other-designs-fix-for-part-2)). The controller's choice keeps its M2 meaning, ahead of the chain.
+   - `swarm()` refuses a chain with `synthesize` until step 3 builds it, and one with a `reporter` until a controller topology uses it.
    - The chain in the provisional answer and finalisation, including verifying the submissions left unverified and the artifact `final_verdict`; `FinalRecord`'s `chain`, `votes` and `tie`, and `SwarmResultRecord.final_verdict`.
    - Tests extend `tests/test_final.py` and `tests/test_controller.py`.
 3. **`synthesize`.**
@@ -1009,16 +1013,11 @@ Untrusted input reaching the new code:
 
 ## Open questions
 
-1. **Does the default chain fall through?** This is a Part 2 question, needed only when the chain is built; M1 has no chain to decide.
+1. **Does the default chain fall through?** Decided: (a), fall through (decision: Ransom, 2026-11-09).
    - With a verifier and an answer key, the default is `["verify", "vote", "first"]`.
-   - This design falls through when a mode yields nothing: nothing verified, so vote; no keys, so first.
-   - The alternative reads the decision as choosing one mode by what the task supplies, so nothing verified means no answer.
-
-   The options:
-   - (a) Fall through (this design). The swarm returns an answer whenever anyone submitted. The strict reading stays available as `leaderless(final="verify")`.
-   - (b) Strict. It measures the verifier alone, and returns no answer more often.
-
-   Recommendation: (a). Swarm.md's text on the post-M2 provisional answer and its test bullet match (a), applying the strict reading to `leaderless(final="verify")` only.
+   - When a mode yields nothing, the chain moves to the next: nothing verified, so vote; no keys, so first. The swarm returns an answer whenever anyone submitted.
+   - The strict reading, where nothing verified means no answer, stays available as `leaderless(final="verify")`.
+   - The alternative, (b) strict, would have measured the verifier alone and returned no answer more often.
 
 ## Not this design
 

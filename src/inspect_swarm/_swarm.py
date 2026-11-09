@@ -34,6 +34,7 @@ from ._channel.messages import is_builtin_messages
 from ._channel.shared_memory import is_builtin_board
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
+from ._final import check_chain, final_chain
 from ._isolation import (
     UserIsolation,
     check_isolated_roster,
@@ -73,7 +74,7 @@ def swarm(
         controller: How the swarm runs: who starts, when and with what input, and when the swarm is done. A name resolves to a registered controller with its default parameters.
         channels: How members share information. A name resolves to a registered channel with its default parameters. `[]` means none: members get no channel instructions, though a shared sandbox is still shared.
         budget: The swarm-wide cap.
-        result: The task's result contract, from `answer_result()` or `artifact_result()`. With it, the swarm records each submission's answer key and the verifier's verdict on it. It holds the task's callables, so the log records only its type name: rebuild the swarm through its task, or a registered builder, rather than from the log.
+        result: The task's result contract, from `answer_result()` or `artifact_result()`. With it, the swarm records each submission's answer key and the verifier's verdict on it, and the controller's default `final` chain uses them to choose the answer. It holds the task's callables, so the log records only its type name: rebuild the swarm through its task, or a registered builder, rather than from the log.
         isolation: How members are kept apart in the sandbox they share. `None`: members share it with no enforcement. `users()`, or `"users"` for its defaults: each member runs as its own Linux user, with a private home and the shared directories it lists (see `users()`). Not with members that have their own sandboxes.
 
     Returns:
@@ -82,7 +83,7 @@ def swarm(
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, `result` is the type name a log records for it, or an argument has the wrong type.
         PrerequisiteError: If the returned agent runs in a sample with checkpointing on: checkpoint and resume are not supported for swarms yet.
-        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, a member is persistent while `result` has an `answer_key` or a `verifier`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; under users isolation, if a member name is not a valid user-name suffix, a member chooses its own name or has its own sandbox, or the `filesystem` channel's `scratch` is not `home`, its `shared` is not a `rw` share or its notes file is in none; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
+        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, a member is persistent while `result` has an `answer_key` or a `verifier`, the controller's `final` chain has `verify` without a verifier in `result`, `vote` without an answer key, or a mode the swarm does not run yet (`synthesize`, a reporter), the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; under users isolation, if a member name is not a valid user-name suffix, a member chooses its own name or has its own sandbox, or the `filesystem` channel's `scratch` is not `home`, its `shared` is not a `rw` share or its notes file is in none; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
         RuntimeError: Under users isolation, when the returned agent runs, if it runs inside a sandbox identity scope (such as a member of a swarm with users isolation), another swarm with users isolation in the sample has set up the same sandbox, the sandbox cannot run commands as other users, the image lacks a tool setup needs, a path is unsafe, or the self-test finds a boundary that does not hold.
     """
     records = _members(members)
@@ -112,6 +113,8 @@ def swarm(
     own_sandboxes = _check_member_sandboxes(runs, resolved_channels)
     resolved_result = _result(result)
     _check_result_members(resolved_result, records, names)
+    chain = final_chain(resolved_controller.final, resolved_result)
+    check_chain(chain, resolved_result)
     resolved_isolation = resolve_isolation(isolation)
     if resolved_isolation is not None:
         filesystems = [c for c in resolved_channels if isinstance(c, FilesystemChannel)]
@@ -181,7 +184,7 @@ def swarm(
             budget=resolved_budget,
             shares=shares,
             channels=resolved_channels,
-            final=resolved_controller.final,
+            chain=chain,
             result=resolved_result,
             identities=identities,
         ).run(resolved_controller.run)

@@ -37,7 +37,7 @@ from ._controller._controller import (
     swarm_controller,
 )
 from ._controller.leaderless import leaderless
-from ._final import FinalName
+from ._final import FinalName, FinalSpec
 from ._isolation import Share, UserIsolation, users
 from ._member import Member, member
 from ._record import (
@@ -82,6 +82,7 @@ __all__ = [
     "Draft",
     "FinalName",
     "FinalRecord",
+    "FinalSpec",
     "LeftOut",
     "Member",
     "MemberArtifacts",

@@ -365,7 +365,7 @@ def test_the_verifier_gets_the_answer_and_the_samples_metadata(
 
 
 @pytest.mark.anyio
-async def test_the_stop_leaves_a_submission_unverified_when_it_refuses_its_check() -> (
+async def test_the_final_step_verifies_a_submission_whose_check_the_stop_refused() -> (
     None
 ):
     model = scripted_model(cost=1.0)
@@ -400,13 +400,16 @@ async def test_the_stop_leaves_a_submission_unverified_when_it_refuses_its_check
         ledger = SwarmLedger.model_validate(store().get(LEDGER_KEY))
     assert record is not None
     assert [m.status for m in record.members] == ["submitted", "submitted"]
-    # the closed runtime lever refused the late check's model call
-    assert [answer for answer, _ in checker.calls] == ["42", "42"]
+    # the closed runtime lever refused the late check's model call, and the final step
+    # checked it again
+    assert [answer for answer, _ in checker.calls] == ["42", "42", "42"]
     early, late = record.members
-    assert early.verdict == Verdict(True, 1.0, "EXPLANATION-42")
-    assert (late.verdict, late.verdict_time) == (None, None)
-    # the verifier's call is the swarm's, under the runtime lever
-    assert ledger.runtime.cost == 1.0
+    assert early.verdict == late.verdict == Verdict(True, 1.0, "EXPLANATION-42")
+    assert late.verdict_time is not None and early.verdict_time is not None
+    assert late.verdict_time > early.verdict_time
+    # the verifier's calls are the swarm's: under the runtime lever during the run, and
+    # the final step's after it
+    assert (ledger.runtime.cost, ledger.final.cost) == (1.0, 1.0)
     assert [m.meter.cost for m in ledger.members] == [0.0, 0.0]
 
 
@@ -439,7 +442,8 @@ class _Held:
         # the swarm's time cap, a controller's stop and the sample's own cancellation
         # each end the verification: whether the verifier lets the cancellation
         # propagate or catches it and returns, the submission stays unverified, and
-        # the queued one is never verified
+        # the queued one is not verified in the run. The final step then verifies
+        # both, unless the sample's cancellation ended the swarm
         *[
             pytest.param(stop, behaviour, id=f"{stop}-{behaviour}")
             for stop in ("swarm-time", "controller", "sample")
@@ -510,12 +514,22 @@ async def test_the_hard_stop_ends_a_verification_in_progress(
         )
         assert first.verdict_time is not None and queued.verdict_time is not None
         assert len(verdicts) == 2
-    else:
+    elif stop == "sample":
         # the queued submission's verifier is never called
         assert len(held.calls) == 1
         for m in (first, queued):
             assert (m.verdict, m.verdict_time) == (None, None)
         assert verdicts == []
+    else:
+        # the final step verifies both, in the order they ended
+        assert first.output is not None and queued.output is not None
+        assert held.calls == [
+            first.output.completion,
+            first.output.completion,
+            queued.output.completion,
+        ]
+        assert first.verdict == queued.verdict == Verdict(passed=False)
+        assert len(verdicts) == 2
     if stop == "swarm-time":
         # the verification held the submissions' events, so the time cap stopped the
         # swarm
