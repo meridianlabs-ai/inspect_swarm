@@ -71,19 +71,33 @@ class Record:
     """How the sender reached the channel's tool: `"tool"` from its own loops, `"bridge"` from a bridged member's CLI through `swarm_bridged_tools()`."""
 
 
-# What a channel's tool hands to `Bus.deliver()`, which makes the `Record`: the
-# channel's name, the record's kind, addresses to deliver to (`()` for an unaddressed
-# record), the payload, the channel's operation data, whether the record can end a
-# wait, and the id of a record it answers.
 @dataclass(frozen=True)
 class Draft:
+    """What a channel's tool hands to `Bus.deliver()`, which makes the `Record` from it.
+
+    The bus binds the sender from the calling member, so a draft has no sender.
+    """
+
     channel: str
+    """The channel's `name`."""
+
     kind: str
+    """What the record does, in the channel's terms (`"message"`, `"create"`)."""
+
     to: tuple[str, ...] = ()
+    """The addresses: member names, each of a member that has started and is not ending or ended, and `"all"` for every other running member. `deliver()` refuses any other address. `()` (the default) for an unaddressed record, which reaches nobody directly: the channel's `apply()` decides whom it concerns, and may name members that have not started or have ended."""
+
     payload: str = ""
+    """The text the record carries."""
+
     op: dict[str, JsonValue] | None = None
+    """The channel's operation data, if any, as JSON. The record gets a copy that cannot be changed."""
+
     wake: bool = False
+    """Whether the record can end a member's wait (`swarm_wait`)."""
+
     reply_to: str | None = None
+    """The id of a record this one answers."""
 
 
 # A record's operation data, detached from the draft's and read-only at every depth.

@@ -28,11 +28,13 @@ from inspect_ai.util import (
 from inspect_swarm import (
     Controller,
     Member,
+    Share,
     StopReason,
     SwarmControl,
     member,
     swarm,
     swarm_controller,
+    users,
 )
 from inspect_swarm._member import build_member
 
@@ -61,8 +63,10 @@ CONTROLLER: dict[str, Any] = {
 }
 
 
-def _swarm(members: Any) -> Agent:
-    return swarm(members, controller=log_test_controller(), channels=[])
+def _swarm(members: Any, isolation: Any = None) -> Agent:
+    # isolation only when given, so that the other tests' logged params leave it out
+    extra = {} if isolation is None else {"isolation": isolation}
+    return swarm(members, controller=log_test_controller(), channels=[], **extra)
 
 
 def _record(**fields: Any) -> dict[str, Any]:
@@ -257,8 +261,10 @@ def _plan_step(solver: Agent) -> Any:
     return plan_to_eval_plan(Plan([as_solver(solver)]), GenerateConfig()).steps[0]
 
 
-def _identifier(members: Any) -> str:
-    task = Task(dataset=[Sample(input="x")], solver=_swarm(members), name="arm")
+def _identifier(members: Any, isolation: Any = None) -> str:
+    task = Task(
+        dataset=[Sample(input="x")], solver=_swarm(members, isolation), name="arm"
+    )
     [resolved] = resolve_tasks(
         task,
         task_args={},
@@ -300,3 +306,38 @@ def _choose_name_arm(choose_name: Any) -> Any:
 def test_eval_set_arms_are_distinct(arm: Callable[[Any], Any], a: Any, b: Any) -> None:
     assert _identifier(arm(a)) == _identifier(arm(a))
     assert _identifier(arm(a)) != _identifier(arm(b))
+
+
+def test_isolation_logs_as_its_fields_and_replays() -> None:
+    original = _swarm(
+        react(prompt="a"),
+        users(peers="read", shared=[Share(path="/data", access="ro")]),
+    )
+    assert _plan_step(original).params_passed["isolation"] == {
+        "kind": "users",
+        "sandbox": "default",
+        "home": "/scratch/{member}",
+        "shared": [{"path": "/data", "access": "ro"}],
+        "peers": "read",
+    }
+    params = registry_params(original)
+    replayed = create_registry_object("agent", registry_info(original).name, params)
+    assert registry_params(replayed) == params
+
+
+@pytest.mark.parametrize(
+    "a,b",
+    [
+        pytest.param(None, "users", id="none-users"),
+        pytest.param(users(), users(peers="read"), id="peers"),
+        pytest.param(
+            users(),
+            users(shared=[Share(path="/shared", access="ro")]),
+            id="share-access",
+        ),
+    ],
+)
+def test_eval_set_arms_differing_in_isolation_are_distinct(a: Any, b: Any) -> None:
+    agent = react(prompt="a")
+    assert _identifier(agent, a) == _identifier(agent, a)
+    assert _identifier(agent, a) != _identifier(agent, b)

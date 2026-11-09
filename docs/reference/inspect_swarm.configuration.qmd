@@ -1,12 +1,14 @@
 ---
 title: Configuration
 reference: inspect_swarm
-description: The member record and the swarm's budget.
+description: The member record, the swarm's budget and its users isolation.
 ---
 
 ## Records
 
-`member()` returns a `Member`, and `swarm(budget=...)` takes a `Budget`. They are on their own page because `Member` and `member()` would share a heading anchor on one page.
+`member()` returns a `Member`, `swarm(budget=...)` takes a `Budget`, and `users()` returns a `UserIsolation` with its `Share`s. They are on their own page because `Member` and `member()` would share a heading anchor on one page.
 
 ### Member
 ### Budget
+### UserIsolation
+### Share

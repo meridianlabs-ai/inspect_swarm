@@ -68,9 +68,10 @@ from .._record import (
 from .._seam import BoundaryCallback, MemberGate, check_origin
 
 if TYPE_CHECKING:
-    from .._bus._bus import Bus
+    from .._bus._bus import SwarmBus
     from .._bus._record import Record
     from .._channel._channel import Channel
+    from .._isolation import MemberIdentity
 
 
 class MemberHandle(Protocol):
@@ -472,9 +473,10 @@ class SwarmRun:
         shares: Mapping[str, Sequence[Limit]] | None = None,
         channels: Sequence["Channel"] = (),
         final: FinalName | None = None,
+        identities: Mapping[str, "MemberIdentity"] | None = None,
     ) -> None:
         # deferred: the bus imports the channels, which import this module's package
-        from .._bus._bus import Bus
+        from .._bus._bus import SwarmBus
 
         self._shares = shares or {}
         self._members = [
@@ -482,7 +484,7 @@ class SwarmRun:
             for record, name in records
         ]
         # the channel states open here, before any member starts
-        self.bus = Bus(
+        self.bus = SwarmBus(
             self._members,
             {m.name: m.context for m in self._members},
             channels,
@@ -518,6 +520,8 @@ class SwarmRun:
         # the controller's choice of the answer, once it has made one
         self._pick: Pick | None = None
         self._preambles = preambles
+        # each member's Linux user, under users isolation
+        self._identities = identities or {}
         self._caps = caps
         self._time = time
         self._grace = grace
@@ -705,7 +709,7 @@ class SwarmRun:
         escaping: BaseException | None = None
         started = False
         ended = False
-        bus_token: "contextvars.Token[Bus | None] | None" = None
+        bus_token: "contextvars.Token[SwarmBus | None] | None" = None
         budget_token: contextvars.Token[BudgetState | None] | None = None
         running: int | None = None
         try:
@@ -1055,6 +1059,7 @@ class SwarmRun:
             m.outcome,
             m.gate,
             end,
+            self._identities.get(m.name),
         )
 
     # A persistent member's answer, from its gate: recorded with its swarm time, as

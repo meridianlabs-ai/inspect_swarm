@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, cast
 
 from inspect_ai.tool import Tool, ToolDef, ToolError, ToolParams
 from pydantic import JsonValue
@@ -18,6 +19,9 @@ from ._channel import (
     swarm_channel,
 )
 from ._params import check_bound, check_rate
+
+if TYPE_CHECKING:
+    from .._bus._bus import SwarmBus
 
 CHANNEL = "messages"
 TAG = "peer_message"
@@ -163,7 +167,9 @@ def messages(
 # The inboxes of one swarm run, kept on the run's bus.
 class MessagesState:
     def __init__(self, channel: _Messages, run: ChannelRun) -> None:
-        self._bus = run.bus
+        # the run's own bus, whose members beyond the public `Bus` the built-in
+        # channels use
+        self._bus = cast("SwarmBus", run.bus)
         self._max_unread = channel.max_unread
         self._dedupe = channel.dedupe
         names = [info.name for info in run.roster]

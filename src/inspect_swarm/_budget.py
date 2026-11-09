@@ -2,7 +2,7 @@ import logging
 import math
 from collections.abc import Callable, Mapping, Sequence, Set
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import Literal
 
@@ -23,7 +23,6 @@ from inspect_ai.util._limit import (
     _TimeLimit,  # pyright: ignore[reportPrivateUsage]
     _TokenLimit,  # pyright: ignore[reportPrivateUsage]
     _TurnLimit,  # pyright: ignore[reportPrivateUsage]
-    record_model_cost,
     token_limit_fields,
     token_limit_tree,
 )
@@ -117,8 +116,9 @@ class Caps:
     time: float | None
 
 
-def derive_caps(budget: Budget, member_count: int) -> Caps:
-    # run at swarm start, inside the sample
+def derive_caps(budget: Budget, member_count: int, check_time: bool = True) -> Caps:
+    # run at swarm start, inside the sample; without check_time, an explicit time cap
+    # is compared with the sample's time limit later, by rederive_time_cap()
     if isinstance(budget.split, tuple) and len(budget.split) != member_count:
         raise ValueError(
             f"Budget.split has {len(budget.split)} weights but the swarm has {member_count} members."
@@ -152,15 +152,28 @@ def derive_caps(budget: Budget, member_count: int) -> Caps:
         cost=_cap("cost", budget.cost, limits.cost, budget),
         tokens=tokens,
         token_type=token_type,
-        time=_cap("time", budget.time, limits.time, budget),
+        time=_cap("time", budget.time, limits.time, budget, check_time),
     )
 
 
+def rederive_time_cap(budget: Budget, caps: Caps) -> Caps:
+    # the caps with a time cap derived from the sample's time limit again, after work
+    # at swarm start (users isolation's setup) that used sample time the first
+    # derivation counted on; an explicit time cap is fixed, and compared with the time
+    # the sample has left now
+    return replace(caps, time=_cap("time", budget.time, sample_limits().time, budget))
+
+
 def _cap(
-    kind: str, explicit: float | None, sample: Limit, budget: Budget
+    kind: str,
+    explicit: float | None,
+    sample: Limit,
+    budget: Budget,
+    check: bool = True,
 ) -> float | None:
     if explicit is not None:
-        _check_explicit(kind, explicit, sample)
+        if check:
+            _check_explicit(kind, explicit, sample)
         return explicit
     return _derived(kind, sample, budget.reserve) if budget.derive else None
 
@@ -452,9 +465,6 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
         self.role = role
         self.pair = pair
         self.unpriced_calls = 0
-        # the cost of the call just recorded, which Inspect charges to the cost tree
-        # only after the token check; cleared by the next check
-        self._uncharged: float | None = None
 
     @property
     def model_usage(self) -> ModelUsage:
@@ -467,11 +477,9 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
             self.unpriced_calls += 1
         elif self.pair is not None:
             self.pair.cost += usage.total_cost
-            self._uncharged = usage.total_cost
 
     def _check_self(self, raise_for_equal: bool = False) -> None:
         self.detect_bridge()
-        uncharged, self._uncharged = self._uncharged, None
         limit = self.limit
         total = self._metering.value(self._usage)
         token_reached = limit is not None and (
@@ -480,7 +488,7 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
         if token_reached or (
             self.pair is not None and _pair_cost_reached(self.pair, raise_for_equal)
         ):
-            self._sample_first(uncharged, raise_for_equal)
+            self._sample_first(raise_for_equal)
         if token_reached:
             assert limit is not None
             kind = "token" if self.type == "all" else f"token ({self.type})"
@@ -496,17 +504,16 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
         if self.pair is not None:
             _check_pair_cost(self.pair, self, raise_for_equal)
 
-    def _sample_first(self, uncharged: float | None, raise_for_equal: bool) -> None:
+    def _sample_first(self, raise_for_equal: bool) -> None:
         # The one gate every raise of a pair's token-tree node goes through, run when
         # the node is about to raise. Under Budget(derive=False) the sample's own limits
-        # end the swarm, but this node raises in the token check, where Inspect has not
-        # yet charged the call just recorded to the cost tree nor checked that tree. So
-        # charge that call here, if there is one, and check the pair's cost-tree
-        # ancestors root first, as Inspect's cost check would with the same
-        # `raise_for_equal`: the sample's cost limit raises ahead of this node. A
-        # bridged member's node does not raise, and Inspect charges and checks itself.
-        # With derived caps nothing changes. The swarm that owns this node decides, not
-        # a nested swarm the call runs in.
+        # end the swarm, but this node raises in the token check, where Inspect has
+        # already charged the call just recorded to the cost tree (inspect_ai#6349) but
+        # not yet checked that tree. So check the pair's cost-tree ancestors root first,
+        # as Inspect's cost check would with the same `raise_for_equal`: the sample's
+        # cost limit raises ahead of this node. A bridged member's node does not raise,
+        # and Inspect checks itself. With derived caps nothing changes. The swarm that
+        # owns this node decides, not a nested swarm the call runs in.
         member = current_member.get()
         if (
             self.pair is None
@@ -517,8 +524,6 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
         if self.stop_swarm is not None:
             # a reached cap stops the swarm even when a tool consumes the sample's error
             self.stop_swarm("swarm_cap")
-        if uncharged is not None:
-            record_model_cost(uncharged)
         parent = self.pair.cost_node.parent
         if parent is not None:
             parent.check(raise_for_equal)

@@ -5,7 +5,8 @@ Everything in this package is experimental and may change in any release without
 
 from ._budget import Budget, BudgetUsage, SwarmBudget, swarm_budget
 from ._bus._bridged import swarm_bridged_tools
-from ._bus._record import Record
+from ._bus._bus import Bus, Caller, Delivery, calling_member
+from ._bus._record import Draft, Record
 from ._bus._tools import swarm_tools
 from ._channel._channel import (
     Channel,
@@ -36,6 +37,7 @@ from ._controller._controller import (
 )
 from ._controller.leaderless import leaderless
 from ._final import FinalName
+from ._isolation import Share, UserIsolation, users
 from ._member import Member, member
 from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
 from ._seam import Boundary, BoundaryCallback
@@ -53,11 +55,15 @@ __all__ = [
     "BoundaryCallback",
     "Budget",
     "BudgetUsage",
+    "Bus",
+    "Caller",
     "Channel",
     "ChannelRun",
     "ChannelState",
     "ControlEvent",
     "Controller",
+    "Delivery",
+    "Draft",
     "FinalName",
     "FinalRecord",
     "Member",
@@ -69,14 +75,17 @@ __all__ = [
     "MemberResult",
     "MemberState",
     "Record",
+    "Share",
     "StopReason",
     "SwarmBudget",
     "SwarmControl",
     "SwarmResultRecord",
+    "UserIsolation",
     "WaitNews",
     "WaitSpec",
     "WaitingState",
     "__version__",
+    "calling_member",
     "filesystem",
     "leaderless",
     "member",
@@ -90,4 +99,5 @@ __all__ = [
     "swarm_resources",
     "swarm_result",
     "swarm_tools",
+    "users",
 ]
