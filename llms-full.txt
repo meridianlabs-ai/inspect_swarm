@@ -40,7 +40,13 @@ or, in a uv project:
 uv add "inspect_swarm @ git+https://github.com/meridianlabs-ai/inspect_swarm"
 ```
 
-It needs inspect_ai 0.3.283 or later and Python 3.11 or later.
+For now it needs inspect_ai’s `main` branch, which has features no inspect_ai release has yet. Installing Inspect Swarm installs a released inspect_ai, so install inspect_ai from GitHub `main` too (in a uv project, `uv add "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai"`):
+
+``` bash
+pip install git+https://github.com/UKGovernmentBEIS/inspect_ai
+```
+
+It needs Python 3.11 or later.
 
 ## Run a swarm on an existing task
 
@@ -203,7 +209,7 @@ These are `react-1` to `react-3`. Names you give with `name` are not numbered ac
 
 ### Members that choose their names
 
-With `choose_name=True` a member is not told its name. Its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:
+With `choose_name=True` a member is not told its name. The swarm’s preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:
 
 ``` python
 from inspect_ai.agent import react
@@ -222,11 +228,13 @@ A roster can mix the two, for example a lead you name and workers that name them
 
 A swarm in which any member chooses its name can use only the `filesystem` channel or no channel (`channels=[]`). Other channels, including [shared memory](./shared-memory.html.md) and your own, show members to each other by name, so [swarm()](./reference/inspect_swarm.html.md#swarm) refuses them.
 
-The swarm does not change text you give the member yourself: the sample input, a controller’s `start(input=...)`, the agent’s prompt, and the sandbox configuration.
+The swarm does not change text you give the member yourself: the sample input, a controller’s `start(input=...)` and `start(preamble=...)`, the agent’s prompt, and the sandbox configuration. A controller’s `start(preamble=...)` uses its text as given, and `preamble=False` leaves the preamble out ([Controllers](./controllers.html.md)). Neither adds a request to choose a name.
 
 ## Limits
 
 `limits` takes token, cost, turn, message and time limits for that member alone. Working limits are refused. A member that reaches one ends with status `member_limit:<type>`, and the others continue. The swarm’s own caps are set with `budget=` ([Budgets](./budget.html.md)).
+
+A member time limit does not run while the member is held at a turn boundary by a controller’s callbacks ([Controllers](./controllers.html.md#boundary-callbacks)): it counts only the time the member was not held. A member whose time limit ran out before it reached the boundary ends `member_limit:time` there, without being held.
 
 ## Member builders
 
@@ -253,7 +261,7 @@ A builder is also the place for anything each member must have its own of. Every
 
 ## Tool state
 
-Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store ([memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory), [bash_session()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session), [web_browser()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#web_browser), the skill tool) give each member its own state when their `instance` is left at the default, so the default [memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory) is private to each member.
+Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store ([memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory), [bash_session()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session), the skill tool) give each member its own state when their `instance` is left at the default, so the default [memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory) is private to each member.
 
 An explicit `instance` is used as given: members that name the same instance share its state. A board shared on purpose was `memory(instance="board")` before the shared-memory channel; see [Shared Memory](./shared-memory.html.md#migrating-from-memoryinstance) for moving to the channel.
 
@@ -274,9 +282,9 @@ A member’s status says how it ended:
 
 | Status | Meaning |
 |----|----|
-| `submitted` | Its agent returned normally. Its output is its answer. |
-| `unsubmitted` | Its agent returned with a `content_filter` or `model_length` stop reason, as [react()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react) does after repeated refusals or a context overflow. |
-| `stopped` | The swarm stopped it, for example when another member submitted or the swarm’s time cap was reached. |
+| `submitted` | Its agent returned normally. Its output is its answer. A [persistent member](#persistent-members) is never `submitted` by a normal return: it ends `submitted` when it is stopped or ended while idle, or at the turn boundary after an answer, with its last answer as its output. |
+| `unsubmitted` | Its agent returned with a `content_filter` or `model_length` stop reason, as [react()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react) does after repeated refusals or a context overflow. A persistent member also ends `unsubmitted` when its agent returns without an answer, for example when its `on_continue` returns `False` (a cut-off). |
+| `stopped` | The swarm stopped it, for example when another member submitted or the swarm’s time cap was reached, or a controller ended it ([Controllers](./controllers.html.md#boundary-callbacks)). A member that reaches a turn boundary of its agent loop after the stop began ends there. |
 | `share` | It used up its share of a split budget. |
 | `member_limit:<type>` | It reached one of its own `limits`. |
 | `member_limit:custom` | Its agent stopped itself by raising `LimitExceededError("custom", ...)` with no `source`, for example from `react(on_continue=...)`. The other members continue. |
@@ -284,7 +292,25 @@ A member’s status says how it ended:
 | `cancelled` | It was cancelled, after the grace period of a stop or from outside the swarm. |
 | `errored` | It raised any other error. The error ends the sample. |
 
-A normal return counts as a submission for any agent other than [react()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react)’s two cases above. An agent that gives up in some other way and returns is treated as having answered. To make a normal return mean something stronger, such as a passed check, have the member’s builder raise a custom limit when it is not so ([Controllers](./controllers.html.md#stopping-on-the-first-proof)).
+For a member that is not persistent, a normal return counts as a submission for any agent other than [react()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react)’s two cases above. An agent that gives up in some other way and returns is treated as having answered. To make a normal return mean something stronger, such as a passed check, have the member’s builder raise a custom limit when it is not so ([Controllers](./controllers.html.md#stopping-on-the-first-proof)).
+
+## Persistent members
+
+A persistent member stays available after it answers, so a controller can give the same member several tasks with its context intact:
+
+``` python
+member(worker(), name="worker", persistent=True)
+```
+
+When a persistent member submits, or a `react(submit=False)` member gives a reply with no tool calls, the swarm records that as one of its *answers* and holds the member *idle* at its next turn boundary. The agent loop does not return. The controller hears [MemberIdle](./reference/inspect_swarm.html.md#memberidle) and gives the member its next task with `SwarmControl.wake()`, which appends the task to the member’s conversation ([Controllers](./controllers.html.md#persistent-members)). The member keeps its conversation, tool state and limits across these *activations*.
+
+- Its limits span its whole life. Its member time limit does not run while it is idle.
+- Every answer is a candidate for the swarm’s answer: `first` and `last` choose across all of them, and `choose_answer()` takes the member’s latest. An answer stays a candidate however the member ends later.
+- A submission in a turn that also calls a [handoff()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#handoff) is not an answer. Nor is a refusal (`content_filter`) or a reply cut off by the context window.
+- A member stopped or ended while idle ends `submitted`. A member whose loop returns without an answer ends `unsubmitted`, its earlier answers still candidates.
+- While it is idle, another member’s write that is news to it reaches the controller as [MemberNews](./reference/inspect_swarm.html.md#membernews), and the controller decides whether to wake it ([News for idle members](./controllers.html.md#news-for-idle-members)).
+
+Only a member whose agent is a [react()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react), `react(submit=False)` or [deepagent()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#deepagent) loop can persist, given directly or returned by a [member builder](#member-builders). The swarm refuses every other agent before it runs: a bridged member, a custom loop, [deepagent()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#deepagent) with background dispatch, and an agent that calls a loop and then checks its result (`checked_solver()` in the examples). In a swarm with [shared_memory()](./reference/inspect_swarm.html.md#shared_memory), a persistent member must have [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools) in its own tools, not only in a subagent’s.
 
 ## A swarm of one
 
@@ -293,7 +319,7 @@ A normal return counts as a submission for any agent other than [react()](https:
 ## Agents the swarm refuses
 
 - ACP agents wait for their caller to drive them, so they are refused.
-- Bridged members, which run a CLI agent in the sandbox through Inspect’s agent bridge, cannot have background work and cannot use channels with tools yet. See [Restrictions](./restrictions.html.md).
+- Bridged members, which run a CLI agent in the sandbox through Inspect’s agent bridge, cannot have background work. See [Restrictions](./restrictions.html.md).
 
 
 # Controllers – Inspect Swarm
@@ -347,6 +373,7 @@ from contextlib import aclosing
 
 from inspect_swarm import (
     Controller,
+    MemberEnded,
     MemberInfo,
     StopReason,
     SwarmControl,
@@ -366,23 +393,24 @@ def escalate(first: str = "fast") -> Controller:
         swarm.start(first)
         async with aclosing(swarm.events()) as events:
             async for event in events:
-                if event.submitted:
+                if isinstance(event, MemberEnded) and event.submitted:
                     return "submitted"
         for m in swarm.members:
             if m.state == "pending":
                 swarm.start(m)
         async with aclosing(swarm.events()) as events:
             async for event in events:
-                if event.submitted:
+                if isinstance(event, MemberEnded) and event.submitted:
                     return "submitted"
         return "all_done"
 
     return Controller(run, check=check)
 ```
 
-- `swarm.members` are the members in roster order, as [MemberHandle](./reference/inspect_swarm.html.md#memberhandle)s: name, role, state (`pending`, `running` or `ended`), status and whether it submitted. A controller never sees what a member wrote.
-- `swarm.start(member, input=None)` starts a member and returns at once. `input` replaces the swarm’s input for that member; `None` gives it the swarm’s input. The member’s preamble follows either. A member runs once, and starting one after the stop has begun raises.
-- `swarm.events()` yields each event once, in order from the swarm’s start. Its only kind is [MemberEnded](./reference/inspect_swarm.html.md#memberended), with the member’s name, status and whether it submitted. The iterator ends when no member is running and no event is waiting, so a member started later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
+- `swarm.members` are the members in roster order, as [MemberHandle](./reference/inspect_swarm.html.md#memberhandle)s: name, role, state (`pending`, `running` or `ended`, and for [persistent members](#persistent-members) `idle` or `ending`), status and whether it submitted. A controller never sees what a member wrote unless it holds the member at a turn boundary ([Boundary callbacks](#boundary-callbacks)).
+- `swarm.start(member, input=None, *, preamble=None)` starts a member and returns at once. `input` replaces the swarm’s input for that member; `None` gives it the swarm’s input. The member’s preamble follows either, as a user message. A member runs once, and starting one after the stop has begun raises.
+- The swarm’s preamble tells each member that the members work at the same time. A controller that runs them otherwise can pass its own text as `preamble`, which replaces the whole preamble, channel instructions included, and is used as given. `preamble=False` leaves it out; the input must then hold a user message.
+- `swarm.events()` yields each event once, in order from the swarm’s start. [MemberEnded](./reference/inspect_swarm.html.md#memberended) gives the member’s name, status and whether it submitted; [MemberIdle](./reference/inspect_swarm.html.md#memberidle) and [MemberNews](./reference/inspect_swarm.html.md#membernews) come only from [persistent members](#persistent-members). Test an event’s type before reading its fields. The iterator ends when no member is running or ending and no event is waiting, so a member started or woken later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
 - `check`, if given, is called with the roster when [swarm()](./reference/inspect_swarm.html.md#swarm) is called. Raise `ValueError` for a roster the controller cannot run.
 - `final`, if given, is the rule that chooses the answer: `first` (the default, as here) or `last`.
 - The stop reasons `all_done`, `submitted`, `verified` and `quiescence` are recorded as they are. Any other is recorded as `controller:<reason>`.
@@ -391,14 +419,20 @@ A [Controller](./reference/inspect_swarm.html.md#controller) holds configuration
 
 ### Choosing the answer
 
-A controller can choose the answer itself. `swarm.choose_answer(member, reason=None)` names a member that has ended with a submission, and its submission is then the answer, whatever the `final` rule says. A controller chooses once. The record gives the mode `controller` and the reason ([Scoring](./scoring.html.md#the-result-record)).
+A controller can choose the answer itself. `swarm.choose_answer(member, reason=None)` names a member that has ended with a submission, and its submission is then the answer, whatever the `final` rule says. For a persistent member, it takes the member’s latest answer at the time of the call, and keeps that one if the member answers again. A controller chooses once. The record gives the mode `controller` and the reason ([Scoring](./scoring.html.md#the-result-record)).
 
 This controller answers with the first submission from a member with a given role, and falls back to the `final` rule, `first`, when none of them submits:
 
 ``` python
 from contextlib import aclosing
 
-from inspect_swarm import Controller, StopReason, SwarmControl, swarm_controller
+from inspect_swarm import (
+    Controller,
+    MemberEnded,
+    StopReason,
+    SwarmControl,
+    swarm_controller,
+)
 
 
 @swarm_controller
@@ -413,6 +447,7 @@ def prefer(role: str) -> Controller:
             async for event in events:
                 if (
                     not chosen
+                    and isinstance(event, MemberEnded)
                     and event.submitted
                     and swarm.member(event.member).role == role
                 ):
@@ -423,6 +458,136 @@ def prefer(role: str) -> Controller:
     return Controller(run)
 ```
 
+## Boundary callbacks
+
+A controller can hold a member between the turns of its agent loop. `handle.on_boundary(callback, origin=...)` registers a callback that runs at every turn boundary of the member’s own loop: before its first generation and before each one after it, with no model or tool call of the loop in flight. It returns a function that unregisters the callback from the next boundary.
+
+The callback gets a [Boundary](./reference/inspect_swarm.html.md#boundary):
+
+- `member` and `index`: the member, and the boundary’s number, 0 before the first generation.
+- `after`: what the conversation ends with: `start` at index 0, `tools` after a tool result, `reply` after an assistant reply with no tool calls, `wake` after a persistent member’s wake input, `user` after anything else.
+- `activation`: 0 until a persistent member is first woken, then one more at each wake.
+- `messages` and `output`: copies of the member’s conversation and of its last output. Changing them changes nothing.
+
+It returns `None` to let the member go on, a list of messages to go on with that conversation, or `"end"` to end the member `stopped`. A returned list keeps each message’s id, and must hold a user message. The member gets copies of the returned messages, so changing them later changes nothing.
+
+While its callbacks run the member is held: `handle.held` is `True`, its time limit does not run, and `swarm_wait` does not count it as active. A callback can wait as long as it likes. Its own model calls count towards the member’s limits. Its time counts as working time unless it marks its idle waits with [suspend_working_limit()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#suspend_working_limit):
+
+``` python
+import anyio
+from inspect_ai.util import suspend_working_limit
+
+from inspect_swarm import Boundary, StopReason, SwarmControl
+
+
+async def run(swarm: SwarmControl) -> StopReason:
+    go = anyio.Event()
+
+    async def wait_for_go(boundary: Boundary) -> None:
+        if boundary.index == 0:
+            with suspend_working_limit():
+                await go.wait()
+        return None
+
+    swarm.member("worker").on_boundary(wait_for_go, origin="scheduler")
+    swarm.start("worker")
+    ...
+```
+
+Several callbacks run in the order they were registered, each receiving the conversation as the ones before it left it. So callers compose: a pause registered after a scheduler holds the member after the scheduler lets it go.
+
+`handle.end(origin=...)` ends a member from outside the chain, `stopped`, with the reason `ended by <origin>`. A held member ends at once: the waiting callback is cancelled and no change from that boundary is applied. A member in the middle of a turn ends at its next boundary, and its next model call is refused. If the member is still running after the swarm’s grace period, its cleanup included, it is cancelled and ends `cancelled`. The same deadline applies when a callback returns `"end"`. A member whose agent returns after `end()` ends `stopped`, whatever its output.
+
+A swarm stop ends every member at its next boundary, and a held member at once.
+
+Only members whose agent runs an Inspect agent loop, such as [react()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react) or [deepagent()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#deepagent), reach a boundary. Subagents and other nested loops run inside a turn of the member’s loop and are not held on their own. `on_boundary()` raises `ValueError` for a bridged member and for [deepagent()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#deepagent) with background dispatch. A member with background work running when it reaches a boundary with callbacks, a member that starts a second agent loop after its first ended, and a member whose callbacks never ran because it never reached a boundary all end `errored`.
+
+The swarm records each boundary where callbacks ran, and each change they made, by message id and hash ([Analysis](./analysis.html.md#boundary-callbacks)).
+
+## Persistent members
+
+A [persistent member](./members.html.md#persistent-members) answers, then waits *idle* at its next turn boundary for its next task. The controller hears [MemberIdle](./reference/inspect_swarm.html.md#memberidle), with the member’s name and the index of the answer it just gave, and wakes the member with `swarm.wake(member, input)`. The input is a string or a list of user messages, appended to the member’s conversation. Each wake message gets a new id, so one list can be passed to several wakes.
+
+This controller gives one worker each task in turn, and makes its last answer the swarm’s:
+
+``` python
+from contextlib import aclosing
+
+from inspect_swarm import (
+    Controller,
+    MemberIdle,
+    StopReason,
+    SwarmControl,
+    member,
+    swarm,
+    swarm_controller,
+)
+
+
+@swarm_controller
+def dispatch(tasks: list[str], worker: str = "worker") -> Controller:
+    """Give `worker` each task in turn, waking it after each answer."""
+
+    async def run(swarm: SwarmControl) -> StopReason:
+        pending = list(tasks)
+        swarm.start(worker, input=pending.pop(0))
+        async with aclosing(swarm.events()) as events:
+            async for event in events:
+                if isinstance(event, MemberIdle) and pending:
+                    swarm.wake(event.member, input=pending.pop(0))
+        return "quiescence" if swarm.member(worker).state == "idle" else "all_done"
+
+    return Controller(run, final="last")
+
+
+swarm(
+    members=[member(worker_agent, name="worker", persistent=True)],
+    controller=dispatch(tasks),
+)
+```
+
+- `wake()` takes only an `idle` member. An event can be stale by the time the controller reads it (an earlier event’s handling may have woken or ended the member), so check `swarm.member(name).state == "idle"` first.
+- An idle member is held: `handle.held` is `True`, its time limit does not run, and `swarm_wait` does not count it as active. Boundary callbacks run after the wake, with `after == "wake"` and the input as the last messages.
+- `handle.end()` or the swarm’s stop on an idle member sets it `ending` at once, and it ends `submitted`, with its last answer as its output. The iterator waits for its [MemberEnded](./reference/inspect_swarm.html.md#memberended).
+- The swarm is *quiescent* when every member is pending, idle or ended and no event is waiting: `events()` ends. Nothing moves until the controller starts, wakes or ends a member. A controller that wakes no one returns `quiescence`.
+- `leaderless` treats [MemberIdle](./reference/inspect_swarm.html.md#memberidle) as a submission, so by default the first answer stops the swarm. With `stop_on_submission=False` it returns `quiescence` once no member is working and some are idle. It never wakes a member.
+
+### News for idle members
+
+An idle member is not in a tool call, so it cannot see what other members write. The controller is told instead. When a record is delivered that would end a `swarm_wait` of the idle member’s own loop watching everything, such as another member’s write to the shared memory or a message sent to it with `wake=True`, the controller gets [MemberNews](./reference/inspect_swarm.html.md#membernews): the idle member, the channel, the record’s id and the name of the member that sent it. The controller decides whether to wake the member.
+
+- `MemberIdle.news` says whether the member already had news when it went idle: a write it did not look at during its activation. No [MemberNews](./reference/inspect_swarm.html.md#membernews) reports that write, so a controller that wakes members on news also wakes on `MemberIdle.news`.
+- A file stays news to the member until its own loop views it. A member that leaves a file unviewed is reported with `news` set every time it goes idle, so its prompt should tell it to view what the status line names before it answers.
+- Two records give two events. Check that the member is still idle before waking it.
+- A member gets no news unless its own loop has [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools).
+
+[`examples/lead_and_workers.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/lead_and_workers.py) is a lead that hands out tasks on the shared memory to persistent workers. Its controller wakes a worker on the lead’s writes and stops when the lead ends:
+
+``` python
+@swarm_controller
+def lead_and_workers(lead: str = "lead") -> Controller:
+    async def run(swarm: SwarmControl) -> StopReason:
+        for m in swarm.members:
+            swarm.start(m)
+        async with aclosing(swarm.events()) as events:
+            async for event in events:
+                if isinstance(event, MemberEnded) and event.member == lead:
+                    if event.submitted:
+                        swarm.choose_answer(lead, reason="the lead's answer")
+                        return "submitted"
+                    return "lead_ended"
+                woken = (isinstance(event, MemberNews) and event.sender == lead) or (
+                    isinstance(event, MemberIdle) and event.news
+                )
+                if woken and swarm.member(event.member).state == "idle":
+                    swarm.wake(event.member, WAKE)
+        return "all_done"
+
+    return Controller(run)
+```
+
+Every worker is woken on each of the lead’s writes, so a worker with no new task answers at once. The workers’ answers are reports on their own tasks, so the controller makes the lead’s submission the answer with `choose_answer()`.
+
 ## Stopping on the first proof
 
 Some tasks have a checker, such as a proof checker or a test suite, and the experiment wants to stop when the first member’s answer passes it. [`examples/stop_on_proof.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/stop_on_proof.py) has such a controller:
@@ -430,7 +595,13 @@ Some tasks have a checker, such as a proof checker or a test suite, and the expe
 ``` python
 from contextlib import aclosing
 
-from inspect_swarm import Controller, StopReason, SwarmControl, swarm_controller
+from inspect_swarm import (
+    Controller,
+    MemberEnded,
+    StopReason,
+    SwarmControl,
+    swarm_controller,
+)
 
 
 @swarm_controller
@@ -445,7 +616,7 @@ def until_proved() -> Controller:
             swarm.start(m)
         async with aclosing(swarm.events()) as events:
             async for event in events:
-                if event.submitted:
+                if isinstance(event, MemberEnded) and event.submitted:
                     return "proved"
         return "all_done"
 
@@ -573,7 +744,99 @@ def lead(name: str) -> Channel:
 
 `instructions()` returns text for the member’s preamble, or `None` to add nothing. `check()`, if overridden, is called with the roster when [swarm()](./reference/inspect_swarm.html.md#swarm) is called and raises `ValueError` for a roster the channel cannot serve. A [Channel](./reference/inspect_swarm.html.md#channel) holds configuration only: one object serves every sample. The factory’s arguments are logged with the channel.
 
-A channel with tools and records, as `shared_memory` is, also sets `name` and `prefix` and returns a [ChannelState](./reference/inspect_swarm.html.md#channelstate) from `open()` for each run of the swarm; its records go through the swarm’s bus. Its `reach` decides which of a member’s loops get its tools from [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools): `"loop"` (the default), only the member’s own loop; `"member"`, also the nested loops the member’s agent gives [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). The agent decides which nested loops get [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools); `reach` filters the channel tools they get and which channels can wake their `swarm_wait`. A channel whose reads consume something for the member, such as an inbox that marks messages read, keeps `"loop"`, so that a subagent cannot read what the member’s own loop then never sees. `shared_memory` sets `"member"`: a view consumes nothing, and each loop keeps its own seen state. A channel’s tools are given to the member as they are: with the `messages` channel, their results do not count the member’s unread messages, as the swarm’s own tools do. A member learns of messages from those, or by calling `list_members`. See the docstrings of [Channel](./reference/inspect_swarm.html.md#channel), [ChannelState](./reference/inspect_swarm.html.md#channelstate) and [WaitingState](./reference/inspect_swarm.html.md#waitingstate) in the [reference](./reference/index.html.md).
+A channel with tools and records, as `shared_memory` is, also sets `name` and `prefix` and returns a [ChannelState](./reference/inspect_swarm.html.md#channelstate) from `open()` for each run of the swarm; its records go through the swarm’s bus. Its `reach` decides which of a member’s loops get its tools from [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools): `"loop"` (the default), only the member’s own loop; `"member"`, also the nested loops the member’s agent gives [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). The agent decides which nested loops get [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools); `reach` filters the channel tools they get and which channels can wake their `swarm_wait`. A channel whose reads consume something for the member, such as an inbox that marks messages read, keeps `"loop"`, so that a subagent cannot read what the member’s own loop then never sees. `shared_memory` sets `"member"`: a view consumes nothing, and each loop keeps its own seen state. A channel’s tools are given to the member as they are: with the `messages` channel, their results do not count the member’s unread messages, as the swarm’s own tools do. A member learns of messages from those, or by calling `list_members`. [swarm_bridged_tools()](./reference/inspect_swarm.html.md#swarm_bridged_tools) serves only the built-in [messages()](./reference/inspect_swarm.html.md#messages) and [shared_memory()](./reference/inspect_swarm.html.md#shared_memory) channels, so [swarm()](./reference/inspect_swarm.html.md#swarm) refuses a bridged member beside a custom channel with records ([Restrictions](./restrictions.html.md#channels-for-bridged-members)).
+
+This channel keeps a notice board. Any member posts a notice, and every member reads them all:
+
+``` python
+from collections.abc import Mapping
+
+from inspect_ai.tool import Tool, ToolDef, ToolError
+from pydantic import JsonValue
+
+from inspect_swarm import (
+    Bus,
+    Channel,
+    ChannelRun,
+    ChannelState,
+    Draft,
+    MemberInfo,
+    Record,
+    calling_member,
+    swarm_channel,
+)
+
+
+class NoticesState:
+    def __init__(self, bus: Bus) -> None:
+        self.bus = bus
+        self.notices: list[Record] = []
+
+    def tools(self) -> list[Tool]:
+        async def post_notice(text: str) -> str:
+            """Post a notice that every member can read.
+
+            Args:
+                text: The notice.
+            """
+            delivery = await self.bus.deliver(Draft("notices", "notice", payload=text))
+            return f"Posted {delivery.record.id}."
+
+        async def read_notices() -> str:
+            """Read the other members' notices."""
+            caller = calling_member()
+            assert caller is not None
+            shown = [r for r in self.notices if r.sender != caller.member]
+            self.bus.read("notices", [r.id for r in shown])
+            lines = [f"{r.id} from {r.sender}: {r.payload}" for r in shown]
+            return "\n".join(lines) or "No notices."
+
+        return [ToolDef(post_notice).as_tool(), ToolDef(read_notices).as_tool()]
+
+    def validate(self, record: Record) -> None:
+        if not record.payload.strip():
+            raise ToolError("A notice needs text.")
+
+    def admit(self, record: Record) -> None:
+        pass
+
+    def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
+        self.notices.append(record)
+        return [], None
+
+
+class Notices(Channel):
+    name = "notices"
+    prefix = "n"
+
+    def open(self, run: ChannelRun) -> ChannelState:
+        return NoticesState(run.bus)
+
+    def instructions(self, member: MemberInfo) -> str | None:
+        return "Post what others should know with post_notice, and read theirs with read_notices."
+
+
+@swarm_channel
+def notices() -> Channel:
+    return Notices()
+```
+
+Members get the tools from [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools), as with the built-in channels. A tool hands the bus a [Draft](./reference/inspect_swarm.html.md#draft), and `run.bus.deliver()` makes the [Record](./reference/inspect_swarm.html.md#record), binds the sender from the calling member, checks it, and calls the state’s `validate()`, then `admit()` and `apply()` with no `await` between them, so what `admit()` checks still holds when `apply()` runs. After address resolution and validation, the log records accepted sends and refusals by liveness, payload and storm checks or `admit()` as `sent` events. Each delivered record also has a `delivered` event. Earlier refusals, including a stopping swarm, produce no communication event. A refusal raises [ToolError](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#toolerror), which the member sees as the tool’s result.
+
+A draft with no `to` is unaddressed: it reaches nobody directly, and the channel decides whom it concerns. `apply()` returns the members the record is news to and a JSON mapping, both written in the `delivered` event, and may name members that have not started or have ended. A draft addressed with `to=` is refused if a member it names has not started, is ending or has ended.
+
+[calling_member()](./reference/inspect_swarm.html.md#calling_member) tells a tool which member it acts for: a [Caller](./reference/inspect_swarm.html.md#caller) with the member’s name, whether the calling loop is a nested one, and that loop’s agent span. It comes from the runtime, never from model output, and is `None` outside a member of a swarm.
+
+A tool whose result shows the channel’s records reports them with `run.bus.read(name, records)`, using the [ChannelRun](./reference/inspect_swarm.html.md#channelrun) that `open()` was given: `name` is the channel’s `name`, and `records` are the ids of the records the result shows. A waiting channel’s `news()` reports them in `WaitNews(lines, files, depends_on=[...])`. The log records them as the result’s `depends_on`, the records the member’s later work depends on, which [the critical path](./analysis.html.md#the-critical-path) links. Two rules decide what a result depends on:
+
+- A result that tells the loop a record was committed, without showing its content, as a wait does, depends on it.
+- A result built from several records, such as a file made by several writes, depends on them all. Pass them as `depends_on=` when they differ from the records the result shows.
+
+A channel that reports nothing adds no dependency. Every id must be a record the channel committed in this run, or the call raises `ValueError`.
+
+`read()` returns the read’s id (`r-5`), which the log’s `read` event carries. Pass `listing=True` for a result that shows what exists rather than its content, which the metrics count as a listing, not a read.
+
+See the docstrings of [Channel](./reference/inspect_swarm.html.md#channel), [ChannelRun](./reference/inspect_swarm.html.md#channelrun), [ChannelState](./reference/inspect_swarm.html.md#channelstate), [Bus](./reference/inspect_swarm.html.md#bus), [Draft](./reference/inspect_swarm.html.md#draft), [Delivery](./reference/inspect_swarm.html.md#delivery), `calling_member`, [WaitingState](./reference/inspect_swarm.html.md#waitingstate) and [WaitNews](./reference/inspect_swarm.html.md#waitnews) in the [reference](./reference/index.html.md).
 
 
 # Shared Memory – Inspect Swarm
@@ -626,7 +889,7 @@ solver = swarm(
 - Any agent that takes a [ToolSource](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#toolsource) in its tools can take [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). It gives no tools when the swarm has no channel with tools, or outside a swarm, so one member definition serves every arm of an experiment.
 - This swarm keeps the `filesystem` channel beside the board. `channels=[shared_memory()]`, or `channels=["shared_memory"]`, replaces it: members still share the sample’s sandbox, but their preamble no longer mentions `/shared`. Members with their own sandboxes can use the board with no shared volume.
 - The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`.
-- Bridged members cannot use the channel yet, and [swarm()](./reference/inspect_swarm.html.md#swarm) refuses a bridged member beside it.
+- A bridged member gets the tool from `swarm_bridged_tools(["shared_memory"])`. Its CLI is one agent to the board: a file any of its conversations viewed counts as viewed by all of them ([Bridged members](./restrictions.html.md#bridged-members)).
 
 ## The tool
 
@@ -713,14 +976,14 @@ A write that would pass a limit is refused with an error that says which. Once t
 
 ## The record of the board
 
-The swarm logs the members’ writes, views and waits as [InfoEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent)s with source `inspect_swarm` and type `comm`. Each is in the span of the tool call that made it:
+The swarm logs the members’ writes, views and waits as [CommunicationEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent)s with source `inspect_swarm`. Each is in the span of the tool call that made it, and its `kind` is one of:
 
-- `sent`: a write that reached the swarm, with its operation and payload, and why it was refused if it was.
-- `delivered`: a write applied to the board, with its commit sequence number and each file’s previous and new version. Replaying the delivered writes in sequence order rebuilds every version of the board.
-- `read`: a view, with each file’s version and the record that last wrote it, or a listing.
-- `waited`: a `swarm_wait` call, with what ended it and how long it took.
+- `sent`: a write that reached the swarm, with its payload in `send.record.content`, why it was refused in `send.rejected` if it was, and its operation in `data["record"]["op"]`.
+- `delivered`: a write applied to the board, with its commit sequence number in `delivery.seq` and each file’s previous and new version in `data["result"]["files"]`. Replaying the delivered writes in sequence order rebuilds every version of the board.
+- `read`: a view or a listing. `record_ids` names the record that last wrote each file at the version shown, and `data` has each file’s version. `data["depends_on"]` names the records the result depends on: for a view, every write in the file’s history; for a deleted file’s id, the delete; for a listing, none.
+- `waited`: a `swarm_wait` call, with what ended it and how long it took in `wait`, and in `data["depends_on"]` the write it reported for each changed file.
 
-Each event names the member and the loop that acted. The [metrics](./analysis.html.md#communication) count these events for each member.
+Each event names the member that acted (`agent`) and its loop (`loop_span_id`). The `record_ids` of a write’s `sent` and `delivered` events and of the reads of what it wrote are the same id. `depends_on` names each record once per loop: a record that an earlier result of the same loop depended on is left out. The [metrics](./analysis.html.md#communication) count these events for each member.
 
 ## Monitoring with Inspect Sentinel
 
@@ -761,11 +1024,11 @@ def no_secrets_on_board() -> Protocol:
     return decide
 ```
 
-Pass it to the task as `Task(..., sentinel=no_secrets_on_board())`. The member gets the decision’s message as the tool call’s error. A step’s `conversation` is the agent span id of the loop that made the call, and each `comm` event names that loop beside its member, so the two can be joined. Sentinel does not run on bridged members’ tool calls, which is one reason bridged members cannot use the channel yet.
+Pass it to the task as `Task(..., sentinel=no_secrets_on_board())`. The member gets the decision’s message as the tool call’s error. A step’s `conversation` is the agent span id of the loop that made the call, and each [CommunicationEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent) names that loop in `loop_span_id`, so the two can be joined. Sentinel does not run on bridged tool calls; use the bridge’s approval policies for those calls.
 
 ## Migrating from `memory(instance=...)`
 
-Before this channel, a board shared on purpose was a [memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory) tool with an explicit instance in every member’s tools, `memory(instance="board")`, with the prompt saying it is shared. That still works, and it is a different channel: members’ [ToolEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent)s record its use, with no sender, fence, status line, bounds or `comm` events. Nothing refuses using both; an arm that wants the board as its only channel gives no two members a shared instance.
+Before this channel, a board shared on purpose was a [memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory) tool with an explicit instance in every member’s tools, `memory(instance="board")`, with the prompt saying it is shared. That still works, and it is a different channel: members’ [ToolEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent)s record its use, with no sender, fence, status line, bounds or [CommunicationEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent)s. Nothing refuses using both; an arm that wants the board as its only channel gives no two members a shared instance.
 
 To move a task to the channel:
 
@@ -818,7 +1081,7 @@ solver = swarm(
 - Only the member’s own loop gets the tools. Its subagents, such as a deepagent member’s [general()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#general), do not, so each inbox has one reader.
 - The channel can be combined with [shared_memory()](./reference/inspect_swarm.html.md#shared_memory). Then the member’s own loop gets both channels’ tools and one `swarm_wait` for both.
 - The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`. `all` and `swarm` are reserved.
-- Bridged members cannot use the channel yet, and [swarm()](./reference/inspect_swarm.html.md#swarm) refuses a bridged member beside it.
+- A bridged member gets the tools from `swarm_bridged_tools(["messages"])`. All of its CLI’s conversations, subagents included, share its inbox: a message any of them reads is read ([Bridged members](./restrictions.html.md#bridged-members)).
 
 ## The tools
 
@@ -872,12 +1135,14 @@ An empty message is refused. Once the swarm begins to stop, sends are refused an
 
 ## The record of messages
 
-The swarm logs messages as [InfoEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent)s with source `inspect_swarm` and type `comm`, each in the span of the tool call that made it:
+The swarm logs messages as [CommunicationEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent)s with source `inspect_swarm`, each in the span of the tool call that made it. Its `kind` is one of:
 
-- `sent`: a send that reached the swarm, with its addresses, recipients, text, `reply_to` and `wake`, and why it was refused if it was. An inbox that is full, or a duplicate, is refused by the control `admit`.
-- `delivered`: a message delivered, with its recipients and commit sequence number.
-- `read`: a `read_messages` result, with the ids of the messages it showed. A read that showed nothing has no event.
-- `waited`: a `swarm_wait` call, with what ended it and the unread messages it named.
+- `sent`: a send that reached the swarm, with its addresses, recipients, text and `reply_to` in `send.record`, why it was refused in `send.rejected` if it was, and `wake` in `data["record"]`. An inbox that is full, or a duplicate, is refused by the control `admit`.
+- `delivered`: a message delivered, with its recipients and commit sequence number in `delivery`.
+- `read`: a `read_messages` result, with the ids of the messages it showed in `record_ids` and the messages it depends on in `data["depends_on"]`. A read that showed nothing has no event.
+- `waited`: a `swarm_wait` call, with what ended it and the unread messages it named. A wait that reports unread messages depends on all of them (`data["depends_on"]`), including those sent with `wake=False`. A wait that ends with only the unread count depends on none.
+
+`depends_on` names each message once per loop, so a read of messages that an earlier wait reported depends on none of them.
 
 The [metrics](./analysis.html.md#communication) count these events for each member.
 
@@ -907,18 +1172,27 @@ solver = swarm(
 
 | Field | Default | Meaning |
 |----|----|----|
-| `cost` | `None` | Cost cap in dollars. `None` derives it from the sample’s cost limit. |
-| `tokens` | `None` | Token cap. A string such as `"output:1m"` keeps its metering type. `None` derives it from the sample’s token limit. |
-| `time` | `None` | Seconds after which the swarm stops its members. `None` derives it from the sample’s time limit. |
+| `cost` | `None` | Cost cap in dollars. `None` derives it from the sample’s cost limit, or sets no cap under `derive=False`. |
+| `tokens` | `None` | Token cap. A string such as `"output:1m"` keeps its metering type. `None` derives it from the sample’s token limit, or sets no cap under `derive=False`. |
+| `time` | `None` | Seconds after which the swarm stops its members. `None` derives it from the sample’s time limit, or sets no cap under `derive=False`. |
 | `reserve` | `0.05` | Fraction of each sample limit held back when a cap is derived. |
 | `split` | `"pool"` | How the cost and token caps are divided between members ([Splits](#splits)). |
 | `grace` | `120.0` | Seconds members have, at most, to finish calls in flight after a stop. |
+| `derive` | `True` | Whether a cap left `None` is derived from the sample’s limit ([No derived caps](#no-derived-caps)). |
 
 Every field is a plain value, so each can be a task parameter. A member whose call reached a cap ends `swarm_cap`, and the swarm then stops the others ([Members](./members.html.md#how-a-member-ends)). The ledger records the caps, each member’s usage and what stopped the swarm ([Analysis](./analysis.html.md#the-ledger)).
 
+## No derived caps
+
+With `Budget(derive=False)`, the swarm derives no caps. The sample’s own cost, token and time limits then end the swarm as they end any solver: the limit’s error propagates out of the swarm, and later solvers do not run. A cap you set explicitly still applies, and `reserve` has no effect.
+
+As in any solver, a limit error that a tool or handoff turns into a tool message does not end the run. The member’s next model call raises the error again, as does any other member’s. A swarm cap, by contrast, stops the swarm even when a tool turns its error into a message.
+
+A split needs a cost or token cap, so with no explicit cap use `split="pool"`.
+
 ## Cost data
 
-A cost cap needs cost data for every member’s model. The swarm checks this when it starts and raises an error naming the models that have none. Configure prices with [set_model_cost()](https://inspect.aisi.org.uk/reference/inspect_ai.model.html#set_model_cost) or `--model-cost-config`.
+A cost cap needs cost data for every member’s model, and so does a sample cost limit under `derive=False`. The swarm checks this when it starts and raises an error naming the models that have none. Configure prices with [set_model_cost()](https://inspect.aisi.org.uk/reference/inspect_ai.model.html#set_model_cost) or `--model-cost-config`.
 
 ## Splits
 
@@ -934,7 +1208,7 @@ A member that uses up its share stops with status `share`. Its unused share is n
 
 When the swarm has a cap, each member’s preamble says how the budget is split. The [swarm_resources()](./reference/inspect_swarm.html.md#swarm_resources) tool, as in the example above, lets a member check the swarm’s caps, how much all members have used, and its own share. Code inside a member can read the same with [swarm_budget()](./reference/inspect_swarm.html.md#swarm_budget).
 
-A tool that reads [sample_limits()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits) shows the sample’s limits, not the swarm’s caps, so it overstates what members can spend.
+A tool that reads [sample_limits()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits) shows the sample’s limits, not the swarm’s caps, so with derived caps it overstates what members can spend. Under `derive=False`, the sample’s limits can still end the run, and [swarm_resources()](./reference/inspect_swarm.html.md#swarm_resources) shows only the caps given explicitly.
 
 ## Sweeps
 
@@ -1122,7 +1396,7 @@ The controller’s `final` rule chooses the swarm’s answer from the members’
 - `first`, the default: the member that submitted earliest, by the swarm’s clock, with ties broken by roster order.
 - `last`: the latest submission, again with ties broken by roster order. `leaderless(stop_on_submission=False, final="last")` gives it, for a team whose members build on each other’s work ([Controllers](./controllers.html.md#leaderless)).
 
-A controller of your own can also choose the answer itself, with `choose_answer()`, in place of the rule ([Controllers](./controllers.html.md#choosing-the-answer)). A member that ended any other way than submitting is never chosen ([Members](./members.html.md#how-a-member-ends)). When no member submitted, the answer is empty.
+A controller of your own can also choose the answer itself, with `choose_answer()`, in place of the rule ([Controllers](./controllers.html.md#choosing-the-answer)). A member that ended any other way than submitting is never chosen ([Members](./members.html.md#how-a-member-ends)). When no member submitted, the answer is empty. Each answer of a [persistent member](./members.html.md#persistent-members) is a submission for these rules, whatever the member’s status later, and ties between two answers of one member go to the earlier one.
 
 The swarm’s output is the chosen member’s [ModelOutput](https://inspect.aisi.org.uk/reference/inspect_ai.model.html#modeloutput), unchanged, so the scorer sees what it would have seen had that member run alone. The sample’s messages are its input followed by the answer’s message, whose `metadata["inspect_swarm"]` names the mode and the chosen member. Each member’s own conversation is in its timeline.
 
@@ -1148,13 +1422,13 @@ When the swarm ends, it writes a record of what it did to the transcript, as an 
 - `gate_checks`, `gate_passes` and `first_pass_time` count the member’s in-loop checks ([Checks during the run](#checks-during-the-run)).
 - `final.mode` is `first`, `last` or `controller`, and `final.member` names the chosen member. Under `controller`, `final.reason` is the reason the controller gave. With no submission, `mode` and `member` are `null` and `final.reason` is `"no_submissions"`.
 
-The event adds `"type": "result_record"` and an `"id"`, which the swarm also puts in the sample store under `inspect_swarm:result_id`, so that [swarm_result()](./reference/inspect_swarm.html.md#swarm_result) finds the record of the store it is given. If a limit, error or cancellation ends the swarm before it finalises its answer, the record has the answer so far with `provisional: true`, and that submission is the sample’s output: the first submission so far, the latest under `last`, or the controller’s choice once it has made one.
+The record is a [SwarmEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent) with `kind="result_record"`. Its `data` holds the fields above and an `id`, which the swarm also puts in the sample store under `inspect_swarm:result_id`, so that [swarm_result()](./reference/inspect_swarm.html.md#swarm_result) finds the record of the store it is given. Older logs hold the record as an [InfoEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent) with source `inspect_swarm` and `data["type"] == "result_record"`; [swarm_result()](./reference/inspect_swarm.html.md#swarm_result) reads both forms. If a limit, error or cancellation ends the swarm before it finalises its answer, the record has the answer so far with `provisional: true`, and that submission is the sample’s output: the first submission so far, the latest under `last`, or the controller’s choice once it has made one.
 
 [swarm_result()](./reference/inspect_swarm.html.md#swarm_result) returns `None` when no swarm ran in the sample. It raises `ValueError` for a sample it cannot read the record of: one read without its events or attachments, one written by an inspect_swarm that kept the record in the store under `inspect_swarm:result`, or one that holds a swarm’s events but whose store names no record, as for a sample recovered from a crashed eval.
 
 ### The record belongs to the swarm
 
-Only the swarm writes the record and `inspect_swarm:result_id`. Task code (tools, member builders, controllers, scorers) must not write that key or an event with source `inspect_swarm`. Member names, roles and sandboxes, and a controller’s `choose_answer()` reason, must be text that a log keeps as it is: not beginning with `attachment://` or `tc://`, which a log reads as a reference to an attachment, not a base64 `data:` URI, which a log removes when images are not logged, and valid UTF-8. The swarm does not write a record that holds such text, and its end raises `ValueError`.
+Only the swarm writes the record and `inspect_swarm:result_id`. Task code (tools, member builders, controllers, scorers) must not write that key, a [SwarmEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent), or an event with source `inspect_swarm`. Member names, roles and sandboxes, and a controller’s `choose_answer()` reason, must be text that a log keeps as it is: not beginning with `attachment://` or `tc://`, which a log reads as a reference to an attachment, not a base64 `data:` URI, which a log removes when images are not logged, and valid UTF-8. The swarm does not write a record that holds such text, and its end raises `ValueError`.
 
 There is no record while the swarm runs, so no member can read another’s results from it. A scorer that reads it after the swarm is how a task finds each member’s sandbox ([Per-member sandboxes](#per-member-sandboxes)). A tool that reads the transcript sees every member’s model and tool calls anyway. That is a channel between members outside the swarm’s channels, and the swarm records no evidence of it.
 
@@ -1252,7 +1526,7 @@ Compare arms on the cost the log records, not on the caps ([Analysis](./analysis
 
 ## Overview
 
-When the swarm ends it writes two entries to the sample store, each also logged as an [InfoEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent) with source `inspect_swarm`:
+When the swarm ends it writes two entries to the sample store, each also logged as a [SwarmEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent) of kind `metrics` or `ledger` whose `data` is the entry:
 
 - `inspect_swarm:metrics`: tokens, cost and time for the swarm and each member, and counts of how each member acted, checked its work, communicated and waited ([Metrics](#metrics)).
 - `inspect_swarm:ledger`: the swarm’s accounting. Its budget, caps, the usage of each member, model calls that errored or reported no usage, unpriced models, and what stopped the swarm ([The ledger](#the-ledger)).
@@ -1266,7 +1540,7 @@ For the swarm:
 - `tokens`, `cost`: everything in the swarm: members, controller and final step.
 - `wall_clock`: seconds from the swarm’s start to its end.
 - `never_acted`: members with no completed model call.
-- `steps_to_answer`: completed model calls of the member whose output is the answer, `null` with no answer.
+- `steps_to_answer`: completed model calls of the member whose output is the answer, `null` with no answer. For a persistent member’s answer, its calls before that answer.
 - `longest_member_steps`: the largest number of completed model calls of any member.
 - `critical_steps_to_answer`: the number of completed model calls on the longest chain of calls the answer depended on, across members ([The critical path](#the-critical-path)).
 
@@ -1276,9 +1550,11 @@ For each member, in roster order:
 
 - `tokens`, `cost`: its usage, its subagents’ and background work’s included.
 - `running_time`: seconds from its start to its end, `null` for a member never started.
-- `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member, whose tool calls leave no tool events.
+- `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member: the CLI’s own tool calls are not recorded; bridged host tool calls, such as the swarm’s tools, are.
 - `gate_checks`, `gate_passes`, `first_pass_time`: its in-loop checks ([Scoring](./scoring.html.md#checks-during-the-run)).
 - `comm`, `waits`, `waits_by_outcome`, `wait_time`, `idle_time`: below.
+- `holds`, `held_time`: the turn boundaries at which a controller’s callbacks held it, and the seconds it was held. `running_time` includes them ([Boundary callbacks](#boundary-callbacks)). A persistent member’s idle holds count too.
+- `activations`, `answers`, `awaiting_work_time`: for a [persistent member](./members.html.md#persistent-members), the activations it began (1 at its start, one more for each wake), the answers it gave, and the part of `held_time` it spent idle, waiting for a wake or its end. All 0 for other members.
 
 ### The critical path
 
@@ -1286,20 +1562,18 @@ For each member, in roster order:
 
 Each member’s calls, its subagents’ and background work’s included, form one chain in the order they began. Chains link between members in two ways:
 
-- A view of a `shared_memory` file, or a `swarm_wait` result that names a file, follows the writes it showed. A view of a file follows every write in its history; a view of a deleted file follows the delete. Directory listings and the `changes` status line make no link.
+- A channel’s result follows the records it showed, as the channel reports them. It links to each record’s sender at the point the record was committed, so the sender’s work after a send or write is not linked. `shared_memory`: a view of a file follows every write in its history, a view of a deleted file follows the delete, and a `swarm_wait` result follows the write of each file it reports. Directory listings and the `changes` status line make no link. `messages`: `read_messages` follows the messages it returned, and a `swarm_wait` result that reports messages follows every unread message it counts. A message sent with `wake=False` links when it is read, or when a wait that reports messages counts it. A custom channel links what it reports ([Channels](./channels.html.md#writing-a-channel)).
 - A `swarm_wait` result that names a member’s end follows all of that member’s calls.
 
-A wait that also reached a custom waiting channel links no files, since its evidence does not say which channel named them. Its links to member ends count either way.
-
-The chain ends when the answering member ends, after its background work has finished, since that work can still change the member’s output.
+The chain ends when the answering member ends, after its background work has finished, since that work can still change the member’s output. For a persistent member’s answer, it ends at that answer.
 
 The number over-counts work inside a member. Parallel and background subagents, tool calls of one turn, and any other concurrent work count one after another, and the answering member’s background work after its agent returned, its reads included, counts whether or not it changed the answer. That excess reaches peers through the member’s later writes.
 
-The number also misses links. Only `shared_memory` and `swarm_wait` make them, so information that members share in other ways adds none: messages, a shared sandbox, a shared volume, a service, a custom channel and its wait results, a shared tool or store key, or a controller that passes one member’s result to another. A `swarm_wait` result that reports more than ten files names only the first ten in its evidence, so the rest make no link until the member views them. Missed links can only lower the number.
+The number also misses links. Only channel results and `swarm_wait` make them, so information that members share in other ways adds none: a shared sandbox, a shared volume, a service, a custom channel that reports no dependencies, a shared tool or store key, or a controller that passes one member’s result to another. Counts alone make no link either: the unread-message count and the line of changed files on other results, and `list_members`. Missed links can only lower the number.
 
-With both effects it is not a bound on true causal depth in either direction. A nested swarm’s board makes no link for the outer swarm; its own metrics count it.
+With both effects it is not a bound on true causal depth in either direction. A nested swarm’s channels make no link for the outer swarm; its own metrics count it.
 
-It is `null` when there is no answer, when the answering member has no recorded end, when the board’s evidence is inconsistent (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.
+It is `null` when there is no answer, when the answering member has no recorded end, when the evidence names a record no recorded commit made (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.
 
 ### Communication
 
@@ -1322,9 +1596,34 @@ Each member’s metrics count its `swarm_wait` calls, its subagents’ included:
 
 In a swarm with no `swarm_wait` (`filesystem` only, or `channels=[]`) the four are `null`, so 0 means the wait was offered and unused. Waiting is wall-clock time, so a member’s `running_time` includes it.
 
+### Boundary callbacks
+
+When a controller holds a member at turn boundaries ([Controllers](./controllers.html.md#boundary-callbacks)), the swarm writes two kinds of [SwarmEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent) in the member’s span, with `member` set. Neither holds message text.
+
+`boundary`, once for each boundary where callbacks ran, and for each hold of a persistent member after an answer, callbacks or not:
+
+- `boundary`: the boundary’s index. `after`: what the conversation ended with.
+- `origins`: the origins of the callbacks that ran, in order. `held_for`: the seconds the member was held.
+- `messages`: the number of messages `before` and `after`.
+- `outcome`: `continue` (any change is in the conversation), `end` (with `origin`), `stop`, `error` (a callback raised, or its result was invalid; with `origin` and `error`, the error’s type), `rejected` (applying the change failed, such as at the member’s message limit; with `error`) or `cancelled` (a cancellation from outside the swarm).
+
+`changed`, once for each callback whose result differed from what it received, with its `boundary` and `origin`:
+
+- `added`: each new message’s `id`, `hash` and `index` in the result.
+- `removed`: the ids of messages no longer there.
+- `replaced`: each message kept under its id with new content, with its `id` and its hashes `before` and `after`.
+- `order`: the result’s ids in order, only when the kept messages changed their order.
+- `applied`: whether the change is in the member’s conversation. It is `false` when a later callback ended the member or raised, the swarm stopped, or the change was rejected.
+
+A hash is the SHA-256 of the message as the log serializes it, without its id (a value JSON cannot hold counts as null, and text UTF-8 cannot encode is escaped), so a change can be matched to the messages in a later [ModelEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#modelevent)‘s input. When a callback rewrites the conversation, compaction summaries that describe messages it changed are removed, and the removal is one more `changed` event with origin `swarm`. A persistent member’s wake input is a `changed` event with origin `swarm` too, before the callbacks’ own.
+
+### Persistent members
+
+A [persistent member](./members.html.md#persistent-members) writes one `answer` event for each answer, in its span, with `answer`, the answer’s index from 0. In the result record, its [MemberResult](./reference/inspect_swarm.html.md#memberresult) has `persistent` true and `answer_times`, the swarm time of each answer. `FinalRecord.answer`, and the `final` event’s `answer`, say which of the chosen member’s answers is the swarm’s; they are `null` for other members.
+
 ### Wiring checks
 
-The metrics also check that members are wired to the channels. `tools_unwired` lists, in a swarm with a channel that has tools, the members with a completed model call whose loops never resolved [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.
+The metrics also check that members are wired to the channels. `tools_unwired` lists, in a swarm with a channel that has tools, the native members with a completed model call whose loops never resolved [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). Bridged members are exempt, so this metric does not detect a CLI built without [swarm_bridged_tools()](./reference/inspect_swarm.html.md#swarm_bridged_tools). A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.
 
 ## Samples dataframe
 
@@ -1384,7 +1683,7 @@ The ledger of a two-member swarm with a cost cap of \$1 and a time cap of 600 se
 ``` json
 {
   "version": 1,
-  "budget": {"cost": 1.0, "tokens": null, "time": 600.0, "reserve": 0.05, "split": "pool", "grace": 120.0},
+  "budget": {"cost": 1.0, "tokens": null, "time": 600.0, "reserve": 0.05, "split": "pool", "grace": 120.0, "derive": true},
   "caps": {"cost": 1.0, "tokens": null, "time": 600.0},
   "sample_limits": {"token": null, "cost": null, "message": null, "turn": null, "working": null, "time": null},
   "members": [
@@ -1430,7 +1729,7 @@ The ledger of a two-member swarm with a cost cap of \$1 and a time cap of 600 se
 ```
 
 - `budget` is the [Budget](./reference/inspect_swarm.configuration.html.md#budget) as given. `caps` are the caps the swarm applied, derived from the sample’s limits or given: `cost` in dollars, `tokens`, and `time` in seconds, `null` for no cap. `sample_limits` are the sample’s limits when the swarm started.
-- `members` has one entry per member, in roster order. `status` is as in [How a member ends](./members.html.md#how-a-member-ends), `null` for a member never started. `cancelled` means the swarm or the sample cancelled the member, so calls it had in flight are unknown. A hard stop during a background drain also sets `cancelled`; the agent’s returned status is kept. `background_started` counts the tasks the member started with [background()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background), and `background_cancelled` those cancelled before they finished, whose calls in flight are unknown too.
+- `members` has one entry per member, in roster order. `status` is as in [How a member ends](./members.html.md#how-a-member-ends), `null` for a member never started. `cancelled` means the swarm or the sample cancelled the member, so calls it had in flight are unknown. A hard stop during a background drain also sets `cancelled`; the agent’s returned status is kept. So does a stop or `end()` that cancels a boundary callback while one of its model calls is in flight. `background_started` counts the tasks the member started with [background()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background), and `background_cancelled` those cancelled before they finished, whose calls in flight are unknown too.
 - `meter` is the usage and cost of what a member did. `suspended_cost` is the part spent while token counting was suspended, such as approval calls.
 - `calls` counts model calls: `calls` completed ones other than cache replays, `cache_replays` replayed from cache at no charge, `errored` attempts that errored or were cancelled (retries included), `no_usage` completed with no usage, and `unpriced` completed with usage but no cost.
 - `runtime` meters the controller’s own calls, `final` the final step’s (the default first-submission answer makes none), and `swarm` everything in the swarm: members, runtime and final step. The top-level `calls` counts every call in the swarm. `unpriced_calls_recorded` counts the unpriced calls the swarm’s meter recorded.
@@ -1446,11 +1745,10 @@ The ledger of a two-member swarm with a cost cap of \$1 and a time cap of 600 se
 
 ## What the swarm does not support
 
-- No background work in bridged members. A member cannot combine background work with the agent bridge. [background()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background) raises in a bridged member, and a member that uses the bridge after starting background work ends `errored`.
-- No channels with tools for bridged members. A bridged member cannot use the [shared-memory channel](./shared-memory.html.md) yet, and [swarm()](./reference/inspect_swarm.html.md#swarm) refuses one beside it.
+- No Inspect background work in bridged members. A member cannot combine Inspect’s [background()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background) with the agent bridge. [background()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background) raises in a bridged member, and a member that uses the bridge after starting background work ends `errored`. The CLI’s own background work is a separate gap ([The CLI’s own concurrent work](#the-clis-own-concurrent-work)).
 - No checkpointing. Inspect’s sample checkpointing does not restore the swarm’s shared state or its caps, so a swarm raises an error before any member starts in a sample with checkpointing on. Turn checkpointing off for tasks that run a swarm: set `checkpoint=False` on `Task()` or [eval()](https://inspect.aisi.org.uk/reference/inspect_ai.html#eval), or remove every checkpoint setting, including `--checkpoint` and `INSPECT_EVAL_CHECKPOINT`.
 - No ACP agents. ACP agents wait for their caller to drive them, so they are refused.
-- No scorers that read a member’s tool state. Each member runs in its own tool-state scope, so built-in tools that keep state in the store ([memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory), [bash_session()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session), [web_browser()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#web_browser), the skill tool) keep each member’s at keys inside its scope, which differ from the default ones. Tool state that a setup solver prepared at the default instance is not carried into the members either; they start with fresh state ([Members](./members.html.md#tool-state)).
+- No scorers that read a member’s tool state. Each member runs in its own tool-state scope, so built-in tools that keep state in the store ([memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory), [bash_session()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session), the skill tool) keep each member’s at keys inside its scope, which differ from the default ones. Tool state that a setup solver prepared at the default instance is not carried into the members either; they start with fresh state ([Members](./members.html.md#tool-state)).
 
 ## Bridged members
 
@@ -1458,17 +1756,104 @@ A bridged member runs a CLI agent in the sandbox through Inspect’s agent bridg
 
 The CLI’s own tool calls do not emit Inspect [ToolEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent)s, so the tool-event evidence described here does not cover them, Inspect Sentinel does not see them, and `longest_identical_tool_run` is `null` for bridged members.
 
+### Channels for bridged members
+
+A bridged agent’s tools are fixed when it is built, so it does not take [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). Give it [swarm_bridged_tools()](./reference/inspect_swarm.html.md#swarm_bridged_tools) in its bridged tools, naming the channels it uses:
+
+``` python
+from inspect_ai.agent import Agent, agent, react
+from inspect_ai.tool import bash
+from inspect_swe import claude_code
+
+from inspect_swarm import (
+    member,
+    messages,
+    shared_memory,
+    swarm,
+    swarm_bridged_tools,
+    swarm_tools,
+)
+
+
+@agent
+def worker() -> Agent:
+    return react(tools=[bash(), swarm_tools()])
+
+
+@agent
+def cc_worker(channels: list[str] = ["messages", "shared_memory"]) -> Agent:
+    return claude_code(bridged_tools=[swarm_bridged_tools(channels)])
+
+
+solver = swarm(
+    members=[member(worker, count=2), member(cc_worker, name="cc", bridged=True)],
+    channels=[messages(), shared_memory()],
+)
+```
+
+- `"messages"` gives `send_message`, `read_messages` and `list_members`, and `"shared_memory"` gives `shared_memory`. Both give `swarm_wait`. The CLI sees them as the MCP server `swarm`.
+- A tool whose channel the swarm does not have returns an error that says so.
+- [swarm_bridged_tools()](./reference/inspect_swarm.html.md#swarm_bridged_tools) serves only [messages()](./reference/inspect_swarm.html.md#messages) and [shared_memory()](./reference/inspect_swarm.html.md#shared_memory). [swarm()](./reference/inspect_swarm.html.md#swarm) refuses a bridged member beside a custom channel that has records. Custom channels that only add instructions are fine.
+- A bridged member in a swarm with [messages()](./reference/inspect_swarm.html.md#messages) needs `"messages"` too: other members can send to it, and without `read_messages` it could never read them. Its tools return an error that says to add it. `["messages"]` alone, in a swarm that also has the shared memory, is fine, with one cost: the member’s preamble includes every channel’s instructions, so it is still told to use `shared_memory`, which it does not have. Per-member channel instructions are tracked in [\#149](https://github.com/meridianlabs-ai/inspect_swarm/issues/149).
+- A member uses [swarm_bridged_tools()](./reference/inspect_swarm.html.md#swarm_bridged_tools) or [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools), never both.
+- The CLI is one agent to the swarm, whichever of its conversations calls, its subagents included. They share the member’s inbox, so a message any of them reads is read for all. They share what the member has viewed in the shared memory, so a view by a subagent lets the top-level session overwrite or delete that file. Sends and writes from any of them are the member’s.
+- A bridged member never counts as waiting, since one call in `swarm_wait` does not show that its CLI is idle. Its waits end on news, a member’s end, the swarm’s stop or their timeout, never because every member is waiting. A native member waiting beside a running bridged member is released by its own timeout at worst.
+- The log records these calls as [ToolEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent)s, and their [CommunicationEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent)s have `via` set to `"bridge"` in `data` (in `data.record` for a send). Inspect Sentinel does not see them; the bridge’s `approval=` policies do.
+
+A CLI gives up on an MCP tool call that runs too long, and the model then gets an error in place of the result. Claude Code and Codex both stop one after 300 seconds by default (Claude Code 2.1.308, Codex 0.166.0), while [shared_memory()](./reference/inspect_swarm.html.md#shared_memory) waits up to 600. So a bridged member’s `swarm_wait` lasts at most `swarm_bridged_tools(channels, max_wait=280)` seconds, or the swarm’s longest wait if that is shorter. Native members’ waits are unchanged.
+
+- Claude Code: keep the default. Claude Code stops a call that sends nothing for 300 seconds, and inspect_swe has no setting that raises this for bridged tools; `MCP_TOOL_TIMEOUT` does not.
+- Codex: to wait longer, raise its timeout and `max_wait` together: `codex_cli(config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"}, bridged_tools=[swarm_bridged_tools(channels, max_wait=600)])`.
+
+If the CLI abandons a wait while its host call continues, that call can still mark member ends reported and record dependency links for the CLI’s shared loop. Later conversations may then miss those end notices, and later reads do not repeat those links, even though no model received the abandoned result. The default `max_wait` keeps a wait inside the CLI’s timeout, but it does not confirm delivery, and it does not prevent an abandoned call after an interruption.
+
+Inspect limits shared-memory views to 16 KiB by default. The CLIs also apply token limits (25,000 for Claude Code; 10,000 for Codex), so a view can be shortened further by the CLI. A default `read_messages` result is about 9 KB.
+
+### The CLI’s own concurrent work
+
+The swarm owns and drains only work started with Inspect’s [background()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background). It does not own, drain or attribute the CLI’s own concurrent work: Claude Code’s background shell commands, background subagents and agent teams, and Codex’s subagents (its multi-agent tools).
+
+- The swarm cannot wait for this work or stop it apart from the CLI. Claude Code waits for much of its background work before it exits, and the member keeps running until then.
+- Its model calls go through the member’s bridge, so they count as the member’s usage: against its limits and the swarm’s caps, and in the ledger.
+- Work left running can outlast the member. The swarm does not check that the CLI stopped it, and a process started with `nohup` or `&` can keep running after the CLI exits. Such work can change the sandbox after the member ends and before scoring.
+
+To keep a bridged member to work the swarm can see, turn these features off.
+
+Claude Code (checked against 2.1.311, the stable release `claude_code()` installs when the sandbox has none):
+
+- Agent teams are off by default. Claude Code turns them on only with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` or `--agent-teams`, and `claude_code()` sets neither.
+- Background shell commands and background subagents are on by default. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` turns them off, and also stops Claude Code moving long subagents and timed-out commands to the background.
+- The `Monitor` tool still runs in the background with that setting. Leave it out with `disallowed_tools=["Monitor"]`.
+- Workflows also run subagents, where the account has them. `CLAUDE_CODE_DISABLE_WORKFLOWS=1` turns them off.
+
+``` python
+claude_code(
+    env={
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+        "CLAUDE_CODE_DISABLE_WORKFLOWS": "1",
+    },
+    disallowed_tools=["Monitor"],
+    bridged_tools=[swarm_bridged_tools(channels)],
+)
+```
+
+Codex (checked against 0.166.0, the latest release `codex_cli()` installs when the sandbox has none):
+
+- Subagents are on by default. `agents.enabled = false` turns them off: `codex_cli(config_overrides={"agents.enabled": "false"}, bridged_tools=[swarm_bridged_tools(channels)])`. Use this rather than `features.multi_agent = false`, which a model’s catalog entry can override. Only an explicit `features.multi_agent_v2 = true` turns them back on.
+
+None of these settings stop a shell command from starting a process that keeps running on its own, such as `nohup server &`. The swarm does not stop such processes when the member ends.
+
 ## What the log records
 
 - Members’ [ToolEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent)s are the record of what they did, except for bridged members.
-- The shared-memory channel’s writes, views and waits are `comm` events ([Shared Memory](./shared-memory.html.md#the-record-of-the-board)).
+- The shared-memory channel’s writes, views and waits are [CommunicationEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent)s ([Shared Memory](./shared-memory.html.md#the-record-of-the-board)).
 - Files members share in a sandbox, tool instances they share, and a tool that reads the transcript are channels the swarm observes but does not record ([Channels](./channels.html.md#shared-files-are-observed-not-recorded)).
 
 Spans inside a swarm log no [StoreEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#storeevent)s. The swarm’s span logs the net change to the store, which says what changed but not which member changed it. If an error, limit or cancellation escapes the swarm and ends the sample, the log may have no [StoreEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#storeevent) for the swarm’s writes. `sample.store` is always the record of the final store.
 
 ## The store keys
 
-The swarm owns three keys in the sample store, written when the swarm ends: `inspect_swarm:result_id`, `inspect_swarm:ledger` and `inspect_swarm:metrics`. Task code must not write them, or an event with source `inspect_swarm`. The result record itself is an event in the transcript ([Scoring](./scoring.html.md#the-result-record)). A tool that reads the transcript sees every member’s model and tool calls, a channel between members that the swarm records no evidence of ([Scoring](./scoring.html.md#the-record-belongs-to-the-swarm)).
+The swarm owns three keys in the sample store, written when the swarm ends: `inspect_swarm:result_id`, `inspect_swarm:ledger` and `inspect_swarm:metrics`. Task code must not write them, a [SwarmEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent), or an event with source `inspect_swarm`. The result record itself is an event in the transcript ([Scoring](./scoring.html.md#the-result-record)). A tool that reads the transcript sees every member’s model and tool calls, a channel between members that the swarm records no evidence of ([Scoring](./scoring.html.md#the-record-belongs-to-the-swarm)).
 
 
 # inspect_swarm.analysis – Inspect Swarm
@@ -1479,7 +1864,7 @@ The swarm owns three keys in the sample store, written when the swarm ends: `ins
 
 Columns for `inspect_ai.analysis.samples_df()` with each sample’s realized cost and what the swarm’s ledger says about it, as in `samples_df(logs, columns=SampleSummary + SwarmColumns)`. The `inspect_swarm.analysis` module docstring lists every column.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/analysis/_columns.py#L111)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/analysis/_columns.py#L111)
 
 ``` python
 SwarmColumns: list[Column] = [
@@ -1503,7 +1888,7 @@ SwarmColumns: list[Column] = [
 
 Read the swarm’s ledger from a sample.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/analysis/_columns.py#L14)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/analysis/_columns.py#L14)
 
 ``` python
 def swarm_ledger(sample: EvalSample) -> SwarmLedger | None
@@ -1516,11 +1901,11 @@ A sample read from a log with its store, for example from [read_eval_log()](http
 
 Realized usage and cost of one run of the swarm, and how complete they are.
 
-The swarm writes its ledger once, when it ends, to the sample store as `inspect_swarm:ledger` and as an [InfoEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent) with source `inspect_swarm`. Read it from a sample with [swarm_ledger()](../reference/inspect_swarm.analysis.html.md#swarm_ledger).
+The swarm writes its ledger once, when it ends, to the sample store as `inspect_swarm:ledger` and as a [SwarmEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent) of kind `ledger` whose `data` is the store entry. Read it from a sample with [swarm_ledger()](../reference/inspect_swarm.analysis.html.md#swarm_ledger).
 
 The store entry’s shape follows `version`. This inspect_swarm reads version 1 only.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L120)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_ledger.py#L121)
 
 ``` python
 class SwarmLedger(BaseModel)
@@ -1598,7 +1983,7 @@ No call is known to be missing from the swarm’s usage and cost: no member, mem
 
 One member’s entry in the swarm’s ledger.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L90)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_ledger.py#L91)
 
 ``` python
 class MemberLedger(BaseModel)
@@ -1636,7 +2021,7 @@ Usage and cost recorded by one of the swarm’s meters.
 
 A meter counts the model calls made in its context: one member’s, the runtime’s, the final step’s, or the whole swarm’s.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L48)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_ledger.py#L49)
 
 ``` python
 class Meter(BaseModel)
@@ -1659,7 +2044,7 @@ Counts of the model events in the swarm, or in one member’s spans.
 
 `errored`, `no_usage` and `unpriced` count calls whose cost is missing, so any of them above zero makes the cost a lower bound.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L66)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_ledger.py#L67)
 
 ``` python
 class Calls(BaseModel)
@@ -1695,7 +2080,7 @@ A swarm member: a built agent, or a registered `@agent` factory and its argument
 
 Create one with [member()](../reference/inspect_swarm.html.md#member), which documents the fields and the member contract.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_member.py#L87)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_member.py#L94)
 
 ``` python
 class Member(BaseModel)
@@ -1719,7 +2104,7 @@ The member’s name. `None` uses the agent’s or factory’s unqualified regist
 The member’s role, given to the controller and in the member’s preamble.
 
 `choose_name` bool  
-Whether the member chooses its own name. `True` leaves the member’s name out of its preamble, which asks it to choose a name and tell the other members; the swarm still uses `name` for everything it records.
+Whether the member chooses its own name. `True` leaves the member’s name out of the swarm’s preamble, which asks it to choose a name and tell the other members; the swarm still uses `name` for everything it records. A controller’s `start(preamble=...)` replaces that preamble with its own text, used as given, or `preamble=False` leaves it out; neither adds a request to choose a name.
 
 `count` int  
 How many members this record stands for. Above 1 needs the factory form.
@@ -1736,6 +2121,9 @@ The member’s own sandbox environment, where `{member}` stands for the member�
 `visible_sandboxes` list\[str\]  
 Other sandbox environments the member can reach by name, such as a shared service. Only with `sandbox`.
 
+`persistent` bool  
+Whether the member stays available after it answers, held idle until the controller wakes it with `SwarmControl.wake()`.
+
 ### Budget
 
 The swarm-wide budget.
@@ -1744,7 +2132,7 @@ By default the swarm derives its caps from the sample’s cost, token and time l
 
 Every field is a plain value, so each can be a task parameter, and two budgets that differ in any field are logged as different arguments.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_budget.py#L32)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_budget.py#L34)
 
 ``` python
 class Budget(BaseModel)
@@ -1753,13 +2141,13 @@ class Budget(BaseModel)
 #### Attributes
 
 `cost` float \| None  
-Swarm cost cap in dollars. `None` derives it from the sample’s cost limit.
+Swarm cost cap in dollars. `None` derives it from the sample’s cost limit when `derive` is `True`, and sets no cap when it is `False`.
 
 `tokens` int \| str \| None  
-Swarm token cap. A string such as `"output:1m"` is parsed by `parse_token_limit()` and keeps its metering type. `None` derives it from the sample’s token limit, with that limit’s metering type.
+Swarm token cap. A string such as `"output:1m"` is parsed by `parse_token_limit()` and keeps its metering type. `None` derives it from the sample’s token limit, with that limit’s metering type, when `derive` is `True`, and sets no cap when it is `False`.
 
 `time` float \| None  
-Seconds after which the swarm stops its members. `None` derives it from the sample’s time limit.
+Seconds after which the swarm stops its members. `None` derives it from the sample’s time limit when `derive` is `True`, and sets no cap when it is `False`.
 
 `reserve` float  
 Fraction of each sample limit held back when a cap is derived.
@@ -1769,6 +2157,9 @@ How the cost and token caps are divided between members: one shared pool, equal 
 
 `grace` float  
 Seconds members have, at most, to finish calls already in flight after a stop. If the sample has a time limit, this period is capped at half its remaining time.
+
+`derive` bool  
+Whether a cap left `None` is derived from the sample’s limit. `False` sets no such cap: the sample’s own limits then end the swarm as they end any solver.
 
 
 # inspect_swarm – Inspect Swarm
@@ -1781,7 +2172,7 @@ A swarm of agents working on one sample.
 
 Each member gets a timeline in the sample named after it, so member names must be unique across the swarm runs and other timelines in a sample. To run swarms more than once in one sample, build them with distinct member names. A member may not be named `init`, `solvers` or `scorers`: Inspect’s timelines read spans with those names as the sample’s phases.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_swarm.py#L39)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_swarm.py#L48)
 
 ``` python
 @agent
@@ -1818,15 +2209,17 @@ Names. Members left on their default name are numbered across the whole roster, 
 
 Objects given to an agent are shared. Every member built from one record receives the same objects from `args`, and two built agents given the same tool object share it, across members and samples. Inspect’s built-in tools keep their state in the sample store or the sandbox, so this matters only for a custom tool or helper that keeps state in its Python object (a counter, a cache, a client). To give each member its own, construct it inside a member builder, an `@agent` factory that builds the configured agent, and use the factory form.
 
-Tool state. Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store ([memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory), [bash_session()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session), [web_browser()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#web_browser), the skill tool) give each member its own state when their `instance` is left at the default, so the default [memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory) is private to each member. An explicit `instance` is used as given: members, or the copies of one counted member, that name the same instance share its state, so a board shared on purpose is `memory(instance="board")`. The sample store itself is shared. State that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with [tool_state_instance()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#tool_state_instance). Built-in tool state that a setup solver prepared at the default instance before the swarm runs is not visible to the members.
+Tool state. Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store ([memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory), [bash_session()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session), the skill tool) give each member its own state when their `instance` is left at the default, so the default [memory()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory) is private to each member. An explicit `instance` is used as given: members, or the copies of one counted member, that name the same instance share its state, so a board shared on purpose is `memory(instance="board")`. The sample store itself is shared. State that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with [tool_state_instance()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#tool_state_instance). Built-in tool state that a setup solver prepared at the default instance before the swarm runs is not visible to the members.
 
-Submissions. A member that returns normally has submitted, and its output is its answer, unless the output’s stop reason is `content_filter` or `model_length`. That is how [react()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react) returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered.
+Submissions. A member that returns normally has submitted, and its output is its answer, unless the output’s stop reason is `content_filter` or `model_length`. That is how [react()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react) returns after three refusals or a context overflow it could not recover from, so the member ends `unsubmitted` and the swarm never chooses its output as the answer. Other agents keep the rule that a normal return is a submission: an agent that gives up in some other way and returns is treated as having answered. A persistent member’s normal return is never a submission: its answers are recorded as it gives them, so a loop that returns has stopped without one (an `on_continue` that returns `False`, for example), and the member ends `unsubmitted`, its earlier answers still candidates.
+
+Persistent members. With `persistent=True`, the member stays available after it answers: when it submits in a turn that calls no handoff, or a `react(submit=False)` member gives a tool-free reply, the swarm records that as one of its answers and holds the member idle at its next turn boundary, in the same agent loop. The controller hears [MemberIdle](../reference/inspect_swarm.html.md#memberidle) and gives the member its next piece of work with `SwarmControl.wake()`, which appends it to the member’s conversation. Every answer is a candidate for the swarm’s answer. The member’s limits span its whole life, and its time limit does not run while it is idle. A member stopped or ended while idle ends `submitted`, its last answer as its output. Only a member whose agent is a [react()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react), `react(submit=False)` or [deepagent()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#deepagent) loop without background dispatch, given directly or returned by an `@agent` builder, can be persistent; any other agent, and a bridged member, is refused.
 
 Stopping itself. An agent that raises `LimitExceededError("custom", ...)` with no `source` to stop itself ends only its member, with status `member_limit:custom`; the other members continue and the swarm never chooses its output as the answer. This holds when the error is raised in a task group inside the agent, too.
 
 Sandboxes. Members share the sample’s sandbox by default. With `sandbox`, a member works in its own: the swarm makes that environment the member’s default, so [sandbox()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sandbox) in its tools returns it, and hides the sample’s other environments from the member except those in `visible_sandboxes`, such as a shared service. Tools that choose a sandbox without a name, such as [text_editor()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#text_editor), [bash_session()](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session) and the agent bridge, use the member’s own; a visible service is reached only by name. `sandbox="{member}"` gives each copy of a counted member the environment named after it: `member(factory, name="agent", count=2, sandbox="{member}")` runs `agent-1` and `agent-2` in the environments of those names. The sample’s sandbox configuration provides the environments (for Docker, a compose service for each), and the swarm checks that they exist when it starts. When one member has its own sandbox, every member must have one, no two the same, and the `filesystem` channel, which describes a shared sandbox, can be used only as `filesystem(shared_volume=True)`, for sandboxes that each mount one shared volume. A service in `visible_sandboxes` is reachable from any of the member’s tools that take a sandbox name, so list only services every member may use.
 
-Chosen names. With `choose_name=True` the member is not told its name: its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members, and the `filesystem` channel tells it to keep its work in a directory named with the name it chose. Its role, if it has one, is still stated. The swarm’s records, spans, tool-state scopes and budget shares still use `name`. A swarm in which any member chooses its name can use only the `filesystem` channel or no channel (`channels=[]`), since other channels show members to each other by name. Text you give the member yourself is not changed: the sample input, a controller’s `start(input=...)`, the agent’s prompt and the sandbox configuration.
+Chosen names. With `choose_name=True` the member is not told its name: the swarm’s preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members, and the `filesystem` channel tells it to keep its work in a directory named with the name it chose. Its role, if it has one, is still stated. The swarm’s records, spans, tool-state scopes and budget shares still use `name`. A swarm in which any member chooses its name can use only the `filesystem` channel or no channel (`channels=[]`), since other channels show members to each other by name. Text you give the member yourself is not changed: the sample input, a controller’s `start(input=...)` and `start(preamble=...)`, the agent’s prompt and the sandbox configuration. A controller’s `start(preamble=...)` uses its text as given, and `preamble=False` leaves the preamble out; neither adds a request to choose a name.
 
 Scoring with member sandboxes. The task’s scorers run after the swarm, outside every member, where [sandbox()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sandbox) is `default`. A scorer that grades the members’ work names each member’s sandbox itself, as in `sandbox("agent-1")`, and the `sandbox` field of each member in the swarm’s result record says which member used which.
 
@@ -1834,7 +2227,7 @@ Background work belongs to the member. Work its agent starts with [background()]
 
 ACP agents, which wait for their caller to drive them rather than returning, are refused: a built one when [member()](../reference/inspect_swarm.html.md#member) is called, and a factory’s when the member is built.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_member.py#L198)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_member.py#L211)
 
 ``` python
 def member(
@@ -1849,6 +2242,7 @@ def member(
     bridged: bool | None = None,
     sandbox: str | None = None,
     visible_sandboxes: Sequence[str] = (),
+    persistent: bool = False,
 ) -> Member
 ```
 
@@ -1874,7 +2268,7 @@ How many members this record stands for. Above 1 needs a factory.
 The member’s own token, cost, turn, message or time limits.
 
 `bridged` bool \| None  
-Whether the agent is bridged (runs a CLI in the sandbox through Inspect’s agent bridge). `None` counts inspect_swe’s agents as bridged and others as native. Pass `True` for any other bridged agent: the swarm stops a bridged member by cancelling it, because a limit error raised inside the bridge would end the sample, and it must know before the member’s first model request. Bridged members cannot use channels with tools and records yet, and [swarm()](../reference/inspect_swarm.html.md#swarm) refuses one beside such a channel. A bridged agent that is not declared and not in the `inspect_swe/` namespace is not refused: it cannot reach those channels’ tools, so it runs without them. Pass `True` to have it refused instead.
+Whether the agent is bridged (runs a CLI in the sandbox through Inspect’s agent bridge). `None` counts inspect_swe’s agents as bridged and others as native. Pass `True` for any other bridged agent: the swarm stops a bridged member by cancelling it, because a limit error raised inside the bridge would end the sample, and it must know before the member’s first model request. A bridged member reaches the swarm’s channels through [swarm_bridged_tools()](../reference/inspect_swarm.html.md#swarm_bridged_tools) in its agent’s bridged tools; a bridged member waiting in `swarm_wait` never counts as waiting.
 
 `sandbox` str \| None  
 The name of the member’s own sandbox environment. `{member}` stands for the member’s name. `None` shares the sample’s sandbox.
@@ -1882,17 +2276,22 @@ The name of the member’s own sandbox environment. `{member}` stands for the me
 `visible_sandboxes` Sequence\[str\]  
 Other sandbox environments the member can reach by name, such as a shared service. Only with `sandbox`. It cannot include `default`, which inside the member is the member’s own sandbox.
 
+`persistent` bool  
+Whether the member stays available after it answers, held idle until the controller wakes it.
+
 ## Controllers
 
 ### leaderless
 
-Start every member with the swarm’s input; stop at the first submission, or when all have ended.
+Start every member with the swarm’s input; stop at the first submission, or when none is still working.
 
 By default the swarm stops when the first member submits. The swarm’s answer is the first submission, so nothing the other members do after it can change the answer. The members still running are stopped: they finish the calls they have in flight, within `Budget.grace`, and the ones still running after it are cancelled.
 
+A persistent member’s answer is a submission: it stops the swarm by default. `leaderless` never wakes a member, so with `stop_on_submission=False` a persistent member answers once and stays idle until the swarm stops.
+
 Pass `stop_on_submission=False` to let every member run to its end when the other members’ work still matters: tasks whose scorer reads a shared artifact (such as the sandbox) after the members end, where members still working change what is scored; arms that measure each member’s result (<team@k>); and agents for which any normal return counts as a submission, so that a member that gives up would end the swarm. Add `final="last"` to make the latest submission the answer, for a team whose members build on each other’s work.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/leaderless.py#L8)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/leaderless.py#L8)
 
 ``` python
 @swarm_controller
@@ -1913,7 +2312,7 @@ Decorator for registering swarm controllers.
 
 The factory’s arguments are recorded with the controller, so they appear in the log and the controller can be rebuilt from it. A factory in a package is registered as `<package>/<name>`.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_controller.py#L67)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_controller.py#L67)
 
 ``` python
 def swarm_controller(
@@ -1936,7 +2335,7 @@ How a swarm runs: which members start, when and with what input, and when the sw
 
 A [Controller](../reference/inspect_swarm.html.md#controller) holds configuration only: one object serves every sample, so per-sample state belongs in `run`’s local variables. Return one from a factory decorated with `@swarm_controller`.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_controller.py#L28)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_controller.py#L28)
 
 ``` python
 class Controller
@@ -1947,7 +2346,7 @@ class Controller
 \_\_init\_\_  
 Create a controller.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_controller.py#L34)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_controller.py#L34)
 
 ``` python
 def __init__(
@@ -1972,7 +2371,7 @@ Called with the roster when the swarm is built. Raise `ValueError` for a roster 
 
 What a controller’s `run` works through: the swarm’s members and their events, for one sample.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_control.py#L117)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L207)
 
 ``` python
 class SwarmControl(Protocol)
@@ -1988,7 +2387,7 @@ The members, in roster order.
 member  
 The member with this name.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_control.py#L125)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L215)
 
 ``` python
 def member(self, name: str) -> MemberHandle
@@ -2000,13 +2399,19 @@ The member’s name.
 start  
 Start a member, and return at once.
 
-The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm’s input when `input` is `None`, followed by the member’s preamble: its name unless `choose_name=True`, its role and the roster size, how the budget is split, and each channel’s instructions.
+The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm’s input when `input` is `None`, followed by the member’s preamble as a user message. The swarm’s preamble gives the member’s name unless `choose_name=True`, its role and the roster size, how the budget is split, and each channel’s instructions.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_control.py#L136)
+A controller that does not run its members at the same time can replace the swarm’s preamble or leave it out. Text passed as `preamble` replaces all of it, channel instructions included, and is used as given, also for a member with `choose_name=True`.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L226)
 
 ``` python
 def start(
-    self, member: str | MemberHandle, input: str | list[ChatMessage] | None = None
+    self,
+    member: str | MemberHandle,
+    input: str | list[ChatMessage] | None = None,
+    *,
+    preamble: str | Literal[False] | None = None,
 ) -> None
 ```
 
@@ -2016,23 +2421,47 @@ The member, or its name.
 `input` str \| list\[[ChatMessage](https://inspect.aisi.org.uk/reference/inspect_ai.model.html#chatmessage)\] \| None  
 The member’s input. `None` gives it the swarm’s input.
 
+`preamble` str \| Literal\[False\] \| None  
+The member’s preamble, a user message after its input. `None` gives it the swarm’s preamble; a string replaces the swarm’s preamble with that text; `False` leaves it out.
+
+wake  
+Give an idle member its next piece of work, and return at once.
+
+The member continues its conversation with `input` appended: a string as one user message, a list of user messages as given. It keeps its tool state, its limits and what it has seen. Each message gets a new id and no `source`; the messages passed are not changed, so the same list can be passed again.
+
+An event can be stale when the controller reads it, so check that `member(name).state == "idle"` before waking a member.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L252)
+
+``` python
+def wake(
+    self, member: str | MemberHandle, input: str | list[ChatMessageUser]
+) -> None
+```
+
+`member` str \| [MemberHandle](../reference/inspect_swarm.html.md#memberhandle)  
+The member, or its name.
+
+`input` str \| list\[[ChatMessageUser](https://inspect.aisi.org.uk/reference/inspect_ai.model.html#chatmessageuser)\]  
+The member’s next input.
+
 events  
 The swarm’s events, in order from the swarm’s start.
 
-Each event is yielded once. The iterator ends when no member is running and no event is waiting; a member started later is reported by a new `events()` call. Use one iterator at a time: an iterator holds the events from its first step until it ends or is closed (`aclose()`, or leaving a `contextlib.aclosing()` block).
+Each event is yielded once. The iterator ends when no member is running or ending and no event is waiting: every member is pending, idle or ended. A member started or woken later is reported by a new `events()` call. Use one iterator at a time: an iterator holds the events from its first step until it ends or is closed (`aclose()`, or leaving a `contextlib.aclosing()` block).
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_control.py#L153)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L272)
 
 ``` python
-def events(self) -> AsyncGenerator[SwarmEvent, None]
+def events(self) -> AsyncGenerator[ControlEvent, None]
 ```
 
 choose_answer  
 Make this member’s submission the swarm’s answer, in place of the controller’s `final` rule.
 
-The choice is the provisional answer from now on and the final answer when the swarm ends. The result record and the `final` event give the mode `controller`, the member and `reason`. Choose once, from a member that has ended with a submission.
+The choice is the provisional answer from now on and the final answer when the swarm ends. The result record and the `final` event give the mode `controller`, the member and `reason`. Choose once, from a member that has ended with a submission, or a persistent member that has answered: its latest answer at the time of the call, kept if it answers again.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_control.py#L163)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L282)
 
 ``` python
 def choose_answer(
@@ -2050,7 +2479,7 @@ Why the controller chose it, for the record.
 
 A member as a controller sees it: its name, role, state and status, never its text.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_control.py#L65)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L71)
 
 ``` python
 class MemberHandle(Protocol)
@@ -2068,7 +2497,7 @@ The member’s role, if it has one.
 Whether the member chooses its own name and is not told `name`.
 
 `state` [MemberState](../reference/inspect_swarm.html.md#memberstate)  
-The member’s lifecycle state.
+The member’s lifecycle state: `pending`, `running` or `ended`, and for a persistent member also `idle` (held after an answer until `SwarmControl.wake()`) and `ending` (its ending has begun, and its [MemberEnded](../reference/inspect_swarm.html.md#memberended) is still to come).
 
 `status` str \| None  
 How the member ended, once it has: `submitted`, `unsubmitted`, `stopped`, `share`, `member_limit:<type>`, `swarm_cap`, `cancelled` or `errored`.
@@ -2076,11 +2505,100 @@ How the member ended, once it has: `submitted`, `unsubmitted`, `stopped`, `share
 `submitted` bool  
 Whether the member ended with a submission (status `submitted`).
 
+`held` bool  
+Whether the member is held at a turn boundary: its boundary callbacks are running, or it is idle.
+
+`persistent` bool  
+Whether the member is persistent (`member(..., persistent=True)`).
+
+`answers` int  
+How many answers a persistent member has given so far; 0 for other members.
+
+#### Methods
+
+on_boundary  
+Register a boundary callback, called at every turn boundary of the member’s own agent loop.
+
+A boundary comes before the loop’s first generation and before each one after it, with no model or tool call of the loop in flight. The callbacks run there in the order they were registered, in the member’s task, while the member is held: its time limit pauses, `swarm_wait` does not count it as active, and a stop ends it at once. Each receives a [Boundary](../reference/inspect_swarm.html.md#boundary) and returns `None` to continue, a list of messages to continue with that conversation (it must hold a user message), or `"end"` to end the member `stopped`. Registered on a pending member, the callback sees boundary 0, before the first generation; on a running one, from its next boundary.
+
+A callback’s model and tool calls count towards the member’s limits and the sample’s working time, and so does the rest of its time: wrap an idle wait in [suspend_working_limit()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#suspend_working_limit) to count it as waiting. An exception a callback raises ends the member `errored`. Every change a callback makes is recorded as a `changed` event, with `origin`.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L119)
+
+``` python
+def on_boundary(
+    self, callback: BoundaryCallback, *, origin: str
+) -> Callable[[], None]
+```
+
+`callback` [BoundaryCallback](../reference/inspect_swarm.html.md#boundarycallback)  
+The callback.
+
+`origin` str  
+Names the caller in the evidence, such as `orbit` or `operator`: 1 to 64 letters, digits, `_`, `-`, `.` or `:`. `swarm` is reserved.
+
+end  
+End the member `stopped`, with the reason `ended by <origin>`.
+
+A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member’s next model call is refused and it ends at its next boundary. A pending member ends at its first boundary once started. If the member is still running when the swarm’s grace period has passed since the request (or since a pending member started), its turn or its cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output. A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L141)
+
+``` python
+def end(self, *, origin: str) -> None
+```
+
+`origin` str  
+Names the caller in the evidence, as for `on_boundary()`.
+
+### Boundary
+
+A member at a turn boundary of its own agent loop, as a boundary callback receives it.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_seam.py#L29)
+
+``` python
+@dataclass(frozen=True)
+class Boundary
+```
+
+#### Attributes
+
+`member` str  
+The member’s name.
+
+`index` int  
+The boundary’s place among the boundaries of the member’s own loop, from 0 before its first generation.
+
+`activation` int  
+The member’s activation: 0 until a persistent member is first woken, then one more at each wake.
+
+`after` BoundaryAfter  
+What the conversation ends with: `start` at index 0, `tools` after a tool result, `reply` after an assistant message with no tool calls, `wake` after a persistent member’s wake input, and `user` after anything else.
+
+`messages` list\[[ChatMessage](https://inspect.aisi.org.uk/reference/inspect_ai.model.html#chatmessage)\]  
+A copy of the conversation: the member’s at the first callback, and as the callbacks before it left it at each later one. Changing it changes nothing; return the conversation instead.
+
+`output` [ModelOutput](https://inspect.aisi.org.uk/reference/inspect_ai.model.html#modeloutput)  
+A copy of the output of the member’s last generation.
+
+### BoundaryCallback
+
+A boundary callback: called with a [Boundary](../reference/inspect_swarm.html.md#boundary), it returns `None` to continue with the messages it received, a list of messages to continue with that conversation, or `"end"` to end the member.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_seam.py#L52)
+
+``` python
+BoundaryCallback: TypeAlias = Callable[
+    [Boundary], Awaitable[list[ChatMessage] | Literal["end"] | None]
+]
+```
+
 ### MemberEnded
 
 A member ended.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_control.py#L99)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L155)
 
 ``` python
 @dataclass(frozen=True)
@@ -2098,21 +2616,70 @@ How it ended, as `MemberHandle.status`.
 `submitted` bool  
 Whether it ended with a submission.
 
-### SwarmEvent
+### MemberIdle
+
+A persistent member answered and is idle, held until `SwarmControl.wake()` gives it more work.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L169)
+
+``` python
+@dataclass(frozen=True)
+class MemberIdle
+```
+
+#### Attributes
+
+`member` str  
+The member’s name.
+
+`answer` int  
+The index of the answer it just gave, from 0.
+
+`news` bool  
+Whether a channel already has news for the member’s own loop: something that would end a `swarm_wait` of that loop that watches everything, such as a file another agent wrote that the member has not viewed. Later writes are reported as [MemberNews](../reference/inspect_swarm.html.md#membernews), so a controller that wakes members on news also wakes on this.
+
+### MemberNews
+
+A record was delivered that is news to an idle persistent member: it would end a `swarm_wait` of the member’s own loop that watches everything.
+
+The controller decides whether to wake the member. Two records give two events, and an earlier event’s handling may have woken the member, so check that it is still idle before waking it.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L183)
+
+``` python
+@dataclass(frozen=True)
+class MemberNews
+```
+
+#### Attributes
+
+`member` str  
+The idle member the record is news to.
+
+`channel` str  
+The name of the channel that delivered the record.
+
+`record` str  
+The record’s id.
+
+`sender` str  
+The name of the member that sent the record.
+
+### ControlEvent
 
 An event a controller receives from `SwarmControl.events()`. Later versions add kinds, so test an event’s type before reading its fields.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_control.py#L113)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_control.py#L203)
 
 ``` python
-SwarmEvent = MemberEnded
+ControlEvent = MemberEnded | MemberIdle | MemberNews
 ```
 
 ### MemberInfo
 
 A member as the controller’s `check` and a channel’s `instructions()` see it.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_controller.py#L14)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_controller.py#L14)
 
 ``` python
 @dataclass(frozen=True)
@@ -2132,19 +2699,19 @@ Whether the member chooses its own name, so that nothing the swarm tells it cont
 
 ### MemberState
 
-A member’s lifecycle: not started, running, or ended.
+A member’s lifecycle: not started, running, idle, ending, or ended. Only persistent members are ever `idle` (answered and waiting for `SwarmControl.wake()`) or `ending` (their ending has begun, and the member has not yet ended).
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_record.py#L18)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_record.py#L18)
 
 ``` python
-MemberState = Literal["pending", "running", "ended"]
+MemberState = Literal["pending", "running", "idle", "ending", "ended"]
 ```
 
 ### StopReason
 
 Why a controller’s `run` returned: a topology reason such as `all_done`, or the controller’s own, recorded as `controller:<reason>`.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_controller/_controller.py#L10)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_controller/_controller.py#L10)
 
 ``` python
 StopReason = str
@@ -2152,9 +2719,9 @@ StopReason = str
 
 ### FinalName
 
-How the swarm chooses its answer from the submissions: `first`, the earliest, or `last`, the latest. A tie goes to the member listed first in the roster.
+How the swarm chooses its answer from the submissions: `first`, the earliest, or `last`, the latest. A tie goes to the member listed first in the roster, then to its earlier answer.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_final.py#L11)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_final.py#L11)
 
 ``` python
 FinalName = Literal["first", "last"]
@@ -2172,7 +2739,7 @@ With `shared_volume=True` it describes members with their own sandboxes (`member
 
 The channel adds no tools and does not create the directories.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/filesystem.py#L49)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/filesystem.py#L49)
 
 ``` python
 @swarm_channel
@@ -2208,7 +2775,7 @@ The board lives for one run of the swarm. A result longer than the tool output l
 
 Each member, and each of its subagents, also gets `swarm_wait`, which blocks until a file it watches has a change it has not viewed, another member ends, every member is waiting, the swarm stops, or a timeout passes. A wait is wall-clock time inside a tool call: it counts towards the member’s time limit, the swarm’s time cap, and the sample’s time and working limits. It makes no model call, so it adds no tokens, cost or steps.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/shared_memory.py#L107)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/shared_memory.py#L157)
 
 ``` python
 @swarm_channel
@@ -2254,9 +2821,9 @@ A fence is a label for the reader, not a protection: a member can write text tha
 
 The member’s own loop also gets `swarm_wait`, which returns while it has unread messages sent with `wake=True` (the default), and otherwise blocks as [shared_memory()](../reference/inspect_swarm.html.md#shared_memory)’s does, up to `max_wait` seconds. A wait is wall-clock time inside a tool call: it counts towards the member’s time limit, the swarm’s time cap, and the sample’s time and working limits.
 
-The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`, other than `all` and `swarm`. Bridged members cannot use it yet.
+The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`, other than `all` and `swarm`. Bridged members get its tools from [swarm_bridged_tools()](../reference/inspect_swarm.html.md#swarm_bridged_tools); all of a bridged member’s conversations share its inbox.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/messages.py#L108)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/messages.py#L120)
 
 ``` python
 @swarm_channel
@@ -2292,11 +2859,37 @@ Pass it in the member’s tools, `react(tools=[bash(), swarm_tools()])`. The mem
 
 The same member definition serves swarms with different channels, and one with none. Outside a swarm it gives no tools.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_bus/_tools.py#L42)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_bus/_tools.py#L48)
 
 ``` python
 def swarm_tools() -> ToolSource
 ```
+
+### swarm_bridged_tools
+
+The tools of the swarm’s channels, for a bridged member’s agent.
+
+Pass it in the agent’s bridged tools, `claude_code(bridged_tools=[swarm_bridged_tools(["messages"])])`. A bridged agent’s tools are fixed when it is built, so name the channels it uses: `"messages"` gives `send_message`, `read_messages` and `list_members`, and `"shared_memory"` gives `shared_memory`. Both also give `swarm_wait`. The tools are served as the MCP server `swarm`.
+
+Each tool acts as the member whose agent calls it, and finds the swarm’s channel when it is called; a tool whose channel the swarm does not have returns an error saying so. The CLI is one loop of the member, whichever of its conversations calls: its subagents read the member’s messages, and a message any of them reads is read for all; they share what the member has viewed in the shared memory; and their sends and writes are the member’s. The member’s evidence records these calls with `via` set to `"bridge"`.
+
+A bridged member never counts as waiting, since one call in `swarm_wait` does not show that its CLI is idle: its waits end on news, a member’s end, the swarm’s stop or their timeout, never because every member is waiting. A bridged wait lasts at most `max_wait` seconds, or the longest wait of the swarm’s channels if that is shorter, because the CLI gives up on a tool call that runs too long: Claude Code and Codex both stop one after 300 seconds by default, and the shared memory’s waits last up to 600. Claude Code’s limit cannot be raised for bridged tools, so keep the default of 280 for it. A Codex member whose timeout is raised with `codex_cli(config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"})` can take a matching `max_wait`.
+
+A swarm with the messages channel needs `"messages"` here too: other members can send to the member, and without the messages tools it could never read what they send, so the tools of a bridge given only `"shared_memory"` return an error saying to add it. A member uses these tools or [swarm_tools()](../reference/inspect_swarm.html.md#swarm_tools), never both, in either order: each would be a reader of its inbox.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_bus/_bridged.py#L26)
+
+``` python
+def swarm_bridged_tools(
+    channels: Sequence[str], max_wait: int = 280
+) -> BridgedToolsSpec
+```
+
+`channels` Sequence\[str\]  
+The channels whose tools to give: `"messages"`, `"shared_memory"` or both.
+
+`max_wait` int  
+The longest `swarm_wait` in seconds, at least 1. Keep it below the CLI’s MCP tool timeout.
 
 ### swarm_channel
 
@@ -2304,7 +2897,7 @@ Decorator for registering swarm channels.
 
 The factory’s arguments are recorded with the channel, so they appear in the log and the channel can be rebuilt from it. A factory in a package is registered as `<package>/<name>`.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L224)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L242)
 
 ``` python
 def swarm_channel(
@@ -2326,7 +2919,7 @@ Subclass it and override `instructions()`, and return an instance from a factory
 
 A channel with tools and records also sets `name` and `prefix` and overrides `open()`, which gives each run of the swarm its own [ChannelState](../reference/inspect_swarm.html.md#channelstate). A channel that only adds instructions, such as [filesystem()](../reference/inspect_swarm.html.md#filesystem), leaves them unset.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L27)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L27)
 
 ``` python
 class Channel
@@ -2354,7 +2947,7 @@ This channel’s contribution to the longest `swarm_wait`, in seconds, or `None`
 check  
 Check the roster when [swarm()](../reference/inspect_swarm.html.md#swarm) is called.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L50)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L50)
 
 ``` python
 def check(self, roster: Sequence[MemberInfo]) -> None
@@ -2366,7 +2959,7 @@ The swarm’s members.
 open  
 Open the channel’s state for one run of the swarm, before any member starts.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L61)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L61)
 
 ``` python
 def open(self, run: "ChannelRun") -> "ChannelState | None"
@@ -2378,7 +2971,7 @@ The run’s bus and roster.
 instructions  
 Text for the member’s preamble.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L72)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L72)
 
 ``` python
 def instructions(self, member: MemberInfo) -> str | None
@@ -2391,7 +2984,7 @@ The member the text is for.
 
 What `Channel.open()` gets for one run of the swarm.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L84)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L84)
 
 ``` python
 @dataclass(frozen=True)
@@ -2400,8 +2993,10 @@ class ChannelRun
 
 #### Attributes
 
-`bus` Bus  
-The run’s bus, which the channel’s tools deliver records through.
+`bus` [Bus](../reference/inspect_swarm.html.md#bus)  
+The run’s bus, which the channel’s tools deliver records through with `bus.deliver(Draft(...))`.
+
+A tool whose result shows the channel’s records also reports them with `bus.read(name, records)`, where `name` is the channel’s `name` and `records` are the ids of the records the result concerns. The log records the read, and the records the calling member’s later work depends on, which the swarm’s critical path links. Pass `depends_on=` when the result depends on other records than it concerns: a result that tells the loop a record was committed, without its content, depends on it, and a result built from several records depends on them all. Every id must be one the channel committed in this run, and the call must come from a member’s tool call; otherwise it raises `ValueError` or `RuntimeError`. `read()` returns the read’s id. See [Bus](../reference/inspect_swarm.html.md#bus).
 
 `roster` Sequence\[[MemberInfo](../reference/inspect_swarm.html.md#memberinfo)\]  
 The swarm’s members.
@@ -2412,7 +3007,7 @@ A channel’s state in one run of the swarm, which only the bus changes.
 
 The bus calls `validate()`, `admit()` and `apply()` with no `await` between them, so `admit()` sees the state that `apply()` changes.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L95)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L98)
 
 ``` python
 class ChannelState(Protocol)
@@ -2423,7 +3018,7 @@ class ChannelState(Protocol)
 tools  
 The channel’s tools, which deliver records through the run’s bus.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L101)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L104)
 
 ``` python
 def tools(self) -> list[Tool]
@@ -2432,7 +3027,7 @@ def tools(self) -> list[Tool]
 validate  
 Check a record’s payload and operation data, before the record gets an id.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L105)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L108)
 
 ``` python
 def validate(self, record: Record) -> None
@@ -2444,7 +3039,7 @@ The record.
 admit  
 Check a record against the state as it is now, after the storm controls.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L116)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L119)
 
 ``` python
 def admit(self, record: Record) -> None
@@ -2456,7 +3051,7 @@ The record.
 apply  
 Apply an admitted record to the state. It cannot fail.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L127)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L130)
 
 ``` python
 def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]
@@ -2471,7 +3066,9 @@ The state of a channel whose records wake waits (one that sets `Channel.max_wait
 
 The bus calls these methods with no `await` around them. None of them marks anything: a loop acknowledges what a wait names by reading it with the channel’s own tool.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L173)
+The bus also calls `wakes()` and `news()` for idle persistent members, with `own=True` and no filters. These queries have no `swarm_wait` call. Use `spec.member` and `spec.loop`; the caller may be another member.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L189)
 
 ``` python
 class WaitingState(ChannelState, Protocol)
@@ -2482,7 +3079,7 @@ class WaitingState(ChannelState, Protocol)
 tools  
 The channel’s tools, which deliver records through the run’s bus.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L101)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L104)
 
 ``` python
 def tools(self) -> list[Tool]
@@ -2491,7 +3088,7 @@ def tools(self) -> list[Tool]
 validate  
 Check a record’s payload and operation data, before the record gets an id.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L105)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L108)
 
 ``` python
 def validate(self, record: Record) -> None
@@ -2503,7 +3100,7 @@ The record.
 admit  
 Check a record against the state as it is now, after the storm controls.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L116)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L119)
 
 ``` python
 def admit(self, record: Record) -> None
@@ -2515,7 +3112,7 @@ The record.
 apply  
 Apply an admitted record to the state. It cannot fail.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L127)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L130)
 
 ``` python
 def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]
@@ -2527,7 +3124,7 @@ The record.
 wait_check  
 Check a wait’s filter when the wait is called.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L179)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L197)
 
 ``` python
 def wait_check(self, spec: WaitSpec) -> None
@@ -2539,7 +3136,7 @@ The wait.
 wakes  
 Whether a record the channel has just applied made something reportable to a wait.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L190)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L208)
 
 ``` python
 def wakes(self, spec: WaitSpec, record: Record) -> bool
@@ -2554,7 +3151,7 @@ The applied record, which has `wake` set.
 news  
 What is reportable to a wait now.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L202)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L220)
 
 ``` python
 def news(self, spec: WaitSpec) -> WaitNews | None
@@ -2565,9 +3162,9 @@ The wait.
 
 ### WaitSpec
 
-One call of `swarm_wait`, as the bus asks a [WaitingState](../reference/inspect_swarm.html.md#waitingstate) about it.
+A loop and filters checked by a waiting channel, for a `swarm_wait` call or an idle member.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L139)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L152)
 
 ``` python
 @dataclass(frozen=True)
@@ -2577,7 +3174,7 @@ class WaitSpec
 #### Attributes
 
 `id` str  
-The wait’s id (`"x-4"`), numbered per run.
+A numbered wait id, or `idle-<member>` for an idle-member query.
 
 `member` str  
 The waiting member’s name.
@@ -2598,7 +3195,7 @@ The shared memory’s file id filter as the model gave it, or `None`. With neith
 
 What a channel has for a waiting loop to look at.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_channel/_channel.py#L162)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_channel/_channel.py#L175)
 
 ``` python
 @dataclass(frozen=True)
@@ -2613,13 +3210,174 @@ The channel’s lines for the wait’s result. Fixed templates with ids and memb
 `files` list\[dict\[str, JsonValue\]\]  
 What `lines` name, for the `waited` evidence.
 
+`depends_on` list\[str\]  
+The ids of the records whose content or news `lines` report, each one this channel committed in this run. The `waited` evidence records them as what the waiting member’s later work depends on, which the swarm’s critical path links. Empty for news that reports no record.
+
+### Bus
+
+A swarm run’s bus, as `ChannelRun.bus` gives it to a channel.
+
+Every record of a channel goes through `deliver()`, and a tool whose result shows the channel’s records reports them with `read()`. Call both from the channel’s tools: they act for the calling member.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_bus/_bus.py#L74)
+
+``` python
+class Bus(Protocol)
+```
+
+#### Attributes
+
+`stopping` bool  
+Whether the swarm has begun to stop. Once it has, every `deliver()` is refused.
+
+#### Methods
+
+deliver  
+Make a record from a draft and deliver it through the channel.
+
+The bus binds the sender from the calling member, resolves the addresses, and calls the channel’s `validate()`. It then checks the sender is still running and the channel’s storm controls, calls `admit()`, writes the `sent` evidence, calls `apply()` and writes the `delivered` evidence, with no `await` between the checks and `apply()`.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_bus/_bus.py#L85)
+
+``` python
+async def deliver(self, draft: Draft) -> Delivery
+```
+
+`draft` [Draft](../reference/inspect_swarm.html.md#draft)  
+The record to make.
+
+read  
+Write the `read` evidence of a tool result that shows the channel’s records.
+
+The evidence names the calling member and loop, the records, and the read’s id. The records the calling loop has not depended on before are written as its `depends_on`, which the swarm’s critical path links.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_bus/_bus.py#L103)
+
+``` python
+def read(
+    self,
+    channel: str,
+    records: Sequence[str],
+    *,
+    depends_on: Sequence[str] | None = None,
+    listing: bool = False,
+) -> str
+```
+
+`channel` str  
+The channel’s `name`.
+
+`records` Sequence\[str\]  
+The ids of the records the result concerns.
+
+`depends_on` Sequence\[str\] \| None  
+The ids of the records whose content or news the result showed, when they differ from `records`: a result that tells the loop a record was committed, without its content, depends on it, and a result built from several records depends on them all.
+
+`listing` bool  
+Whether the result showed what exists rather than its content. The swarm’s metrics count listings apart from reads.
+
+### calling_member
+
+The member of the current swarm run that the caller runs in or descends from.
+
+A channel’s tool calls it to learn which member it acts for. The answer comes from the runtime, never from model output.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_bus/_bus.py#L131)
+
+``` python
+def calling_member() -> Caller | None
+```
+
+### Caller
+
+The member a channel’s tool acts for, from [calling_member()](../reference/inspect_swarm.html.md#calling_member).
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_bus/_bus.py#L60)
+
+``` python
+@dataclass(frozen=True)
+class Caller
+```
+
+#### Attributes
+
+`member` str  
+The member’s name.
+
+`nested` bool  
+Whether the calling loop is not the member’s own, such as a subagent’s. The member’s own loop is the first in which it resolves [swarm_tools()](../reference/inspect_swarm.html.md#swarm_tools), or until then the loop its agent runs directly. An agent run with [run()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#run) from it is nested. A bridged member’s CLI is one loop, its own.
+
+`loop_span_id` str \| None  
+The agent span of the calling loop.
+
+### Draft
+
+What a channel’s tool hands to `Bus.deliver()`, which makes the [Record](../reference/inspect_swarm.html.md#record) from it.
+
+The bus binds the sender from the calling member, so a draft has no sender.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_bus/_record.py#L74)
+
+``` python
+@dataclass(frozen=True)
+class Draft
+```
+
+#### Attributes
+
+`channel` str  
+The channel’s `name`.
+
+`kind` str  
+What the record does, in the channel’s terms (`"message"`, `"create"`).
+
+`to` tuple\[str, ...\]  
+The addresses: member names, each of a member that has started and is not ending or ended, and `"all"` for every other running member. `deliver()` refuses any other address. `()` (the default) for an unaddressed record, which reaches nobody directly: the channel’s `apply()` decides whom it concerns, and may name members that have not started or have ended.
+
+`payload` str  
+The text the record carries.
+
+`op` dict\[str, JsonValue\] \| None  
+The channel’s operation data, if any, as JSON. The record gets a copy that cannot be changed.
+
+`wake` bool  
+Whether the record can end a member’s wait (`swarm_wait`).
+
+`reply_to` str \| None  
+The id of a record this one answers.
+
+### Delivery
+
+What `Bus.deliver()` returns for a delivered record.
+
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_bus/_bus.py#L43)
+
+``` python
+@dataclass(frozen=True)
+class Delivery
+```
+
+#### Attributes
+
+`record` [Record](../reference/inspect_swarm.html.md#record)  
+The record as delivered.
+
+`seq` int  
+The record’s commit sequence number, across the run’s channels. It is `delivery.seq` in the record’s `delivered` evidence.
+
+`notify` list\[str\]  
+The members whose own loop the record is news to, as the channel’s `apply()` returned them.
+
+`result` Mapping\[str, JsonValue\] \| None  
+What the channel’s `apply()` returned for the evidence.
+
 ### Record
 
 One communication through the bus: a message, a write, a claim.
 
-A channel’s tool hands the bus a `Draft`; the bus makes the record, binding the sender and resolving the addresses, and gives it to the channel.
+A channel’s tool hands the bus a [Draft](../reference/inspect_swarm.html.md#draft); the bus makes the record, binding the sender and resolving the addresses, and gives it to the channel.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_bus/_record.py#L20)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_bus/_record.py#L24)
 
 ``` python
 @dataclass(frozen=True)
@@ -2667,6 +3425,9 @@ The sender’s agent span.
 `tool_span_id` str \| None  
 The tool span the call ran in.
 
+`via` Via  
+How the sender reached the channel’s tool: `"tool"` from its own loops, `"bridge"` from a bridged member’s CLI through [swarm_bridged_tools()](../reference/inspect_swarm.html.md#swarm_bridged_tools).
+
 ## Results
 
 ### swarm_result
@@ -2675,7 +3436,7 @@ Read the swarm’s result record.
 
 The swarm writes its record to the transcript once, when it ends, however it ends, and its id to the store it ran with. This returns the record the store of `source` names: the last swarm to end with that store, which is the outermost of nested swarms. A forked branch or a subtask has its own store, and so its own record.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_record.py#L187)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_record.py#L196)
 
 ``` python
 def swarm_result(source: TaskState | EvalSample) -> SwarmResultRecord | None
@@ -2688,7 +3449,7 @@ The [TaskState](https://inspect.aisi.org.uk/reference/inspect_ai.solver.html#tas
 
 What the swarm did in a sample: each member’s result and the final answer, written to the transcript when the swarm ends and read with [swarm_result()](../reference/inspect_swarm.html.md#swarm_result).
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_record.py#L82)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_record.py#L91)
 
 ``` python
 class SwarmResultRecord(BaseModel)
@@ -2709,7 +3470,7 @@ The final answer.
 
 One member in the swarm’s result record.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_record.py#L29)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_record.py#L29)
 
 ``` python
 class MemberResult(BaseModel)
@@ -2750,11 +3511,17 @@ How many of those checks passed: a score of 1.0 under Inspect’s default `value
 `first_pass_time` float \| None  
 Swarm time of the member’s first passing check; `None` without one. A pass assumes the default `value_to_float()` converter, as for `gate_passes`.
 
+`persistent` bool  
+Whether the member is persistent (`member(..., persistent=True)`).
+
+`answer_times` list\[float\]  
+The swarm times of a persistent member’s answers, in order. Empty for other members, whose answer is their submission at `time`.
+
 ### FinalRecord
 
 The swarm’s final answer in its result record.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_record.py#L66)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_record.py#L72)
 
 ``` python
 class FinalRecord(BaseModel)
@@ -2774,15 +3541,18 @@ Why there is no answer: `no_submissions`. Under the mode `controller`, the reaso
 `provisional` bool  
 `True` when the swarm ended without finalising its answer: a limit, error or cancellation ended it first, or the answer did not fit the sample’s message limit.
 
+`answer` int \| None  
+Which of a persistent member’s answers is the swarm’s answer, from 0. `None` for other members, and when there is no answer.
+
 ## Budget view
 
 ### swarm_resources
 
 A tool that reports the swarm’s budget to the member that calls it.
 
-It shows the caps that will stop the swarm, how much all members have used, the member’s own share when the budget is split, and the time cap. Use it in place of a tool that reads [sample_limits()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits), which shows the sample’s limits rather than the swarm’s caps.
+It shows the caps that will stop the swarm, how much all members have used, the member’s own share when the budget is split, and the time cap. It reports swarm caps only. Sample limits can still end the run; read [sample_limits()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits) for those limits.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_tools.py#L8)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_tools.py#L8)
 
 ``` python
 @tool
@@ -2793,9 +3563,9 @@ def swarm_resources() -> Tool
 
 The budget of the swarm the caller runs in.
 
-Reports the swarm’s cap per kind and how much of it the whole swarm has used, and, when the budget is split and the caller is a member, the member’s share and its usage. The caps are the ones that stop the swarm, which [sample_limits()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits) does not show: the swarm holds back part of each sample limit.
+Reports the swarm’s cap per kind and how much of it the whole swarm has used, and, when the budget is split and the caller is a member, the member’s share and its usage. The caps are the ones that stop the swarm, which [sample_limits()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits) does not show: by default the swarm holds back part of each sample limit. Under `Budget(derive=False)` the swarm has only the caps given explicitly, and the sample’s limits, which [sample_limits()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits) reports, can still end the run.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_budget.py#L649)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_budget.py#L764)
 
 ``` python
 def swarm_budget() -> SwarmBudget
@@ -2805,7 +3575,7 @@ def swarm_budget() -> SwarmBudget
 
 The swarm’s budget as a member sees it, from [swarm_budget()](../reference/inspect_swarm.html.md#swarm_budget).
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_budget.py#L612)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_budget.py#L727)
 
 ``` python
 @dataclass(frozen=True)
@@ -2833,7 +3603,7 @@ The time cap, and the seconds since the swarm started, or `None` when the swarm 
 
 One capped kind of the swarm’s budget, and what has been used of it.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_budget.py#L595)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_budget.py#L710)
 
 ``` python
 @dataclass(frozen=True)

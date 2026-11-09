@@ -452,14 +452,38 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundary" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Boundary</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundarycallback" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">BoundaryCallback</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#memberended" class="sidebar-item-text sidebar-link">
  <span class="menu-text">MemberEnded</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarmevent" class="sidebar-item-text sidebar-link">
- <span class="menu-text">SwarmEvent</span></a>
+  <a href="./reference/inspect_swarm.html#memberidle" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberIdle</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#membernews" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#controlevent" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">ControlEvent</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -512,6 +536,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarm_bridged_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_bridged_tools</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#swarm_channel" class="sidebar-item-text sidebar-link">
  <span class="menu-text">swarm_channel</span></a>
   </div>
@@ -550,6 +580,36 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#waitnews" class="sidebar-item-text sidebar-link">
  <span class="menu-text">WaitNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#bus" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Bus</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#calling_member" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">calling_member</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#caller" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Caller</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#draft" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Draft</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#delivery" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Delivery</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -628,6 +688,8 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <li><a href="#the-critical-path" id="toc-the-critical-path" class="nav-link" data-scroll-target="#the-critical-path">The critical path</a></li>
   <li><a href="#communication" id="toc-communication" class="nav-link" data-scroll-target="#communication">Communication</a></li>
   <li><a href="#waits" id="toc-waits" class="nav-link" data-scroll-target="#waits">Waits</a></li>
+  <li><a href="#boundary-callbacks" id="toc-boundary-callbacks" class="nav-link" data-scroll-target="#boundary-callbacks">Boundary callbacks</a></li>
+  <li><a href="#persistent-members" id="toc-persistent-members" class="nav-link" data-scroll-target="#persistent-members">Persistent members</a></li>
   <li><a href="#wiring-checks" id="toc-wiring-checks" class="nav-link" data-scroll-target="#wiring-checks">Wiring checks</a></li>
   </ul></li>
   <li><a href="#samples-dataframe" id="toc-samples-dataframe" class="nav-link" data-scroll-target="#samples-dataframe">Samples dataframe</a></li>
@@ -659,7 +721,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 
 <section id="overview" class="level2">
 <h2 class="anchored" data-anchor-id="overview">Overview</h2>
-<p>When the swarm ends it writes two entries to the sample store, each also logged as an <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent">InfoEvent</a></span> with source <code>inspect_swarm</code>:</p>
+<p>When the swarm ends it writes two entries to the sample store, each also logged as a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent">SwarmEvent</a></span> of kind <code>metrics</code> or <code>ledger</code> whose <code>data</code> is the entry:</p>
 <ul>
 <li><code>inspect_swarm:metrics</code>: tokens, cost and time for the swarm and each member, and counts of how each member acted, checked its work, communicated and waited (<a href="#metrics">Metrics</a>).</li>
 <li><code>inspect_swarm:ledger</code>: the swarm’s accounting. Its budget, caps, the usage of each member, model calls that errored or reported no usage, unpriced models, and what stopped the swarm (<a href="#the-ledger">The ledger</a>).</li>
@@ -673,7 +735,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li><code>tokens</code>, <code>cost</code>: everything in the swarm: members, controller and final step.</li>
 <li><code>wall_clock</code>: seconds from the swarm’s start to its end.</li>
 <li><code>never_acted</code>: members with no completed model call.</li>
-<li><code>steps_to_answer</code>: completed model calls of the member whose output is the answer, <code>null</code> with no answer.</li>
+<li><code>steps_to_answer</code>: completed model calls of the member whose output is the answer, <code>null</code> with no answer. For a persistent member’s answer, its calls before that answer.</li>
 <li><code>longest_member_steps</code>: the largest number of completed model calls of any member.</li>
 <li><code>critical_steps_to_answer</code>: the number of completed model calls on the longest chain of calls the answer depended on, across members (<a href="#the-critical-path">The critical path</a>).</li>
 </ul>
@@ -682,24 +744,25 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <ul>
 <li><code>tokens</code>, <code>cost</code>: its usage, its subagents’ and background work’s included.</li>
 <li><code>running_time</code>: seconds from its start to its end, <code>null</code> for a member never started.</li>
-<li><code>longest_identical_tool_run</code>: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. <code>null</code> for a bridged member, whose tool calls leave no tool events.</li>
+<li><code>longest_identical_tool_run</code>: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. <code>null</code> for a bridged member: the CLI’s own tool calls are not recorded; bridged host tool calls, such as the swarm’s tools, are.</li>
 <li><code>gate_checks</code>, <code>gate_passes</code>, <code>first_pass_time</code>: its in-loop checks (<a href="./scoring.html#checks-during-the-run">Scoring</a>).</li>
 <li><code>comm</code>, <code>waits</code>, <code>waits_by_outcome</code>, <code>wait_time</code>, <code>idle_time</code>: below.</li>
+<li><code>holds</code>, <code>held_time</code>: the turn boundaries at which a controller’s callbacks held it, and the seconds it was held. <code>running_time</code> includes them (<a href="#boundary-callbacks">Boundary callbacks</a>). A persistent member’s idle holds count too.</li>
+<li><code>activations</code>, <code>answers</code>, <code>awaiting_work_time</code>: for a <a href="./members.html#persistent-members">persistent member</a>, the activations it began (1 at its start, one more for each wake), the answers it gave, and the part of <code>held_time</code> it spent idle, waiting for a wake or its end. All 0 for other members.</li>
 </ul>
 <section id="the-critical-path" class="level3">
 <h3 class="anchored" data-anchor-id="the-critical-path">The critical path</h3>
 <p><code>critical_steps_to_answer</code> is the measure to read latency by: how many model calls the answer took one after another, given that members work in parallel but wait on and build on each other. A member that waits for a peer’s file and then answers in three steps has <code>steps_to_answer</code> 3, but if the peer took ten steps to write that file, the answer took at least 11.</p>
 <p>Each member’s calls, its subagents’ and background work’s included, form one chain in the order they began. Chains link between members in two ways:</p>
 <ul>
-<li>A view of a <code>shared_memory</code> file, or a <code>swarm_wait</code> result that names a file, follows the writes it showed. A view of a file follows every write in its history; a view of a deleted file follows the delete. Directory listings and the <code>changes</code> status line make no link.</li>
+<li>A channel’s result follows the records it showed, as the channel reports them. It links to each record’s sender at the point the record was committed, so the sender’s work after a send or write is not linked. <code>shared_memory</code>: a view of a file follows every write in its history, a view of a deleted file follows the delete, and a <code>swarm_wait</code> result follows the write of each file it reports. Directory listings and the <code>changes</code> status line make no link. <code>messages</code>: <code>read_messages</code> follows the messages it returned, and a <code>swarm_wait</code> result that reports messages follows every unread message it counts. A message sent with <code>wake=False</code> links when it is read, or when a wait that reports messages counts it. A custom channel links what it reports (<a href="./channels.html#writing-a-channel">Channels</a>).</li>
 <li>A <code>swarm_wait</code> result that names a member’s end follows all of that member’s calls.</li>
 </ul>
-<p>A wait that also reached a custom waiting channel links no files, since its evidence does not say which channel named them. Its links to member ends count either way.</p>
-<p>The chain ends when the answering member ends, after its background work has finished, since that work can still change the member’s output.</p>
+<p>The chain ends when the answering member ends, after its background work has finished, since that work can still change the member’s output. For a persistent member’s answer, it ends at that answer.</p>
 <p>The number over-counts work inside a member. Parallel and background subagents, tool calls of one turn, and any other concurrent work count one after another, and the answering member’s background work after its agent returned, its reads included, counts whether or not it changed the answer. That excess reaches peers through the member’s later writes.</p>
-<p>The number also misses links. Only <code>shared_memory</code> and <code>swarm_wait</code> make them, so information that members share in other ways adds none: messages, a shared sandbox, a shared volume, a service, a custom channel and its wait results, a shared tool or store key, or a controller that passes one member’s result to another. A <code>swarm_wait</code> result that reports more than ten files names only the first ten in its evidence, so the rest make no link until the member views them. Missed links can only lower the number.</p>
-<p>With both effects it is not a bound on true causal depth in either direction. A nested swarm’s board makes no link for the outer swarm; its own metrics count it.</p>
-<p>It is <code>null</code> when there is no answer, when the answering member has no recorded end, when the board’s evidence is inconsistent (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.</p>
+<p>The number also misses links. Only channel results and <code>swarm_wait</code> make them, so information that members share in other ways adds none: a shared sandbox, a shared volume, a service, a custom channel that reports no dependencies, a shared tool or store key, or a controller that passes one member’s result to another. Counts alone make no link either: the unread-message count and the line of changed files on other results, and <code>list_members</code>. Missed links can only lower the number.</p>
+<p>With both effects it is not a bound on true causal depth in either direction. A nested swarm’s channels make no link for the outer swarm; its own metrics count it.</p>
+<p>It is <code>null</code> when there is no answer, when the answering member has no recorded end, when the evidence names a record no recorded commit made (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.</p>
 </section>
 <section id="communication" class="level3">
 <h3 class="anchored" data-anchor-id="communication">Communication</h3>
@@ -722,9 +785,33 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </ul>
 <p>In a swarm with no <code>swarm_wait</code> (<code>filesystem</code> only, or <code>channels=[]</code>) the four are <code>null</code>, so 0 means the wait was offered and unused. Waiting is wall-clock time, so a member’s <code>running_time</code> includes it.</p>
 </section>
+<section id="boundary-callbacks" class="level3">
+<h3 class="anchored" data-anchor-id="boundary-callbacks">Boundary callbacks</h3>
+<p>When a controller holds a member at turn boundaries (<a href="./controllers.html#boundary-callbacks">Controllers</a>), the swarm writes two kinds of <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent">SwarmEvent</a></span> in the member’s span, with <code>member</code> set. Neither holds message text.</p>
+<p><code>boundary</code>, once for each boundary where callbacks ran, and for each hold of a persistent member after an answer, callbacks or not:</p>
+<ul>
+<li><code>boundary</code>: the boundary’s index. <code>after</code>: what the conversation ended with.</li>
+<li><code>origins</code>: the origins of the callbacks that ran, in order. <code>held_for</code>: the seconds the member was held.</li>
+<li><code>messages</code>: the number of messages <code>before</code> and <code>after</code>.</li>
+<li><code>outcome</code>: <code>continue</code> (any change is in the conversation), <code>end</code> (with <code>origin</code>), <code>stop</code>, <code>error</code> (a callback raised, or its result was invalid; with <code>origin</code> and <code>error</code>, the error’s type), <code>rejected</code> (applying the change failed, such as at the member’s message limit; with <code>error</code>) or <code>cancelled</code> (a cancellation from outside the swarm).</li>
+</ul>
+<p><code>changed</code>, once for each callback whose result differed from what it received, with its <code>boundary</code> and <code>origin</code>:</p>
+<ul>
+<li><code>added</code>: each new message’s <code>id</code>, <code>hash</code> and <code>index</code> in the result.</li>
+<li><code>removed</code>: the ids of messages no longer there.</li>
+<li><code>replaced</code>: each message kept under its id with new content, with its <code>id</code> and its hashes <code>before</code> and <code>after</code>.</li>
+<li><code>order</code>: the result’s ids in order, only when the kept messages changed their order.</li>
+<li><code>applied</code>: whether the change is in the member’s conversation. It is <code>false</code> when a later callback ended the member or raised, the swarm stopped, or the change was rejected.</li>
+</ul>
+<p>A hash is the SHA-256 of the message as the log serializes it, without its id (a value JSON cannot hold counts as null, and text UTF-8 cannot encode is escaped), so a change can be matched to the messages in a later <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#modelevent">ModelEvent</a></span>‘s input. When a callback rewrites the conversation, compaction summaries that describe messages it changed are removed, and the removal is one more <code>changed</code> event with origin <code>swarm</code>. A persistent member’s wake input is a <code>changed</code> event with origin <code>swarm</code> too, before the callbacks’ own.</p>
+</section>
+<section id="persistent-members" class="level3">
+<h3 class="anchored" data-anchor-id="persistent-members">Persistent members</h3>
+<p>A <a href="./members.html#persistent-members">persistent member</a> writes one <code>answer</code> event for each answer, in its span, with <code>answer</code>, the answer’s index from 0. In the result record, its <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#memberresult">MemberResult</a></span> has <code>persistent</code> true and <code>answer_times</code>, the swarm time of each answer. <code>FinalRecord.answer</code>, and the <code>final</code> event’s <code>answer</code>, say which of the chosen member’s answers is the swarm’s; they are <code>null</code> for other members.</p>
+</section>
 <section id="wiring-checks" class="level3">
 <h3 class="anchored" data-anchor-id="wiring-checks">Wiring checks</h3>
-<p>The metrics also check that members are wired to the channels. <code>tools_unwired</code> lists, in a swarm with a channel that has tools, the members with a completed model call whose loops never resolved <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>. A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.</p>
+<p>The metrics also check that members are wired to the channels. <code>tools_unwired</code> lists, in a swarm with a channel that has tools, the native members with a completed model call whose loops never resolved <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>. Bridged members are exempt, so this metric does not detect a CLI built without <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_bridged_tools">swarm_bridged_tools()</a></span>. A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.</p>
 </section>
 </section>
 <section id="samples-dataframe" class="level2">
@@ -770,7 +857,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <p>The ledger of a two-member swarm with a cost cap of $1 and a time cap of 600 seconds:</p>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode json code-with-copy"><code class="sourceCode json"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
 <span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">"version"</span><span class="fu">:</span> <span class="dv">1</span><span class="fu">,</span></span>
-<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">"budget"</span><span class="fu">:</span> <span class="fu">{</span><span class="dt">"cost"</span><span class="fu">:</span> <span class="fl">1.0</span><span class="fu">,</span> <span class="dt">"tokens"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"time"</span><span class="fu">:</span> <span class="fl">600.0</span><span class="fu">,</span> <span class="dt">"reserve"</span><span class="fu">:</span> <span class="fl">0.05</span><span class="fu">,</span> <span class="dt">"split"</span><span class="fu">:</span> <span class="st">"pool"</span><span class="fu">,</span> <span class="dt">"grace"</span><span class="fu">:</span> <span class="fl">120.0</span><span class="fu">},</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">"budget"</span><span class="fu">:</span> <span class="fu">{</span><span class="dt">"cost"</span><span class="fu">:</span> <span class="fl">1.0</span><span class="fu">,</span> <span class="dt">"tokens"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"time"</span><span class="fu">:</span> <span class="fl">600.0</span><span class="fu">,</span> <span class="dt">"reserve"</span><span class="fu">:</span> <span class="fl">0.05</span><span class="fu">,</span> <span class="dt">"split"</span><span class="fu">:</span> <span class="st">"pool"</span><span class="fu">,</span> <span class="dt">"grace"</span><span class="fu">:</span> <span class="fl">120.0</span><span class="fu">,</span> <span class="dt">"derive"</span><span class="fu">:</span> <span class="kw">true</span><span class="fu">},</span></span>
 <span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">"caps"</span><span class="fu">:</span> <span class="fu">{</span><span class="dt">"cost"</span><span class="fu">:</span> <span class="fl">1.0</span><span class="fu">,</span> <span class="dt">"tokens"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"time"</span><span class="fu">:</span> <span class="fl">600.0</span><span class="fu">},</span></span>
 <span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">"sample_limits"</span><span class="fu">:</span> <span class="fu">{</span><span class="dt">"token"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"cost"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"message"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"turn"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"working"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">,</span> <span class="dt">"time"</span><span class="fu">:</span> <span class="kw">null</span><span class="fu">},</span></span>
 <span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">"members"</span><span class="fu">:</span> <span class="ot">[</span></span>
@@ -815,7 +902,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <ul>
 <li><code>budget</code> is the <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.configuration.html#budget">Budget</a></span> as given. <code>caps</code> are the caps the swarm applied, derived from the sample’s limits or given: <code>cost</code> in dollars, <code>tokens</code>, and <code>time</code> in seconds, <code>null</code> for no cap. <code>sample_limits</code> are the sample’s limits when the swarm started.</li>
-<li><code>members</code> has one entry per member, in roster order. <code>status</code> is as in <a href="./members.html#how-a-member-ends">How a member ends</a>, <code>null</code> for a member never started. <code>cancelled</code> means the swarm or the sample cancelled the member, so calls it had in flight are unknown. A hard stop during a background drain also sets <code>cancelled</code>; the agent’s returned status is kept. <code>background_started</code> counts the tasks the member started with <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background">background()</a></span>, and <code>background_cancelled</code> those cancelled before they finished, whose calls in flight are unknown too.</li>
+<li><code>members</code> has one entry per member, in roster order. <code>status</code> is as in <a href="./members.html#how-a-member-ends">How a member ends</a>, <code>null</code> for a member never started. <code>cancelled</code> means the swarm or the sample cancelled the member, so calls it had in flight are unknown. A hard stop during a background drain also sets <code>cancelled</code>; the agent’s returned status is kept. So does a stop or <code>end()</code> that cancels a boundary callback while one of its model calls is in flight. <code>background_started</code> counts the tasks the member started with <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background">background()</a></span>, and <code>background_cancelled</code> those cancelled before they finished, whose calls in flight are unknown too.</li>
 <li><code>meter</code> is the usage and cost of what a member did. <code>suspended_cost</code> is the part spent while token counting was suspended, such as approval calls.</li>
 <li><code>calls</code> counts model calls: <code>calls</code> completed ones other than cache replays, <code>cache_replays</code> replayed from cache at no charge, <code>errored</code> attempts that errored or were cancelled (retries included), <code>no_usage</code> completed with no usage, and <code>unpriced</code> completed with usage but no cost.</li>
 <li><code>runtime</code> meters the controller’s own calls, <code>final</code> the final step’s (the default first-submission answer makes none), and <code>swarm</code> everything in the swarm: members, runtime and final step. The top-level <code>calls</code> counts every call in the swarm. <code>unpriced_calls_recorded</code> counts the unpriced calls the swarm’s meter recorded.</li>

@@ -452,14 +452,38 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundary" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Boundary</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundarycallback" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">BoundaryCallback</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#memberended" class="sidebar-item-text sidebar-link">
  <span class="menu-text">MemberEnded</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarmevent" class="sidebar-item-text sidebar-link">
- <span class="menu-text">SwarmEvent</span></a>
+  <a href="./reference/inspect_swarm.html#memberidle" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberIdle</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#membernews" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#controlevent" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">ControlEvent</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -512,6 +536,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarm_bridged_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_bridged_tools</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#swarm_channel" class="sidebar-item-text sidebar-link">
  <span class="menu-text">swarm_channel</span></a>
   </div>
@@ -550,6 +580,36 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#waitnews" class="sidebar-item-text sidebar-link">
  <span class="menu-text">WaitNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#bus" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Bus</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#calling_member" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">calling_member</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#caller" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Caller</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#draft" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Draft</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#delivery" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Delivery</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -623,6 +683,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
    
   <ul>
   <li><a href="#overview" id="toc-overview" class="nav-link active" data-scroll-target="#overview">Overview</a></li>
+  <li><a href="#no-derived-caps" id="toc-no-derived-caps" class="nav-link" data-scroll-target="#no-derived-caps">No derived caps</a></li>
   <li><a href="#cost-data" id="toc-cost-data" class="nav-link" data-scroll-target="#cost-data">Cost data</a></li>
   <li><a href="#splits" id="toc-splits" class="nav-link" data-scroll-target="#splits">Splits</a></li>
   <li><a href="#what-members-see" id="toc-what-members-see" class="nav-link" data-scroll-target="#what-members-see">What members see</a></li>
@@ -677,17 +738,17 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <tr class="odd">
 <td><code>cost</code></td>
 <td><code>None</code></td>
-<td>Cost cap in dollars. <code>None</code> derives it from the sample’s cost limit.</td>
+<td>Cost cap in dollars. <code>None</code> derives it from the sample’s cost limit, or sets no cap under <code>derive=False</code>.</td>
 </tr>
 <tr class="even">
 <td><code>tokens</code></td>
 <td><code>None</code></td>
-<td>Token cap. A string such as <code>"output:1m"</code> keeps its metering type. <code>None</code> derives it from the sample’s token limit.</td>
+<td>Token cap. A string such as <code>"output:1m"</code> keeps its metering type. <code>None</code> derives it from the sample’s token limit, or sets no cap under <code>derive=False</code>.</td>
 </tr>
 <tr class="odd">
 <td><code>time</code></td>
 <td><code>None</code></td>
-<td>Seconds after which the swarm stops its members. <code>None</code> derives it from the sample’s time limit.</td>
+<td>Seconds after which the swarm stops its members. <code>None</code> derives it from the sample’s time limit, or sets no cap under <code>derive=False</code>.</td>
 </tr>
 <tr class="even">
 <td><code>reserve</code></td>
@@ -704,13 +765,24 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <td><code>120.0</code></td>
 <td>Seconds members have, at most, to finish calls in flight after a stop.</td>
 </tr>
+<tr class="odd">
+<td><code>derive</code></td>
+<td><code>True</code></td>
+<td>Whether a cap left <code>None</code> is derived from the sample’s limit (<a href="#no-derived-caps">No derived caps</a>).</td>
+</tr>
 </tbody>
 </table>
 <p>Every field is a plain value, so each can be a task parameter. A member whose call reached a cap ends <code>swarm_cap</code>, and the swarm then stops the others (<a href="./members.html#how-a-member-ends">Members</a>). The ledger records the caps, each member’s usage and what stopped the swarm (<a href="./analysis.html#the-ledger">Analysis</a>).</p>
 </section>
+<section id="no-derived-caps" class="level2">
+<h2 class="anchored" data-anchor-id="no-derived-caps">No derived caps</h2>
+<p>With <code>Budget(derive=False)</code>, the swarm derives no caps. The sample’s own cost, token and time limits then end the swarm as they end any solver: the limit’s error propagates out of the swarm, and later solvers do not run. A cap you set explicitly still applies, and <code>reserve</code> has no effect.</p>
+<p>As in any solver, a limit error that a tool or handoff turns into a tool message does not end the run. The member’s next model call raises the error again, as does any other member’s. A swarm cap, by contrast, stops the swarm even when a tool turns its error into a message.</p>
+<p>A split needs a cost or token cap, so with no explicit cap use <code>split="pool"</code>.</p>
+</section>
 <section id="cost-data" class="level2">
 <h2 class="anchored" data-anchor-id="cost-data">Cost data</h2>
-<p>A cost cap needs cost data for every member’s model. The swarm checks this when it starts and raises an error naming the models that have none. Configure prices with <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.model.html#set_model_cost">set_model_cost()</a></span> or <code>--model-cost-config</code>.</p>
+<p>A cost cap needs cost data for every member’s model, and so does a sample cost limit under <code>derive=False</code>. The swarm checks this when it starts and raises an error naming the models that have none. Configure prices with <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.model.html#set_model_cost">set_model_cost()</a></span> or <code>--model-cost-config</code>.</p>
 </section>
 <section id="splits" class="level2">
 <h2 class="anchored" data-anchor-id="splits">Splits</h2>
@@ -725,7 +797,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="what-members-see" class="level2">
 <h2 class="anchored" data-anchor-id="what-members-see">What members see</h2>
 <p>When the swarm has a cap, each member’s preamble says how the budget is split. The <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_resources">swarm_resources()</a></span> tool, as in the example above, lets a member check the swarm’s caps, how much all members have used, and its own share. Code inside a member can read the same with <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_budget">swarm_budget()</a></span>.</p>
-<p>A tool that reads <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits">sample_limits()</a></span> shows the sample’s limits, not the swarm’s caps, so it overstates what members can spend.</p>
+<p>A tool that reads <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits">sample_limits()</a></span> shows the sample’s limits, not the swarm’s caps, so with derived caps it overstates what members can spend. Under <code>derive=False</code>, the sample’s limits can still end the run, and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_resources">swarm_resources()</a></span> shows only the caps given explicitly.</p>
 </section>
 <section id="sweeps" class="level2">
 <h2 class="anchored" data-anchor-id="sweeps">Sweeps</h2>

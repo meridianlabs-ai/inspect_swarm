@@ -452,14 +452,38 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundary" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Boundary</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundarycallback" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">BoundaryCallback</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#memberended" class="sidebar-item-text sidebar-link">
  <span class="menu-text">MemberEnded</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarmevent" class="sidebar-item-text sidebar-link">
- <span class="menu-text">SwarmEvent</span></a>
+  <a href="./reference/inspect_swarm.html#memberidle" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberIdle</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#membernews" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#controlevent" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">ControlEvent</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -512,6 +536,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarm_bridged_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_bridged_tools</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#swarm_channel" class="sidebar-item-text sidebar-link">
  <span class="menu-text">swarm_channel</span></a>
   </div>
@@ -550,6 +580,36 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#waitnews" class="sidebar-item-text sidebar-link">
  <span class="menu-text">WaitNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#bus" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Bus</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#calling_member" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">calling_member</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#caller" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Caller</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#draft" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Draft</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#delivery" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Delivery</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -671,7 +731,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li><code>first</code>, the default: the member that submitted earliest, by the swarm’s clock, with ties broken by roster order.</li>
 <li><code>last</code>: the latest submission, again with ties broken by roster order. <code>leaderless(stop_on_submission=False, final="last")</code> gives it, for a team whose members build on each other’s work (<a href="./controllers.html#leaderless">Controllers</a>).</li>
 </ul>
-<p>A controller of your own can also choose the answer itself, with <code>choose_answer()</code>, in place of the rule (<a href="./controllers.html#choosing-the-answer">Controllers</a>). A member that ended any other way than submitting is never chosen (<a href="./members.html#how-a-member-ends">Members</a>). When no member submitted, the answer is empty.</p>
+<p>A controller of your own can also choose the answer itself, with <code>choose_answer()</code>, in place of the rule (<a href="./controllers.html#choosing-the-answer">Controllers</a>). A member that ended any other way than submitting is never chosen (<a href="./members.html#how-a-member-ends">Members</a>). When no member submitted, the answer is empty. Each answer of a <a href="./members.html#persistent-members">persistent member</a> is a submission for these rules, whatever the member’s status later, and ties between two answers of one member go to the earlier one.</p>
 <p>The swarm’s output is the chosen member’s <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.model.html#modeloutput">ModelOutput</a></span>, unchanged, so the scorer sees what it would have seen had that member run alone. The sample’s messages are its input followed by the answer’s message, whose <code>metadata["inspect_swarm"]</code> names the mode and the chosen member. Each member’s own conversation is in its timeline.</p>
 </section>
 <section id="the-result-record" class="level3">
@@ -693,12 +753,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li><code>gate_checks</code>, <code>gate_passes</code> and <code>first_pass_time</code> count the member’s in-loop checks (<a href="#checks-during-the-run">Checks during the run</a>).</li>
 <li><code>final.mode</code> is <code>first</code>, <code>last</code> or <code>controller</code>, and <code>final.member</code> names the chosen member. Under <code>controller</code>, <code>final.reason</code> is the reason the controller gave. With no submission, <code>mode</code> and <code>member</code> are <code>null</code> and <code>final.reason</code> is <code>"no_submissions"</code>.</li>
 </ul>
-<p>The event adds <code>"type": "result_record"</code> and an <code>"id"</code>, which the swarm also puts in the sample store under <code>inspect_swarm:result_id</code>, so that <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_result">swarm_result()</a></span> finds the record of the store it is given. If a limit, error or cancellation ends the swarm before it finalises its answer, the record has the answer so far with <code>provisional: true</code>, and that submission is the sample’s output: the first submission so far, the latest under <code>last</code>, or the controller’s choice once it has made one.</p>
+<p>The record is a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent">SwarmEvent</a></span> with <code>kind="result_record"</code>. Its <code>data</code> holds the fields above and an <code>id</code>, which the swarm also puts in the sample store under <code>inspect_swarm:result_id</code>, so that <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_result">swarm_result()</a></span> finds the record of the store it is given. Older logs hold the record as an <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent">InfoEvent</a></span> with source <code>inspect_swarm</code> and <code>data["type"] == "result_record"</code>; <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_result">swarm_result()</a></span> reads both forms. If a limit, error or cancellation ends the swarm before it finalises its answer, the record has the answer so far with <code>provisional: true</code>, and that submission is the sample’s output: the first submission so far, the latest under <code>last</code>, or the controller’s choice once it has made one.</p>
 <p><span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_result">swarm_result()</a></span> returns <code>None</code> when no swarm ran in the sample. It raises <code>ValueError</code> for a sample it cannot read the record of: one read without its events or attachments, one written by an inspect_swarm that kept the record in the store under <code>inspect_swarm:result</code>, or one that holds a swarm’s events but whose store names no record, as for a sample recovered from a crashed eval.</p>
 </section>
 <section id="the-record-belongs-to-the-swarm" class="level3">
 <h3 class="anchored" data-anchor-id="the-record-belongs-to-the-swarm">The record belongs to the swarm</h3>
-<p>Only the swarm writes the record and <code>inspect_swarm:result_id</code>. Task code (tools, member builders, controllers, scorers) must not write that key or an event with source <code>inspect_swarm</code>. Member names, roles and sandboxes, and a controller’s <code>choose_answer()</code> reason, must be text that a log keeps as it is: not beginning with <code>attachment://</code> or <code>tc://</code>, which a log reads as a reference to an attachment, not a base64 <code>data:</code> URI, which a log removes when images are not logged, and valid UTF-8. The swarm does not write a record that holds such text, and its end raises <code>ValueError</code>.</p>
+<p>Only the swarm writes the record and <code>inspect_swarm:result_id</code>. Task code (tools, member builders, controllers, scorers) must not write that key, a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent">SwarmEvent</a></span>, or an event with source <code>inspect_swarm</code>. Member names, roles and sandboxes, and a controller’s <code>choose_answer()</code> reason, must be text that a log keeps as it is: not beginning with <code>attachment://</code> or <code>tc://</code>, which a log reads as a reference to an attachment, not a base64 <code>data:</code> URI, which a log removes when images are not logged, and valid UTF-8. The swarm does not write a record that holds such text, and its end raises <code>ValueError</code>.</p>
 <p>There is no record while the swarm runs, so no member can read another’s results from it. A scorer that reads it after the swarm is how a task finds each member’s sandbox (<a href="#per-member-sandboxes">Per-member sandboxes</a>). A tool that reads the transcript sees every member’s model and tool calls anyway. That is a channel between members outside the swarm’s channels, and the swarm records no evidence of it.</p>
 </section>
 </section>

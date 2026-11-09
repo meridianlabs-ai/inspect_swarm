@@ -452,14 +452,38 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundary" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Boundary</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundarycallback" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">BoundaryCallback</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#memberended" class="sidebar-item-text sidebar-link">
  <span class="menu-text">MemberEnded</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarmevent" class="sidebar-item-text sidebar-link">
- <span class="menu-text">SwarmEvent</span></a>
+  <a href="./reference/inspect_swarm.html#memberidle" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberIdle</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#membernews" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#controlevent" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">ControlEvent</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -512,6 +536,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarm_bridged_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_bridged_tools</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#swarm_channel" class="sidebar-item-text sidebar-link">
  <span class="menu-text">swarm_channel</span></a>
   </div>
@@ -550,6 +580,36 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#waitnews" class="sidebar-item-text sidebar-link">
  <span class="menu-text">WaitNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#bus" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Bus</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#calling_member" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">calling_member</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#caller" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Caller</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#draft" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Draft</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#delivery" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Delivery</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -683,7 +743,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li>Only the member’s own loop gets the tools. Its subagents, such as a deepagent member’s <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#general">general()</a></span>, do not, so each inbox has one reader.</li>
 <li>The channel can be combined with <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#shared_memory">shared_memory()</a></span>. Then the member’s own loop gets both channels’ tools and one <code>swarm_wait</code> for both.</li>
 <li>The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, <code>_</code> or <code>-</code>. <code>all</code> and <code>swarm</code> are reserved.</li>
-<li>Bridged members cannot use the channel yet, and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm">swarm()</a></span> refuses a bridged member beside it.</li>
+<li>A bridged member gets the tools from <code>swarm_bridged_tools(["messages"])</code>. All of its CLI’s conversations, subagents included, share its inbox: a message any of them reads is read (<a href="./restrictions.html#bridged-members">Bridged members</a>).</li>
 </ul>
 </section>
 <section id="the-tools" class="level2">
@@ -765,13 +825,14 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="the-record-of-messages" class="level2">
 <h2 class="anchored" data-anchor-id="the-record-of-messages">The record of messages</h2>
-<p>The swarm logs messages as <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent">InfoEvent</a></span>s with source <code>inspect_swarm</code> and type <code>comm</code>, each in the span of the tool call that made it:</p>
+<p>The swarm logs messages as <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent">CommunicationEvent</a></span>s with source <code>inspect_swarm</code>, each in the span of the tool call that made it. Its <code>kind</code> is one of:</p>
 <ul>
-<li><code>sent</code>: a send that reached the swarm, with its addresses, recipients, text, <code>reply_to</code> and <code>wake</code>, and why it was refused if it was. An inbox that is full, or a duplicate, is refused by the control <code>admit</code>.</li>
-<li><code>delivered</code>: a message delivered, with its recipients and commit sequence number.</li>
-<li><code>read</code>: a <code>read_messages</code> result, with the ids of the messages it showed. A read that showed nothing has no event.</li>
-<li><code>waited</code>: a <code>swarm_wait</code> call, with what ended it and the unread messages it named.</li>
+<li><code>sent</code>: a send that reached the swarm, with its addresses, recipients, text and <code>reply_to</code> in <code>send.record</code>, why it was refused in <code>send.rejected</code> if it was, and <code>wake</code> in <code>data["record"]</code>. An inbox that is full, or a duplicate, is refused by the control <code>admit</code>.</li>
+<li><code>delivered</code>: a message delivered, with its recipients and commit sequence number in <code>delivery</code>.</li>
+<li><code>read</code>: a <code>read_messages</code> result, with the ids of the messages it showed in <code>record_ids</code> and the messages it depends on in <code>data["depends_on"]</code>. A read that showed nothing has no event.</li>
+<li><code>waited</code>: a <code>swarm_wait</code> call, with what ended it and the unread messages it named. A wait that reports unread messages depends on all of them (<code>data["depends_on"]</code>), including those sent with <code>wake=False</code>. A wait that ends with only the unread count depends on none.</li>
 </ul>
+<p><code>depends_on</code> names each message once per loop, so a read of messages that an earlier wait reported depends on none of them.</p>
 <p>The <a href="./analysis.html#communication">metrics</a> count these events for each member.</p>
 <p>A native member’s calls to <code>send_message</code> and <code>read_messages</code> are ordinary tool calls, so <a href="https://meridianlabs-ai.github.io/inspect_sentinel">Inspect Sentinel</a>’s tool stages see them, as in <a href="./shared-memory.html#monitoring-with-inspect-sentinel">Shared Memory</a>.</p>
 

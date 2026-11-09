@@ -452,14 +452,38 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundary" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Boundary</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundarycallback" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">BoundaryCallback</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#memberended" class="sidebar-item-text sidebar-link">
  <span class="menu-text">MemberEnded</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarmevent" class="sidebar-item-text sidebar-link">
- <span class="menu-text">SwarmEvent</span></a>
+  <a href="./reference/inspect_swarm.html#memberidle" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberIdle</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#membernews" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#controlevent" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">ControlEvent</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -512,6 +536,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarm_bridged_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_bridged_tools</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#swarm_channel" class="sidebar-item-text sidebar-link">
  <span class="menu-text">swarm_channel</span></a>
   </div>
@@ -550,6 +580,36 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#waitnews" class="sidebar-item-text sidebar-link">
  <span class="menu-text">WaitNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#bus" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Bus</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#calling_member" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">calling_member</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#caller" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Caller</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#draft" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Draft</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#delivery" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Delivery</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -709,7 +769,89 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""Tell members that one of them writes a plan for the others."""</span></span>
 <span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> LeadChannel(name)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <p><code>instructions()</code> returns text for the member’s preamble, or <code>None</code> to add nothing. <code>check()</code>, if overridden, is called with the roster when <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm">swarm()</a></span> is called and raises <code>ValueError</code> for a roster the channel cannot serve. A <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channel">Channel</a></span> holds configuration only: one object serves every sample. The factory’s arguments are logged with the channel.</p>
-<p>A channel with tools and records, as <code>shared_memory</code> is, also sets <code>name</code> and <code>prefix</code> and returns a <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channelstate">ChannelState</a></span> from <code>open()</code> for each run of the swarm; its records go through the swarm’s bus. Its <code>reach</code> decides which of a member’s loops get its tools from <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>: <code>"loop"</code> (the default), only the member’s own loop; <code>"member"</code>, also the nested loops the member’s agent gives <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>. The agent decides which nested loops get <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>; <code>reach</code> filters the channel tools they get and which channels can wake their <code>swarm_wait</code>. A channel whose reads consume something for the member, such as an inbox that marks messages read, keeps <code>"loop"</code>, so that a subagent cannot read what the member’s own loop then never sees. <code>shared_memory</code> sets <code>"member"</code>: a view consumes nothing, and each loop keeps its own seen state. A channel’s tools are given to the member as they are: with the <code>messages</code> channel, their results do not count the member’s unread messages, as the swarm’s own tools do. A member learns of messages from those, or by calling <code>list_members</code>. See the docstrings of <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channel">Channel</a></span>, <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channelstate">ChannelState</a></span> and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#waitingstate">WaitingState</a></span> in the <a href="./reference/index.html">reference</a>.</p>
+<p>A channel with tools and records, as <code>shared_memory</code> is, also sets <code>name</code> and <code>prefix</code> and returns a <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channelstate">ChannelState</a></span> from <code>open()</code> for each run of the swarm; its records go through the swarm’s bus. Its <code>reach</code> decides which of a member’s loops get its tools from <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>: <code>"loop"</code> (the default), only the member’s own loop; <code>"member"</code>, also the nested loops the member’s agent gives <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>. The agent decides which nested loops get <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>; <code>reach</code> filters the channel tools they get and which channels can wake their <code>swarm_wait</code>. A channel whose reads consume something for the member, such as an inbox that marks messages read, keeps <code>"loop"</code>, so that a subagent cannot read what the member’s own loop then never sees. <code>shared_memory</code> sets <code>"member"</code>: a view consumes nothing, and each loop keeps its own seen state. A channel’s tools are given to the member as they are: with the <code>messages</code> channel, their results do not count the member’s unread messages, as the swarm’s own tools do. A member learns of messages from those, or by calling <code>list_members</code>. <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_bridged_tools">swarm_bridged_tools()</a></span> serves only the built-in <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#messages">messages()</a></span> and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#shared_memory">shared_memory()</a></span> channels, so <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm">swarm()</a></span> refuses a bridged member beside a custom channel with records (<a href="./restrictions.html#channels-for-bridged-members">Restrictions</a>).</p>
+<p>This channel keeps a notice board. Any member posts a notice, and every member reads them all:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> collections.abc <span class="im">import</span> Mapping</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.tool <span class="im">import</span> Tool, ToolDef, ToolError</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> pydantic <span class="im">import</span> JsonValue</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_swarm <span class="im">import</span> (</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    Bus,</span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    Channel,</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    ChannelRun,</span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>    ChannelState,</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>    Draft,</span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>    MemberInfo,</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>    Record,</span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a>    calling_member,</span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>    swarm_channel,</span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> NoticesState:</span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>, bus: Bus) <span class="op">-&gt;</span> <span class="va">None</span>:</span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.bus <span class="op">=</span> bus</span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.notices: <span class="bu">list</span>[Record] <span class="op">=</span> []</span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> tools(<span class="va">self</span>) <span class="op">-&gt;</span> <span class="bu">list</span>[Tool]:</span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>        <span class="cf">async</span> <span class="kw">def</span> post_notice(text: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">str</span>:</span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>            <span class="co">"""Post a notice that every member can read.</span></span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a><span class="co">            Args:</span></span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a><span class="co">                text: The notice.</span></span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a><span class="co">            """</span></span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>            delivery <span class="op">=</span> <span class="cf">await</span> <span class="va">self</span>.bus.deliver(Draft(<span class="st">"notices"</span>, <span class="st">"notice"</span>, payload<span class="op">=</span>text))</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> <span class="ss">f"Posted </span><span class="sc">{</span>delivery<span class="sc">.</span>record<span class="sc">.</span><span class="bu">id</span><span class="sc">}</span><span class="ss">."</span></span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>        <span class="cf">async</span> <span class="kw">def</span> read_notices() <span class="op">-&gt;</span> <span class="bu">str</span>:</span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>            <span class="co">"""Read the other members' notices."""</span></span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>            caller <span class="op">=</span> calling_member()</span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>            <span class="cf">assert</span> caller <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span></span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>            shown <span class="op">=</span> [r <span class="cf">for</span> r <span class="kw">in</span> <span class="va">self</span>.notices <span class="cf">if</span> r.sender <span class="op">!=</span> caller.member]</span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.bus.read(<span class="st">"notices"</span>, [r.<span class="bu">id</span> <span class="cf">for</span> r <span class="kw">in</span> shown])</span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>            lines <span class="op">=</span> [<span class="ss">f"</span><span class="sc">{</span>r<span class="sc">.</span><span class="bu">id</span><span class="sc">}</span><span class="ss"> from </span><span class="sc">{</span>r<span class="sc">.</span>sender<span class="sc">}</span><span class="ss">: </span><span class="sc">{</span>r<span class="sc">.</span>payload<span class="sc">}</span><span class="ss">"</span> <span class="cf">for</span> r <span class="kw">in</span> shown]</span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> <span class="st">"</span><span class="ch">\n</span><span class="st">"</span>.join(lines) <span class="kw">or</span> <span class="st">"No notices."</span></span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> [ToolDef(post_notice).as_tool(), ToolDef(read_notices).as_tool()]</span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> validate(<span class="va">self</span>, record: Record) <span class="op">-&gt;</span> <span class="va">None</span>:</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="kw">not</span> record.payload.strip():</span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a>            <span class="cf">raise</span> ToolError(<span class="st">"A notice needs text."</span>)</span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-49"><a href="#cb3-49" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> admit(<span class="va">self</span>, record: Record) <span class="op">-&gt;</span> <span class="va">None</span>:</span>
+<span id="cb3-50"><a href="#cb3-50" aria-hidden="true" tabindex="-1"></a>        <span class="cf">pass</span></span>
+<span id="cb3-51"><a href="#cb3-51" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-52"><a href="#cb3-52" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="bu">apply</span>(<span class="va">self</span>, record: Record) <span class="op">-&gt;</span> <span class="bu">tuple</span>[<span class="bu">list</span>[<span class="bu">str</span>], Mapping[<span class="bu">str</span>, JsonValue] <span class="op">|</span> <span class="va">None</span>]:</span>
+<span id="cb3-53"><a href="#cb3-53" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.notices.append(record)</span>
+<span id="cb3-54"><a href="#cb3-54" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> [], <span class="va">None</span></span>
+<span id="cb3-55"><a href="#cb3-55" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-56"><a href="#cb3-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-57"><a href="#cb3-57" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> Notices(Channel):</span>
+<span id="cb3-58"><a href="#cb3-58" aria-hidden="true" tabindex="-1"></a>    name <span class="op">=</span> <span class="st">"notices"</span></span>
+<span id="cb3-59"><a href="#cb3-59" aria-hidden="true" tabindex="-1"></a>    prefix <span class="op">=</span> <span class="st">"n"</span></span>
+<span id="cb3-60"><a href="#cb3-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-61"><a href="#cb3-61" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="bu">open</span>(<span class="va">self</span>, run: ChannelRun) <span class="op">-&gt;</span> ChannelState:</span>
+<span id="cb3-62"><a href="#cb3-62" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> NoticesState(run.bus)</span>
+<span id="cb3-63"><a href="#cb3-63" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-64"><a href="#cb3-64" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> instructions(<span class="va">self</span>, member: MemberInfo) <span class="op">-&gt;</span> <span class="bu">str</span> <span class="op">|</span> <span class="va">None</span>:</span>
+<span id="cb3-65"><a href="#cb3-65" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="st">"Post what others should know with post_notice, and read theirs with read_notices."</span></span>
+<span id="cb3-66"><a href="#cb3-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-67"><a href="#cb3-67" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-68"><a href="#cb3-68" aria-hidden="true" tabindex="-1"></a><span class="at">@swarm_channel</span></span>
+<span id="cb3-69"><a href="#cb3-69" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> notices() <span class="op">-&gt;</span> Channel:</span>
+<span id="cb3-70"><a href="#cb3-70" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> Notices()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Members get the tools from <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>, as with the built-in channels. A tool hands the bus a <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#draft">Draft</a></span>, and <code>run.bus.deliver()</code> makes the <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#record">Record</a></span>, binds the sender from the calling member, checks it, and calls the state’s <code>validate()</code>, then <code>admit()</code> and <code>apply()</code> with no <code>await</code> between them, so what <code>admit()</code> checks still holds when <code>apply()</code> runs. After address resolution and validation, the log records accepted sends and refusals by liveness, payload and storm checks or <code>admit()</code> as <code>sent</code> events. Each delivered record also has a <code>delivered</code> event. Earlier refusals, including a stopping swarm, produce no communication event. A refusal raises <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#toolerror">ToolError</a></span>, which the member sees as the tool’s result.</p>
+<p>A draft with no <code>to</code> is unaddressed: it reaches nobody directly, and the channel decides whom it concerns. <code>apply()</code> returns the members the record is news to and a JSON mapping, both written in the <code>delivered</code> event, and may name members that have not started or have ended. A draft addressed with <code>to=</code> is refused if a member it names has not started, is ending or has ended.</p>
+<p><span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#calling_member">calling_member()</a></span> tells a tool which member it acts for: a <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#caller">Caller</a></span> with the member’s name, whether the calling loop is a nested one, and that loop’s agent span. It comes from the runtime, never from model output, and is <code>None</code> outside a member of a swarm.</p>
+<p>A tool whose result shows the channel’s records reports them with <code>run.bus.read(name, records)</code>, using the <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channelrun">ChannelRun</a></span> that <code>open()</code> was given: <code>name</code> is the channel’s <code>name</code>, and <code>records</code> are the ids of the records the result shows. A waiting channel’s <code>news()</code> reports them in <code>WaitNews(lines, files, depends_on=[...])</code>. The log records them as the result’s <code>depends_on</code>, the records the member’s later work depends on, which <a href="./analysis.html#the-critical-path">the critical path</a> links. Two rules decide what a result depends on:</p>
+<ul>
+<li>A result that tells the loop a record was committed, without showing its content, as a wait does, depends on it.</li>
+<li>A result built from several records, such as a file made by several writes, depends on them all. Pass them as <code>depends_on=</code> when they differ from the records the result shows.</li>
+</ul>
+<p>A channel that reports nothing adds no dependency. Every id must be a record the channel committed in this run, or the call raises <code>ValueError</code>.</p>
+<p><code>read()</code> returns the read’s id (<code>r-5</code>), which the log’s <code>read</code> event carries. Pass <code>listing=True</code> for a result that shows what exists rather than its content, which the metrics count as a listing, not a read.</p>
+<p>See the docstrings of <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channel">Channel</a></span>, <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channelrun">ChannelRun</a></span>, <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#channelstate">ChannelState</a></span>, <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#bus">Bus</a></span>, <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#draft">Draft</a></span>, <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#delivery">Delivery</a></span>, <code>calling_member</code>, <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#waitingstate">WaitingState</a></span> and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#waitnews">WaitNews</a></span> in the <a href="./reference/index.html">reference</a>.</p>
 
 
 </section>

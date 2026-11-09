@@ -452,14 +452,38 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundary" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Boundary</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundarycallback" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">BoundaryCallback</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#memberended" class="sidebar-item-text sidebar-link">
  <span class="menu-text">MemberEnded</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarmevent" class="sidebar-item-text sidebar-link">
- <span class="menu-text">SwarmEvent</span></a>
+  <a href="./reference/inspect_swarm.html#memberidle" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberIdle</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#membernews" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#controlevent" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">ControlEvent</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -512,6 +536,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarm_bridged_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_bridged_tools</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#swarm_channel" class="sidebar-item-text sidebar-link">
  <span class="menu-text">swarm_channel</span></a>
   </div>
@@ -550,6 +580,36 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#waitnews" class="sidebar-item-text sidebar-link">
  <span class="menu-text">WaitNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#bus" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Bus</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#calling_member" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">calling_member</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#caller" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Caller</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#draft" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Draft</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#delivery" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Delivery</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -632,6 +692,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <li><a href="#tool-state" id="toc-tool-state" class="nav-link" data-scroll-target="#tool-state">Tool state</a></li>
   <li><a href="#background-work" id="toc-background-work" class="nav-link" data-scroll-target="#background-work">Background work</a></li>
   <li><a href="#how-a-member-ends" id="toc-how-a-member-ends" class="nav-link" data-scroll-target="#how-a-member-ends">How a member ends</a></li>
+  <li><a href="#persistent-members" id="toc-persistent-members" class="nav-link" data-scroll-target="#persistent-members">Persistent members</a></li>
   <li><a href="#a-swarm-of-one" id="toc-a-swarm-of-one" class="nav-link" data-scroll-target="#a-swarm-of-one">A swarm of one</a></li>
   <li><a href="#agents-the-swarm-refuses" id="toc-agents-the-swarm-refuses" class="nav-link" data-scroll-target="#agents-the-swarm-refuses">Agents the swarm refuses</a></li>
   </ul>
@@ -718,7 +779,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <p>These are <code>react-1</code> to <code>react-3</code>. Names you give with <code>name</code> are not numbered across records, so give each record its own.</p>
 <section id="members-that-choose-their-names" class="level3">
 <h3 class="anchored" data-anchor-id="members-that-choose-their-names">Members that choose their names</h3>
-<p>With <code>choose_name=True</code> a member is not told its name. Its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:</p>
+<p>With <code>choose_name=True</code> a member is not told its name. The swarm’s preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:</p>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.agent <span class="im">import</span> react</span>
 <span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.tool <span class="im">import</span> bash</span>
 <span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a></span>
@@ -730,12 +791,13 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <p>Each member starts with <code>You are one of 4 agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is.</code> Its role, if it has one, is still stated. The log still names the members <code>react-1</code> to <code>react-4</code>: the swarm’s timelines, spans, tool state, budget shares and result record use those names. The name a member chose is in its transcript, not in the swarm’s records.</p>
 <p>A roster can mix the two, for example a lead you name and workers that name themselves. The <code>filesystem</code> channel then tells every member that its scratch directory may be taken by another member (<a href="./channels.html#the-filesystem-channel">Channels</a>).</p>
 <p>A swarm in which any member chooses its name can use only the <code>filesystem</code> channel or no channel (<code>channels=[]</code>). Other channels, including <a href="./shared-memory.html">shared memory</a> and your own, show members to each other by name, so <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm">swarm()</a></span> refuses them.</p>
-<p>The swarm does not change text you give the member yourself: the sample input, a controller’s <code>start(input=...)</code>, the agent’s prompt, and the sandbox configuration.</p>
+<p>The swarm does not change text you give the member yourself: the sample input, a controller’s <code>start(input=...)</code> and <code>start(preamble=...)</code>, the agent’s prompt, and the sandbox configuration. A controller’s <code>start(preamble=...)</code> uses its text as given, and <code>preamble=False</code> leaves the preamble out (<a href="./controllers.html">Controllers</a>). Neither adds a request to choose a name.</p>
 </section>
 </section>
 <section id="limits" class="level2">
 <h2 class="anchored" data-anchor-id="limits">Limits</h2>
 <p><code>limits</code> takes token, cost, turn, message and time limits for that member alone. Working limits are refused. A member that reaches one ends with status <code>member_limit:&lt;type&gt;</code>, and the others continue. The swarm’s own caps are set with <code>budget=</code> (<a href="./budget.html">Budgets</a>).</p>
+<p>A member time limit does not run while the member is held at a turn boundary by a controller’s callbacks (<a href="./controllers.html#boundary-callbacks">Controllers</a>): it counts only the time the member was not held. A member whose time limit ran out before it reached the boundary ends <code>member_limit:time</code> there, without being held.</p>
 </section>
 <section id="member-builders" class="level2">
 <h2 class="anchored" data-anchor-id="member-builders">Member builders</h2>
@@ -757,7 +819,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="tool-state" class="level2">
 <h2 class="anchored" data-anchor-id="tool-state">Tool state</h2>
-<p>Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (<span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span>, <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session">bash_session()</a></span>, <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#web_browser">web_browser()</a></span>, the skill tool) give each member its own state when their <code>instance</code> is left at the default, so the default <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span> is private to each member.</p>
+<p>Each member runs in its own tool-state scope, named after the member. Built-in tools that keep state in the sample store (<span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span>, <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session">bash_session()</a></span>, the skill tool) give each member its own state when their <code>instance</code> is left at the default, so the default <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span> is private to each member.</p>
 <p>An explicit <code>instance</code> is used as given: members that name the same instance share its state. A board shared on purpose was <code>memory(instance="board")</code> before the shared-memory channel; see <a href="./shared-memory.html#migrating-from-memoryinstance">Shared Memory</a> for moving to the channel.</p>
 <ul>
 <li>The sample store itself is shared. State that custom tools or agent code keep in the store with no instance is shared unless they resolve their instance with <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#tool_state_instance">tool_state_instance()</a></span>.</li>
@@ -783,15 +845,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <tbody>
 <tr class="odd">
 <td><code>submitted</code></td>
-<td>Its agent returned normally. Its output is its answer.</td>
+<td>Its agent returned normally. Its output is its answer. A <a href="#persistent-members">persistent member</a> is never <code>submitted</code> by a normal return: it ends <code>submitted</code> when it is stopped or ended while idle, or at the turn boundary after an answer, with its last answer as its output.</td>
 </tr>
 <tr class="even">
 <td><code>unsubmitted</code></td>
-<td>Its agent returned with a <code>content_filter</code> or <code>model_length</code> stop reason, as <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react">react()</a></span> does after repeated refusals or a context overflow.</td>
+<td>Its agent returned with a <code>content_filter</code> or <code>model_length</code> stop reason, as <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react">react()</a></span> does after repeated refusals or a context overflow. A persistent member also ends <code>unsubmitted</code> when its agent returns without an answer, for example when its <code>on_continue</code> returns <code>False</code> (a cut-off).</td>
 </tr>
 <tr class="odd">
 <td><code>stopped</code></td>
-<td>The swarm stopped it, for example when another member submitted or the swarm’s time cap was reached.</td>
+<td>The swarm stopped it, for example when another member submitted or the swarm’s time cap was reached, or a controller ended it (<a href="./controllers.html#boundary-callbacks">Controllers</a>). A member that reaches a turn boundary of its agent loop after the stop began ends there.</td>
 </tr>
 <tr class="even">
 <td><code>share</code></td>
@@ -819,7 +881,21 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </tr>
 </tbody>
 </table>
-<p>A normal return counts as a submission for any agent other than <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react">react()</a></span>’s two cases above. An agent that gives up in some other way and returns is treated as having answered. To make a normal return mean something stronger, such as a passed check, have the member’s builder raise a custom limit when it is not so (<a href="./controllers.html#stopping-on-the-first-proof">Controllers</a>).</p>
+<p>For a member that is not persistent, a normal return counts as a submission for any agent other than <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react">react()</a></span>’s two cases above. An agent that gives up in some other way and returns is treated as having answered. To make a normal return mean something stronger, such as a passed check, have the member’s builder raise a custom limit when it is not so (<a href="./controllers.html#stopping-on-the-first-proof">Controllers</a>).</p>
+</section>
+<section id="persistent-members" class="level2">
+<h2 class="anchored" data-anchor-id="persistent-members">Persistent members</h2>
+<p>A persistent member stays available after it answers, so a controller can give the same member several tasks with its context intact:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>member(worker(), name<span class="op">=</span><span class="st">"worker"</span>, persistent<span class="op">=</span><span class="va">True</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>When a persistent member submits, or a <code>react(submit=False)</code> member gives a reply with no tool calls, the swarm records that as one of its <em>answers</em> and holds the member <em>idle</em> at its next turn boundary. The agent loop does not return. The controller hears <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#memberidle">MemberIdle</a></span> and gives the member its next task with <code>SwarmControl.wake()</code>, which appends the task to the member’s conversation (<a href="./controllers.html#persistent-members">Controllers</a>). The member keeps its conversation, tool state and limits across these <em>activations</em>.</p>
+<ul>
+<li>Its limits span its whole life. Its member time limit does not run while it is idle.</li>
+<li>Every answer is a candidate for the swarm’s answer: <code>first</code> and <code>last</code> choose across all of them, and <code>choose_answer()</code> takes the member’s latest. An answer stays a candidate however the member ends later.</li>
+<li>A submission in a turn that also calls a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#handoff">handoff()</a></span> is not an answer. Nor is a refusal (<code>content_filter</code>) or a reply cut off by the context window.</li>
+<li>A member stopped or ended while idle ends <code>submitted</code>. A member whose loop returns without an answer ends <code>unsubmitted</code>, its earlier answers still candidates.</li>
+<li>While it is idle, another member’s write that is news to it reaches the controller as <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#membernews">MemberNews</a></span>, and the controller decides whether to wake it (<a href="./controllers.html#news-for-idle-members">News for idle members</a>).</li>
+</ul>
+<p>Only a member whose agent is a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react">react()</a></span>, <code>react(submit=False)</code> or <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#deepagent">deepagent()</a></span> loop can persist, given directly or returned by a <a href="#member-builders">member builder</a>. The swarm refuses every other agent before it runs: a bridged member, a custom loop, <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#deepagent">deepagent()</a></span> with background dispatch, and an agent that calls a loop and then checks its result (<code>checked_solver()</code> in the examples). In a swarm with <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#shared_memory">shared_memory()</a></span>, a persistent member must have <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span> in its own tools, not only in a subagent’s.</p>
 </section>
 <section id="a-swarm-of-one" class="level2">
 <h2 class="anchored" data-anchor-id="a-swarm-of-one">A swarm of one</h2>
@@ -829,7 +905,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <h2 class="anchored" data-anchor-id="agents-the-swarm-refuses">Agents the swarm refuses</h2>
 <ul>
 <li>ACP agents wait for their caller to drive them, so they are refused.</li>
-<li>Bridged members, which run a CLI agent in the sandbox through Inspect’s agent bridge, cannot have background work and cannot use channels with tools yet. See <a href="./restrictions.html">Restrictions</a>.</li>
+<li>Bridged members, which run a CLI agent in the sandbox through Inspect’s agent bridge, cannot have background work. See <a href="./restrictions.html">Restrictions</a>.</li>
 </ul>
 
 

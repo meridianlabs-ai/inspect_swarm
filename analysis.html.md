@@ -2,7 +2,7 @@
 
 ## Overview
 
-When the swarm ends it writes two entries to the sample store, each also logged as an [InfoEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent) with source `inspect_swarm`:
+When the swarm ends it writes two entries to the sample store, each also logged as a [SwarmEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent) of kind `metrics` or `ledger` whose `data` is the entry:
 
 - `inspect_swarm:metrics`: tokens, cost and time for the swarm and each member, and counts of how each member acted, checked its work, communicated and waited ([Metrics](#metrics)).
 - `inspect_swarm:ledger`: the swarm’s accounting. Its budget, caps, the usage of each member, model calls that errored or reported no usage, unpriced models, and what stopped the swarm ([The ledger](#the-ledger)).
@@ -16,7 +16,7 @@ For the swarm:
 - `tokens`, `cost`: everything in the swarm: members, controller and final step.
 - `wall_clock`: seconds from the swarm’s start to its end.
 - `never_acted`: members with no completed model call.
-- `steps_to_answer`: completed model calls of the member whose output is the answer, `null` with no answer.
+- `steps_to_answer`: completed model calls of the member whose output is the answer, `null` with no answer. For a persistent member’s answer, its calls before that answer.
 - `longest_member_steps`: the largest number of completed model calls of any member.
 - `critical_steps_to_answer`: the number of completed model calls on the longest chain of calls the answer depended on, across members ([The critical path](#the-critical-path)).
 
@@ -26,9 +26,11 @@ For each member, in roster order:
 
 - `tokens`, `cost`: its usage, its subagents’ and background work’s included.
 - `running_time`: seconds from its start to its end, `null` for a member never started.
-- `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member, whose tool calls leave no tool events.
+- `longest_identical_tool_run`: the longest run of identical tool calls (same function and arguments), a sign of a stuck member. `null` for a bridged member: the CLI’s own tool calls are not recorded; bridged host tool calls, such as the swarm’s tools, are.
 - `gate_checks`, `gate_passes`, `first_pass_time`: its in-loop checks ([Scoring](./scoring.html.md#checks-during-the-run)).
 - `comm`, `waits`, `waits_by_outcome`, `wait_time`, `idle_time`: below.
+- `holds`, `held_time`: the turn boundaries at which a controller’s callbacks held it, and the seconds it was held. `running_time` includes them ([Boundary callbacks](#boundary-callbacks)). A persistent member’s idle holds count too.
+- `activations`, `answers`, `awaiting_work_time`: for a [persistent member](./members.html.md#persistent-members), the activations it began (1 at its start, one more for each wake), the answers it gave, and the part of `held_time` it spent idle, waiting for a wake or its end. All 0 for other members.
 
 ### The critical path
 
@@ -36,20 +38,18 @@ For each member, in roster order:
 
 Each member’s calls, its subagents’ and background work’s included, form one chain in the order they began. Chains link between members in two ways:
 
-- A view of a `shared_memory` file, or a `swarm_wait` result that names a file, follows the writes it showed. A view of a file follows every write in its history; a view of a deleted file follows the delete. Directory listings and the `changes` status line make no link.
+- A channel’s result follows the records it showed, as the channel reports them. It links to each record’s sender at the point the record was committed, so the sender’s work after a send or write is not linked. `shared_memory`: a view of a file follows every write in its history, a view of a deleted file follows the delete, and a `swarm_wait` result follows the write of each file it reports. Directory listings and the `changes` status line make no link. `messages`: `read_messages` follows the messages it returned, and a `swarm_wait` result that reports messages follows every unread message it counts. A message sent with `wake=False` links when it is read, or when a wait that reports messages counts it. A custom channel links what it reports ([Channels](./channels.html.md#writing-a-channel)).
 - A `swarm_wait` result that names a member’s end follows all of that member’s calls.
 
-A wait that also reached a custom waiting channel links no files, since its evidence does not say which channel named them. Its links to member ends count either way.
-
-The chain ends when the answering member ends, after its background work has finished, since that work can still change the member’s output.
+The chain ends when the answering member ends, after its background work has finished, since that work can still change the member’s output. For a persistent member’s answer, it ends at that answer.
 
 The number over-counts work inside a member. Parallel and background subagents, tool calls of one turn, and any other concurrent work count one after another, and the answering member’s background work after its agent returned, its reads included, counts whether or not it changed the answer. That excess reaches peers through the member’s later writes.
 
-The number also misses links. Only `shared_memory` and `swarm_wait` make them, so information that members share in other ways adds none: messages, a shared sandbox, a shared volume, a service, a custom channel and its wait results, a shared tool or store key, or a controller that passes one member’s result to another. A `swarm_wait` result that reports more than ten files names only the first ten in its evidence, so the rest make no link until the member views them. Missed links can only lower the number.
+The number also misses links. Only channel results and `swarm_wait` make them, so information that members share in other ways adds none: a shared sandbox, a shared volume, a service, a custom channel that reports no dependencies, a shared tool or store key, or a controller that passes one member’s result to another. Counts alone make no link either: the unread-message count and the line of changed files on other results, and `list_members`. Missed links can only lower the number.
 
-With both effects it is not a bound on true causal depth in either direction. A nested swarm’s board makes no link for the outer swarm; its own metrics count it.
+With both effects it is not a bound on true causal depth in either direction. A nested swarm’s channels make no link for the outer swarm; its own metrics count it.
 
-It is `null` when there is no answer, when the answering member has no recorded end, when the board’s evidence is inconsistent (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.
+It is `null` when there is no answer, when the answering member has no recorded end, when the evidence names a record no recorded commit made (with a warning in the log), and for a sample resumed from a checkpoint. Metrics written by earlier versions do not have it.
 
 ### Communication
 
@@ -72,9 +72,34 @@ Each member’s metrics count its `swarm_wait` calls, its subagents’ included:
 
 In a swarm with no `swarm_wait` (`filesystem` only, or `channels=[]`) the four are `null`, so 0 means the wait was offered and unused. Waiting is wall-clock time, so a member’s `running_time` includes it.
 
+### Boundary callbacks
+
+When a controller holds a member at turn boundaries ([Controllers](./controllers.html.md#boundary-callbacks)), the swarm writes two kinds of [SwarmEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent) in the member’s span, with `member` set. Neither holds message text.
+
+`boundary`, once for each boundary where callbacks ran, and for each hold of a persistent member after an answer, callbacks or not:
+
+- `boundary`: the boundary’s index. `after`: what the conversation ended with.
+- `origins`: the origins of the callbacks that ran, in order. `held_for`: the seconds the member was held.
+- `messages`: the number of messages `before` and `after`.
+- `outcome`: `continue` (any change is in the conversation), `end` (with `origin`), `stop`, `error` (a callback raised, or its result was invalid; with `origin` and `error`, the error’s type), `rejected` (applying the change failed, such as at the member’s message limit; with `error`) or `cancelled` (a cancellation from outside the swarm).
+
+`changed`, once for each callback whose result differed from what it received, with its `boundary` and `origin`:
+
+- `added`: each new message’s `id`, `hash` and `index` in the result.
+- `removed`: the ids of messages no longer there.
+- `replaced`: each message kept under its id with new content, with its `id` and its hashes `before` and `after`.
+- `order`: the result’s ids in order, only when the kept messages changed their order.
+- `applied`: whether the change is in the member’s conversation. It is `false` when a later callback ended the member or raised, the swarm stopped, or the change was rejected.
+
+A hash is the SHA-256 of the message as the log serializes it, without its id (a value JSON cannot hold counts as null, and text UTF-8 cannot encode is escaped), so a change can be matched to the messages in a later [ModelEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#modelevent)‘s input. When a callback rewrites the conversation, compaction summaries that describe messages it changed are removed, and the removal is one more `changed` event with origin `swarm`. A persistent member’s wake input is a `changed` event with origin `swarm` too, before the callbacks’ own.
+
+### Persistent members
+
+A [persistent member](./members.html.md#persistent-members) writes one `answer` event for each answer, in its span, with `answer`, the answer’s index from 0. In the result record, its [MemberResult](./reference/inspect_swarm.html.md#memberresult) has `persistent` true and `answer_times`, the swarm time of each answer. `FinalRecord.answer`, and the `final` event’s `answer`, say which of the chosen member’s answers is the swarm’s; they are `null` for other members.
+
 ### Wiring checks
 
-The metrics also check that members are wired to the channels. `tools_unwired` lists, in a swarm with a channel that has tools, the members with a completed model call whose loops never resolved [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.
+The metrics also check that members are wired to the channels. `tools_unwired` lists, in a swarm with a channel that has tools, the native members with a completed model call whose loops never resolved [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). Bridged members are exempt, so this metric does not detect a CLI built without [swarm_bridged_tools()](./reference/inspect_swarm.html.md#swarm_bridged_tools). A member listed there did not get what the channel offers, so it ran a different experiment from the one configured.
 
 ## Samples dataframe
 
@@ -134,7 +159,7 @@ The ledger of a two-member swarm with a cost cap of \$1 and a time cap of 600 se
 ``` json
 {
   "version": 1,
-  "budget": {"cost": 1.0, "tokens": null, "time": 600.0, "reserve": 0.05, "split": "pool", "grace": 120.0},
+  "budget": {"cost": 1.0, "tokens": null, "time": 600.0, "reserve": 0.05, "split": "pool", "grace": 120.0, "derive": true},
   "caps": {"cost": 1.0, "tokens": null, "time": 600.0},
   "sample_limits": {"token": null, "cost": null, "message": null, "turn": null, "working": null, "time": null},
   "members": [
@@ -180,7 +205,7 @@ The ledger of a two-member swarm with a cost cap of \$1 and a time cap of 600 se
 ```
 
 - `budget` is the [Budget](./reference/inspect_swarm.configuration.html.md#budget) as given. `caps` are the caps the swarm applied, derived from the sample’s limits or given: `cost` in dollars, `tokens`, and `time` in seconds, `null` for no cap. `sample_limits` are the sample’s limits when the swarm started.
-- `members` has one entry per member, in roster order. `status` is as in [How a member ends](./members.html.md#how-a-member-ends), `null` for a member never started. `cancelled` means the swarm or the sample cancelled the member, so calls it had in flight are unknown. A hard stop during a background drain also sets `cancelled`; the agent’s returned status is kept. `background_started` counts the tasks the member started with [background()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background), and `background_cancelled` those cancelled before they finished, whose calls in flight are unknown too.
+- `members` has one entry per member, in roster order. `status` is as in [How a member ends](./members.html.md#how-a-member-ends), `null` for a member never started. `cancelled` means the swarm or the sample cancelled the member, so calls it had in flight are unknown. A hard stop during a background drain also sets `cancelled`; the agent’s returned status is kept. So does a stop or `end()` that cancels a boundary callback while one of its model calls is in flight. `background_started` counts the tasks the member started with [background()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background), and `background_cancelled` those cancelled before they finished, whose calls in flight are unknown too.
 - `meter` is the usage and cost of what a member did. `suspended_cost` is the part spent while token counting was suspended, such as approval calls.
 - `calls` counts model calls: `calls` completed ones other than cache replays, `cache_replays` replayed from cache at no charge, `errored` attempts that errored or were cancelled (retries included), `no_usage` completed with no usage, and `unpriced` completed with usage but no cost.
 - `runtime` meters the controller’s own calls, `final` the final step’s (the default first-submission answer makes none), and `swarm` everything in the swarm: members, runtime and final step. The top-level `calls` counts every call in the swarm. `unpriced_calls_recorded` counts the unpriced calls the swarm’s meter recorded.

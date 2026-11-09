@@ -451,14 +451,38 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#boundary" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Boundary</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#boundarycallback" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">BoundaryCallback</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="../reference/inspect_swarm.html#memberended" class="sidebar-item-text sidebar-link">
  <span class="menu-text">MemberEnded</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="../reference/inspect_swarm.html#swarmevent" class="sidebar-item-text sidebar-link">
- <span class="menu-text">SwarmEvent</span></a>
+  <a href="../reference/inspect_swarm.html#memberidle" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberIdle</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#membernews" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#controlevent" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">ControlEvent</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -511,6 +535,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#swarm_bridged_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_bridged_tools</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="../reference/inspect_swarm.html#swarm_channel" class="sidebar-item-text sidebar-link">
  <span class="menu-text">swarm_channel</span></a>
   </div>
@@ -549,6 +579,36 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="../reference/inspect_swarm.html#waitnews" class="sidebar-item-text sidebar-link">
  <span class="menu-text">WaitNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#bus" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Bus</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#calling_member" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">calling_member</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#caller" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Caller</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#draft" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Draft</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../reference/inspect_swarm.html#delivery" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Delivery</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -664,7 +724,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <p>A swarm member: a built agent, or a registered <code>@agent</code> factory and its arguments.</p>
 <p>Create one with <span class="element-type-name ref-interlink"><a href="../reference/inspect_swarm.html#member">member()</a></span>, which documents the fields and the member contract.</p>
 <div class="source-link">
-<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_member.py#L87">Source</a>
+<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_member.py#L94">Source</a>
 </div>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode python doc-declaration code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> Member(BaseModel)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <section class="level4">
@@ -692,7 +752,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </dd>
 <dt><code class="ref-definition">choose_name</code> <span class="element-type"><span class="element-type-name">bool</span></span></dt>
 <dd>
-<p>Whether the member chooses its own name. <code>True</code> leaves the member’s name out of its preamble, which asks it to choose a name and tell the other members; the swarm still uses <code>name</code> for everything it records.</p>
+<p>Whether the member chooses its own name. <code>True</code> leaves the member’s name out of the swarm’s preamble, which asks it to choose a name and tell the other members; the swarm still uses <code>name</code> for everything it records. A controller’s <code>start(preamble=...)</code> replaces that preamble with its own text, used as given, or <code>preamble=False</code> leaves it out; neither adds a request to choose a name.</p>
 </dd>
 <dt><code class="ref-definition">count</code> <span class="element-type"><span class="element-type-name">int</span></span></dt>
 <dd>
@@ -714,6 +774,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <dd>
 <p>Other sandbox environments the member can reach by name, such as a shared service. Only with <code>sandbox</code>.</p>
 </dd>
+<dt><code class="ref-definition">persistent</code> <span class="element-type"><span class="element-type-name">bool</span></span></dt>
+<dd>
+<p>Whether the member stays available after it answers, held idle until the controller wakes it with <code>SwarmControl.wake()</code>.</p>
+</dd>
 </dl>
 </section>
 </section>
@@ -723,7 +787,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <p>By default the swarm derives its caps from the sample’s cost, token and time limits when it starts, holding back <code>reserve</code> of each. The caps are stopping rules: when one is reached the swarm stops its members, gives them up to <code>grace</code> seconds to finish the calls they have in flight, and then cancels the members still running. If the sample has a time limit, the grace period is capped at half its remaining time.</p>
 <p>Every field is a plain value, so each can be a task parameter, and two budgets that differ in any field are logged as different arguments.</p>
 <div class="source-link">
-<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_budget.py#L32">Source</a>
+<a href="https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_budget.py#L34">Source</a>
 </div>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode python doc-declaration code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> Budget(BaseModel)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <section class="level4">
@@ -731,15 +795,15 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <dl>
 <dt><code class="ref-definition">cost</code> <span class="element-type"><span class="element-type-name">float</span> | <span class="element-type-name">None</span></span></dt>
 <dd>
-<p>Swarm cost cap in dollars. <code>None</code> derives it from the sample’s cost limit.</p>
+<p>Swarm cost cap in dollars. <code>None</code> derives it from the sample’s cost limit when <code>derive</code> is <code>True</code>, and sets no cap when it is <code>False</code>.</p>
 </dd>
 <dt><code class="ref-definition">tokens</code> <span class="element-type"><span class="element-type-name">int</span> | <span class="element-type-name">str</span> | <span class="element-type-name">None</span></span></dt>
 <dd>
-<p>Swarm token cap. A string such as <code>"output:1m"</code> is parsed by <code>parse_token_limit()</code> and keeps its metering type. <code>None</code> derives it from the sample’s token limit, with that limit’s metering type.</p>
+<p>Swarm token cap. A string such as <code>"output:1m"</code> is parsed by <code>parse_token_limit()</code> and keeps its metering type. <code>None</code> derives it from the sample’s token limit, with that limit’s metering type, when <code>derive</code> is <code>True</code>, and sets no cap when it is <code>False</code>.</p>
 </dd>
 <dt><code class="ref-definition">time</code> <span class="element-type"><span class="element-type-name">float</span> | <span class="element-type-name">None</span></span></dt>
 <dd>
-<p>Seconds after which the swarm stops its members. <code>None</code> derives it from the sample’s time limit.</p>
+<p>Seconds after which the swarm stops its members. <code>None</code> derives it from the sample’s time limit when <code>derive</code> is <code>True</code>, and sets no cap when it is <code>False</code>.</p>
 </dd>
 <dt><code class="ref-definition">reserve</code> <span class="element-type"><span class="element-type-name">float</span></span></dt>
 <dd>
@@ -752,6 +816,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <dt><code class="ref-definition">grace</code> <span class="element-type"><span class="element-type-name">float</span></span></dt>
 <dd>
 <p>Seconds members have, at most, to finish calls already in flight after a stop. If the sample has a time limit, this period is capped at half its remaining time.</p>
+</dd>
+<dt><code class="ref-definition">derive</code> <span class="element-type"><span class="element-type-name">bool</span></span></dt>
+<dd>
+<p>Whether a cap left <code>None</code> is derived from the sample’s limit. <code>False</code> sets no such cap: the sample’s own limits then end the swarm as they end any solver.</p>
 </dd>
 </dl>
 

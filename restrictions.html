@@ -26,6 +26,41 @@ ul.task-list li input[type="checkbox"] {
   margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
   vertical-align: middle;
 }
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
 </style>
 
 
@@ -417,14 +452,38 @@ ul.task-list li input[type="checkbox"] {
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundary" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Boundary</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundarycallback" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">BoundaryCallback</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#memberended" class="sidebar-item-text sidebar-link">
  <span class="menu-text">MemberEnded</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarmevent" class="sidebar-item-text sidebar-link">
- <span class="menu-text">SwarmEvent</span></a>
+  <a href="./reference/inspect_swarm.html#memberidle" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberIdle</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#membernews" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#controlevent" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">ControlEvent</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -477,6 +536,12 @@ ul.task-list li input[type="checkbox"] {
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarm_bridged_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_bridged_tools</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#swarm_channel" class="sidebar-item-text sidebar-link">
  <span class="menu-text">swarm_channel</span></a>
   </div>
@@ -515,6 +580,36 @@ ul.task-list li input[type="checkbox"] {
   <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#waitnews" class="sidebar-item-text sidebar-link">
  <span class="menu-text">WaitNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#bus" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Bus</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#calling_member" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">calling_member</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#caller" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Caller</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#draft" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Draft</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#delivery" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Delivery</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -588,7 +683,11 @@ ul.task-list li input[type="checkbox"] {
    
   <ul>
   <li><a href="#what-the-swarm-does-not-support" id="toc-what-the-swarm-does-not-support" class="nav-link active" data-scroll-target="#what-the-swarm-does-not-support">What the swarm does not support</a></li>
-  <li><a href="#bridged-members" id="toc-bridged-members" class="nav-link" data-scroll-target="#bridged-members">Bridged members</a></li>
+  <li><a href="#bridged-members" id="toc-bridged-members" class="nav-link" data-scroll-target="#bridged-members">Bridged members</a>
+  <ul class="collapse">
+  <li><a href="#channels-for-bridged-members" id="toc-channels-for-bridged-members" class="nav-link" data-scroll-target="#channels-for-bridged-members">Channels for bridged members</a></li>
+  <li><a href="#the-clis-own-concurrent-work" id="toc-the-clis-own-concurrent-work" class="nav-link" data-scroll-target="#the-clis-own-concurrent-work">The CLI’s own concurrent work</a></li>
+  </ul></li>
   <li><a href="#what-the-log-records" id="toc-what-the-log-records" class="nav-link" data-scroll-target="#what-the-log-records">What the log records</a></li>
   <li><a href="#the-store-keys" id="toc-the-store-keys" class="nav-link" data-scroll-target="#the-store-keys">The store keys</a></li>
   </ul>
@@ -619,30 +718,108 @@ ul.task-list li input[type="checkbox"] {
 <section id="what-the-swarm-does-not-support" class="level2">
 <h2 class="anchored" data-anchor-id="what-the-swarm-does-not-support">What the swarm does not support</h2>
 <ul>
-<li>No background work in bridged members. A member cannot combine background work with the agent bridge. <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background">background()</a></span> raises in a bridged member, and a member that uses the bridge after starting background work ends <code>errored</code>.</li>
-<li>No channels with tools for bridged members. A bridged member cannot use the <a href="./shared-memory.html">shared-memory channel</a> yet, and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm">swarm()</a></span> refuses one beside it.</li>
+<li>No Inspect background work in bridged members. A member cannot combine Inspect’s <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background">background()</a></span> with the agent bridge. <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background">background()</a></span> raises in a bridged member, and a member that uses the bridge after starting background work ends <code>errored</code>. The CLI’s own background work is a separate gap (<a href="#the-clis-own-concurrent-work">The CLI’s own concurrent work</a>).</li>
 <li>No checkpointing. Inspect’s sample checkpointing does not restore the swarm’s shared state or its caps, so a swarm raises an error before any member starts in a sample with checkpointing on. Turn checkpointing off for tasks that run a swarm: set <code>checkpoint=False</code> on <code>Task()</code> or <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.html#eval">eval()</a></span>, or remove every checkpoint setting, including <code>--checkpoint</code> and <code>INSPECT_EVAL_CHECKPOINT</code>.</li>
 <li>No ACP agents. ACP agents wait for their caller to drive them, so they are refused.</li>
-<li>No scorers that read a member’s tool state. Each member runs in its own tool-state scope, so built-in tools that keep state in the store (<span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span>, <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session">bash_session()</a></span>, <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#web_browser">web_browser()</a></span>, the skill tool) keep each member’s at keys inside its scope, which differ from the default ones. Tool state that a setup solver prepared at the default instance is not carried into the members either; they start with fresh state (<a href="./members.html#tool-state">Members</a>).</li>
+<li>No scorers that read a member’s tool state. Each member runs in its own tool-state scope, so built-in tools that keep state in the store (<span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span>, <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#bash_session">bash_session()</a></span>, the skill tool) keep each member’s at keys inside its scope, which differ from the default ones. Tool state that a setup solver prepared at the default instance is not carried into the members either; they start with fresh state (<a href="./members.html#tool-state">Members</a>).</li>
 </ul>
 </section>
 <section id="bridged-members" class="level2">
 <h2 class="anchored" data-anchor-id="bridged-members">Bridged members</h2>
 <p>A bridged member runs a CLI agent in the sandbox through Inspect’s agent bridge. <code>inspect_swe</code> agents count as bridged by default; pass <code>member(..., bridged=True)</code> for other agents that use the bridge. The swarm stops a bridged member by cancelling it.</p>
 <p>The CLI’s own tool calls do not emit Inspect <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent">ToolEvent</a></span>s, so the tool-event evidence described here does not cover them, Inspect Sentinel does not see them, and <code>longest_identical_tool_run</code> is <code>null</code> for bridged members.</p>
+<section id="channels-for-bridged-members" class="level3">
+<h3 class="anchored" data-anchor-id="channels-for-bridged-members">Channels for bridged members</h3>
+<p>A bridged agent’s tools are fixed when it is built, so it does not take <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>. Give it <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_bridged_tools">swarm_bridged_tools()</a></span> in its bridged tools, naming the channels it uses:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.agent <span class="im">import</span> Agent, agent, react</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_ai.tool <span class="im">import</span> bash</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_swe <span class="im">import</span> claude_code</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> inspect_swarm <span class="im">import</span> (</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>    member,</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>    messages,</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>    shared_memory,</span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    swarm,</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    swarm_bridged_tools,</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>    swarm_tools,</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a><span class="at">@agent</span></span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> worker() <span class="op">-&gt;</span> Agent:</span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> react(tools<span class="op">=</span>[bash(), swarm_tools()])</span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a><span class="at">@agent</span></span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> cc_worker(channels: <span class="bu">list</span>[<span class="bu">str</span>] <span class="op">=</span> [<span class="st">"messages"</span>, <span class="st">"shared_memory"</span>]) <span class="op">-&gt;</span> Agent:</span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> claude_code(bridged_tools<span class="op">=</span>[swarm_bridged_tools(channels)])</span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>solver <span class="op">=</span> swarm(</span>
+<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>    members<span class="op">=</span>[member(worker, count<span class="op">=</span><span class="dv">2</span>), member(cc_worker, name<span class="op">=</span><span class="st">"cc"</span>, bridged<span class="op">=</span><span class="va">True</span>)],</span>
+<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a>    channels<span class="op">=</span>[messages(), shared_memory()],</span>
+<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<ul>
+<li><code>"messages"</code> gives <code>send_message</code>, <code>read_messages</code> and <code>list_members</code>, and <code>"shared_memory"</code> gives <code>shared_memory</code>. Both give <code>swarm_wait</code>. The CLI sees them as the MCP server <code>swarm</code>.</li>
+<li>A tool whose channel the swarm does not have returns an error that says so.</li>
+<li><span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_bridged_tools">swarm_bridged_tools()</a></span> serves only <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#messages">messages()</a></span> and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#shared_memory">shared_memory()</a></span>. <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm">swarm()</a></span> refuses a bridged member beside a custom channel that has records. Custom channels that only add instructions are fine.</li>
+<li>A bridged member in a swarm with <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#messages">messages()</a></span> needs <code>"messages"</code> too: other members can send to it, and without <code>read_messages</code> it could never read them. Its tools return an error that says to add it. <code>["messages"]</code> alone, in a swarm that also has the shared memory, is fine, with one cost: the member’s preamble includes every channel’s instructions, so it is still told to use <code>shared_memory</code>, which it does not have. Per-member channel instructions are tracked in <a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/149">#149</a>.</li>
+<li>A member uses <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_bridged_tools">swarm_bridged_tools()</a></span> or <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>, never both.</li>
+<li>The CLI is one agent to the swarm, whichever of its conversations calls, its subagents included. They share the member’s inbox, so a message any of them reads is read for all. They share what the member has viewed in the shared memory, so a view by a subagent lets the top-level session overwrite or delete that file. Sends and writes from any of them are the member’s.</li>
+<li>A bridged member never counts as waiting, since one call in <code>swarm_wait</code> does not show that its CLI is idle. Its waits end on news, a member’s end, the swarm’s stop or their timeout, never because every member is waiting. A native member waiting beside a running bridged member is released by its own timeout at worst.</li>
+<li>The log records these calls as <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent">ToolEvent</a></span>s, and their <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent">CommunicationEvent</a></span>s have <code>via</code> set to <code>"bridge"</code> in <code>data</code> (in <code>data.record</code> for a send). Inspect Sentinel does not see them; the bridge’s <code>approval=</code> policies do.</li>
+</ul>
+<p>A CLI gives up on an MCP tool call that runs too long, and the model then gets an error in place of the result. Claude Code and Codex both stop one after 300 seconds by default (Claude Code 2.1.308, Codex 0.166.0), while <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#shared_memory">shared_memory()</a></span> waits up to 600. So a bridged member’s <code>swarm_wait</code> lasts at most <code>swarm_bridged_tools(channels, max_wait=280)</code> seconds, or the swarm’s longest wait if that is shorter. Native members’ waits are unchanged.</p>
+<ul>
+<li>Claude Code: keep the default. Claude Code stops a call that sends nothing for 300 seconds, and inspect_swe has no setting that raises this for bridged tools; <code>MCP_TOOL_TIMEOUT</code> does not.</li>
+<li>Codex: to wait longer, raise its timeout and <code>max_wait</code> together: <code>codex_cli(config_overrides={"mcp_servers.swarm.tool_timeout_sec": "700"}, bridged_tools=[swarm_bridged_tools(channels, max_wait=600)])</code>.</li>
+</ul>
+<p>If the CLI abandons a wait while its host call continues, that call can still mark member ends reported and record dependency links for the CLI’s shared loop. Later conversations may then miss those end notices, and later reads do not repeat those links, even though no model received the abandoned result. The default <code>max_wait</code> keeps a wait inside the CLI’s timeout, but it does not confirm delivery, and it does not prevent an abandoned call after an interruption.</p>
+<p>Inspect limits shared-memory views to 16 KiB by default. The CLIs also apply token limits (25,000 for Claude Code; 10,000 for Codex), so a view can be shortened further by the CLI. A default <code>read_messages</code> result is about 9 KB.</p>
+</section>
+<section id="the-clis-own-concurrent-work" class="level3">
+<h3 class="anchored" data-anchor-id="the-clis-own-concurrent-work">The CLI’s own concurrent work</h3>
+<p>The swarm owns and drains only work started with Inspect’s <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.util.html#background">background()</a></span>. It does not own, drain or attribute the CLI’s own concurrent work: Claude Code’s background shell commands, background subagents and agent teams, and Codex’s subagents (its multi-agent tools).</p>
+<ul>
+<li>The swarm cannot wait for this work or stop it apart from the CLI. Claude Code waits for much of its background work before it exits, and the member keeps running until then.</li>
+<li>Its model calls go through the member’s bridge, so they count as the member’s usage: against its limits and the swarm’s caps, and in the ledger.</li>
+<li>Work left running can outlast the member. The swarm does not check that the CLI stopped it, and a process started with <code>nohup</code> or <code>&amp;</code> can keep running after the CLI exits. Such work can change the sandbox after the member ends and before scoring.</li>
+</ul>
+<p>To keep a bridged member to work the swarm can see, turn these features off.</p>
+<p>Claude Code (checked against 2.1.311, the stable release <code>claude_code()</code> installs when the sandbox has none):</p>
+<ul>
+<li>Agent teams are off by default. Claude Code turns them on only with <code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS</code> or <code>--agent-teams</code>, and <code>claude_code()</code> sets neither.</li>
+<li>Background shell commands and background subagents are on by default. <code>CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1</code> turns them off, and also stops Claude Code moving long subagents and timed-out commands to the background.</li>
+<li>The <code>Monitor</code> tool still runs in the background with that setting. Leave it out with <code>disallowed_tools=["Monitor"]</code>.</li>
+<li>Workflows also run subagents, where the account has them. <code>CLAUDE_CODE_DISABLE_WORKFLOWS=1</code> turns them off.</li>
+</ul>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>claude_code(</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    env<span class="op">=</span>{</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>        <span class="st">"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"</span>: <span class="st">"1"</span>,</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>        <span class="st">"CLAUDE_CODE_DISABLE_WORKFLOWS"</span>: <span class="st">"1"</span>,</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    },</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>    disallowed_tools<span class="op">=</span>[<span class="st">"Monitor"</span>],</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>    bridged_tools<span class="op">=</span>[swarm_bridged_tools(channels)],</span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Codex (checked against 0.166.0, the latest release <code>codex_cli()</code> installs when the sandbox has none):</p>
+<ul>
+<li>Subagents are on by default. <code>agents.enabled = false</code> turns them off: <code>codex_cli(config_overrides={"agents.enabled": "false"}, bridged_tools=[swarm_bridged_tools(channels)])</code>. Use this rather than <code>features.multi_agent = false</code>, which a model’s catalog entry can override. Only an explicit <code>features.multi_agent_v2 = true</code> turns them back on.</li>
+</ul>
+<p>None of these settings stop a shell command from starting a process that keeps running on its own, such as <code>nohup server &amp;</code>. The swarm does not stop such processes when the member ends.</p>
+</section>
 </section>
 <section id="what-the-log-records" class="level2">
 <h2 class="anchored" data-anchor-id="what-the-log-records">What the log records</h2>
 <ul>
 <li>Members’ <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent">ToolEvent</a></span>s are the record of what they did, except for bridged members.</li>
-<li>The shared-memory channel’s writes, views and waits are <code>comm</code> events (<a href="./shared-memory.html#the-record-of-the-board">Shared Memory</a>).</li>
+<li>The shared-memory channel’s writes, views and waits are <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent">CommunicationEvent</a></span>s (<a href="./shared-memory.html#the-record-of-the-board">Shared Memory</a>).</li>
 <li>Files members share in a sandbox, tool instances they share, and a tool that reads the transcript are channels the swarm observes but does not record (<a href="./channels.html#shared-files-are-observed-not-recorded">Channels</a>).</li>
 </ul>
 <p>Spans inside a swarm log no <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#storeevent">StoreEvent</a></span>s. The swarm’s span logs the net change to the store, which says what changed but not which member changed it. If an error, limit or cancellation escapes the swarm and ends the sample, the log may have no <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#storeevent">StoreEvent</a></span> for the swarm’s writes. <code>sample.store</code> is always the record of the final store.</p>
 </section>
 <section id="the-store-keys" class="level2">
 <h2 class="anchored" data-anchor-id="the-store-keys">The store keys</h2>
-<p>The swarm owns three keys in the sample store, written when the swarm ends: <code>inspect_swarm:result_id</code>, <code>inspect_swarm:ledger</code> and <code>inspect_swarm:metrics</code>. Task code must not write them, or an event with source <code>inspect_swarm</code>. The result record itself is an event in the transcript (<a href="./scoring.html#the-result-record">Scoring</a>). A tool that reads the transcript sees every member’s model and tool calls, a channel between members that the swarm records no evidence of (<a href="./scoring.html#the-record-belongs-to-the-swarm">Scoring</a>).</p>
+<p>The swarm owns three keys in the sample store, written when the swarm ends: <code>inspect_swarm:result_id</code>, <code>inspect_swarm:ledger</code> and <code>inspect_swarm:metrics</code>. Task code must not write them, a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent">SwarmEvent</a></span>, or an event with source <code>inspect_swarm</code>. The result record itself is an event in the transcript (<a href="./scoring.html#the-result-record">Scoring</a>). A tool that reads the transcript sees every member’s model and tool calls, a channel between members that the swarm records no evidence of (<a href="./scoring.html#the-record-belongs-to-the-swarm">Scoring</a>).</p>
 
 
 </section>

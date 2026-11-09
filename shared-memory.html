@@ -452,14 +452,38 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundary" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Boundary</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#boundarycallback" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">BoundaryCallback</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#memberended" class="sidebar-item-text sidebar-link">
  <span class="menu-text">MemberEnded</span></a>
   </div>
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
-  <a href="./reference/inspect_swarm.html#swarmevent" class="sidebar-item-text sidebar-link">
- <span class="menu-text">SwarmEvent</span></a>
+  <a href="./reference/inspect_swarm.html#memberidle" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberIdle</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#membernews" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">MemberNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#controlevent" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">ControlEvent</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -512,6 +536,12 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </li>
           <li class="sidebar-item">
   <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#swarm_bridged_tools" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">swarm_bridged_tools</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#swarm_channel" class="sidebar-item-text sidebar-link">
  <span class="menu-text">swarm_channel</span></a>
   </div>
@@ -550,6 +580,36 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
   <div class="sidebar-item-container"> 
   <a href="./reference/inspect_swarm.html#waitnews" class="sidebar-item-text sidebar-link">
  <span class="menu-text">WaitNews</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#bus" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Bus</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#calling_member" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">calling_member</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#caller" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Caller</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#draft" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Draft</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./reference/inspect_swarm.html#delivery" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Delivery</span></a>
   </div>
 </li>
           <li class="sidebar-item">
@@ -704,7 +764,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li>Any agent that takes a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#toolsource">ToolSource</a></span> in its tools can take <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span>. It gives no tools when the swarm has no channel with tools, or outside a swarm, so one member definition serves every arm of an experiment.</li>
 <li>This swarm keeps the <code>filesystem</code> channel beside the board. <code>channels=[shared_memory()]</code>, or <code>channels=["shared_memory"]</code>, replaces it: members still share the sample’s sandbox, but their preamble no longer mentions <code>/shared</code>. Members with their own sandboxes can use the board with no shared volume.</li>
 <li>The channel needs member names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, <code>_</code> or <code>-</code>.</li>
-<li>Bridged members cannot use the channel yet, and <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm">swarm()</a></span> refuses a bridged member beside it.</li>
+<li>A bridged member gets the tool from <code>swarm_bridged_tools(["shared_memory"])</code>. Its CLI is one agent to the board: a file any of its conversations viewed counts as viewed by all of them (<a href="./restrictions.html#bridged-members">Bridged members</a>).</li>
 </ul>
 </section>
 <section id="the-tool" class="level2">
@@ -824,14 +884,14 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="the-record-of-the-board" class="level2">
 <h2 class="anchored" data-anchor-id="the-record-of-the-board">The record of the board</h2>
-<p>The swarm logs the members’ writes, views and waits as <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent">InfoEvent</a></span>s with source <code>inspect_swarm</code> and type <code>comm</code>. Each is in the span of the tool call that made it:</p>
+<p>The swarm logs the members’ writes, views and waits as <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent">CommunicationEvent</a></span>s with source <code>inspect_swarm</code>. Each is in the span of the tool call that made it, and its <code>kind</code> is one of:</p>
 <ul>
-<li><code>sent</code>: a write that reached the swarm, with its operation and payload, and why it was refused if it was.</li>
-<li><code>delivered</code>: a write applied to the board, with its commit sequence number and each file’s previous and new version. Replaying the delivered writes in sequence order rebuilds every version of the board.</li>
-<li><code>read</code>: a view, with each file’s version and the record that last wrote it, or a listing.</li>
-<li><code>waited</code>: a <code>swarm_wait</code> call, with what ended it and how long it took.</li>
+<li><code>sent</code>: a write that reached the swarm, with its payload in <code>send.record.content</code>, why it was refused in <code>send.rejected</code> if it was, and its operation in <code>data["record"]["op"]</code>.</li>
+<li><code>delivered</code>: a write applied to the board, with its commit sequence number in <code>delivery.seq</code> and each file’s previous and new version in <code>data["result"]["files"]</code>. Replaying the delivered writes in sequence order rebuilds every version of the board.</li>
+<li><code>read</code>: a view or a listing. <code>record_ids</code> names the record that last wrote each file at the version shown, and <code>data</code> has each file’s version. <code>data["depends_on"]</code> names the records the result depends on: for a view, every write in the file’s history; for a deleted file’s id, the delete; for a listing, none.</li>
+<li><code>waited</code>: a <code>swarm_wait</code> call, with what ended it and how long it took in <code>wait</code>, and in <code>data["depends_on"]</code> the write it reported for each changed file.</li>
 </ul>
-<p>Each event names the member and the loop that acted. The <a href="./analysis.html#communication">metrics</a> count these events for each member.</p>
+<p>Each event names the member that acted (<code>agent</code>) and its loop (<code>loop_span_id</code>). The <code>record_ids</code> of a write’s <code>sent</code> and <code>delivered</code> events and of the reads of what it wrote are the same id. <code>depends_on</code> names each record once per loop: a record that an earlier result of the same loop depended on is left out. The <a href="./analysis.html#communication">metrics</a> count these events for each member.</p>
 </section>
 <section id="monitoring-with-inspect-sentinel" class="level2">
 <h2 class="anchored" data-anchor-id="monitoring-with-inspect-sentinel">Monitoring with Inspect Sentinel</h2>
@@ -868,11 +928,11 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> Decision.proceed()</span>
 <span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> decide</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<p>Pass it to the task as <code>Task(..., sentinel=no_secrets_on_board())</code>. The member gets the decision’s message as the tool call’s error. A step’s <code>conversation</code> is the agent span id of the loop that made the call, and each <code>comm</code> event names that loop beside its member, so the two can be joined. Sentinel does not run on bridged members’ tool calls, which is one reason bridged members cannot use the channel yet.</p>
+<p>Pass it to the task as <code>Task(..., sentinel=no_secrets_on_board())</code>. The member gets the decision’s message as the tool call’s error. A step’s <code>conversation</code> is the agent span id of the loop that made the call, and each <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent">CommunicationEvent</a></span> names that loop in <code>loop_span_id</code>, so the two can be joined. Sentinel does not run on bridged tool calls; use the bridge’s approval policies for those calls.</p>
 </section>
 <section id="migrating-from-memoryinstance" class="level2">
 <h2 class="anchored" data-anchor-id="migrating-from-memoryinstance">Migrating from <code>memory(instance=...)</code></h2>
-<p>Before this channel, a board shared on purpose was a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span> tool with an explicit instance in every member’s tools, <code>memory(instance="board")</code>, with the prompt saying it is shared. That still works, and it is a different channel: members’ <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent">ToolEvent</a></span>s record its use, with no sender, fence, status line, bounds or <code>comm</code> events. Nothing refuses using both; an arm that wants the board as its only channel gives no two members a shared instance.</p>
+<p>Before this channel, a board shared on purpose was a <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#memory">memory()</a></span> tool with an explicit instance in every member’s tools, <code>memory(instance="board")</code>, with the prompt saying it is shared. That still works, and it is a different channel: members’ <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#toolevent">ToolEvent</a></span>s record its use, with no sender, fence, status line, bounds or <span class="element-type-name ref-interlink"><a href="https://inspect.aisi.org.uk/reference/inspect_ai.event.html#communicationevent">CommunicationEvent</a></span>s. Nothing refuses using both; an arm that wants the board as its only channel gives no two members a shared instance.</p>
 <p>To move a task to the channel:</p>
 <ol type="1">
 <li>In the member builder, replace <code>memory(instance="board")</code> with <span class="element-type-name ref-interlink"><a href="./reference/inspect_swarm.html#swarm_tools">swarm_tools()</a></span> in the tools. The builder stays a registered <code>@agent</code>.</li>

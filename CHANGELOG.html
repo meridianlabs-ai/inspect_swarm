@@ -157,25 +157,31 @@ ul.task-list li input[type="checkbox"] {
     <h2 id="toc-title">On this page</h2>
    
   <ul>
-  <li><a href="#section" id="toc-section" class="nav-link active" data-scroll-target="#section">0.3.0 (2026-10-30)</a>
+  <li><a href="#section" id="toc-section" class="nav-link active" data-scroll-target="#section">0.4.0 (2026-11-09)</a>
   <ul class="collapse">
   <li><a href="#breaking-changes" id="toc-breaking-changes" class="nav-link" data-scroll-target="#breaking-changes">⚠ BREAKING CHANGES</a></li>
   <li><a href="#features" id="toc-features" class="nav-link" data-scroll-target="#features">Features</a></li>
   <li><a href="#bug-fixes" id="toc-bug-fixes" class="nav-link" data-scroll-target="#bug-fixes">Bug Fixes</a></li>
   </ul></li>
-  <li><a href="#section-1" id="toc-section-1" class="nav-link" data-scroll-target="#section-1">0.2.1 (2026-10-28)</a>
-  <ul class="collapse">
-  <li><a href="#features-1" id="toc-features-1" class="nav-link" data-scroll-target="#features-1">Features</a></li>
-  </ul></li>
-  <li><a href="#section-2" id="toc-section-2" class="nav-link" data-scroll-target="#section-2">0.2.0 (2026-10-27)</a>
+  <li><a href="#section-1" id="toc-section-1" class="nav-link" data-scroll-target="#section-1">0.3.0 (2026-10-30)</a>
   <ul class="collapse">
   <li><a href="#breaking-changes-1" id="toc-breaking-changes-1" class="nav-link" data-scroll-target="#breaking-changes-1">⚠ BREAKING CHANGES</a></li>
-  <li><a href="#features-2" id="toc-features-2" class="nav-link" data-scroll-target="#features-2">Features</a></li>
+  <li><a href="#features-1" id="toc-features-1" class="nav-link" data-scroll-target="#features-1">Features</a></li>
   <li><a href="#bug-fixes-1" id="toc-bug-fixes-1" class="nav-link" data-scroll-target="#bug-fixes-1">Bug Fixes</a></li>
   </ul></li>
-  <li><a href="#section-3" id="toc-section-3" class="nav-link" data-scroll-target="#section-3">0.1.0 (2026-10-23)</a>
+  <li><a href="#section-2" id="toc-section-2" class="nav-link" data-scroll-target="#section-2">0.2.1 (2026-10-28)</a>
   <ul class="collapse">
+  <li><a href="#features-2" id="toc-features-2" class="nav-link" data-scroll-target="#features-2">Features</a></li>
+  </ul></li>
+  <li><a href="#section-3" id="toc-section-3" class="nav-link" data-scroll-target="#section-3">0.2.0 (2026-10-27)</a>
+  <ul class="collapse">
+  <li><a href="#breaking-changes-2" id="toc-breaking-changes-2" class="nav-link" data-scroll-target="#breaking-changes-2">⚠ BREAKING CHANGES</a></li>
   <li><a href="#features-3" id="toc-features-3" class="nav-link" data-scroll-target="#features-3">Features</a></li>
+  <li><a href="#bug-fixes-2" id="toc-bug-fixes-2" class="nav-link" data-scroll-target="#bug-fixes-2">Bug Fixes</a></li>
+  </ul></li>
+  <li><a href="#section-4" id="toc-section-4" class="nav-link" data-scroll-target="#section-4">0.1.0 (2026-10-23)</a>
+  <ul class="collapse">
+  <li><a href="#features-4" id="toc-features-4" class="nav-link" data-scroll-target="#features-4">Features</a></li>
   </ul></li>
   </ul>
 </nav>
@@ -203,15 +209,45 @@ ul.task-list li input[type="checkbox"] {
 
 
 <section id="section" class="level2">
-<h2 class="anchored" data-anchor-id="section"><a href="https://github.com/meridianlabs-ai/inspect_swarm/compare/0.2.1...0.3.0">0.3.0</a> (2026-10-30)</h2>
+<h2 class="anchored" data-anchor-id="section"><a href="https://github.com/meridianlabs-ai/inspect_swarm/compare/0.3.0...0.4.0">0.4.0</a> (2026-11-09)</h2>
 <section id="breaking-changes" class="level3">
 <h3 class="anchored" data-anchor-id="breaking-changes">⚠ BREAKING CHANGES</h3>
 <ul>
-<li>the swarm’s result record moves from the sample store to the transcript (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/135">#135</a>)</li>
+<li>write the swarm’s evidence as CommunicationEvent and SwarmEvent (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/147">#147</a>)</li>
 </ul>
 </section>
 <section id="features" class="level3">
 <h3 class="anchored" data-anchor-id="features">Features</h3>
+<ul>
+<li>a public bus API for channels with records (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/167">#167</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/cf0fa561fabd3b52206a60e9e2011119ce531a05">cf0fa56</a>)</li>
+<li>Budget(derive=False) sets no caps of its own (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/165">#165</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/06f37a8dd50df2240cc741e802e39cdb890d4a99">06f37a8</a>)</li>
+<li>channels report what their results depend on (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/143">#143</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/9ac3bb847ae5b32731a04c459f5f2cf9116ab9c4">9ac3bb8</a>)</li>
+<li>hold a member at its turn boundaries with boundary callbacks (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/153">#153</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/38faaa6cb165cf2efe4cfbc6d7b06fa6b0d50e89">38faaa6</a>)</li>
+<li>let a controller replace or leave out a member’s preamble (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/166">#166</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/8880be081111185632341969d39fe2ef3e9bff3a">8880be0</a>)</li>
+<li>persistent members, held idle after an answer and woken with new work (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/155">#155</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/f2123fd3e10534c4e36f5e5899041e67595ef1c6">f2123fd</a>)</li>
+<li>tell the controller when an idle member has news (MemberNews) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/157">#157</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/8a33f3769da753801172829bc580aeab5a161011">8a33f37</a>)</li>
+<li>the critical path links what each channel reports it depends on (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/151">#151</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/82b5f1fb28d5939e08614c8176fff491957fffb8">82b5f1f</a>)</li>
+<li>the swarm’s channels for bridged members, swarm_bridged_tools() (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/142">#142</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/f2a013a72314d5694966e196ea9398c63af16dcb">f2a013a</a>)</li>
+<li>write the swarm’s evidence as CommunicationEvent and SwarmEvent (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/147">#147</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/968ed3f61485c38ef63a2558b4b955a5bbfcae65">968ed3f</a>)</li>
+</ul>
+</section>
+<section id="bug-fixes" class="level3">
+<h3 class="anchored" data-anchor-id="bug-fixes">Bug Fixes</h3>
+<ul>
+<li>charge the sample’s cost limit once per call with inspect-ai 0.3.288 (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/171">#171</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/4ec4998743d1c5f7f907a058fbdc9e6d54c71f33">4ec4998</a>)</li>
+</ul>
+</section>
+</section>
+<section id="section-1" class="level2">
+<h2 class="anchored" data-anchor-id="section-1"><a href="https://github.com/meridianlabs-ai/inspect_swarm/compare/0.2.1...0.3.0">0.3.0</a> (2026-10-30)</h2>
+<section id="breaking-changes-1" class="level3">
+<h3 class="anchored" data-anchor-id="breaking-changes-1">⚠ BREAKING CHANGES</h3>
+<ul>
+<li>the swarm’s result record moves from the sample store to the transcript (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/135">#135</a>)</li>
+</ul>
+</section>
+<section id="features-1" class="level3">
+<h3 class="anchored" data-anchor-id="features-1">Features</h3>
 <ul>
 <li>direct messages between members, the messages channel (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/130">#130</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/fb7e2b1d0335d92c0f5f6e3a623d415a2dd0e7d7">fb7e2b1</a>)</li>
 <li>members that choose their own names (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/113">#113</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/a2270b0959369fa81a7bf36e6a122bb707980d3d">a2270b0</a>)</li>
@@ -219,17 +255,17 @@ ul.task-list li input[type="checkbox"] {
 <li>the swarm’s result record moves from the sample store to the transcript (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/135">#135</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/807e0cd2bb72d6e1c777bb8c1f463547afe14a5d">807e0cd</a>)</li>
 </ul>
 </section>
-<section id="bug-fixes" class="level3">
-<h3 class="anchored" data-anchor-id="bug-fixes">Bug Fixes</h3>
+<section id="bug-fixes-1" class="level3">
+<h3 class="anchored" data-anchor-id="bug-fixes-1">Bug Fixes</h3>
 <ul>
 <li>keep board-file links on waits that also reach messages (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/137">#137</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/3d979b455c2e9676f17db08c21e193c506867234">3d979b4</a>)</li>
 </ul>
 </section>
 </section>
-<section id="section-1" class="level2">
-<h2 class="anchored" data-anchor-id="section-1"><a href="https://github.com/meridianlabs-ai/inspect_swarm/compare/0.2.0...0.2.1">0.2.1</a> (2026-10-28)</h2>
-<section id="features-1" class="level3">
-<h3 class="anchored" data-anchor-id="features-1">Features</h3>
+<section id="section-2" class="level2">
+<h2 class="anchored" data-anchor-id="section-2"><a href="https://github.com/meridianlabs-ai/inspect_swarm/compare/0.2.0...0.2.1">0.2.1</a> (2026-10-28)</h2>
+<section id="features-2" class="level3">
+<h3 class="anchored" data-anchor-id="features-2">Features</h3>
 <ul>
 <li>raise shared_memory’s default size limits (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/110">#110</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/114cf7a4c3574546da7d1bbbffd28bb029cadce5">114cf7a</a>)</li>
 <li>the changes command names every changed file (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/109">#109</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/f84ee01bc37ce52ee73a65f1903a851f06989e0d">f84ee01</a>)</li>
@@ -237,16 +273,16 @@ ul.task-list li input[type="checkbox"] {
 </ul>
 </section>
 </section>
-<section id="section-2" class="level2">
-<h2 class="anchored" data-anchor-id="section-2"><a href="https://github.com/meridianlabs-ai/inspect_swarm/compare/0.1.0...0.2.0">0.2.0</a> (2026-10-27)</h2>
-<section id="breaking-changes-1" class="level3">
-<h3 class="anchored" data-anchor-id="breaking-changes-1">⚠ BREAKING CHANGES</h3>
+<section id="section-3" class="level2">
+<h2 class="anchored" data-anchor-id="section-3"><a href="https://github.com/meridianlabs-ai/inspect_swarm/compare/0.1.0...0.2.0">0.2.0</a> (2026-10-27)</h2>
+<section id="breaking-changes-2" class="level3">
+<h3 class="anchored" data-anchor-id="breaking-changes-2">⚠ BREAKING CHANGES</h3>
 <ul>
 <li>remove swarm notices; members learn of shared memory changes from tools (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/106">#106</a>)</li>
 </ul>
 </section>
-<section id="features-2" class="level3">
-<h3 class="anchored" data-anchor-id="features-2">Features</h3>
+<section id="features-3" class="level3">
+<h3 class="anchored" data-anchor-id="features-3">Features</h3>
 <ul>
 <li>new <code>changes</code> command in <code>shared_memory</code> reports changed files without listing the board (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/96">#96</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/f56b83e10a7349ab923af3635ccc4d916949dc29">f56b83e</a>)</li>
 <li>remove swarm notices; members learn of shared memory changes from tools (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/106">#106</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/aa9ec882cbbb3eda8ef8c7923214bbde4eecac6c">aa9ec88</a>)</li>
@@ -260,18 +296,18 @@ ul.task-list li input[type="checkbox"] {
 <li>swarm notices start with [Automatic swarm notice] (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/98">#98</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/cbe8b264b5486952cfdbc3a297fa03ee6b811c65">cbe8b26</a>)</li>
 </ul>
 </section>
-<section id="bug-fixes-1" class="level3">
-<h3 class="anchored" data-anchor-id="bug-fixes-1">Bug Fixes</h3>
+<section id="bug-fixes-2" class="level3">
+<h3 class="anchored" data-anchor-id="bug-fixes-2">Bug Fixes</h3>
 <ul>
 <li>shared memory listings line up their columns when file ids, versions or writers differ in length (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/97">#97</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/6345c82ea8ca1cca956ebc4612a610fddb59e491">6345c82</a>)</li>
 <li>validate member limit dicts (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/88">#88</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/fff3c7ee88be70a05b5d72531db072c7ac8b452b">fff3c7e</a>)</li>
 </ul>
 </section>
 </section>
-<section id="section-3" class="level2">
-<h2 class="anchored" data-anchor-id="section-3">0.1.0 (2026-10-23)</h2>
-<section id="features-3" class="level3">
-<h3 class="anchored" data-anchor-id="features-3">Features</h3>
+<section id="section-4" class="level2">
+<h2 class="anchored" data-anchor-id="section-4">0.1.0 (2026-10-23)</h2>
+<section id="features-4" class="level3">
+<h3 class="anchored" data-anchor-id="features-4">Features</h3>
 <ul>
 <li>an agent-raised custom limit ends only that member (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/44">#44</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/760deee5c4d423ef504679eba9761a5a5af18915">760deee</a>)</li>
 <li>an unsubmitted status for members that stop on a content filter or length limit (<a href="https://github.com/meridianlabs-ai/inspect_swarm/issues/39">#39</a>) (<a href="https://github.com/meridianlabs-ai/inspect_swarm/commit/a4748b4804e88c5687662fbe6015189c4d205d9c">a4748b4</a>)</li>

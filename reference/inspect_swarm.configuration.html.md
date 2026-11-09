@@ -10,7 +10,7 @@ A swarm member: a built agent, or a registered `@agent` factory and its argument
 
 Create one with [member()](../reference/inspect_swarm.html.md#member), which documents the fields and the member contract.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_member.py#L87)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_member.py#L94)
 
 ``` python
 class Member(BaseModel)
@@ -34,7 +34,7 @@ The member’s name. `None` uses the agent’s or factory’s unqualified regist
 The member’s role, given to the controller and in the member’s preamble.
 
 `choose_name` bool  
-Whether the member chooses its own name. `True` leaves the member’s name out of its preamble, which asks it to choose a name and tell the other members; the swarm still uses `name` for everything it records.
+Whether the member chooses its own name. `True` leaves the member’s name out of the swarm’s preamble, which asks it to choose a name and tell the other members; the swarm still uses `name` for everything it records. A controller’s `start(preamble=...)` replaces that preamble with its own text, used as given, or `preamble=False` leaves it out; neither adds a request to choose a name.
 
 `count` int  
 How many members this record stands for. Above 1 needs the factory form.
@@ -51,6 +51,9 @@ The member’s own sandbox environment, where `{member}` stands for the member�
 `visible_sandboxes` list\[str\]  
 Other sandbox environments the member can reach by name, such as a shared service. Only with `sandbox`.
 
+`persistent` bool  
+Whether the member stays available after it answers, held idle until the controller wakes it with `SwarmControl.wake()`.
+
 ### Budget
 
 The swarm-wide budget.
@@ -59,7 +62,7 @@ By default the swarm derives its caps from the sample’s cost, token and time l
 
 Every field is a plain value, so each can be a task parameter, and two budgets that differ in any field are logged as different arguments.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_budget.py#L32)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_budget.py#L34)
 
 ``` python
 class Budget(BaseModel)
@@ -68,13 +71,13 @@ class Budget(BaseModel)
 #### Attributes
 
 `cost` float \| None  
-Swarm cost cap in dollars. `None` derives it from the sample’s cost limit.
+Swarm cost cap in dollars. `None` derives it from the sample’s cost limit when `derive` is `True`, and sets no cap when it is `False`.
 
 `tokens` int \| str \| None  
-Swarm token cap. A string such as `"output:1m"` is parsed by `parse_token_limit()` and keeps its metering type. `None` derives it from the sample’s token limit, with that limit’s metering type.
+Swarm token cap. A string such as `"output:1m"` is parsed by `parse_token_limit()` and keeps its metering type. `None` derives it from the sample’s token limit, with that limit’s metering type, when `derive` is `True`, and sets no cap when it is `False`.
 
 `time` float \| None  
-Seconds after which the swarm stops its members. `None` derives it from the sample’s time limit.
+Seconds after which the swarm stops its members. `None` derives it from the sample’s time limit when `derive` is `True`, and sets no cap when it is `False`.
 
 `reserve` float  
 Fraction of each sample limit held back when a cap is derived.
@@ -84,3 +87,6 @@ How the cost and token caps are divided between members: one shared pool, equal 
 
 `grace` float  
 Seconds members have, at most, to finish calls already in flight after a stop. If the sample has a time limit, this period is capped at half its remaining time.
+
+`derive` bool  
+Whether a cap left `None` is derived from the sample’s limit. `False` sets no such cap: the sample’s own limits then end the swarm as they end any solver.

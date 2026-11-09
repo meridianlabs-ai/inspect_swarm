@@ -34,7 +34,13 @@ or, in a uv project:
 uv add "inspect_swarm @ git+https://github.com/meridianlabs-ai/inspect_swarm"
 ```
 
-It needs inspect_ai 0.3.283 or later and Python 3.11 or later.
+For now it needs inspect_ai’s `main` branch, which has features no inspect_ai release has yet. Installing Inspect Swarm installs a released inspect_ai, so install inspect_ai from GitHub `main` too (in a uv project, `uv add "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai"`):
+
+``` bash
+pip install git+https://github.com/UKGovernmentBEIS/inspect_ai
+```
+
+It needs Python 3.11 or later.
 
 ## Run a swarm on an existing task
 

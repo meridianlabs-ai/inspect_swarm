@@ -49,6 +49,7 @@ from contextlib import aclosing
 
 from inspect_swarm import (
     Controller,
+    MemberEnded,
     MemberInfo,
     StopReason,
     SwarmControl,
@@ -68,23 +69,24 @@ def escalate(first: str = "fast") -> Controller:
         swarm.start(first)
         async with aclosing(swarm.events()) as events:
             async for event in events:
-                if event.submitted:
+                if isinstance(event, MemberEnded) and event.submitted:
                     return "submitted"
         for m in swarm.members:
             if m.state == "pending":
                 swarm.start(m)
         async with aclosing(swarm.events()) as events:
             async for event in events:
-                if event.submitted:
+                if isinstance(event, MemberEnded) and event.submitted:
                     return "submitted"
         return "all_done"
 
     return Controller(run, check=check)
 ```
 
-- `swarm.members` are the members in roster order, as [MemberHandle](./reference/inspect_swarm.html.md#memberhandle)s: name, role, state (`pending`, `running` or `ended`), status and whether it submitted. A controller never sees what a member wrote.
-- `swarm.start(member, input=None)` starts a member and returns at once. `input` replaces the swarm’s input for that member; `None` gives it the swarm’s input. The member’s preamble follows either. A member runs once, and starting one after the stop has begun raises.
-- `swarm.events()` yields each event once, in order from the swarm’s start. Its only kind is [MemberEnded](./reference/inspect_swarm.html.md#memberended), with the member’s name, status and whether it submitted. The iterator ends when no member is running and no event is waiting, so a member started later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
+- `swarm.members` are the members in roster order, as [MemberHandle](./reference/inspect_swarm.html.md#memberhandle)s: name, role, state (`pending`, `running` or `ended`, and for [persistent members](#persistent-members) `idle` or `ending`), status and whether it submitted. A controller never sees what a member wrote unless it holds the member at a turn boundary ([Boundary callbacks](#boundary-callbacks)).
+- `swarm.start(member, input=None, *, preamble=None)` starts a member and returns at once. `input` replaces the swarm’s input for that member; `None` gives it the swarm’s input. The member’s preamble follows either, as a user message. A member runs once, and starting one after the stop has begun raises.
+- The swarm’s preamble tells each member that the members work at the same time. A controller that runs them otherwise can pass its own text as `preamble`, which replaces the whole preamble, channel instructions included, and is used as given. `preamble=False` leaves it out; the input must then hold a user message.
+- `swarm.events()` yields each event once, in order from the swarm’s start. [MemberEnded](./reference/inspect_swarm.html.md#memberended) gives the member’s name, status and whether it submitted; [MemberIdle](./reference/inspect_swarm.html.md#memberidle) and [MemberNews](./reference/inspect_swarm.html.md#membernews) come only from [persistent members](#persistent-members). Test an event’s type before reading its fields. The iterator ends when no member is running or ending and no event is waiting, so a member started or woken later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
 - `check`, if given, is called with the roster when [swarm()](./reference/inspect_swarm.html.md#swarm) is called. Raise `ValueError` for a roster the controller cannot run.
 - `final`, if given, is the rule that chooses the answer: `first` (the default, as here) or `last`.
 - The stop reasons `all_done`, `submitted`, `verified` and `quiescence` are recorded as they are. Any other is recorded as `controller:<reason>`.
@@ -93,14 +95,20 @@ A [Controller](./reference/inspect_swarm.html.md#controller) holds configuration
 
 ### Choosing the answer
 
-A controller can choose the answer itself. `swarm.choose_answer(member, reason=None)` names a member that has ended with a submission, and its submission is then the answer, whatever the `final` rule says. A controller chooses once. The record gives the mode `controller` and the reason ([Scoring](./scoring.html.md#the-result-record)).
+A controller can choose the answer itself. `swarm.choose_answer(member, reason=None)` names a member that has ended with a submission, and its submission is then the answer, whatever the `final` rule says. For a persistent member, it takes the member’s latest answer at the time of the call, and keeps that one if the member answers again. A controller chooses once. The record gives the mode `controller` and the reason ([Scoring](./scoring.html.md#the-result-record)).
 
 This controller answers with the first submission from a member with a given role, and falls back to the `final` rule, `first`, when none of them submits:
 
 ``` python
 from contextlib import aclosing
 
-from inspect_swarm import Controller, StopReason, SwarmControl, swarm_controller
+from inspect_swarm import (
+    Controller,
+    MemberEnded,
+    StopReason,
+    SwarmControl,
+    swarm_controller,
+)
 
 
 @swarm_controller
@@ -115,6 +123,7 @@ def prefer(role: str) -> Controller:
             async for event in events:
                 if (
                     not chosen
+                    and isinstance(event, MemberEnded)
                     and event.submitted
                     and swarm.member(event.member).role == role
                 ):
@@ -125,6 +134,136 @@ def prefer(role: str) -> Controller:
     return Controller(run)
 ```
 
+## Boundary callbacks
+
+A controller can hold a member between the turns of its agent loop. `handle.on_boundary(callback, origin=...)` registers a callback that runs at every turn boundary of the member’s own loop: before its first generation and before each one after it, with no model or tool call of the loop in flight. It returns a function that unregisters the callback from the next boundary.
+
+The callback gets a [Boundary](./reference/inspect_swarm.html.md#boundary):
+
+- `member` and `index`: the member, and the boundary’s number, 0 before the first generation.
+- `after`: what the conversation ends with: `start` at index 0, `tools` after a tool result, `reply` after an assistant reply with no tool calls, `wake` after a persistent member’s wake input, `user` after anything else.
+- `activation`: 0 until a persistent member is first woken, then one more at each wake.
+- `messages` and `output`: copies of the member’s conversation and of its last output. Changing them changes nothing.
+
+It returns `None` to let the member go on, a list of messages to go on with that conversation, or `"end"` to end the member `stopped`. A returned list keeps each message’s id, and must hold a user message. The member gets copies of the returned messages, so changing them later changes nothing.
+
+While its callbacks run the member is held: `handle.held` is `True`, its time limit does not run, and `swarm_wait` does not count it as active. A callback can wait as long as it likes. Its own model calls count towards the member’s limits. Its time counts as working time unless it marks its idle waits with [suspend_working_limit()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#suspend_working_limit):
+
+``` python
+import anyio
+from inspect_ai.util import suspend_working_limit
+
+from inspect_swarm import Boundary, StopReason, SwarmControl
+
+
+async def run(swarm: SwarmControl) -> StopReason:
+    go = anyio.Event()
+
+    async def wait_for_go(boundary: Boundary) -> None:
+        if boundary.index == 0:
+            with suspend_working_limit():
+                await go.wait()
+        return None
+
+    swarm.member("worker").on_boundary(wait_for_go, origin="scheduler")
+    swarm.start("worker")
+    ...
+```
+
+Several callbacks run in the order they were registered, each receiving the conversation as the ones before it left it. So callers compose: a pause registered after a scheduler holds the member after the scheduler lets it go.
+
+`handle.end(origin=...)` ends a member from outside the chain, `stopped`, with the reason `ended by <origin>`. A held member ends at once: the waiting callback is cancelled and no change from that boundary is applied. A member in the middle of a turn ends at its next boundary, and its next model call is refused. If the member is still running after the swarm’s grace period, its cleanup included, it is cancelled and ends `cancelled`. The same deadline applies when a callback returns `"end"`. A member whose agent returns after `end()` ends `stopped`, whatever its output.
+
+A swarm stop ends every member at its next boundary, and a held member at once.
+
+Only members whose agent runs an Inspect agent loop, such as [react()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react) or [deepagent()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#deepagent), reach a boundary. Subagents and other nested loops run inside a turn of the member’s loop and are not held on their own. `on_boundary()` raises `ValueError` for a bridged member and for [deepagent()](https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#deepagent) with background dispatch. A member with background work running when it reaches a boundary with callbacks, a member that starts a second agent loop after its first ended, and a member whose callbacks never ran because it never reached a boundary all end `errored`.
+
+The swarm records each boundary where callbacks ran, and each change they made, by message id and hash ([Analysis](./analysis.html.md#boundary-callbacks)).
+
+## Persistent members
+
+A [persistent member](./members.html.md#persistent-members) answers, then waits *idle* at its next turn boundary for its next task. The controller hears [MemberIdle](./reference/inspect_swarm.html.md#memberidle), with the member’s name and the index of the answer it just gave, and wakes the member with `swarm.wake(member, input)`. The input is a string or a list of user messages, appended to the member’s conversation. Each wake message gets a new id, so one list can be passed to several wakes.
+
+This controller gives one worker each task in turn, and makes its last answer the swarm’s:
+
+``` python
+from contextlib import aclosing
+
+from inspect_swarm import (
+    Controller,
+    MemberIdle,
+    StopReason,
+    SwarmControl,
+    member,
+    swarm,
+    swarm_controller,
+)
+
+
+@swarm_controller
+def dispatch(tasks: list[str], worker: str = "worker") -> Controller:
+    """Give `worker` each task in turn, waking it after each answer."""
+
+    async def run(swarm: SwarmControl) -> StopReason:
+        pending = list(tasks)
+        swarm.start(worker, input=pending.pop(0))
+        async with aclosing(swarm.events()) as events:
+            async for event in events:
+                if isinstance(event, MemberIdle) and pending:
+                    swarm.wake(event.member, input=pending.pop(0))
+        return "quiescence" if swarm.member(worker).state == "idle" else "all_done"
+
+    return Controller(run, final="last")
+
+
+swarm(
+    members=[member(worker_agent, name="worker", persistent=True)],
+    controller=dispatch(tasks),
+)
+```
+
+- `wake()` takes only an `idle` member. An event can be stale by the time the controller reads it (an earlier event’s handling may have woken or ended the member), so check `swarm.member(name).state == "idle"` first.
+- An idle member is held: `handle.held` is `True`, its time limit does not run, and `swarm_wait` does not count it as active. Boundary callbacks run after the wake, with `after == "wake"` and the input as the last messages.
+- `handle.end()` or the swarm’s stop on an idle member sets it `ending` at once, and it ends `submitted`, with its last answer as its output. The iterator waits for its [MemberEnded](./reference/inspect_swarm.html.md#memberended).
+- The swarm is *quiescent* when every member is pending, idle or ended and no event is waiting: `events()` ends. Nothing moves until the controller starts, wakes or ends a member. A controller that wakes no one returns `quiescence`.
+- `leaderless` treats [MemberIdle](./reference/inspect_swarm.html.md#memberidle) as a submission, so by default the first answer stops the swarm. With `stop_on_submission=False` it returns `quiescence` once no member is working and some are idle. It never wakes a member.
+
+### News for idle members
+
+An idle member is not in a tool call, so it cannot see what other members write. The controller is told instead. When a record is delivered that would end a `swarm_wait` of the idle member’s own loop watching everything, such as another member’s write to the shared memory or a message sent to it with `wake=True`, the controller gets [MemberNews](./reference/inspect_swarm.html.md#membernews): the idle member, the channel, the record’s id and the name of the member that sent it. The controller decides whether to wake the member.
+
+- `MemberIdle.news` says whether the member already had news when it went idle: a write it did not look at during its activation. No [MemberNews](./reference/inspect_swarm.html.md#membernews) reports that write, so a controller that wakes members on news also wakes on `MemberIdle.news`.
+- A file stays news to the member until its own loop views it. A member that leaves a file unviewed is reported with `news` set every time it goes idle, so its prompt should tell it to view what the status line names before it answers.
+- Two records give two events. Check that the member is still idle before waking it.
+- A member gets no news unless its own loop has [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools).
+
+[`examples/lead_and_workers.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/lead_and_workers.py) is a lead that hands out tasks on the shared memory to persistent workers. Its controller wakes a worker on the lead’s writes and stops when the lead ends:
+
+``` python
+@swarm_controller
+def lead_and_workers(lead: str = "lead") -> Controller:
+    async def run(swarm: SwarmControl) -> StopReason:
+        for m in swarm.members:
+            swarm.start(m)
+        async with aclosing(swarm.events()) as events:
+            async for event in events:
+                if isinstance(event, MemberEnded) and event.member == lead:
+                    if event.submitted:
+                        swarm.choose_answer(lead, reason="the lead's answer")
+                        return "submitted"
+                    return "lead_ended"
+                woken = (isinstance(event, MemberNews) and event.sender == lead) or (
+                    isinstance(event, MemberIdle) and event.news
+                )
+                if woken and swarm.member(event.member).state == "idle":
+                    swarm.wake(event.member, WAKE)
+        return "all_done"
+
+    return Controller(run)
+```
+
+Every worker is woken on each of the lead’s writes, so a worker with no new task answers at once. The workers’ answers are reports on their own tasks, so the controller makes the lead’s submission the answer with `choose_answer()`.
+
 ## Stopping on the first proof
 
 Some tasks have a checker, such as a proof checker or a test suite, and the experiment wants to stop when the first member’s answer passes it. [`examples/stop_on_proof.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/stop_on_proof.py) has such a controller:
@@ -132,7 +271,13 @@ Some tasks have a checker, such as a proof checker or a test suite, and the expe
 ``` python
 from contextlib import aclosing
 
-from inspect_swarm import Controller, StopReason, SwarmControl, swarm_controller
+from inspect_swarm import (
+    Controller,
+    MemberEnded,
+    StopReason,
+    SwarmControl,
+    swarm_controller,
+)
 
 
 @swarm_controller
@@ -147,7 +292,7 @@ def until_proved() -> Controller:
             swarm.start(m)
         async with aclosing(swarm.events()) as events:
             async for event in events:
-                if event.submitted:
+                if isinstance(event, MemberEnded) and event.submitted:
                     return "proved"
         return "all_done"
 

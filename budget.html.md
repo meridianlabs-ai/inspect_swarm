@@ -21,18 +21,27 @@ solver = swarm(
 
 | Field | Default | Meaning |
 |----|----|----|
-| `cost` | `None` | Cost cap in dollars. `None` derives it from the sample’s cost limit. |
-| `tokens` | `None` | Token cap. A string such as `"output:1m"` keeps its metering type. `None` derives it from the sample’s token limit. |
-| `time` | `None` | Seconds after which the swarm stops its members. `None` derives it from the sample’s time limit. |
+| `cost` | `None` | Cost cap in dollars. `None` derives it from the sample’s cost limit, or sets no cap under `derive=False`. |
+| `tokens` | `None` | Token cap. A string such as `"output:1m"` keeps its metering type. `None` derives it from the sample’s token limit, or sets no cap under `derive=False`. |
+| `time` | `None` | Seconds after which the swarm stops its members. `None` derives it from the sample’s time limit, or sets no cap under `derive=False`. |
 | `reserve` | `0.05` | Fraction of each sample limit held back when a cap is derived. |
 | `split` | `"pool"` | How the cost and token caps are divided between members ([Splits](#splits)). |
 | `grace` | `120.0` | Seconds members have, at most, to finish calls in flight after a stop. |
+| `derive` | `True` | Whether a cap left `None` is derived from the sample’s limit ([No derived caps](#no-derived-caps)). |
 
 Every field is a plain value, so each can be a task parameter. A member whose call reached a cap ends `swarm_cap`, and the swarm then stops the others ([Members](./members.html.md#how-a-member-ends)). The ledger records the caps, each member’s usage and what stopped the swarm ([Analysis](./analysis.html.md#the-ledger)).
 
+## No derived caps
+
+With `Budget(derive=False)`, the swarm derives no caps. The sample’s own cost, token and time limits then end the swarm as they end any solver: the limit’s error propagates out of the swarm, and later solvers do not run. A cap you set explicitly still applies, and `reserve` has no effect.
+
+As in any solver, a limit error that a tool or handoff turns into a tool message does not end the run. The member’s next model call raises the error again, as does any other member’s. A swarm cap, by contrast, stops the swarm even when a tool turns its error into a message.
+
+A split needs a cost or token cap, so with no explicit cap use `split="pool"`.
+
 ## Cost data
 
-A cost cap needs cost data for every member’s model. The swarm checks this when it starts and raises an error naming the models that have none. Configure prices with [set_model_cost()](https://inspect.aisi.org.uk/reference/inspect_ai.model.html#set_model_cost) or `--model-cost-config`.
+A cost cap needs cost data for every member’s model, and so does a sample cost limit under `derive=False`. The swarm checks this when it starts and raises an error naming the models that have none. Configure prices with [set_model_cost()](https://inspect.aisi.org.uk/reference/inspect_ai.model.html#set_model_cost) or `--model-cost-config`.
 
 ## Splits
 
@@ -48,7 +57,7 @@ A member that uses up its share stops with status `share`. Its unused share is n
 
 When the swarm has a cap, each member’s preamble says how the budget is split. The [swarm_resources()](./reference/inspect_swarm.html.md#swarm_resources) tool, as in the example above, lets a member check the swarm’s caps, how much all members have used, and its own share. Code inside a member can read the same with [swarm_budget()](./reference/inspect_swarm.html.md#swarm_budget).
 
-A tool that reads [sample_limits()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits) shows the sample’s limits, not the swarm’s caps, so it overstates what members can spend.
+A tool that reads [sample_limits()](https://inspect.aisi.org.uk/reference/inspect_ai.util.html#sample_limits) shows the sample’s limits, not the swarm’s caps, so with derived caps it overstates what members can spend. Under `derive=False`, the sample’s limits can still end the run, and [swarm_resources()](./reference/inspect_swarm.html.md#swarm_resources) shows only the caps given explicitly.
 
 ## Sweeps
 

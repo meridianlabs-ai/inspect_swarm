@@ -6,7 +6,7 @@
 
 Columns for `inspect_ai.analysis.samples_df()` with each sample’s realized cost and what the swarm’s ledger says about it, as in `samples_df(logs, columns=SampleSummary + SwarmColumns)`. The `inspect_swarm.analysis` module docstring lists every column.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/analysis/_columns.py#L111)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/analysis/_columns.py#L111)
 
 ``` python
 SwarmColumns: list[Column] = [
@@ -30,7 +30,7 @@ SwarmColumns: list[Column] = [
 
 Read the swarm’s ledger from a sample.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/analysis/_columns.py#L14)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/analysis/_columns.py#L14)
 
 ``` python
 def swarm_ledger(sample: EvalSample) -> SwarmLedger | None
@@ -43,11 +43,11 @@ A sample read from a log with its store, for example from [read_eval_log()](http
 
 Realized usage and cost of one run of the swarm, and how complete they are.
 
-The swarm writes its ledger once, when it ends, to the sample store as `inspect_swarm:ledger` and as an [InfoEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#infoevent) with source `inspect_swarm`. Read it from a sample with [swarm_ledger()](../reference/inspect_swarm.analysis.html.md#swarm_ledger).
+The swarm writes its ledger once, when it ends, to the sample store as `inspect_swarm:ledger` and as a [SwarmEvent](https://inspect.aisi.org.uk/reference/inspect_ai.event.html#swarmevent) of kind `ledger` whose `data` is the store entry. Read it from a sample with [swarm_ledger()](../reference/inspect_swarm.analysis.html.md#swarm_ledger).
 
 The store entry’s shape follows `version`. This inspect_swarm reads version 1 only.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L120)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_ledger.py#L121)
 
 ``` python
 class SwarmLedger(BaseModel)
@@ -125,7 +125,7 @@ No call is known to be missing from the swarm’s usage and cost: no member, mem
 
 One member’s entry in the swarm’s ledger.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L90)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_ledger.py#L91)
 
 ``` python
 class MemberLedger(BaseModel)
@@ -163,7 +163,7 @@ Usage and cost recorded by one of the swarm’s meters.
 
 A meter counts the model calls made in its context: one member’s, the runtime’s, the final step’s, or the whole swarm’s.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L48)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_ledger.py#L49)
 
 ``` python
 class Meter(BaseModel)
@@ -186,7 +186,7 @@ Counts of the model events in the swarm, or in one member’s spans.
 
 `errored`, `no_usage` and `unpriced` count calls whose cost is missing, so any of them above zero makes the cost a lower bound.
 
-[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/83b552b7d0692d944b19bbce6d5e0514fe41eb69/src/inspect_swarm/_ledger.py#L66)
+[Source](https://github.com/meridianlabs-ai/inspect_swarm/blob/41c5a3e21c8abea5fb39fc4a653538f6ad0a4e2d/src/inspect_swarm/_ledger.py#L67)
 
 ``` python
 class Calls(BaseModel)

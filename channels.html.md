@@ -72,4 +72,96 @@ def lead(name: str) -> Channel:
 
 `instructions()` returns text for the member’s preamble, or `None` to add nothing. `check()`, if overridden, is called with the roster when [swarm()](./reference/inspect_swarm.html.md#swarm) is called and raises `ValueError` for a roster the channel cannot serve. A [Channel](./reference/inspect_swarm.html.md#channel) holds configuration only: one object serves every sample. The factory’s arguments are logged with the channel.
 
-A channel with tools and records, as `shared_memory` is, also sets `name` and `prefix` and returns a [ChannelState](./reference/inspect_swarm.html.md#channelstate) from `open()` for each run of the swarm; its records go through the swarm’s bus. Its `reach` decides which of a member’s loops get its tools from [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools): `"loop"` (the default), only the member’s own loop; `"member"`, also the nested loops the member’s agent gives [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). The agent decides which nested loops get [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools); `reach` filters the channel tools they get and which channels can wake their `swarm_wait`. A channel whose reads consume something for the member, such as an inbox that marks messages read, keeps `"loop"`, so that a subagent cannot read what the member’s own loop then never sees. `shared_memory` sets `"member"`: a view consumes nothing, and each loop keeps its own seen state. A channel’s tools are given to the member as they are: with the `messages` channel, their results do not count the member’s unread messages, as the swarm’s own tools do. A member learns of messages from those, or by calling `list_members`. See the docstrings of [Channel](./reference/inspect_swarm.html.md#channel), [ChannelState](./reference/inspect_swarm.html.md#channelstate) and [WaitingState](./reference/inspect_swarm.html.md#waitingstate) in the [reference](./reference/index.html.md).
+A channel with tools and records, as `shared_memory` is, also sets `name` and `prefix` and returns a [ChannelState](./reference/inspect_swarm.html.md#channelstate) from `open()` for each run of the swarm; its records go through the swarm’s bus. Its `reach` decides which of a member’s loops get its tools from [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools): `"loop"` (the default), only the member’s own loop; `"member"`, also the nested loops the member’s agent gives [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools). The agent decides which nested loops get [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools); `reach` filters the channel tools they get and which channels can wake their `swarm_wait`. A channel whose reads consume something for the member, such as an inbox that marks messages read, keeps `"loop"`, so that a subagent cannot read what the member’s own loop then never sees. `shared_memory` sets `"member"`: a view consumes nothing, and each loop keeps its own seen state. A channel’s tools are given to the member as they are: with the `messages` channel, their results do not count the member’s unread messages, as the swarm’s own tools do. A member learns of messages from those, or by calling `list_members`. [swarm_bridged_tools()](./reference/inspect_swarm.html.md#swarm_bridged_tools) serves only the built-in [messages()](./reference/inspect_swarm.html.md#messages) and [shared_memory()](./reference/inspect_swarm.html.md#shared_memory) channels, so [swarm()](./reference/inspect_swarm.html.md#swarm) refuses a bridged member beside a custom channel with records ([Restrictions](./restrictions.html.md#channels-for-bridged-members)).
+
+This channel keeps a notice board. Any member posts a notice, and every member reads them all:
+
+``` python
+from collections.abc import Mapping
+
+from inspect_ai.tool import Tool, ToolDef, ToolError
+from pydantic import JsonValue
+
+from inspect_swarm import (
+    Bus,
+    Channel,
+    ChannelRun,
+    ChannelState,
+    Draft,
+    MemberInfo,
+    Record,
+    calling_member,
+    swarm_channel,
+)
+
+
+class NoticesState:
+    def __init__(self, bus: Bus) -> None:
+        self.bus = bus
+        self.notices: list[Record] = []
+
+    def tools(self) -> list[Tool]:
+        async def post_notice(text: str) -> str:
+            """Post a notice that every member can read.
+
+            Args:
+                text: The notice.
+            """
+            delivery = await self.bus.deliver(Draft("notices", "notice", payload=text))
+            return f"Posted {delivery.record.id}."
+
+        async def read_notices() -> str:
+            """Read the other members' notices."""
+            caller = calling_member()
+            assert caller is not None
+            shown = [r for r in self.notices if r.sender != caller.member]
+            self.bus.read("notices", [r.id for r in shown])
+            lines = [f"{r.id} from {r.sender}: {r.payload}" for r in shown]
+            return "\n".join(lines) or "No notices."
+
+        return [ToolDef(post_notice).as_tool(), ToolDef(read_notices).as_tool()]
+
+    def validate(self, record: Record) -> None:
+        if not record.payload.strip():
+            raise ToolError("A notice needs text.")
+
+    def admit(self, record: Record) -> None:
+        pass
+
+    def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
+        self.notices.append(record)
+        return [], None
+
+
+class Notices(Channel):
+    name = "notices"
+    prefix = "n"
+
+    def open(self, run: ChannelRun) -> ChannelState:
+        return NoticesState(run.bus)
+
+    def instructions(self, member: MemberInfo) -> str | None:
+        return "Post what others should know with post_notice, and read theirs with read_notices."
+
+
+@swarm_channel
+def notices() -> Channel:
+    return Notices()
+```
+
+Members get the tools from [swarm_tools()](./reference/inspect_swarm.html.md#swarm_tools), as with the built-in channels. A tool hands the bus a [Draft](./reference/inspect_swarm.html.md#draft), and `run.bus.deliver()` makes the [Record](./reference/inspect_swarm.html.md#record), binds the sender from the calling member, checks it, and calls the state’s `validate()`, then `admit()` and `apply()` with no `await` between them, so what `admit()` checks still holds when `apply()` runs. After address resolution and validation, the log records accepted sends and refusals by liveness, payload and storm checks or `admit()` as `sent` events. Each delivered record also has a `delivered` event. Earlier refusals, including a stopping swarm, produce no communication event. A refusal raises [ToolError](https://inspect.aisi.org.uk/reference/inspect_ai.tool.html#toolerror), which the member sees as the tool’s result.
+
+A draft with no `to` is unaddressed: it reaches nobody directly, and the channel decides whom it concerns. `apply()` returns the members the record is news to and a JSON mapping, both written in the `delivered` event, and may name members that have not started or have ended. A draft addressed with `to=` is refused if a member it names has not started, is ending or has ended.
+
+[calling_member()](./reference/inspect_swarm.html.md#calling_member) tells a tool which member it acts for: a [Caller](./reference/inspect_swarm.html.md#caller) with the member’s name, whether the calling loop is a nested one, and that loop’s agent span. It comes from the runtime, never from model output, and is `None` outside a member of a swarm.
+
+A tool whose result shows the channel’s records reports them with `run.bus.read(name, records)`, using the [ChannelRun](./reference/inspect_swarm.html.md#channelrun) that `open()` was given: `name` is the channel’s `name`, and `records` are the ids of the records the result shows. A waiting channel’s `news()` reports them in `WaitNews(lines, files, depends_on=[...])`. The log records them as the result’s `depends_on`, the records the member’s later work depends on, which [the critical path](./analysis.html.md#the-critical-path) links. Two rules decide what a result depends on:
+
+- A result that tells the loop a record was committed, without showing its content, as a wait does, depends on it.
+- A result built from several records, such as a file made by several writes, depends on them all. Pass them as `depends_on=` when they differ from the records the result shows.
+
+A channel that reports nothing adds no dependency. Every id must be a record the channel committed in this run, or the call raises `ValueError`.
+
+`read()` returns the read’s id (`r-5`), which the log’s `read` event carries. Pass `listing=True` for a result that shows what exists rather than its content, which the metrics count as a listing, not a read.
+
+See the docstrings of [Channel](./reference/inspect_swarm.html.md#channel), [ChannelRun](./reference/inspect_swarm.html.md#channelrun), [ChannelState](./reference/inspect_swarm.html.md#channelstate), [Bus](./reference/inspect_swarm.html.md#bus), [Draft](./reference/inspect_swarm.html.md#draft), [Delivery](./reference/inspect_swarm.html.md#delivery), `calling_member`, [WaitingState](./reference/inspect_swarm.html.md#waitingstate) and [WaitNews](./reference/inspect_swarm.html.md#waitnews) in the [reference](./reference/index.html.md).
