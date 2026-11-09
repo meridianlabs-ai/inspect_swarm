@@ -162,7 +162,7 @@ The ledger of a two-member swarm with a cost cap of $1 and a time cap of 600 sec
 ```json
 {
   "version": 1,
-  "budget": {"cost": 1.0, "tokens": null, "time": 600.0, "reserve": 0.05, "split": "pool", "grace": 120.0},
+  "budget": {"cost": 1.0, "tokens": null, "time": 600.0, "reserve": 0.05, "split": "pool", "grace": 120.0, "derive": true},
   "caps": {"cost": 1.0, "tokens": null, "time": 600.0},
   "sample_limits": {"token": null, "cost": null, "message": null, "turn": null, "working": null, "time": null},
   "members": [

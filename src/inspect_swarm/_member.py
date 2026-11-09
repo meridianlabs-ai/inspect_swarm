@@ -67,6 +67,7 @@ from ._budget import (
     SwarmTurnNode,
     current_member,
 )
+from ._isolation import MemberIdentity, member_identity
 from ._seam import MemberGate
 
 AgentFactory = Callable[..., Agent]
@@ -115,7 +116,7 @@ class Member(BaseModel):
     """The member's role, given to the controller and in the member's preamble."""
 
     choose_name: bool = False
-    """Whether the member chooses its own name. `True` leaves the member's name out of its preamble, which asks it to choose a name and tell the other members; the swarm still uses `name` for everything it records."""
+    """Whether the member chooses its own name. `True` leaves the member's name out of the swarm's preamble, which asks it to choose a name and tell the other members; the swarm still uses `name` for everything it records. A controller's `start(preamble=...)` replaces that preamble with its own text, used as given, or `preamble=False` leaves it out; neither adds a request to choose a name."""
 
     count: int = 1
     """How many members this record stands for. Above 1 needs the factory form."""
@@ -242,7 +243,7 @@ def member(
 
     Sandboxes. Members share the sample's sandbox by default. With `sandbox`, a member works in its own: the swarm makes that environment the member's default, so `sandbox()` in its tools returns it, and hides the sample's other environments from the member except those in `visible_sandboxes`, such as a shared service. Tools that choose a sandbox without a name, such as `text_editor()`, `bash_session()` and the agent bridge, use the member's own; a visible service is reached only by name. `sandbox="{member}"` gives each copy of a counted member the environment named after it: `member(factory, name="agent", count=2, sandbox="{member}")` runs `agent-1` and `agent-2` in the environments of those names. The sample's sandbox configuration provides the environments (for Docker, a compose service for each), and the swarm checks that they exist when it starts. When one member has its own sandbox, every member must have one, no two the same, and the `filesystem` channel, which describes a shared sandbox, can be used only as `filesystem(shared_volume=True)`, for sandboxes that each mount one shared volume. A service in `visible_sandboxes` is reachable from any of the member's tools that take a sandbox name, so list only services every member may use.
 
-    Chosen names. With `choose_name=True` the member is not told its name: its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members, and the `filesystem` channel tells it to keep its work in a directory named with the name it chose. Its role, if it has one, is still stated. The swarm's records, spans, tool-state scopes and budget shares still use `name`. A swarm in which any member chooses its name can use only the `filesystem` channel or no channel (`channels=[]`), since other channels show members to each other by name. Text you give the member yourself is not changed: the sample input, a controller's `start(input=...)`, the agent's prompt and the sandbox configuration.
+    Chosen names. With `choose_name=True` the member is not told its name: the swarm's preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members, and the `filesystem` channel tells it to keep its work in a directory named with the name it chose. Its role, if it has one, is still stated. The swarm's records, spans, tool-state scopes and budget shares still use `name`. A swarm in which any member chooses its name can use only the `filesystem` channel or no channel (`channels=[]`), since other channels show members to each other by name. Text you give the member yourself is not changed: the sample input, a controller's `start(input=...)` and `start(preamble=...)`, the agent's prompt and the sandbox configuration. A controller's `start(preamble=...)` uses its text as given, and `preamble=False` leaves the preamble out; neither adds a request to choose a name.
 
     Scoring with member sandboxes. The task's scorers run after the swarm, outside every member, where `sandbox()` is `default`. A scorer that grades the members' work names each member's sandbox itself, as in `sandbox("agent-1")`, and the `sandbox` field of each member in the swarm's result record says which member used which.
 
@@ -484,15 +485,16 @@ class MemberOutcome:
 
 
 # The member wrapper. Runs the member on `state` with `input` as its conversation, in
-# its tool-state scope, cancel scope and agent span, under its nodes and the swarm's
-# caps, with its background work owned by the member and its turn gate installed;
-# drains that work once the agent has returned; then calls `end` with its status and
-# the state the agent returned, inside the member's span when the span was entered. The
-# caller keeps `state`, as as_solver() does, for the output of a member that does not
-# return; when its own loop reached the gate, the loop's state at its last boundary is
-# used instead. An end requested through the gate makes a normal return `stopped`, and
-# a member whose callbacks never ran because its loop never reached the gate ends
-# `errored` when it produced its ending itself. No error whose
+# its tool-state scope, its sandbox identity scope under users isolation, cancel scope
+# and agent span, under its nodes and the swarm's caps, with its background work owned
+# by the member and its turn gate installed; drains that work once the agent has
+# returned; then calls `end` with its status and the state the agent returned, inside
+# the member's span when the span was entered. The caller keeps `state`, as as_solver()
+# does, for the output of a member that does not return; when its own loop reached the
+# gate, the loop's state at its last boundary is used instead. An end requested through
+# the gate makes a normal return `stopped`, and a member whose callbacks never ran
+# because its loop never reached the gate ends `errored` when it produced its ending
+# itself. No error whose
 # source is a swarm node leaves it: a cap becomes a stop of the swarm, and the member's
 # own nodes a status, as does a sourceless custom limit error, which the agent raised
 # to stop itself. Anything else (a foreign error) is raised, without the swarm's
@@ -511,6 +513,7 @@ async def run_member(
     outcome: MemberOutcome,
     gate: MemberGate,
     end: Callable[[str, AgentState], None],
+    identity: MemberIdentity | None = None,
 ) -> None:
     status = "cancelled"
     # holds the member's span open after its limits and cancel scope have exited, so
@@ -530,6 +533,7 @@ async def run_member(
                 outcome,
                 gate,
                 member_span,
+                identity,
             )
         except Exception:
             status = "errored"
@@ -560,6 +564,7 @@ async def _run_member(
     outcome: MemberOutcome,
     gate: MemberGate,
     member_span: AsyncExitStack,
+    identity: MemberIdentity | None,
 ) -> str:
     token = current_member.set(context)
     status: str | None = None
@@ -574,6 +579,7 @@ async def _run_member(
         with (
             tool_state_scope(name),
             _member_sandboxes(member_sandbox(record, name), record.visible_sandboxes),
+            member_identity(identity),
             context.scope,
         ):
             # inside the member's scopes, so the hard stop cancels its background work

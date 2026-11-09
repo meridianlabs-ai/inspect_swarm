@@ -15,12 +15,12 @@ classifiers = [
     "Development Status :: 3 - Alpha",
 ]
 dependencies = [
-    # Temporarily a git reference, to unblock work: the swarm writes its evidence as
-    # CommunicationEvent and SwarmEvent (UKGovernmentBEIS/inspect_ai#6164), which no
-    # release has yet, so this tracks inspect_ai's `main`. PyPI rejects git
-    # dependencies, so go back to a released `inspect-ai>=X` floor before
-    # inspect_swarm is published.
-    "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai@main",
+    # The published package's floor. Development and CI track inspect_ai's
+    # `main` through [tool.uv.sources] below, which only uv reads. The Release
+    # Please release PR ignores the sources and is tested against PyPI, after
+    # release-pin-deps.yml raises this floor to the release it was tested
+    # against.
+    "inspect-ai>=0.3.288",
     # imported directly; inspect-ai depends on them too, but a transitive
     # dependency is not a promise
     "anyio>=4.0",
@@ -41,7 +41,7 @@ inspect_swarm = "inspect_swarm._entrypoint"
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
     "ruff",
     "pytest",
@@ -56,7 +56,14 @@ dev = [
     # inspect_ai.analysis.samples_df(), through which the analysis tests read
     "pandas>=2.1.0",
     "pyarrow>=10.0.1",
+    # tests/test_dependency_cooldown.py reads the workflows
+    "pyyaml",
 ]
+
+[dependency-groups]
+# Keeps a plain `uv sync` or `uv run` (Makefile) and the nightly canary's
+# `--group dev` install pulling the dev tools.
+dev = ["inspect_swarm[dev]"]
 # The docs' Python tools are in `doc`, which `dev` leaves out: CI installs `dev`
 # and never builds the docs. Quarto itself is a system install (`make docs`
 # checks its version), so the lock does not carry the Jupyter stack the
@@ -84,13 +91,26 @@ version-file = "src/inspect_swarm/_version.py"
 [tool.hatch.version.raw-options]
 local_scheme = "no-local-version" # Important for PyPI compatibility
 
-# hatchling rejects PEP 508 direct references (the inspect-ai git ref above)
-# without this
-[tool.hatch.metadata]
-allow-direct-references = true
-
 [tool.uv]
 managed = true
+# 0.11.8 is the first uv that keeps uv.lock stable with a relative exclude-newer,
+# and 0.13.4 the first that no longer trusts the compromised emSign root
+# (GHSA-hq85-5cpj-mr62).
+required-version = ">=0.13.4"
+# Only resolve releases at least 7 days old (see CONTRIBUTING.md).
+exclude-newer = "7 days"
+
+# 6 hours only for direct dependencies that are a model provider SDK or an
+# Inspect package; see CONTRIBUTING.md.
+[tool.uv.exclude-newer-package]
+inspect-ai = "6 hours"
+
+# Development and CI track inspect_ai's main. uv.lock records a commit, and CI
+# moves it to main's latest (.github/actions/uv-sync). The published package
+# requires the floor above, and the release PR's CI installs the newest
+# release instead.
+[tool.uv.sources]
+inspect-ai = { git = "https://github.com/UKGovernmentBEIS/inspect_ai", branch = "main" }
 
 [tool.ruff]
 extend-exclude = ["docs", "design"]

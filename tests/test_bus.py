@@ -1,34 +1,44 @@
 import json
 from collections import UserDict
 from collections.abc import Callable, Generator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 import anyio
 import pytest
+from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai._util.json import to_json_safe
-from inspect_ai.agent import Agent, AgentState, agent, run
+from inspect_ai.agent import Agent, AgentState, agent, deepagent, general, react, run
+from inspect_ai.dataset import Sample
 from inspect_ai.event import (
     CommunicationDelivery,
     CommunicationEvent,
     CommunicationRejection,
     SpanBeginEvent,
+    ToolEvent,
 )
 from inspect_ai.log import EvalSample
 from inspect_ai.log._condense import condense_sample
 from inspect_ai.log._recorders.eval import _parse_sample_data
 from inspect_ai.log._transcript import Transcript
-from inspect_ai.tool import Tool, ToolError
+from inspect_ai.model import ChatMessage, ModelOutput
+from inspect_ai.tool import Tool, ToolDef, ToolError
 from inspect_ai.util._span import span
 from pydantic import JsonValue
 
 from inspect_swarm import (
+    Boundary,
+    Bus,
+    Caller,
     Channel,
     ChannelRun,
     ChannelState,
     Controller,
+    Delivery,
+    Draft,
     MemberInfo,
     MemberState,
     Record,
@@ -37,18 +47,32 @@ from inspect_swarm import (
     VerdictSummary,
     WaitNews,
     WaitSpec,
+    calling_member,
     member,
     swarm,
     swarm_channel,
     swarm_controller,
+    swarm_result,
+    swarm_tools,
 )
 from inspect_swarm._budget import MemberContext, current_member
-from inspect_swarm._bus._bus import Bus, Delivery, current_bus
-from inspect_swarm._bus._record import Draft, thaw_json
+from inspect_swarm._bus._bus import SwarmBus, current_bus
+from inspect_swarm._bus._record import thaw_json
 from inspect_swarm._bus._storm import StormControls
 from inspect_swarm._seam import BoundaryCallback
 
-from .swarm_runtime import data, run_swarm, sample, send, swarm_events
+from .swarm_runtime import (
+    Script,
+    controller,
+    data,
+    delivery,
+    run_swarm,
+    sample,
+    scripted_model,
+    send,
+    swarm_events,
+)
+from .test_binding import _model, _Plan
 
 
 class _BoardState:
@@ -192,7 +216,7 @@ class _Member:
 MEMBERS = ("w-1", "w-2", "w-3")
 
 
-class _TestBus(Bus):
+class _TestBus(SwarmBus):
     # the stand-in members, for `_send`
     stand_ins: dict[str, _Member]
 
@@ -240,7 +264,7 @@ def _comm(transcript: Transcript) -> list[CommunicationEvent]:
     return [e for e in transcript.events if isinstance(e, CommunicationEvent)]
 
 
-def _board(bus: Bus) -> _BoardState:
+def _board(bus: SwarmBus) -> _BoardState:
     state = bus.states["board"]
     assert isinstance(state, _BoardState)
     return state
@@ -602,7 +626,7 @@ async def test_record_ids_count_per_channel_and_seq_per_run() -> None:
 
 
 @agent
-def bus_user(buses: list[Bus]) -> Agent:
+def bus_user(buses: list[SwarmBus]) -> Agent:
     async def execute(state: AgentState) -> AgentState:
         bus = current_bus.get()
         assert bus is not None
@@ -624,7 +648,7 @@ def bus_user(buses: list[Bus]) -> Agent:
 async def test_each_run_opens_its_own_channel_states(
     channels: list[str], opened: list[str]
 ) -> None:
-    buses: list[Bus] = []
+    buses: list[SwarmBus] = []
     agent = swarm(
         member(bus_user, args={"buses": buses}, name="w", count=2), channels=channels
     )
@@ -643,7 +667,7 @@ async def test_each_run_opens_its_own_channel_states(
 
 @agent
 def bus_test_neighbour(
-    side: str, buses: dict[str, Bus], ready: anyio.Event, done: anyio.Event
+    side: str, buses: dict[str, SwarmBus], ready: anyio.Event, done: anyio.Event
 ) -> Agent:
     # "a" delivers from itself and a child task once "b", a member of the same name in
     # another run, has tried to deliver through a's bus
@@ -671,7 +695,7 @@ def bus_test_neighbour(
 
 @pytest.mark.anyio
 async def test_a_member_of_another_run_with_the_same_name_cannot_deliver() -> None:
-    buses: dict[str, Bus] = {}
+    buses: dict[str, SwarmBus] = {}
     ready, done = anyio.Event(), anyio.Event()
 
     def run(side: str) -> Agent:
@@ -737,13 +761,15 @@ async def test_comm_evidence_names_the_members_span_and_the_record_the_loops(
     sent, delivered = _comm(outcome.transcript)
     assert (sent.agent_span_id, delivered.agent_span_id) == (member_span, member_span)
     assert (sent.agent, delivered.agent) == ("w", "w")
+    # nested by its span, though no loop of the member resolved swarm_tools()
+    assert (sent.nested, delivered.nested) == (nested, nested)
     loop_span = data(sent)["record"]["sender_span_id"]
     assert sent.loop_span_id == loop_span
     assert spans[loop_span] == ("bus_test_child" if nested else "w")
 
 
 @agent
-def bus_test_late_sender(buses: list[Bus], outcomes: list[str]) -> Agent:
+def bus_test_late_sender(buses: list[SwarmBus], outcomes: list[str]) -> Agent:
     # sends once the swarm has begun to stop, while it still runs in the grace period
     async def execute(state: AgentState) -> AgentState:
         bus = current_bus.get()
@@ -773,7 +799,7 @@ async def test_a_stop_refuses_records_from_members_still_running() -> None:
 
         return Controller(run)
 
-    buses: list[Bus] = []
+    buses: list[SwarmBus] = []
     outcomes: list[str] = []
     outcome = await run_swarm(
         swarm(
@@ -902,19 +928,24 @@ async def _report(
     loop: str = "top",
     channel: str = "board",
     depends_on: Sequence[str] | None = None,
-) -> None:
+    listing: bool = False,
+) -> str:
     # as a channel's tool reports a result, in a tool span of the member's loop
     with _as(bus.stand_ins[member].context):
         async with span("agent", type="agent", id=f"{member}/{loop}"):
             async with span("tool", type="tool", id=f"{member}/{loop}/tool"):
-                bus.read(channel, records, depends_on=depends_on)
+                return bus.read(
+                    channel, records, depends_on=depends_on, listing=listing
+                )
 
 
 @pytest.mark.anyio
 async def test_a_read_names_its_records_and_writes_each_dependency_once_per_loop() -> (
     None
 ):
-    bus, _ = _bus()
+    bus, members = _bus()
+    # w-2's own loop runs in its agent span, as a member's agent does
+    members["w-2"].context.span_id = "w-2/top"
     async with sample() as transcript:
         await _send(bus)
         await _send(bus)
@@ -1157,3 +1188,411 @@ async def test_two_instructions_only_channels_are_accepted_and_both_instruct() -
     [preamble] = preambles
     assert "Share files with them in /shared." in preamble
     assert "Take a lock before editing a file." in preamble
+
+
+# The public bus API: a channel written with the names `inspect_swarm` exports. Its
+# posts are unaddressed; `apply()` names every other member of the roster, whatever
+# its state, and numbers the posts it applies.
+
+
+class _PostsState:
+    def __init__(self, run: ChannelRun) -> None:
+        self.bus: Bus = run.bus
+        self.roster = [m.name for m in run.roster]
+        self.posts: list[Record] = []
+        self.callers: list[Caller | None] = []
+        # each applied post's id and number, and the members running when it applied
+        self.applied: list[tuple[str, int, list[str]]] = []
+
+    def tools(self) -> list[Tool]:
+        async def post(text: str) -> str:
+            """Post text to the channel.
+
+            Args:
+                text: The text.
+            """
+            self.callers.append(calling_member())
+            delivery: Delivery = await self.bus.deliver(
+                Draft("posts", "post", payload=text)
+            )
+            return delivery.record.id
+
+        async def read_posts() -> str:
+            """Read the channel's posts."""
+            posts = list(self.posts)
+            read = self.bus.read("posts", [r.id for r in posts])
+            return "\n".join([read, *(r.payload for r in posts)])
+
+        return [
+            ToolDef(post, name="post").as_tool(),
+            ToolDef(read_posts, name="read_posts").as_tool(),
+        ]
+
+    def validate(self, record: Record) -> None:
+        pass
+
+    def admit(self, record: Record) -> None:
+        if record.payload == "refuse":
+            raise ToolError("the post is refused")
+
+    def apply(self, record: Record) -> tuple[list[str], Mapping[str, JsonValue] | None]:
+        self.posts.append(record)
+        readers = [name for name in self.roster if name != record.sender]
+        # member state is the runtime's, not the public bus's: read it from the run's bus
+        assert isinstance(self.bus, SwarmBus)
+        running = [name for name in self.roster if self.bus.running(name)]
+        self.applied.append((record.id, len(self.posts), running))
+        return readers, {"readers": list[JsonValue](readers), "number": len(self.posts)}
+
+
+class _Posts(Channel):
+    name = "posts"
+    prefix = "p"
+    reach = "member"
+
+    def __init__(
+        self, opened: list[_PostsState], storm: StormControls | None = None
+    ) -> None:
+        self.storm = storm or StormControls()
+        self.opened = opened
+
+    def open(self, run: ChannelRun) -> ChannelState | None:
+        state = _PostsState(run)
+        self.opened.append(state)
+        return state
+
+
+@swarm_channel
+def bus_test_posts(opened: list[_PostsState]) -> Channel:
+    return _Posts(opened)
+
+
+def _call(function: str, **args: Any) -> ModelOutput:
+    return ModelOutput.for_tool_call("mockllm", function, args)
+
+
+def _react(*outputs: ModelOutput) -> Agent:
+    return react(
+        model=scripted_model(Script([*outputs, _call("submit", answer="done")])),
+        tools=[swarm_tools()],
+    )
+
+
+async def _eval_swarm(solver: Agent, tmp_path: Path) -> EvalSample:
+    # react needs a running sample
+    [log] = await eval_async(
+        Task(dataset=[Sample(input="task")], solver=solver),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "success", log.error
+    assert log.samples is not None
+    return log.samples[0]
+
+
+def _events(sample: EvalSample, channel: str, kind: str) -> list[CommunicationEvent]:
+    return [
+        e
+        for e in sample.events
+        if isinstance(e, CommunicationEvent) and e.channel == channel and e.kind == kind
+    ]
+
+
+def _shape(event: CommunicationEvent) -> tuple[Any, ...]:
+    # what a sent or delivered event has, without what differs between channels
+    record = data(event).get("record", {})
+    return (
+        event.source,
+        event.agent,
+        event.agent_span_id,
+        event.loop_span_id,
+        event.nested,
+        len(event.record_ids),
+        event.send is None,
+        event.delivery is None,
+        sorted(data(event)),
+        sorted(record),
+        record.get("sender_span_id") == event.loop_span_id,
+    )
+
+
+@pytest.mark.anyio
+async def test_a_channel_written_with_public_names_delivers_as_a_built_in_does(
+    tmp_path: Path,
+) -> None:
+    opened: list[_PostsState] = []
+    sample = await _eval_swarm(
+        swarm(
+            member(
+                _react(
+                    _call("post", text="hello"),
+                    _call(
+                        "shared_memory",
+                        command="create",
+                        path="/shared_memory/a.md",
+                        file_text="hello",
+                    ),
+                    _call("read_posts"),
+                ),
+                name="w",
+            ),
+            channels=[bus_test_posts(opened), "shared_memory"],
+        ),
+        tmp_path,
+    )
+    for kind in ("sent", "delivered"):
+        [posted] = _events(sample, "posts", kind)
+        [written] = _events(sample, "shared_memory", kind)
+        assert _shape(posted) == _shape(written)
+    [sent] = _events(sample, "posts", "sent")
+    assert (send(sent).record.sender, send(sent).record.content) == ("w", "hello")
+    [delivered] = _events(sample, "posts", "delivered")
+    assert data(delivered)["result"] == {"readers": [], "number": 1}
+    [read] = _events(sample, "posts", "read")
+    assert (read.agent, read.record_ids, data(read)["read"]) == ("w", ["p-1"], "r-1")
+    # in the span of the tool call that read
+    spans = {e.id: e.type for e in sample.events if isinstance(e, SpanBeginEvent)}
+    assert read.span_id == data(read)["tool_span_id"]
+    assert read.span_id is not None and spans[read.span_id] == "tool"
+    [tool] = [
+        e
+        for e in sample.events
+        if isinstance(e, ToolEvent) and e.function == "read_posts"
+    ]
+    assert tool.result == "r-1\nhello"
+
+
+@pytest.mark.anyio
+async def test_calling_member_names_the_member_from_its_own_and_a_nested_loop(
+    tmp_path: Path,
+) -> None:
+    opened: list[_PostsState] = []
+    plan = _Plan(
+        parent=[
+            ("post", {"text": "parent"}),
+            ("agent", {"prompt": "child of {name}"}),
+        ],
+        child=[("post", {"text": "child"})],
+    )
+    sample = await _eval_swarm(
+        swarm(
+            member(
+                deepagent,
+                args={
+                    "model": _model(plan),
+                    "tools": [swarm_tools()],
+                    "subagents": [general()],
+                    "todo_write": False,
+                },
+                name="w",
+            ),
+            channels=[bus_test_posts(opened)],
+        ),
+        tmp_path,
+    )
+    [state] = opened
+    sent = _events(sample, "posts", "sent")
+    assert state.callers == [
+        Caller(member="w", nested=False, loop_span_id=sent[0].loop_span_id),
+        Caller(member="w", nested=True, loop_span_id=sent[1].loop_span_id),
+    ]
+    spans = {e.id: e.name for e in sample.events if isinstance(e, SpanBeginEvent)}
+    assert sent[1].loop_span_id is not None
+    assert spans[sent[1].loop_span_id] == "general"
+    assert calling_member() is None
+
+
+@agent
+def bus_test_caller(callers: list[Caller | None], children: int, bind: bool) -> Agent:
+    # a custom agent, which opens no agent channel, so its run() child keeps its own
+    async def execute(state: AgentState) -> AgentState:
+        if bind:
+            await swarm_tools().tools()
+        callers.append(calling_member())
+        for _ in range(children):
+            await run(bus_test_caller(callers, 0, False), "go")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bind", [False, True], ids=["unbound", "bound"])
+async def test_calling_member_finds_a_custom_agents_nested_loop(bind: bool) -> None:
+    callers: list[Caller | None] = []
+    outcome = await run_swarm(
+        swarm(
+            member(
+                bus_test_caller,
+                args={"callers": callers, "children": 1, "bind": bind},
+                name="w",
+            ),
+            channels=[],
+        )
+    )
+    [result] = swarm_events(outcome.transcript, "member_result")
+    member_span = result.data["span_id"]
+    assert isinstance(member_span, str)
+    child = next(
+        e.id
+        for e in outcome.transcript.events
+        if isinstance(e, SpanBeginEvent) and e.name == "bus_test_caller"
+    )
+    assert callers == [
+        Caller(member="w", nested=False, loop_span_id=member_span),
+        Caller(member="w", nested=True, loop_span_id=child),
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_read_writes_listing_and_returns_its_id() -> None:
+    bus, _ = _bus()
+    async with sample() as transcript:
+        await _send(bus)
+        first = await _report(bus, ["b-1"], listing=True)
+        second = await _report(bus, [])
+    assert (first, second) == ("r-1", "r-2")
+    reads = [c for c in _comm(transcript) if c.kind == "read"]
+    assert [(r.agent, r.loop_span_id, r.record_ids) for r in reads] == [
+        ("w-2", "w-2/top", ["b-1"]),
+        ("w-2", "w-2/top", []),
+    ]
+    assert [r.data for r in reads] == [
+        {
+            "version": 1,
+            "read": "r-1",
+            "tool_span_id": "w-2/top/tool",
+            "depends_on": ["b-1"],
+            "listing": True,
+            "via": "tool",
+        },
+        {
+            "version": 1,
+            "read": "r-2",
+            "tool_span_id": "w-2/top/tool",
+            "depends_on": [],
+            "listing": False,
+            "via": "tool",
+        },
+    ]
+
+
+@pytest.mark.anyio
+async def test_an_unaddressed_post_reaches_members_pending_held_and_ended(
+    tmp_path: Path,
+) -> None:
+    opened: list[_PostsState] = []
+    release = anyio.Event()
+    held: list[bool] = []
+
+    async def hold(boundary: Boundary) -> list[ChatMessage] | None:
+        if boundary.index == 0:
+            await release.wait()
+        return None
+
+    async def drain(control: SwarmControl) -> None:
+        async with aclosing(control.events()) as events:
+            async for _ in events:
+                pass
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        control.start("d")
+        await drain(control)
+        control.member("b").on_boundary(hold, origin="test")
+        control.start("b")
+        while not control.member("b").held:
+            await anyio.sleep(0.01)
+        control.start("a")
+        while control.member("a").state != "ended":
+            await anyio.sleep(0.01)
+        held.append(control.member("b").held)
+        release.set()
+        await drain(control)
+        return "all_done"
+
+    sample = await _eval_swarm(
+        swarm(
+            [
+                member(_react(_call("post", text="hello")), name="a"),
+                member(_react(), name="b"),
+                member(bus_test_native, name="c"),
+                member(bus_test_native, name="d"),
+            ],
+            controller=controller(run_controller, "bus_test_held"),
+            channels=[bus_test_posts(opened)],
+        ),
+        tmp_path,
+    )
+    [state] = opened
+    # b was held at boundary 0 throughout; c never started; d had ended
+    assert held == [True]
+    assert state.applied == [("p-1", 1, ["a", "b"])]
+    [delivered] = _events(sample, "posts", "delivered")
+    assert delivery(delivered).recipients == []
+    assert data(delivered)["notify"] == ["b", "c", "d"]
+    assert data(delivered)["result"] == {"readers": ["b", "c", "d"], "number": 1}
+    record = swarm_result(sample)
+    assert record is not None
+    assert {m.name: m.state for m in record.members} == {
+        "a": "ended",
+        "b": "ended",
+        "c": "pending",
+        "d": "ended",
+    }
+
+
+@pytest.mark.anyio
+async def test_a_number_given_in_apply_has_no_gap_where_a_delivery_was_refused() -> (
+    None
+):
+    # w-1's third post is over its rate, and w-2's "refuse" is refused by admit(): both
+    # are given an id, and neither is numbered
+    opened: list[_PostsState] = []
+    bus, _ = _bus(channels=[_Posts(opened, StormControls(rate=(2, 3600.0)))])
+    sends = [
+        ("w-1", "one"),
+        ("w-1", "two"),
+        ("w-1", "three"),
+        ("w-2", "refuse"),
+        ("w-2", "four"),
+    ]
+    go = [anyio.Event() for _ in sends]
+    refused: list[str] = []
+
+    async def post(index: int) -> None:
+        sender, payload = sends[index]
+        await go[index].wait()
+        try:
+            await _send(bus, sender, channel="posts", payload=payload)
+        except ToolError as ex:
+            refused.append(ex.message)
+
+    async with sample() as transcript:
+        async with anyio.create_task_group() as tg:
+            for index in range(len(sends)):
+                tg.start_soon(post, index)
+            # every post is waiting at once; each is let go in turn
+            for event in go:
+                await anyio.wait_all_tasks_blocked()
+                event.set()
+    [state] = opened
+    assert [(id, number) for id, number, _ in state.applied] == [
+        ("p-1", 1),
+        ("p-2", 2),
+        ("p-5", 3),
+    ]
+    assert refused == ["rate limit: retry in 3600 s", "the post is refused"]
+    sent = [c for c in _comm(transcript) if c.kind == "sent"]
+    assert [(c.record_ids, send(c).rejected is None) for c in sent] == [
+        (["p-1"], True),
+        (["p-2"], True),
+        (["p-3"], False),
+        (["p-4"], False),
+        (["p-5"], True),
+    ]
+    delivered = [c for c in _comm(transcript) if c.kind == "delivered"]
+    assert [(delivery(c).seq, data(c)["result"]["number"]) for c in delivered] == [
+        (1, 1),
+        (2, 2),
+        (3, 3),
+    ]

@@ -36,7 +36,7 @@ from inspect_swarm import (
     swarm_tools,
 )
 from inspect_swarm._budget import current_member
-from inspect_swarm._bus._bus import Bus
+from inspect_swarm._bus._bus import SwarmBus
 from inspect_swarm._channel.shared_memory import (
     _SharedMemoryState,  # pyright: ignore[reportPrivateUsage]
 )
@@ -74,7 +74,9 @@ class _Run:
         for m in self.members.values():
             # the own loop is the one outside any agent channel
             m.context.loop = current_agent_channel()
-        self.bus = Bus(
+            # and its agent span, as swarm_tools() binds them
+            m.context.loop_span = f"{m.name}/top"
+        self.bus = SwarmBus(
             list(self.members.values()),
             {name: m.context for name, m in self.members.items()},
             [shared_memory(rate=None, **channel)],

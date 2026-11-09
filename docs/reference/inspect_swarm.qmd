@@ -7,6 +7,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 
 ### swarm
 ### member
+### users
 
 ## Controllers
 
@@ -41,6 +42,11 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### WaitingState
 ### WaitSpec
 ### WaitNews
+### Bus
+### calling_member
+### Caller
+### Draft
+### Delivery
 ### Record
 
 ## Results
