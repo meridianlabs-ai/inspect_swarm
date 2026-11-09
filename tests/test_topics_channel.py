@@ -53,13 +53,12 @@ GENERAL = {
     "name": "general",
     "readers": "all",
     "writers": "all",
-    "private": False,
     "wake": False,
 }
 
 
 @pytest.mark.parametrize("name", ["topics", "inspect_swarm/topics"])
-def test_names_resolve_with_one_public_room_for_everyone(name: str) -> None:
+def test_names_resolve_with_one_room_for_everyone(name: str) -> None:
     channel = resolve("swarm_channel", name)
     assert _config(channel) == {
         "topics": [GENERAL],
@@ -72,18 +71,18 @@ def test_names_resolve_with_one_public_room_for_everyone(name: str) -> None:
 
 def test_topics_and_mappings_of_their_fields_give_the_same_channel() -> None:
     declared = [
-        Topic(name="red", readers=["a", "b"], writers=["a"], private=True),
+        Topic(name="red", readers=["a", "b"], writers=["a"]),
         Topic(name="news", wake=True),
     ]
     given = [
-        {"name": "red", "readers": ["a", "b"], "writers": ["a"], "private": True},
+        {"name": "red", "readers": ["a", "b"], "writers": ["a"]},
         {"name": "news", "wake": True},
     ]
     assert _config(topics(declared)) == _config(topics(given))
 
 
 def test_the_plan_step_logs_the_topics_and_replay_rebuilds_them() -> None:
-    declared = [Topic(name="red", readers=["a", "b"], private=True)]
+    declared = [Topic(name="red", readers=["a", "b"])]
     channel = topics(declared, rate=(3, 10.0))
     members = [member(react(), name="a"), member(react(), name="b")]
     plan = Plan([as_solver(swarm(members, channels=[channel]))])
@@ -103,7 +102,6 @@ def test_eval_set_arms_that_differ_in_one_topic_are_distinct() -> None:
 
     arms = [
         arm(Topic(name="room")),
-        arm(Topic(name="room", private=True)),
         arm(Topic(name="room", wake=True)),
         arm(Topic(name="room", readers=["a-1"])),
         arm(Topic(name="room"), Topic(name="other")),
@@ -121,6 +119,11 @@ def test_eval_set_arms_that_differ_in_one_topic_are_distinct() -> None:
             {"topics": [{"name": "a", "colour": "red"}]},
             "topic 'a' is not valid: colour: Extra inputs are not permitted",
             id="unknown-field",
+        ),
+        pytest.param(
+            {"topics": [{"name": "a", "private": True}]},
+            "topic 'a' is not valid: private: Extra inputs are not permitted",
+            id="no-private-field",
         ),
         pytest.param(
             {"topics": [Topic(name="Orders")]},
@@ -223,28 +226,24 @@ def test_swarm_refuses_a_bridged_or_naming_member_beside_topics(
         )
 
 
-def test_instructions_name_the_members_own_topics_and_no_private_one_it_is_not_in() -> (
-    None
-):
+def test_instructions_name_the_members_own_topics_and_none_it_is_not_in() -> None:
     channel = topics(
         [
             Topic(
                 name="orders-a",
                 readers=["a"],
                 writers=["lead"],
-                private=True,
                 wake=True,
             ),
             Topic(
                 name="orders-b",
                 readers=["b"],
                 writers=["lead"],
-                private=True,
                 wake=True,
             ),
             Topic(name="reports", readers=["lead"], writers=["a", "b"]),
             Topic(name="general"),
-            Topic(name="leads", readers=["lead"], writers=["lead", "a"], private=True),
+            Topic(name="leads", readers=["lead"], writers=["lead", "a"]),
         ]
     )
     text = channel.instructions(MemberInfo("a", None))
@@ -255,9 +254,9 @@ def test_instructions_name_the_members_own_topics_and_no_private_one_it_is_not_i
     )
     assert "A post in #orders-a ends `swarm_wait`" in text
     assert "orders-b" not in text and "lead," not in text
-    outsider = topics(
-        [Topic(name="pair", readers=["a"], writers=["b"], private=True)]
-    ).instructions(MemberInfo("c", None))
+    outsider = topics([Topic(name="pair", readers=["a"], writers=["b"])]).instructions(
+        MemberInfo("c", None)
+    )
     assert outsider is not None
     assert "You are in no topic." in outsider and "pair" not in outsider
 

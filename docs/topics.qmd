@@ -1,11 +1,11 @@
 ---
 title: Topics
-llms-description: "The `topics` channel: named rooms with readers and writers, private topics, `post_topic`, `read_topics` and `list_topics`, delivery to readers that have not started, waking topics, limits, and the record of posts; read it to set up team rooms, a hub and spokes or a pipeline."
+llms-description: "The `topics` channel: named rooms with readers and writers, visible only to their members, `post_topic`, `read_topics` and `list_topics`, delivery to readers that have not started, waking topics, limits, and the record of posts; read it to set up team rooms, a hub and spokes or a pipeline."
 ---
 
 ## Overview
 
-`topics()` gives the swarm named rooms. You declare each topic with the members that read it and the members that post to it. A member posts with `post_topic`, reads the posts it has not read with `read_topics`, and lists the topics it can see with `list_topics`. Every post goes through the swarm as a record from the member that posted it, so the log keeps who posted what, who it reached and when it was read.
+`topics()` gives the swarm named rooms. You declare each topic with the members that read it and the members that post to it. A topic exists only for those members: no other member is told about it. A member posts with `post_topic`, reads the posts it has not read with `read_topics`, and lists its topics with `list_topics`. Every post goes through the swarm as a record from the member that posted it, so the log keeps who posted what, who it reached and when it was read.
 
 A post reaches every reader of its topic, not only the readers running when it is posted. A reader that has not started yet, or a persistent member held idle, finds the post unread when it next looks.
 
@@ -42,7 +42,6 @@ A `Topic` has:
 
 - `name`: the topic's name, which members address as `#name`. It starts with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`. Names such as `c-3` are reserved.
 - `readers` and `writers`: `"all"` (the default), every member, or a list of member names.
-- `private`: whether only its readers and writers know it exists. Default `False`.
 - `wake`: whether a post ends its readers' `swarm_wait`. Default `False`.
 
 Topics can also be given as mappings of these fields, which is how the log records them.
@@ -63,7 +62,7 @@ A common room, the blackboard beside "filesystem only" and "messages":
 channels=["filesystem", "topics"]
 ```
 
-Team rooms. Each team has a private room, and the leads write an announcement room that everyone reads:
+Team rooms. Each team has its own room, and the leads write an announcement room that everyone reads:
 
 ```python
 red = ["red-1", "red-2", "red-3"]
@@ -71,8 +70,8 @@ blue = ["blue-1", "blue-2", "blue-3"]
 swarm(
     members=[member(worker, name="red", count=3), member(worker, name="blue", count=3)],
     channels=[topics([
-        Topic(name="red", readers=red, writers=red, private=True),
-        Topic(name="blue", readers=blue, writers=blue, private=True),
+        Topic(name="red", readers=red, writers=red),
+        Topic(name="blue", readers=blue, writers=blue),
         Topic(name="announcements", writers=["red-1", "blue-1"], wake=True),
     ])],
 )
@@ -80,12 +79,12 @@ swarm(
 
 A red member is never told that `#blue` exists.
 
-A hub and spokes. The lead gives each worker its orders in a private topic and reads every report:
+A hub and spokes. The lead gives each worker its orders in a topic of its own and reads every report:
 
 ```python
 workers = [f"worker-{i}" for i in range(1, k + 1)]
 topics([
-    *(Topic(name=f"orders-{w}", readers=[w], writers=["lead"], private=True, wake=True) for w in workers),
+    *(Topic(name=f"orders-{w}", readers=[w], writers=["lead"], wake=True) for w in workers),
     Topic(name="reports", readers=["lead"], writers=workers, wake=True),
 ])
 ```
@@ -105,7 +104,7 @@ Topics restrict only themselves. They do not restrict the messages channel, the 
 
 ## The tools
 
-`post_topic(topic, message, reply_to=None)` posts to a topic the member writes, given as `orders` or `#orders`, and returns `Posted p-7 to #orders, read by worker-1, worker-2.` `reply_to` is the id of a post the member posted or read. A post is refused, and reaches no one, when the topic is not one the member can see or writes, when it has no reader but the poster, or when one of the [limits](#limits) is passed.
+`post_topic(topic, message, reply_to=None)` posts to a topic the member writes, given as `orders` or `#orders`, and returns `Posted p-7 to #orders, read by worker-1, worker-2.` `reply_to` is the id of a post the member posted or read. A post is refused, and reaches no one, when the topic is not one the member writes, when it has no reader but the poster, or when one of the [limits](#limits) is passed.
 
 `read_topics(topic=None)` returns the member's unread posts, oldest first, and marks them read. Without `topic` it reads every topic the member reads; with it, that topic only:
 
@@ -126,21 +125,20 @@ Topics restrict only themselves. They do not restrict the messages channel, the 
 
 A read of one topic ends with the count of unread posts in the member's other topics, such as `You have 4 unread posts in other topics (#general 3, #red 1).` One read returns as many whole posts as fit in a bound set by `max_bytes`, the topics and the roster, and always at least one. The generate config's `max_tool_output` does not apply to it. `read_topics` never waits; `swarm_wait` does. A member never reads its own posts.
 
-`list_topics()` lists the topics the member can see, in the order you declared them, with their readers and writers, whether the member reads or posts in each, and its unread posts there:
+`list_topics()` lists the member's topics, the ones it reads or posts in, in the order you declared them, with their readers and writers, whether the member reads or posts in each, and its unread posts there:
 
 ```
-#orders-worker-2 (private): readers worker-2; writers lead; you read. 1 unread.
+#orders-worker-2: readers worker-2; writers lead; you read. 1 unread.
 #reports: readers lead; writers worker-1, worker-2; you post.
-#red: readers red-1, red-2, red-3; writers red-1, red-2, red-3; you are not in it.
 ```
 
 A member's preamble names its own topics and what it can do in each, and which of them wake its `swarm_wait`.
 
-### Private topics
+### Who sees a topic
 
-A private topic exists only for its readers and writers. Every other member never sees its name: not in its preamble, `list_topics`, the count lines, `swarm_wait` results or errors. Posting to it or reading it gives the same error as a topic that does not exist. Public topics are listed to every member, with who is in them.
+A topic exists only for its readers and writers. No other member sees its name: not in its preamble, `list_topics`, the count lines, `swarm_wait` results, post results or errors. Posting to it or reading it gives the same error as a topic that does not exist.
 
-Private is about what members are told, not about the log: the log records every post, and the channel's logged configuration says which topics are private.
+This is about what members are told, not about the log: the log records every post, and the channel's logged configuration has every topic with its readers and writers.
 
 ### Fences are labels
 
@@ -178,4 +176,4 @@ The swarm logs posts as `CommunicationEvent`s with source `inspect_swarm` and ch
 - `read`: a `read_topics` result, with the ids of the posts it showed in `record_ids`. A read that showed nothing has no event.
 - `waited`: a `swarm_wait` call, with what ended it. A wait that reports unread posts depends on all of them (`data["depends_on"]`), including those in topics that do not wake.
 
-The [metrics](analysis.qmd#communication) count these events for each member. Analysis reads each topic's readers, writers and privacy from the channel's logged configuration.
+The [metrics](analysis.qmd#communication) count these events for each member. Analysis reads each topic's readers and writers from the channel's logged configuration.

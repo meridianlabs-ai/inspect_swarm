@@ -45,7 +45,7 @@ _READ = (
     "It never waits: to wait for a post, call swarm_wait."
 )
 
-_LIST = "List the topics you can see, with who reads and who posts in each, whether you read or post in it, and how many posts you have unread in it."
+_LIST = "List your topics, the ones you read or post in, with who reads and who posts in each, whether you read or post in it, and how many posts you have unread in it."
 
 
 # post_topic's and read_topics's signatures, reflected once for their parameters. Each
@@ -76,7 +76,10 @@ _READ_PARAMETERS = ToolDef(_read_topics, description=_READ).parameters
 
 
 class Topic(BaseModel):
-    """A topic: a room that its readers read and its writers post to."""
+    """A topic: a room that its readers read and its writers post to.
+
+    A topic exists only for its readers and writers: no other member is told its name.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -88,9 +91,6 @@ class Topic(BaseModel):
 
     writers: Literal["all"] | list[str] = "all"
     """The members that post to it, in the same form."""
-
-    private: bool = False
-    """Whether only its readers and writers know it exists."""
 
     wake: bool = False
     """Whether a post ends its readers' `swarm_wait` and is news for an idle reader."""
@@ -158,7 +158,7 @@ class _Topics(Channel):
             *([f"post in {_tags(posts)}"] if posts else []),
         ]
         parts = [
-            "You can post to the swarm's topics with `post_topic`, read the posts you have not read with `read_topics`, and list the topics you can see, with who reads and posts in each, with `list_topics`.",
+            "You can post to the swarm's topics with `post_topic`, read the posts you have not read with `read_topics`, and list your topics, with who reads and posts in each, with `list_topics`.",
             "Posts are shown between `<topic_post>` tags whose `from` attribute names the poster.",
             f"You {'; you '.join(access)}." if access else "You are in no topic.",
         ]
@@ -183,11 +183,11 @@ def topics(
 
     Each topic has readers, the members that read it, and writers, the members that post to it. A post reaches every reader of its topic but the poster, whether the reader is running, has not started yet, is held idle or has ended: a reader that starts later finds the post unread. With no arguments, the channel has one topic, `#general`, that every member reads and writes.
 
-    Each member's own loop gets three tools. `post_topic` posts to a topic the member writes and returns the post's id, such as `p-3`. `read_topics` returns the member's unread posts, oldest first, in every topic it reads or in one, each inside a `<topic_post>` fence that names its id, topic and poster, and marks them read. `list_topics` lists the topics the member can see, with their readers and writers. While a member has unread posts, the results of `post_topic`, `list_topics`, `send_message`, `list_members`, `shared_memory` and `swarm_wait` in its own loop end with a line that counts them by topic, then a line with the totals of unread messages and posts. Nested loops, such as a `deepagent()` member's subagents, get none of these tools.
+    Each member's own loop gets three tools. `post_topic` posts to a topic the member writes and returns the post's id, such as `p-3`. `read_topics` returns the member's unread posts, oldest first, in every topic it reads or in one, each inside a `<topic_post>` fence that names its id, topic and poster, and marks them read. `list_topics` lists the member's topics, with their readers and writers. While a member has unread posts, the results of `post_topic`, `list_topics`, `send_message`, `list_members`, `shared_memory` and `swarm_wait` in its own loop end with a line that counts them by topic, then a line with the totals of unread messages and posts. Nested loops, such as a `deepagent()` member's subagents, get none of these tools.
 
-    A private topic exists only for its readers and writers: no other member is told its name, in its preamble, lists, counts or errors. A public topic is listed to every member. Topics do not restrict the messages channel, the shared memory or a shared sandbox.
+    A topic exists only for its readers and writers: no other member is told its name, in its preamble, lists, counts or errors, and naming it gets the same error as a name that does not exist. Topics do not restrict the messages channel, the shared memory or a shared sandbox.
 
-    Every post goes through the swarm's bus as a record from the member that made it. A post is refused when the topic is not one the member can see or writes, when it has no reader but the poster, when it is empty or longer than `max_bytes`, or when the poster is over its `rate`.
+    Every post goes through the swarm's bus as a record from the member that made it. A post is refused when the topic is not one the member writes, when it has no reader but the poster, when it is empty or longer than `max_bytes`, or when the poster is over its `rate`.
 
     One read always returns at least the oldest unread post whole: the read is bounded by the largest fence and count lines the topics and roster allow plus `max_bytes`, and Inspect's tool output limit does not apply to it.
 
@@ -471,28 +471,26 @@ class TopicsState:
 
     def _list_tool(self) -> Tool:
         async def execute() -> str:
-            """List the topics you can see."""
+            """List your topics."""
             context = own_caller(self._bus, "list_topics")
             member = context.name
             counts = dict(self._counts(self._unread[member]))
             lines: list[str] = []
             for name, topic in self._topics.items():
-                if not self._sees(member, name):
-                    continue
                 reader = member in self._readers[name]
                 writer = member in self._writers[name]
+                if not (reader or writer):
+                    continue
                 access = (
                     "you read and post"
                     if reader and writer
                     else "you read"
                     if reader
                     else "you post"
-                    if writer
-                    else "you are not in it"
                 )
                 unread = counts.get(name, 0)
                 lines.append(
-                    f"#{name}{' (private)' if topic.private else ''}: readers {_listed(topic.readers, self._readers[name])}; writers {_listed(topic.writers, self._writers[name])}; {access}."
+                    f"#{name}: readers {_listed(topic.readers, self._readers[name])}; writers {_listed(topic.writers, self._writers[name])}; {access}."
                     + (f" {unread} unread." if unread else "")
                 )
             return with_lines(
@@ -508,19 +506,15 @@ class TopicsState:
             parallel=True,
         ).as_tool()
 
-    def _sees(self, member: str, name: str) -> bool:
-        return (
-            not self._topics[name].private
-            or member in self._readers[name]
-            or member in self._writers[name]
-        )
+    def _in(self, member: str, name: str) -> bool:
+        return member in self._readers[name] or member in self._writers[name]
 
     def _visible(self, member: str, name: str) -> str:
-        # the topic, if the member can see it; a private topic it is not in gets the
-        # same error as a name that does not exist, which names only what it can see
-        if name in self._topics and self._sees(member, name):
+        # the topic, if the member reads or writes it; a topic it is not in gets the
+        # same error as a name that does not exist, which names only its own topics
+        if name in self._topics and self._in(member, name):
             return name
-        visible = [t for t in self._topics if self._sees(member, t)]
+        visible = [t for t in self._topics if self._in(member, t)]
         listed = (
             f"your topics are {_tags(visible)}" if visible else "you are in no topic"
         )

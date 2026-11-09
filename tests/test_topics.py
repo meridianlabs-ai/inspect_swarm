@@ -19,6 +19,7 @@ from inspect_ai.tool import ToolDef, ToolError
 from inspect_swarm import (
     Channel,
     Draft,
+    MemberInfo,
     Topic,
     messages,
     shared_memory,
@@ -35,15 +36,11 @@ from .test_messages import _Run  # pyright: ignore[reportPrivateUsage]
 
 STOPPING = "The swarm is stopping."
 
-# a hub and spokes: the lead gives each worker its orders in a private topic, which
+# a hub and spokes: the lead gives each worker its orders in a topic of its own, which
 # wakes it, and reads every report
 HUB = [
-    Topic(
-        name="orders-w-1", readers=["w-1"], writers=["lead"], private=True, wake=True
-    ),
-    Topic(
-        name="orders-w-2", readers=["w-2"], writers=["lead"], private=True, wake=True
-    ),
+    Topic(name="orders-w-1", readers=["w-1"], writers=["lead"], wake=True),
+    Topic(name="orders-w-2", readers=["w-2"], writers=["lead"], wake=True),
     Topic(name="reports", readers=["lead"], writers=["w-1", "w-2"], wake=True),
     Topic(name="general"),
 ]
@@ -179,14 +176,14 @@ async def test_a_post_reaches_readers_whatever_their_state() -> None:
             "post_topic",
             {"topic": "orders-w-2", "message": "x"},
             "no topic #orders-w-2; your topics are #orders-w-1, #reports, #general.",
-            id="private-not-in",
+            id="not-in",
         ),
         pytest.param(
             "w-1",
             "read_topics",
             {"topic": "orders-w-2"},
             "no topic #orders-w-2; your topics are #orders-w-1, #reports, #general.",
-            id="read-private-not-in",
+            id="read-not-in",
         ),
         pytest.param(
             "w-1",
@@ -285,33 +282,58 @@ async def test_reply_to_names_a_post_the_poster_posted_or_read() -> None:
 
 
 @pytest.mark.anyio
-async def test_a_private_topic_is_hidden_from_members_outside_it() -> None:
+async def test_list_topics_shows_only_the_callers_topics() -> None:
     async with run() as (r, _):
         await post(r, "lead", "orders-w-1", "build")
         # w-2 sees its own orders, not w-1's
         assert await r.call("w-2", "list_topics") == (
-            "#orders-w-2 (private): readers w-2; writers lead; you read.\n"
+            "#orders-w-2: readers w-2; writers lead; you read.\n"
             "#reports: readers lead; writers w-1, w-2; you post.\n"
             "#general: readers all members; writers all members; you read and post."
         )
         assert await r.call("w-1", "list_topics") == (
-            "#orders-w-1 (private): readers w-1; writers lead; you read. 1 unread.\n"
+            "#orders-w-1: readers w-1; writers lead; you read. 1 unread.\n"
             "#reports: readers lead; writers w-1, w-2; you post.\n"
             "#general: readers all members; writers all members; you read and post.\n"
             "Unread posts: #orders-w-1 1.\n"
             "You have 1 unread post."
         )
         assert (await r.call("lead", "list_topics")).startswith(
-            "#orders-w-1 (private): readers w-1; writers lead; you post.\n"
-            "#orders-w-2 (private): readers w-2; writers lead; you post.\n"
+            "#orders-w-1: readers w-1; writers lead; you post.\n"
+            "#orders-w-2: readers w-2; writers lead; you post.\n"
         )
 
 
 @pytest.mark.anyio
+async def test_a_topic_is_absent_for_a_member_outside_it() -> None:
+    channel = topics(HUB, rate=None)
+    async with run(channel=channel) as (r, _):
+        await post(r, "lead", "orders-w-1", "build")
+        await post(r, "lead", "general", "hello")
+        preamble = channel.instructions(MemberInfo("w-2", None))
+        assert preamble is not None and "orders-w-1" not in preamble
+        # its own list and status lines count only its own topics
+        listed = await r.call("w-2", "list_topics")
+        assert "orders-w-1" not in listed
+        assert listed.endswith("Unread posts: #general 1.\nYou have 1 unread post.")
+        # naming it gets the same error as a name that does not exist
+        errors: list[str] = []
+        for name in ("orders-w-1", "orders-w-9"):
+            for tool, args in (
+                ("post_topic", {"topic": name, "message": "x"}),
+                ("read_topics", {"topic": name}),
+            ):
+                with pytest.raises(ToolError) as raised:
+                    await r.call("w-2", tool, **args)
+                errors.append(raised.value.message.replace(name, "<name>"))
+        assert set(errors) == {
+            "no topic #<name>; your topics are #orders-w-2, #reports, #general."
+        }
+
+
+@pytest.mark.anyio
 async def test_a_member_in_no_topic_is_told_so() -> None:
-    channel = topics(
-        [Topic(name="pair", readers=["a"], writers=["b"], private=True)], rate=None
-    )
+    channel = topics([Topic(name="pair", readers=["a"], writers=["b"])], rate=None)
     async with run(("a", "b", "c"), channel) as (r, _):
         assert await r.call("c", "list_topics") == "You are in no topic."
         with pytest.raises(ToolError) as raised:
