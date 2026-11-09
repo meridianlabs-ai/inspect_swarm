@@ -29,7 +29,7 @@ _LEGACY_RECORD_KEY = "inspect_swarm:result"
 class MemberReap(BaseModel):
     """What stopping a member's leftover processes found, under users isolation.
 
-    When a member ends, the swarm kills every process in the sandbox that runs as the member's user, in up to five rounds, since a process can start another between rounds. Processes that have exited and wait for their parent to collect them (zombies) are not counted.
+    When a member ends, the swarm kills every process in the sandbox that runs as the member's user, in up to five rounds, since a process can start another between rounds. Processes that have fully exited and wait for their parent to collect them (zombies) are not counted.
     """
 
     status: Literal["ok", "survivors", "timeout", "error"]

@@ -131,6 +131,10 @@ class MemberGate:
     registered: bool = False
     # the member's own loop reached the gate
     reached: bool = False
+    # the member's agent and its work have ended, after the wrapper's last supervision
+    # check: no callback can be registered from here, though the member's end is still
+    # to be recorded (under users isolation, after its processes are reaped)
+    finished: bool = False
     # the state the own or successor loop passed at its last boundary, None when it
     # passed none, for the member's output when its agent raises
     state: AgentState | None = None

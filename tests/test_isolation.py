@@ -1,5 +1,5 @@
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
@@ -36,9 +36,12 @@ from inspect_ai.util._sandbox.identity import (
 )
 
 from inspect_swarm import (
+    Boundary,
     Budget,
     MemberReap,
     Share,
+    StopReason,
+    SwarmControl,
     SwarmResultRecord,
     UserIsolation,
     filesystem,
@@ -50,7 +53,14 @@ from inspect_swarm import (
 from inspect_swarm._budget import current_member
 from inspect_swarm._record import _transcript_result
 
-from .swarm_runtime import run_swarm, sample, swarm_events
+from .swarm_runtime import (
+    controller,
+    generator,
+    run_swarm,
+    sample,
+    scripted_model,
+    swarm_events,
+)
 
 # what tells the reaping and census scripts from setup's
 _REAP_MARK = "proc_uid()"
@@ -90,6 +100,9 @@ class IsolationStub(SandboxEnvironment):
         # for each reaping, the uid it was for and the members whose result was written
         # before it ran
         self.reaped: list[tuple[str, set[str | None]]] = []
+        # set when a reaping starts; a reaping waits for `hold_reaping` when it is set
+        self.reaping: anyio.Event | None = None
+        self.hold_reaping: anyio.Event | None = None
 
     async def exec(
         self,
@@ -114,6 +127,10 @@ class IsolationStub(SandboxEnvironment):
         if _REAP_MARK in cmd[2]:
             ended = {e.member for e in swarm_events(transcript(), "member_result")}
             self.reaped.append((cmd[4], ended))
+            if self.reaping is not None:
+                self.reaping.set()
+            if self.hold_reaping is not None:
+                await self.hold_reaping.wait()
             if self.fail is not None and self.fail_on == _REAP_MARK:
                 return self.fail
             return ExecResult(True, 0, self.reap, "")
@@ -1311,3 +1328,44 @@ async def test_a_path_cannot_add_records_to_the_census(separator: str) -> None:
         "w-1": {"entries": 1, "bytes": 4, "paths": [{"type": "file", "path": path}]}
     }
     assert outcome.record.final.provisional is False
+
+
+@pytest.mark.anyio
+async def test_no_callback_can_be_registered_while_a_member_is_reaped() -> None:
+    # the member's agent never reaches a boundary; a callback accepted after the
+    # wrapper's last check would never run, and the member would pass as supervised
+    stub = IsolationStub()
+    stub.reaping, stub.hold_reaping = anyio.Event(), anyio.Event()
+    refused: list[str] = []
+
+    async def callback(b: Boundary) -> None:
+        return None
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        control.start("w")
+        assert stub.reaping is not None and stub.hold_reaping is not None
+        await stub.reaping.wait()
+        # its agent has ended, and its end waits for the reaping
+        assert control.member("w").state == "running"
+        try:
+            control.member("w").on_boundary(callback, origin="operator")
+        except RuntimeError as ex:
+            refused.append(str(ex))
+        stub.hold_reaping.set()
+        events = control.events()
+        async with aclosing(events):
+            async for _ in events:
+                pass
+        return "all_done"
+
+    team = swarm(
+        member(generator(scripted_model(), calls=1), name="w"),
+        controller=controller(run_controller, "isolation_test_reaping_callback"),
+        channels=[],
+        isolation="users",
+    )
+    with environments(default=stub):
+        outcome = await run_swarm(team)
+    assert refused == ["on_boundary('w'): the member has ended."]
+    assert [m.status for m in outcome.record.members] == ["submitted"]
+    assert outcome.record.final.member == "w"

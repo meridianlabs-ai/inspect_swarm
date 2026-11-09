@@ -144,7 +144,7 @@ class MemberHandle(Protocol):
 
         Raises:
             ValueError: If `origin` is invalid, or the member cannot be held: a bridged member, or `deepagent()` with background dispatch.
-            RuntimeError: If the member has ended, or the swarm is stopping.
+            RuntimeError: If the member has ended, or its agent and work have ended and only its end is still to be recorded (under users isolation, while its leftover processes are stopped), or the swarm is stopping.
         """
         ...
 
@@ -410,7 +410,8 @@ class MemberRun:
             raise ValueError(
                 f"{call}: the member cannot be held at a turn boundary: {refusal}."
             )
-        if self.state == "ended":
+        if self.state == "ended" or self.gate.finished:
+            # finished: its agent has ended, and only its end is still to be recorded
             raise RuntimeError(f"{call}: the member has ended.")
         stopping = self.gate.stopping()
         if stopping is not None:

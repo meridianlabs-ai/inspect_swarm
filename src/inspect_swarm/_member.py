@@ -542,6 +542,9 @@ async def run_member(
             status = "errored"
             raise
         finally:
+            # synchronously, before reaping awaits: a callback registered after the
+            # wrapper's last supervision check would never run, nor be found
+            gate.finished = True
             try:
                 if reap is not None:
                     await reap()

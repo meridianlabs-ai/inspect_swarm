@@ -1067,8 +1067,9 @@ def _message(result: ExecResult[str]) -> str:
 # Kills every process in the sandbox whose real uid is the member's, as root: scans
 # /proc, reads each match's Uid line again just before it kills it, so that a pid reused
 # since the scan is not killed, and repeats until a scan finds none or five rounds have
-# run, since a process can start another between rounds. A zombie has exited and waits
-# for its parent to collect it, so it is not counted. Prints the number killed and the
+# run, since a process can start another between rounds. A zombie that has fully exited
+# waits for its parent to collect it, so it is not counted; one whose main thread exited
+# while its other threads run is killed and counted. Prints the number killed and the
 # number left, and the first 50 names of each, between markers. A name is read up to its
 # first newline, and every character in it other than printable ASCII, and every ':', is
 # printed as '?', so that no name can read as an attachment reference in the record.
@@ -1079,13 +1080,16 @@ _REAP = (
 uid=$1
 nl='
 '
-# $u the process's real uid, and $z set when it is a zombie; $u empty when it has gone
+# $u the process's real uid, and $z set when it has fully exited: a zombie whose thread
+# group has no other task; $u empty when it has gone. A zombie leader whose other
+# threads still run is live, and a kill of its pid reaches them.
 proc_uid() {
-  u= z=
+  u= z= state=
   while read -r k v _; do
     case $k in
-      State:) [ "$v" = Z ] && z=1 ;;
-      Uid:) u=$v; break ;;
+      State:) state=$v ;;
+      Uid:) u=$v ;;
+      Threads:) [ "$state" = Z ] && [ "$v" = 1 ] && z=1; break ;;
     esac
   done 2>/dev/null <"/proc/$1/status"
 }

@@ -1048,6 +1048,22 @@ def _alive(name: str) -> str:
     )
 
 
+# starts a thread that keeps writing to /tmp/zl.out, then ends the main thread
+_ZOMBIE_LEADER = """cat > ~/zl.py <<'PY'
+import ctypes, threading, time
+def work():
+    while True:
+        with open("/tmp/zl.out", "a") as f:
+            f.write("x")
+        time.sleep(0.1)
+threading.Thread(target=work).start()
+time.sleep(0.3)
+ctypes.CDLL(None).pthread_exit(None)
+PY
+nohup python3 ~/zl.py >/dev/null 2>&1 &
+sleep 1; echo started"""
+
+
 @pytest.mark.slow
 def test_leftover_processes_are_stopped_and_the_census_attributes_files(
     tmp_path: Path,
@@ -1060,6 +1076,9 @@ def test_leftover_processes_are_stopped_and_the_census_attributes_files(
                     {
                         "w-1": [
                             ("bash", "nohup sleep 300 >/dev/null 2>&1 & echo started"),
+                            # a process whose main thread exits while another thread
+                            # keeps writing: its leader is a zombie, its group is live
+                            ("bash", _ZOMBIE_LEADER),
                             ("session", "sleep 301 &"),
                             ("bash", _alive("w-1")),
                             (
@@ -1071,6 +1090,10 @@ def test_leftover_processes_are_stopped_and_the_census_attributes_files(
                         "w-2": [
                             ("bash", _alive("w-1")),
                             ("bash", "echo two > /tmp/w2"),
+                            (
+                                "bash",
+                                'a=$(wc -c </tmp/zl.out); sleep 1; b=$(wc -c </tmp/zl.out); [ "$a" = "$b" ] && echo stopped',
+                            ),
                         ],
                     },
                     after=f"{_alive('w-1')}; {_alive('w-2')}",
@@ -1083,9 +1106,10 @@ def test_leftover_processes_are_stopped_and_the_census_attributes_files(
     samples = _eval(tmp_path, cases)
     results = cases["reap"].results
     # w-1's processes ran while it did, and were gone when w-2 started
-    running = _ok(results["w-1"][2]).split()
+    running = _ok(results["w-1"][3]).split()
     assert running[-1] == "checked" and running.count("sleep") == 2, running
     assert _ok(results["w-2"][0]) == "checked"
+    assert _ok(results["w-2"][2]) == "stopped"
     assert results["after"] == ["checked\nchecked\n"]
     record = swarm_result(samples["reap"])
     assert record is not None
@@ -1093,6 +1117,7 @@ def test_leftover_processes_are_stopped_and_the_census_attributes_files(
     assert first.reap is not None and second.reap is not None
     assert first.reap.status == "ok" and first.reap.killed >= 2
     assert first.reap.killed_names.count("sleep") == 2
+    assert "python3" in first.reap.killed_names
     assert second.reap.status == "ok"
     assert record.isolation_incomplete is False
     assert (first.user, first.home, first.foreign_execs) == (
@@ -1120,7 +1145,8 @@ def test_leftover_processes_are_stopped_and_the_census_attributes_files(
     assert {"type": "file", "path": "/tmp/w2"} in paths("/tmp", "w-2")
     # a CR in a name is part of the path, not the end of a record
     assert {"type": "file", "path": "/tmp/cr\rowner 0 50 500"} in paths("/tmp", "w-1")
-    assert roots["/tmp"]["members"]["w-1"]["entries"] == 3
+    # w1, w1-link, the CR file and the thread's output
+    assert roots["/tmp"]["members"]["w-1"]["entries"] == 4
     assert roots["/tmp"]["others"]["entries"] < 50
     assert {"type": "file", "path": "/dev/shm/w1"} in paths("/dev/shm", "w-1")
     assert paths("/dev/shm", "w-2") == []
