@@ -573,6 +573,70 @@ async def test_messages_are_refused_where_no_loop_can_take_them() -> None:
     assert ran.messages() == []
 
 
+# A member that is ending takes no more turns: the gate ends it at its next boundary
+# before it drains a message, so a message is refused once its end is requested, by the
+# operator or the controller, or once the swarm is stopping.
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "by,reason",
+    [
+        ("operator", "The member is ending: it takes no more turns."),
+        ("controller", "The member is ending: it takes no more turns."),
+        ("swarm", "The swarm is stopping: its members take no more turns."),
+    ],
+)
+async def test_messages_are_refused_once_the_member_is_ending(
+    by: str, reason: str
+) -> None:
+    started, release, end_now = anyio.Event(), anyio.Event(), anyio.Event()
+
+    async def run_controller(control: SwarmControl) -> str:
+        control.start("a")
+        if by == "controller":
+            await end_now.wait()
+            control.member("a").end(origin="test")
+        return await _drain(control)
+
+    async def drive(group: OperatorGroup) -> None:
+        a = group.agents["a"]
+        await started.wait()
+        try:
+            assert _act(a.info).actions["message"] is None
+            if by == "operator":
+                assert _act(a.stop, dry_run=False).changed
+            elif by == "controller":
+                end_now.set()
+                await _until(lambda: _act(a.info).actions["message"] is not None)
+            else:
+                assert _act(group.stop, dry_run=False).changed
+            assert _act(a.info).actions["message"] == reason
+            for dry_run in (True, False):
+                for interrupt in (False, True):
+                    outcome = _act(a.message, "x", interrupt=interrupt, dry_run=dry_run)
+                    assert (outcome.changed, outcome.refused) == (False, reason)
+        finally:
+            release.set()
+
+    ran = await _run(
+        _swarm(
+            [
+                member(
+                    _react(
+                        Script([_call("slow", seconds=30)]), _slow(started, release)
+                    ),
+                    name="a",
+                )
+            ],
+            run_controller,
+            grace=60,
+        ),
+        drive,
+    )
+
+    assert ran.messages() == []
+    assert ran.status("a") == "stopped"
+
+
 @pytest.mark.anyio
 async def test_messages_a_member_never_drained_are_recorded_when_it_ends() -> None:
     started = anyio.Event()
@@ -1058,6 +1122,7 @@ async def test_a_stop_once_an_error_is_known_changes_nothing(
     by: str, anyio_backend: str
 ) -> None:
     outcomes: list[OperatorOutcome] = []
+    messages: list[OperatorOutcome] = []
     # the error waits until the driver has found the group
     found = anyio.Event()
 
@@ -1072,6 +1137,7 @@ async def test_a_stop_once_an_error_is_known_changes_nothing(
         for dry_run in (True, False):
             outcomes.append(_act(a.stop, dry_run=dry_run))
             outcomes.append(_act(group.stop, dry_run=dry_run))
+            messages.append(_act(a.message, "x", interrupt=False, dry_run=dry_run))
 
     def on_event(event: Event) -> None:
         # b's errored result is published, and its error has not yet left its task
@@ -1112,6 +1178,12 @@ async def test_a_stop_once_an_error_is_known_changes_nothing(
     for outcome in outcomes:
         assert (outcome.changed, outcome.refused) == (False, None)
         assert "ending after an error or a cancellation" in outcome.detail
+    # a message too: the member is being cancelled and takes no more turns
+    assert len(messages) == 2
+    for outcome in messages:
+        assert outcome.changed is False and outcome.refused is not None
+        assert "ending after an error or a cancellation" in outcome.refused
+    assert ran.messages() == []
     error = "controller failed" if by == "controller" else "sibling failed"
     assert ran.sample.error is not None and error in ran.sample.error.message
     assert ran.status("a") == "cancelled"

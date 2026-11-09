@@ -225,6 +225,13 @@ class MemberOperator:
             return "The member has not started."
         if m.gate.turn_closed:
             return "The member's agent loop has ended."
+        # the gate ends an ending member at its next boundary, before it drains a message
+        if m.gate.end_origin is not None:
+            return "The member is ending: it takes no more turns."
+        if self._swarm.stop_reason is not None:
+            return "The swarm is stopping: its members take no more turns."
+        if not self._swarm.active():
+            return _ENDED
         return None
 
     def _message(self, text: str, interrupt: bool, dry_run: bool) -> OperatorOutcome:

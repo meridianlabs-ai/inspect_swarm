@@ -35,7 +35,7 @@ Each swarm is a group. A swarm run directly in the sample is the group `swarm`. 
 - A member between turns, or held at a turn boundary by a controller, takes it at its next turn.
 - A member that is still setting up, before its agent loop starts, takes it at its first turn. A member whose agent never starts an agent loop never takes it.
 
-`message` is refused for a member that has not started, has ended, or whose agent loop has ended, and for a bridged member: its CLI does not read the messages, so it takes only `stop`.
+`message` is refused for a member that has not started, has ended, or whose agent loop has ended, and for a bridged member: its CLI does not read the messages, so it takes only `stop`. It is also refused once the member is ending (after `stop`, or a controller's `end()`), once the swarm is stopping, and while the swarm is ending after an error or a cancellation: the member takes no more turns, so it would never read the message. That last check is best effort, as for `stop`.
 
 Several messages that reach a member together are merged into one user message.
 

@@ -191,6 +191,7 @@ The seam gains one hook, `loop_bound(member, channel)`, which its gate calls syn
 | bridged | refused: a bridged member's CLI reads no agent channel; it takes `stop` only | the same |
 | running, its turn loop not yet bound (setup before its first boundary, or a custom agent with no agent loop) | kept by the swarm, posted by `loop_bound()`; a member that never binds a loop never receives it | the same: there is no turn to cancel yet |
 | running, its turn loop bound and closed (its loop has returned) | refused: "its agent loop has ended" | the same |
+| running and ending: an end was requested (the operator's `stop`, a controller's `end()`), the swarm is stopping, or an error or a cancellation has begun to end the swarm's runtime (the stop guard, best effort) | refused: the gate ends the member at its next boundary before it drains a message, so the message would never be read | the same |
 | running, its turn loop bound and not in a turn (`turn_active` false: between turns, or held at a boundary) | posted; the loop's next `before_turn()` returns it, after any hold | posted; nothing to interrupt, and the detail says so |
 | running, its turn loop in a turn (`turn_active` true), whether or not a pause is pending | posted; it reaches the next turn, after the turn's tool calls and subagents finish | posted, then `interrupt(Cancel(reason="user_cancel"))`: the turn's model call, tool calls and subagents are cancelled, and `after_cancel()` returns the repairs and the message at once |
 
