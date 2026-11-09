@@ -1755,7 +1755,10 @@ async def test_a_callback_marks_its_own_waits_as_waiting_time(
     )
     assert sample_.working_time is not None
     if marked == "both":
-        assert sample_.working_time < hold / 2
+        # the sample's own overhead is working time, so measure the waiting time,
+        # which is the hold alone
+        assert sample_.total_time is not None
+        assert sample_.total_time - sample_.working_time >= hold * 0.9
     else:
         # an unmarked wait counts as working time, whatever the other one does
         assert sample_.working_time >= hold * 0.9
