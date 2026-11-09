@@ -197,7 +197,11 @@ async def test_grace_is_clipped_to_half_the_samples_remaining_time() -> None:
 
 @pytest.mark.anyio
 async def test_the_first_stop_wins() -> None:
-    # two members reach the cap, and the time cap fires during grace
+    # two members reach the cap, and the time cap fires during grace. The time cap's
+    # timer starts with the swarm, so the cap must come first on wall-clock time: the
+    # time cap is long enough to cover a slow runner's first model calls, and the grace
+    # is twice it, so the sleeper is still running when the time cap fires
+    time_cap = 1.0
     spender = member(
         generator, args={"model": scripted_model(), "calls": None}, count=2
     )
@@ -205,8 +209,14 @@ async def test_the_first_stop_wins() -> None:
         swarm(
             [spender, sleeper()],
             channels=[],
-            budget=Budget(tokens=2 * TOKENS_PER_CALL, time=0.1, grace=0.3),
+            budget=Budget(
+                tokens=2 * TOKENS_PER_CALL, time=time_cap, grace=2 * time_cap
+            ),
         )
+    )
+    reached = {m.name: m.time for m in stop.record.members if m.name != "sleeper"}
+    assert all(t is not None and t < time_cap for t in reached.values()), (
+        f"the cap was reached after the time cap: {reached}"
     )
     assert stop.reason == "swarm_cap"
     assert statuses(stop) == {
