@@ -11,6 +11,7 @@ from inspect_ai.agent import (
     Agent,
     AgentState,
     agent,
+    as_solver,
     deepagent,
     general,
     react,
@@ -75,8 +76,8 @@ from inspect_swarm import (
 from inspect_swarm._budget import current_member
 from inspect_swarm._bus._bus import current_bus
 from inspect_swarm._bus._record import Draft
-from inspect_swarm._evidence import METRICS_KEY, comm_read
-from inspect_swarm._ledger import EventLog, ScoreRecord
+from inspect_swarm._evidence import LEDGER_KEY, METRICS_KEY, comm_read
+from inspect_swarm._ledger import EventLog, ScoreRecord, SwarmLedger
 from inspect_swarm._metrics import GateChecks, SwarmMetrics, gate_checks
 from inspect_swarm._record import SwarmResultRecord, _transcript_result
 
@@ -546,8 +547,12 @@ def recording_eviction(inner: Agent) -> Agent:
     return execute
 
 
+def _lanes(timeline: Timeline) -> dict[str, TimelineSpan]:
+    return {c.name: c for c in timeline.root.content if isinstance(c, TimelineSpan)}
+
+
 @pytest.mark.parametrize("bounded", [False, True])
-def test_each_member_has_a_timeline_of_its_spans(
+def test_the_swarm_has_one_timeline_rooted_at_its_span(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bounded: bool
 ) -> None:
     if bounded:
@@ -576,41 +581,85 @@ def test_each_member_has_a_timeline_of_its_spans(
     assert log.status == "success" and log.samples is not None
     [sample_log] = log.samples
     assert sample_log.store["evicted"] is bounded
+    begins = [e for e in sample_log.events if isinstance(e, SpanBeginEvent)]
+    # the swarm's span is the agent span it runs in, here its wrapper's
+    [swarm_span] = [
+        e
+        for e in begins
+        if e.name == "recording_eviction" and e.type == AGENT_SPAN_TYPE
+    ]
+    member_spans = {e.name: e for e in begins if e.name in ("a", "b")}
+    assert {e.parent_id for e in member_spans.values()} == {swarm_span.id}
     assert sample_log.timelines is not None
-    timelines = {t.name: t for t in sample_log.timelines}
-    assert list(timelines) == ["a", "b"]
-    spans = {
-        e.name: e.id
-        for e in sample_log.events
-        if isinstance(e, SpanBeginEvent) and e.name in timelines
+    [timeline] = sample_log.timelines
+    assert timeline.name == "recording_eviction"
+    assert (timeline.root.id, timeline.root.name) == (swarm_span.id, swarm_span.name)
+    lanes = _lanes(timeline)
+    assert {name: lane.id for name, lane in lanes.items()} == {
+        name: span.id for name, span in member_spans.items()
     }
-    parents = {
-        e.id: e.parent_id for e in sample_log.events if isinstance(e, SpanBeginEvent)
-    }
+    parents = {e.id: e.parent_id for e in begins}
 
     def member_of(span: str | None) -> str | None:
         while span is not None:
-            for name, member_span in spans.items():
-                if span == member_span:
+            for name, member_span in member_spans.items():
+                if span == member_span.id:
                     return name
             span = parents.get(span)
         return None
 
-    for name, calls in [("a", a_calls), ("b", 1)]:
-        events = _model_events(timelines[name].root)
-        assert len(events) == calls
+    ledger = SwarmLedger.model_validate(sample_log.store[LEDGER_KEY])
+    calls = {m.name: m.calls.calls for m in ledger.members}
+    assert calls == {"a": a_calls, "b": 1}
+    for name, count in calls.items():
+        events = _model_events(lanes[name])
+        assert len(events) == count
         assert {member_of(e.span_id) for e in events} == {name}
-    # a's first model event, evicted in a bounded transcript, is in its timeline
+    # the swarm's own events are in its root, outside the lanes
+    root_kinds = [
+        item.event.kind
+        for item in timeline.root.content
+        if isinstance(item, TimelineEvent) and isinstance(item.event, SwarmEvent)
+    ]
+    assert {"swarm_start", "result_record", "ledger", "metrics"} <= set(root_kinds)
+    # a's first model event, evicted in a bounded transcript, is in its lane
     first = next(
         e
         for e in sample_log.events
         if isinstance(e, ModelEvent) and member_of(e.span_id) == "a"
     )
-    assert _model_events(timelines["a"].root)[0].uuid == first.uuid
+    assert _model_events(lanes["a"])[0].uuid == first.uuid
+
+
+def test_a_second_swarm_in_a_sample_gets_a_numbered_timeline(tmp_path: Path) -> None:
+    model = scripted_model()
+    # one after the other, so the second may reuse the first's member names
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="task")],
+            solver=[
+                as_solver(swarm(member(generator(model), name="a"), channels=[])),
+                as_solver(swarm(member(generator(model), name="a"), channels=[])),
+            ],
+        ),
+        model=model,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success" and log.samples is not None
+    [sample_log] = log.samples
+    assert sample_log.timelines is not None
+    assert [(t.name, t.root.name) for t in sample_log.timelines] == [
+        ("swarm", "swarm"),
+        ("swarm-2", "swarm"),
+    ]
+    assert len({t.root.id for t in sample_log.timelines}) == 2
+    for timeline in sample_log.timelines:
+        assert len(_model_events(_lanes(timeline)["a"])) == 1
 
 
 @pytest.mark.anyio
-async def test_a_member_timeline_holds_its_communication_and_result_events() -> None:
+async def test_a_member_lane_holds_its_communication_and_result_events() -> None:
     outcome = await run_swarm(
         swarm(
             [member(notes(scripted_model(), 1), name=name) for name in ("a", "b")],
@@ -618,9 +667,10 @@ async def test_a_member_timeline_holds_its_communication_and_result_events() -> 
             controller=_answered_by("b"),
         )
     )
-    timelines = {t.name: t for t in outcome.transcript.timelines}
+    [timeline] = outcome.transcript.timelines
+    lanes = _lanes(timeline)
     for name in ("a", "b"):
-        events = _events(timelines[name].root)
+        events = _events(lanes[name])
         comms = [e for e in events if isinstance(e, CommunicationEvent)]
         assert [(e.kind, e.agent) for e in comms] == [
             ("sent", name),
@@ -648,16 +698,21 @@ async def test_timelines_and_metrics_are_written_when_a_cancellation_ends_the_sw
 ):
     async with sample() as t:
         with anyio.move_on_after(0.2):
-            await swarm(
-                member(
-                    generator(scripted_model(Script(delay=0.05)), calls=None),
-                    name="spender",
+            await run(
+                swarm(
+                    member(
+                        generator(scripted_model(Script(delay=0.05)), calls=None),
+                        name="spender",
+                    ),
+                    channels=[],
                 ),
-                channels=[],
-            )(AgentState(messages=[]))
+                [],
+            )
         [metrics] = _metrics(t).members
         assert metrics.name == "spender" and metrics.tokens > 0
-        assert [timeline.name for timeline in t.timelines] == ["spender"]
+        [timeline] = t.timelines
+        assert timeline.name == "swarm"
+        assert len(_model_events(_lanes(timeline)["spender"])) > 0
 
 
 @pytest.mark.parametrize("name", ["init", "solvers", "scorers"])
@@ -667,25 +722,13 @@ def test_a_member_named_like_a_sample_phase_is_refused(name: str) -> None:
         swarm(member(generator(scripted_model()), name=name), channels=[])
 
 
-@pytest.mark.anyio
-async def test_a_member_name_taken_by_a_timeline_is_refused() -> None:
-    async with sample():
-        transcript().add_timeline(
-            Timeline(name="a", description="", root=TimelineSpan(id="x", name="x"))
-        )
-        with pytest.raises(ValueError, match="already has a timeline named 'a'"):
-            await swarm(member(generator(scripted_model()), name="a"), channels=[])(
-                AgentState(messages=[])
-            )
-
-
 @agent
 def nesting(model: Model, ending: str) -> Agent:
     """Act, run a swarm whose member has this member's name, then fail or wait as `ending` says."""
 
     async def execute(state: AgentState) -> AgentState:
         state.output = await model.generate(state.messages)
-        with pytest.raises(ValueError, match="already has a timeline named 'a'"):
+        with pytest.raises(ValueError, match="already has a member named 'a'"):
             await swarm(member(generator(model), name="a"), channels=[])(
                 AgentState(messages=[])
             )
@@ -702,20 +745,20 @@ def nesting(model: Model, ending: str) -> Agent:
 async def test_a_member_name_taken_while_the_swarm_runs_is_refused_there(
     ending: str,
 ) -> None:
-    # the inner swarm is refused before it runs, and the outer swarm ends as its member
-    # makes it end, with its timeline
+    # the inner swarm is refused before it runs or adds a timeline, and the outer swarm
+    # ends as its member makes it end, with its timeline
     async with sample() as t:
-        run = swarm(member(nesting(scripted_model(), ending), name="a"), channels=[])
+        outer = swarm(member(nesting(scripted_model(), ending), name="a"), channels=[])
         if ending == "error":
             with pytest.raises(RuntimeError, match="original-member-failure"):
-                await run(AgentState(messages=[]))
+                await run(outer, [])
         else:
             with anyio.move_on_after(0.3) as scope:
-                await run(AgentState(messages=[]))
+                await run(outer, [])
             assert scope.cancelled_caught
         [timeline] = t.timelines
-        assert timeline.name == "a"
-        assert len(_model_events(timeline.root)) == 1
+        assert timeline.name == "swarm"
+        assert len(_model_events(_lanes(timeline)["a"])) == 1
 
 
 # ---------------------------------------------------------------------------

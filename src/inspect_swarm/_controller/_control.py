@@ -30,7 +30,14 @@ from .._budget import (
     current_budget,
     is_bridged,
 )
-from .._evidence import MemberTimelines, swarm_event, write_ledger, write_metrics
+from .._evidence import (
+    SwarmTimeline,
+    claim_member_names,
+    release_member_names,
+    swarm_event,
+    write_ledger,
+    write_metrics,
+)
 from .._final import FinalName, Pick, answer, finalise, settle
 from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
@@ -644,7 +651,13 @@ class SwarmRun:
         from .._bus._bus import current_bus
 
         _refuse_checkpointing()
-        timelines = MemberTimelines([m.name for m in self._members])
+        names = [m.name for m in self._members]
+        claimed = claim_member_names(names)
+        try:
+            timeline = SwarmTimeline(current_span_id())
+        except BaseException:
+            release_member_names(claimed, names)
+            raise
         interval = self._interval = LedgerInterval(
             roster=[m.name for m in self._members]
         )
@@ -752,7 +765,7 @@ class SwarmRun:
                     except Exception as ex:
                         failures.append(ex)
                     failures += self._account(
-                        interval, timelines, record, ended=ended, error=error
+                        interval, timeline, record, ended=ended, error=error
                     )
                     # the error or cancellation that ended the swarm stays the one
                     # raised, else the first failure here; the others become its notes
@@ -783,6 +796,7 @@ class SwarmRun:
                     current_bus.reset(bus_token)
                 if running is not None:
                     _swarm_ended(running)
+                release_member_names(claimed, names)
         if error is not None:
             raise error
 
@@ -792,7 +806,7 @@ class SwarmRun:
     def _account(
         self,
         interval: LedgerInterval,
-        timelines: MemberTimelines,
+        timeline: SwarmTimeline,
         record: SwarmResultRecord,
         *,
         ended: bool,
@@ -873,7 +887,7 @@ class SwarmRun:
                     record.final.answer,
                 )
             )
-            timelines.fill(places)
+            timeline.fill(places)
         except Exception as ex:
             failures.append(ex)
         return failures

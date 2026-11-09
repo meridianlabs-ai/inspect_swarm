@@ -40,7 +40,7 @@ This swarm has four members: `solver-1` to `solver-3` and `reviewer`. The role i
 
 ## Names
 
-A member is named after its agent (`react`, `deepagent`) unless you give `name`. With `count` above 1 the members are `name-1` to `name-k`. Names must be unique in the swarm. They cannot be `init`, `solvers` or `scorers`, and cannot contain `/` or `#`. The [shared-memory channel](shared-memory.qmd) also needs names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`.
+A member is named after its agent (`react`, `deepagent`) unless you give `name`. With `count` above 1 the members are `name-1` to `name-k`. Names must be unique in the swarm, and differ from the member names of any other swarm running at the same time in the sample, such as a swarm nested in a member. They cannot be `init`, `solvers` or `scorers`, and cannot contain `/` or `#`. The [shared-memory channel](shared-memory.qmd) also needs names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`.
 
 Members left on their default name are numbered across the whole roster, not per record. So one member with a different prompt and model takes two records:
 
@@ -89,7 +89,7 @@ solver = swarm(
 )
 ```
 
-Each member starts with `You are one of 4 agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is.` Its role, if it has one, is still stated. The log still names the members `react-1` to `react-4`: the swarm's timelines, spans, tool state, budget shares and result record use those names. The name a member chose is in its transcript, not in the swarm's records.
+Each member starts with `You are one of 4 agents in a swarm working on this task at the same time. Choose a name for yourself and tell the other members what it is.` Its role, if it has one, is still stated. The log still names the members `react-1` to `react-4`: the swarm's timeline lanes, spans, tool state, budget shares and result record use those names. The name a member chose is in its transcript, not in the swarm's records.
 
 A roster can mix the two, for example a lead you name and workers that name themselves. The `filesystem` channel then tells every member that its scratch directory may be taken by another member ([Channels](channels.qmd#the-filesystem-channel)).
 

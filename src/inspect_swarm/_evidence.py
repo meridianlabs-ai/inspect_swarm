@@ -10,9 +10,10 @@ from inspect_ai.event import (
     CommunicationRejection,
     CommunicationSend,
     CommunicationWait,
-    Event,
+    SpanBeginEvent,
     SwarmEvent,
     Timeline,
+    TimelineSpan,
     timeline_build,
 )
 from inspect_ai.log import transcript
@@ -315,34 +316,90 @@ def _write_dump(kind: str, data: dict[str, JsonValue]) -> None:
     )
 
 
-# A timeline named after each member, of the events in its spans, so that the viewer can
-# show one member's trajectory. The timelines are added when the swarm starts, so that a
-# name already taken in the sample (by another swarm running there, or one that ran
-# before) is refused before any member runs, and a name taken later is refused where it
-# is taken; they are filled when the swarm ends, and never raise over its outcome. A
-# member that never entered its span has an empty timeline.
-class MemberTimelines:
-    def __init__(self, members: Sequence[str]) -> None:
-        taken = [t.name for t in transcript().timelines if t.name in members]
-        if taken:
-            raise ValueError(
-                f"The sample already has a timeline named {', '.join(repr(n) for n in taken)}, and each swarm member's timeline is named after the member, as when two swarms with the same member names run in one sample. Give the members other names with member(..., name=...)."
-            )
-        # the swarm's events are those reported from here on
-        self._start = transcript().history.event_count
-        self._timelines = [_timeline(name, []) for name in members]
-        for timeline in self._timelines:
-            transcript().add_timeline(timeline)
+# One timeline for the swarm, rooted at the swarm's span with each member's span as a
+# child, so that the viewer shows the swarm as one agent with its members as lanes. It
+# is named after the swarm's span, or the first of `name-2`, `name-3`, ... not yet a
+# timeline in the sample. It is added when the swarm starts and filled when the swarm
+# ends, and never raises over its outcome. A swarm run outside every span, as only a test
+# does, has no span to root it at and gets none.
+class SwarmTimeline:
+    def __init__(self, span_id: str | None) -> None:
+        self._timeline: Timeline | None = None
+        if span_id is None:
+            return
+        self._begin, self._start = _span_begin(span_id)
+        taken = {t.name for t in transcript().timelines}
+        name, n = self._begin.name, 1
+        while name in taken:
+            n += 1
+            name = f"{self._begin.name}-{n}"
+        self._timeline = Timeline(
+            name=name,
+            description="Swarm",
+            root=TimelineSpan(id=span_id, name=self._begin.name, span_type="agent"),
+        )
+        transcript().add_timeline(self._timeline)
 
     def fill(self, places: SpanPlaces) -> None:
-        events: dict[str, list[Event]] = {t.name: [] for t in self._timelines}
-        for event in transcript().history.events_from(self._start):
-            _, member = places(event.span_id)
-            if member is not None:
-                events[member].append(event)
-        for timeline in self._timelines:
-            timeline.root = _timeline(timeline.name, events[timeline.name]).root
+        if self._timeline is None:
+            return
+        events = [
+            event
+            for event in transcript().history.events_from(self._start)
+            if places(event.span_id)[0]
+        ]
+        # with the span's begin, the built root's child is the swarm's span
+        root = timeline_build(events, name=self._timeline.name).root
+        self._timeline.root = next(
+            (
+                c
+                for c in root.content
+                if isinstance(c, TimelineSpan) and c.id == self._begin.id
+            ),
+            root,
+        )
 
 
-def _timeline(name: str, events: list[Event]) -> Timeline:
-    return timeline_build(events, name=name, description="Swarm member")
+# The begin event of the span `span_id`, which the swarm runs in, and its index in the
+# transcript, searched back from the latest event.
+def _span_begin(span_id: str) -> tuple[SpanBeginEvent, int]:
+    history = transcript().history
+    end = history.event_count
+    while end > 0:
+        start = max(0, end - 64)
+        events = history.events_from(start, end - start)
+        for i in range(len(events) - 1, -1, -1):
+            event = events[i]
+            if isinstance(event, SpanBeginEvent) and event.id == span_id:
+                return event, start + i
+        end = start
+    raise RuntimeError(
+        f"The swarm's span {span_id!r} has no begin event in the sample."
+    )
+
+
+# The member names of the swarms running in each sample, by the id of the sample's
+# transcript, which the running swarms' contexts keep alive, so the id is not reused while
+# held. The analyses tell a swarm's evidence from a nested swarm's by its member names,
+# so no two swarms running at once in a sample share one.
+_running_members: dict[int, set[str]] = {}
+
+
+def claim_member_names(members: Sequence[str]) -> int:
+    key = id(transcript())
+    held = _running_members.get(key, set())
+    taken = [name for name in members if name in held]
+    if taken:
+        raise ValueError(
+            f"A swarm running in this sample already has a member named {', '.join(repr(n) for n in taken)}, as when a member runs a nested swarm with its own members' names. Member names must differ between swarms that run at the same time in a sample, because the swarm's metrics tell their evidence apart by member name. Give the members other names with member(..., name=...)."
+        )
+    _running_members[key] = held | set(members)
+    return key
+
+
+def release_member_names(key: int, members: Sequence[str]) -> None:
+    held = _running_members[key] - set(members)
+    if held:
+        _running_members[key] = held
+    else:
+        del _running_members[key]

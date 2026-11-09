@@ -135,7 +135,7 @@ So `SwarmLedger.model_validate(event.data)` reads a ledger event, as it reads th
 - **The critical path.** `PathLog` (`_critical_path.py`) takes `delivered` events as commits (`agent`, `record_ids`), `read` and `waited` events as results (`data["depends_on"]`, and a wait's `data["ended"]`), and `member_result` and `answer` `SwarmEvent`s as ends ([swarm-critical-path.md](swarm-critical-path.md)).
 - **The result record.** `swarm_result()` matches the `SwarmEvent` of kind `result_record`, and also the `InfoEvent` with source `inspect_swarm` and `type: "result_record"` that inspect_swarm wrote before the swarm's evidence had its own types, so an older log still gives its record. Its check for a swarm's events in a sample whose store lost the record's id accepts any `SwarmEvent` or any `InfoEvent` with source `inspect_swarm`, whatever its data, so a sample with even one older communication or member-result event and no record id raises rather than returning `None` ([swarm-result-record.md](swarm-result-record.md#samples-whose-store-lost-the-id)).
 - **Analysis after a run** reads the store entries, not the events: `swarm_ledger()` and the samples-dataframe columns.
-- **Member timelines.** `MemberTimelines` builds each member's timeline from the events in its spans, the evidence included; inspect_ai's timeline builder treats both types as ordinary events.
+- **The swarm's timeline.** `SwarmTimeline` builds the swarm's timeline from the events in its span, the evidence included, with each member as a lane; inspect_ai's timeline builder treats both types as ordinary events.
 
 ## In inspect_ai besides the types
 
@@ -147,7 +147,7 @@ So `SwarmLedger.model_validate(event.data)` reads a ledger event, as it reads th
 ## In the viewer
 
 - **Types and normalization.** ts-mono's generated types include both events and their models. The log normalizer fills `nested`, `record_ids`, `data` and the communication models' lists when a log omits them.
-- **Filter.** The transcript filter lists `Communication` and `Swarm`, neither hidden by default, so the swarm's communication can be hidden alone. The filter applies before stored timelines are converted and orphaned events attached, so hiding a type removes it from every member's timeline and from the Overall timeline alike.
+- **Filter.** The transcript filter lists `Communication` and `Swarm`, neither hidden by default, so the swarm's communication can be hidden alone. The filter applies before stored timelines are converted and orphaned events attached, so hiding a type removes it from the swarm's timeline and from any Overall timeline alike.
 - **`CommunicationEventView`**, one `EventRow` per event: the agent's name, with ` (subagent)` when `nested`, then one line:
   - `sent`: `→ shared_memory: create (w-1) to b, c` and the first line of the content; a refused send adds `refused (rate)` styled as a refusal and the first line of the reason, with the refusal icon.
   - `delivered`: `→ shared_memory: delivered w-1 (#1) to b, c`, the number being `delivery.seq`.
