@@ -66,7 +66,7 @@ def member_scores(
     - A member that never started has no value (`not_started`), and is not graded.
     - A member whose output the record left out, or whose grade is `None`, NaN (`Score.unscored()`, or a value `value_to_float` converts to NaN) or not a single value (a dict, list or tuple), is unavailable: no value, with a reason (the grade's own `reason` for NaN, else `unscored`).
     - A member with no output, or one whose completion is only whitespace, gets `empty_value` without being graded.
-    - Every other member gets its grade, converted with `value_to_float`.
+    - Every other member gets its grade, converted with `value_to_float`, and the grade's own `reason`, such as `invalid_response_format`.
 
     A sample with no swarm, a plain agent, is scored as one member named `solver`, whose output is the sample's. A task whose result is not an answer (`artifact`), a swarm without the contract, or one with another kind, gives no member values; then both keys are NaN, which Inspect counts as unscored, with the reason `artifact_without_member_artifacts`, `kind_not_declared` or `kind_mismatch`. So does a sample with no member value, with the reason `no_member_valued`.
 
@@ -204,7 +204,8 @@ async def _grade(
     value = to_float(score.value)
     if math.isnan(value):
         return _Grade("unavailable", math.nan, score.reason or "unscored", score)
-    return _Grade("graded", value, None, score)
+    # the grade's own reason, such as a format failure
+    return _Grade("graded", value, score.reason, score)
 
 
 def _input_messages(input: str | list[ChatMessage]) -> list[ChatMessage]:

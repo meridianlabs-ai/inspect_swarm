@@ -69,7 +69,7 @@ def _input(answers: dict[str, str]) -> str:
 
 @scorer(metrics=[])
 def graded(calls: list[TaskState]) -> Scorer:
-    """Grade a completion by what it says: a number, `PASS` or `FAIL` as given, or `none`, `nan`, `dict`, `list` or `tuple` for a grade with no single value."""
+    """Grade a completion by what it says: a number, `PASS` or `FAIL` as given, `badformat` as 0 with a reason, or `none`, `nan`, `dict`, `list` or `tuple` for a grade with no single value."""
 
     async def score(state: TaskState, target: Target) -> Score | None:
         calls.append(state)
@@ -84,6 +84,13 @@ def graded(calls: list[TaskState]) -> Scorer:
             return Score(value=[1.0])
         if text == "tuple":
             return Score(value=(1.0, 0.5))
+        if text == "badformat":
+            return Score(
+                value=0.0,
+                answer=text,
+                explanation=f"graded {text}",
+                reason="invalid_response_format",
+            )
         if text in ("PASS", "FAIL"):
             return Score(value=text)
         return Score(value=float(text), answer=text, explanation=f"graded {text}")
@@ -164,6 +171,15 @@ GRADES: dict[str, tuple[dict[str, str], dict[str, tuple[str, float, str | None]]
             "d": ("unavailable", NAN, "non_scalar_value"),
         },
     ),
+    "reasons": (
+        {"a": "badformat", "b": "1", "c": "", "d": "nan"},
+        {
+            "a": ("graded", 0.0, "invalid_response_format"),
+            "b": ("graded", 1.0, None),
+            "c": ("empty", 0.25, "empty_output"),
+            "d": ("unavailable", NAN, "grader_failed"),
+        },
+    ),
     "left_out": (
         {"a": "0.5", "b": "1", "c": "", "d": "attachment://x"},
         {
@@ -201,6 +217,7 @@ def test_each_member_is_graded_and_aggregated_over_the_members_with_a_value(
     expected = {
         "graded": (1.0, 1.75 / 4, True, 4, None),
         "unavailable": (NAN, NAN, False, 0, "no_member_valued"),
+        "reasons": (1.0, 1.25 / 3, False, 3, None),
         "left_out": (1.0, 1.75 / 3, False, 3, None),
     } | {id: (1.0, 1.25 / 2, False, 2, None) for id in PERMUTED}
     for id, (best, mean, complete, valued, reason) in expected.items():
