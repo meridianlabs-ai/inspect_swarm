@@ -61,10 +61,10 @@ def member_scores(
 
     List it after the task's own scorer, which stays the headline score.
 
-    `scorer` must be a function of the answer: the output, the sample's input, metadata and target. It may use the sandbox to evaluate the answer, but never as a source of the answer, or it would credit the team's work to a member. It grades each member on a copy of the state, with the member's output as the output and the sample's input followed by the member's message as the messages. Members are graded in roster order, each inside a span named after it:
+    `scorer` must be a function of the answer: the output, the sample's input, metadata and target. It may use the sandbox to evaluate the answer, but never as a source of the answer, or it would credit the team's work to a member. It grades each member on a copy of the state, with the member's output as the output and the sample's input followed by the member's message as the messages. An output with only a completion and no message adds no message, as when the swarm returns it as its answer. Members are graded in roster order, each inside a span named after it:
 
     - A member that never started has no value (`not_started`), and is not graded.
-    - A member whose output the record left out, or whose grade is `None`, NaN (`Score.unscored()`), a dict or a list, is unavailable: no value, with a reason (the grade's own `reason` for NaN, else `unscored`).
+    - A member whose output the record left out, or whose grade is `None`, NaN (`Score.unscored()`, or a value `value_to_float` converts to NaN) or not a single value (a dict, list or tuple), is unavailable: no value, with a reason (the grade's own `reason` for NaN, else `unscored`).
     - A member with no output, or one whose completion is only whitespace, gets `empty_value` without being graded.
     - Every other member gets its grade, converted with `value_to_float`.
 
@@ -187,13 +187,20 @@ async def _grade(
         return _Grade("empty", empty_value, "empty_output")
     copy = deepcopy(state)
     copy.output = m.output.model_copy(deep=True)
-    copy.messages = [*_input_messages(copy.input), copy.output.message]
+    # as the swarm gives its answer: an output with no choices, only a completion, adds
+    # no message
+    copy.messages = _input_messages(copy.input)
+    if not copy.output.empty:
+        copy.messages.append(copy.output.message)
     async with span(name=m.name):
         score = await scorer(copy, target)
     if score is None:
         return _Grade("unavailable", math.nan, "scorer_returned_none")
-    if isinstance(score.value, dict | list):
+    if not isinstance(score.value, str | int | float | bool):
         return _Grade("unavailable", math.nan, "non_scalar_value", score)
+    # before conversion, which may turn the unscored sentinel into a number
+    if isinstance(score.value, float) and math.isnan(score.value):
+        return _Grade("unavailable", math.nan, score.reason or "unscored", score)
     value = to_float(score.value)
     if math.isnan(value):
         return _Grade("unavailable", math.nan, score.reason or "unscored", score)

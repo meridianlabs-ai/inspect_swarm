@@ -130,8 +130,8 @@ def math_swarm() -> Task:
 
 - List it after the task's own scorer, which stays the headline score.
 - The scorer it is given must grade the answer alone. It may run the answer in the sandbox, but must never read the answer from the sandbox, or it would credit the team's work to one member. A scorer that falls back to the sandbox's files needs an answer-only version for `member_scores()`.
-- Each member's grade sees the sample's input, metadata and target, with the member's output as the sample's output. It runs in a span named after the member, within the scorer's span.
-- A member that never started has no value. A member with no output, or only whitespace, gets `empty_value` (0 by default) and is not graded. A member whose grade is `None`, NaN, a dict or a list, or whose output the record left out, has no value either.
+- Each member's grade sees the sample's input, metadata and target, with the member's output as the sample's output and its message after the input. It runs in a span named after the member, within the scorer's span.
+- A member that never started has no value. A member with no output, or only whitespace, gets `empty_value` (0 by default) and is not graded. A member whose grade is `None`, NaN, or more than one value (a dict, list or tuple), or whose output the record left out, has no value either.
 - The values are over the members that have one. When none has, both are NaN, which Inspect counts as unscored. The score's metadata says, for each member, its outcome, value and reason, with its key and verdict from the record; `complete` is `false` when a member that started has no value.
 - Without the contract, with a contract of another kind, or for an `artifact` task, both values are NaN with the reason `kind_not_declared`, `kind_mismatch` or `artifact_without_member_artifacts`. `member_scores()` does not grade member artifacts yet.
 - A sample with no swarm is scored as one member named `solver`, with the sample's output.

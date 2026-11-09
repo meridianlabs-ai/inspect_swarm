@@ -24,6 +24,7 @@ from inspect_swarm import (
     SwarmControl,
     answer_result,
     artifact_result,
+    baseline,
     leaderless,
     member,
     swarm,
@@ -48,12 +49,15 @@ def _result(kind: str) -> ResultSpec:
 
 @agent
 def from_input(name: str) -> Agent:
-    """Answer what the sample's input gives this member: `answers: {"a": "1", ...}`."""
+    """Answer what the sample's input gives this member: `answers: {"a": "1", ...}`. An answer `bare:<text>` is an output with only a completion, and no message."""
 
     async def execute(state: AgentState) -> AgentState:
         text = next(m.text for m in state.messages if "answers: " in m.text)
-        answers = json.loads(text.split("answers: ", 1)[1])
-        state.output = ModelOutput.from_content("mockllm", answers[name])
+        answer: str = json.loads(text.split("answers: ", 1)[1])[name]
+        if answer.startswith("bare:"):
+            state.output = ModelOutput(model="mockllm", completion=answer[5:])
+        else:
+            state.output = ModelOutput.from_content("mockllm", answer)
         return state
 
     return execute
@@ -65,7 +69,7 @@ def _input(answers: dict[str, str]) -> str:
 
 @scorer(metrics=[])
 def graded(calls: list[TaskState]) -> Scorer:
-    """Grade a completion by what it says: a number, or `none`, `nan`, `dict` or `list` for a grade with no value."""
+    """Grade a completion by what it says: a number, `PASS` or `FAIL` as given, or `none`, `nan`, `dict`, `list` or `tuple` for a grade with no single value."""
 
     async def score(state: TaskState, target: Target) -> Score | None:
         calls.append(state)
@@ -78,6 +82,10 @@ def graded(calls: list[TaskState]) -> Scorer:
             return Score(value={"x": 1.0})
         if text == "list":
             return Score(value=[1.0])
+        if text == "tuple":
+            return Score(value=(1.0, 0.5))
+        if text in ("PASS", "FAIL"):
+            return Score(value=text)
         return Score(value=float(text), answer=text, explanation=f"graded {text}")
 
     return score
@@ -148,7 +156,7 @@ GRADES: dict[str, tuple[dict[str, str], dict[str, tuple[str, float, str | None]]
         },
     ),
     "unavailable": (
-        {"a": "none", "b": "nan", "c": "dict", "d": "list"},
+        {"a": "none", "b": "nan", "c": "dict", "d": "tuple"},
         {
             "a": ("unavailable", NAN, "scorer_returned_none"),
             "b": ("unavailable", NAN, "grader_failed"),
@@ -170,7 +178,7 @@ GRADES: dict[str, tuple[dict[str, str], dict[str, tuple[str, float, str | None]]
 # every placement of one valued, one unavailable and one empty member, beside a fourth
 # that is unavailable, gives the same aggregates
 PERMUTED: dict[str, dict[str, str]] = {
-    f"permuted-{i}": dict(zip(NAMES, (*answers, "nan"), strict=True))
+    f"permuted-{i}": dict(zip(NAMES, (*answers, "list"), strict=True))
     for i, answers in enumerate(itertools.permutations(("1", "none", " ")))
 }
 
@@ -520,3 +528,58 @@ def test_an_answer_only_scorer_never_credits_a_member_with_the_teams_files(
     result = _score(_samples(read_eval_log(run.location))["s1"], "code_members")
     assert result.metadata is not None
     assert [m["value"] for m in result.metadata["members"]] == [credited, 0.0]
+
+
+def _pass_fail(value: object) -> float:
+    return float(value == "PASS")
+
+
+@scorer(metrics=MEMBER_METRICS)
+def pass_fail_members(calls: list[TaskState]) -> Scorer:
+    return member_scores(graded(calls), _result("answer"), value_to_float=_pass_fail)
+
+
+def test_an_unscored_grade_stays_unavailable_under_a_converter_that_gives_zero(
+    tmp_path: Path,
+) -> None:
+    calls: list[TaskState] = []
+    log = _eval(
+        tmp_path,
+        [Sample(id="s1", input=_input({"a": "PASS", "b": "nan"}), target="1")],
+        _swarm(("a", "b"), result=_result("answer")),
+        [pass_fail_members(calls)],
+    )
+    result = _score(_samples(log)["s1"], "pass_fail_members")
+    assert result.value == {"best_member": 1.0, "mean_member": 1.0}
+    metadata = result.metadata
+    assert metadata is not None
+    assert (metadata["members_valued"], metadata["complete"]) == (1, False)
+    b = metadata["members"][1]
+    assert (b["outcome"], b["reason"]) == ("unavailable", "grader_failed")
+
+
+@pytest.mark.parametrize("solver", ["swarm", "baseline", "plain"])
+def test_an_output_with_only_a_completion_is_graded(
+    tmp_path: Path, solver: str
+) -> None:
+    built = {
+        "swarm": lambda: _swarm(("a",), result=_result("answer")),
+        "baseline": lambda: baseline(
+            member(from_input("a"), name="a"), result=_result("answer")
+        ),
+        "plain": lambda: from_input("a"),
+    }[solver]()
+    calls: list[TaskState] = []
+    log = _eval(
+        tmp_path,
+        [Sample(id="s1", input=_input({"a": "bare:0.5"}), target="1")],
+        built,
+        [members(calls)],
+    )
+    result = _score(_samples(log)["s1"])
+    assert result.value == {"best_member": 0.5, "mean_member": 0.5}
+    # the member's output has no message, so the grade sees the sample's input alone,
+    # as the swarm's answer would give it
+    [state] = calls
+    assert state.output.completion == "0.5"
+    assert [m.role for m in state.messages] == ["user"]
