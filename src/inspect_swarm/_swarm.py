@@ -33,6 +33,7 @@ from ._channel.messages import is_builtin_messages
 from ._channel.shared_memory import is_builtin_board
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
+from ._evidence import PHASE_NAMES
 from ._member import (
     Member,
     is_factory,
@@ -55,7 +56,7 @@ def swarm(
 ) -> Agent:
     """A swarm of agents working on one sample.
 
-    The swarm adds one timeline to the sample, rooted at the agent span it runs in, with each member as a child, so the log viewer shows the swarm as one agent with its members as lanes. The timeline is named after that span (`swarm` when the swarm runs as a solver or with `run()`); a later swarm in the same sample gets `swarm-2`, `swarm-3`, and so on. Member names must be unique across the swarms in a sample. To run swarms more than once in one sample, build them with distinct member names. A member may not be named `init`, `solvers` or `scorers`: Inspect's timelines read spans with those names as the sample's phases.
+    The swarm adds one timeline to the sample, rooted at the agent span it runs in, with each member as a child, so the log viewer shows the swarm as one agent with its members as lanes. The timeline is named after that span (`swarm` when the swarm runs as a solver or with `run()`); a later swarm in the same sample gets `swarm-2`, `swarm-3`, and so on. The span must be an agent span not named `init`, `solvers` or `scorers`, and two swarms running at the same time each need their own: `run(swarm(...), input)` gives a swarm its own span. Member names must be unique across the swarms in a sample. To run swarms more than once in one sample, build them with distinct member names. A member may not be named `init`, `solvers` or `scorers`: Inspect's timelines read spans with those names as the sample's phases.
 
     Args:
         members: The roster: built agents or `member()` records. A bare agent is `member(agent)`. A factory-form `member()` may stand for several members (`count`).
@@ -69,7 +70,7 @@ def swarm(
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
         PrerequisiteError: If the returned agent runs in a sample with checkpointing on: checkpoint and resume are not supported for swarms yet.
-        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if the sample already has a swarm member named after one of its members or does not have a sandbox a member names.
+        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if it runs in a span that is not an agent span, in an agent span named `init`, `solvers` or `scorers`, or in the span of another swarm still running, if the sample already has a swarm member named after one of its members, or does not have a sandbox a member names.
     """
     records = _members(members)
     names = member_names(records)
@@ -264,13 +265,9 @@ def _member(item: object) -> Member:
     )
 
 
-# span names Inspect's timeline_build() reads as the sample's phases, wherever they are
-_PHASE_NAMES = ("init", "solvers", "scorers")
-
-
 def _check_phase_names(names: Sequence[list[str]]) -> None:
     for name in (name for record_names in names for name in record_names):
-        if name in _PHASE_NAMES:
+        if name in PHASE_NAMES:
             raise ValueError(
                 f"members=: a member is named {name!r}, which Inspect's timelines read as a phase of the sample. Give the member another name with member(..., name=...)."
             )

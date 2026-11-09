@@ -49,7 +49,7 @@ from inspect_ai.scorer import (
 )
 from inspect_ai.solver import TaskState
 from inspect_ai.tool import Tool, ToolCall, ToolDef, tool
-from inspect_ai.util import background, store
+from inspect_ai.util import background, span, store
 from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import JsonValue
 
@@ -747,6 +747,59 @@ async def test_a_member_name_taken_by_an_earlier_swarm_is_refused() -> None:
             await run(
                 swarm(member(generator(scripted_model()), name="a"), channels=[]), []
             )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("root", ["ensemble", "init", "solvers", "scorers"])
+async def test_a_swarm_in_a_span_that_cannot_root_its_timeline_is_refused(
+    root: str,
+) -> None:
+    # a span that is not an agent's, or an agent span named as a sample phase
+    swarm_agent = swarm(member(generator(scripted_model()), name="a"), channels=[])
+    async with sample() as t:
+        with pytest.raises(ValueError, match="must be rooted at an agent span"):
+            if root == "ensemble":
+                async with span(root):
+                    await swarm_agent(AgentState(messages=[]))
+            else:
+                await run(swarm_agent, [], name=root)
+        assert t.timelines == []
+
+
+@agent
+def overlapping(held: Script, gate: anyio.Event) -> Agent:
+    """Run a swarm, try a second one in this span while it runs, then run a third after it."""
+
+    async def execute(state: AgentState) -> AgentState:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                swarm(member(generator(scripted_model(held)), name="a"), channels=[]),
+                AgentState(messages=[]),
+            )
+            while held.started == 0:
+                await anyio.sleep(0.01)
+            with pytest.raises(ValueError, match="another swarm is running"):
+                await swarm(member(generator(scripted_model()), name="b"), channels=[])(
+                    AgentState(messages=[])
+                )
+            gate.set()
+        return await swarm(member(generator(scripted_model()), name="c"), channels=[])(
+            state
+        )
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_a_second_swarm_running_at_once_in_one_span_is_refused() -> None:
+    gate = anyio.Event()
+    async with sample() as t:
+        await run(overlapping(Script(gate=gate), gate), [])
+        # the refused swarm left nothing; the span takes another swarm once the first ends
+        assert [(tl.name, list(_lanes(tl))) for tl in t.timelines] == [
+            ("overlapping", ["a"]),
+            ("overlapping-2", ["c"]),
+        ]
 
 
 @agent

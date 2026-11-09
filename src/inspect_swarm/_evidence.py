@@ -19,6 +19,7 @@ from inspect_ai.event import (
 )
 from inspect_ai.log import Transcript, transcript
 from inspect_ai.util import store
+from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import JsonValue
 
 from ._bus._record import Record, current_via, thaw_json
@@ -317,18 +318,41 @@ def _write_dump(kind: str, data: dict[str, JsonValue]) -> None:
     )
 
 
+# span names Inspect's timeline_build() reads as the sample's phases, wherever they are
+PHASE_NAMES = ("init", "solvers", "scorers")
+
+# the spans a running swarm is rooted at: one swarm at a time in each
+_active_spans: set[str] = set()
+
+
 # One timeline for the swarm, rooted at the swarm's span with each member's span as a
 # child, so that the viewer shows the swarm as one agent with its members as lanes. It
 # is named after the swarm's span, or the first of `name-2`, `name-3`, ... not yet a
-# timeline in the sample. It is added when the swarm starts and filled when the swarm
-# ends, and never raises over its outcome. A swarm run outside every span, as only a test
-# does, has no span to root it at and gets none.
+# timeline in the sample. Built when the swarm starts, which refuses a span that cannot
+# root it; opened, which adds it, once the swarm's other checks pass; filled when the
+# swarm ends, never raising over its outcome; closed however the swarm ends. A swarm run
+# outside every span, as only a test does, has no span to root it at and gets none.
 class SwarmTimeline:
     def __init__(self, span_id: str | None) -> None:
         self._timeline: Timeline | None = None
+        self._begin: SpanBeginEvent | None = None
         if span_id is None:
             return
-        self._begin = _span_begin(span_id)
+        begin = _span_begin(span_id)
+        if begin.type != AGENT_SPAN_TYPE or begin.name in PHASE_NAMES:
+            raise ValueError(
+                f"swarm(): the swarm runs in the span {begin.name!r} of type {begin.type!r}, and its timeline must be rooted at an agent span not named init, solvers or scorers. Run the swarm as a solver, with run(swarm(...), input), or directly from an agent of your own."
+            )
+        if span_id in _active_spans:
+            raise ValueError(
+                f"swarm(): another swarm is running in the agent span {begin.name!r}, and each running swarm needs a span of its own. Run each swarm with run(swarm(...), input), which gives it its own span."
+            )
+        self._begin = begin
+
+    def open(self) -> None:
+        if self._begin is None:
+            return
+        _active_spans.add(self._begin.id)
         # this swarm's events are those reported from here on: the span may hold an
         # earlier swarm's too, as when one agent awaits two swarms
         self._start = transcript().history.event_count
@@ -340,12 +364,18 @@ class SwarmTimeline:
         self._timeline = Timeline(
             name=name,
             description="Swarm",
-            root=TimelineSpan(id=span_id, name=self._begin.name, span_type="agent"),
+            root=TimelineSpan(
+                id=self._begin.id, name=self._begin.name, span_type="agent"
+            ),
         )
         transcript().add_timeline(self._timeline)
 
+    def close(self) -> None:
+        if self._begin is not None:
+            _active_spans.discard(self._begin.id)
+
     def fill(self, places: SpanPlaces) -> None:
-        if self._timeline is None:
+        if self._timeline is None or self._begin is None:
             return
         events = [self._begin] + [
             event
@@ -360,7 +390,7 @@ class SwarmTimeline:
                 for c in root.content
                 if isinstance(c, TimelineSpan) and c.id == self._begin.id
             ),
-            root,
+            self._timeline.root,
         )
 
 

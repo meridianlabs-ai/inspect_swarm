@@ -650,8 +650,8 @@ class SwarmRun:
         from .._bus._bus import current_bus
 
         _refuse_checkpointing()
-        claim_member_names([m.name for m in self._members])
         timeline = SwarmTimeline(current_span_id())
+        claim_member_names([m.name for m in self._members])
         interval = self._interval = LedgerInterval(
             roster=[m.name for m in self._members]
         )
@@ -669,6 +669,7 @@ class SwarmRun:
         bus_token: "contextvars.Token[SwarmBus | None] | None" = None
         budget_token: contextvars.Token[BudgetState | None] | None = None
         running: int | None = None
+        timeline.open()
         try:
             # in the swarm's span, before any member can start
             write_start()
@@ -790,6 +791,7 @@ class SwarmRun:
                     current_bus.reset(bus_token)
                 if running is not None:
                     _swarm_ended(running)
+                timeline.close()
         if error is not None:
             raise error
 
