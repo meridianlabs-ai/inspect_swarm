@@ -461,15 +461,9 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
         # already charged the call just recorded to the cost tree (inspect_ai#6349) but
         # not yet checked that tree. So check the pair's cost-tree ancestors root first,
         # as Inspect's cost check would with the same `raise_for_equal`: the sample's
-        # cost limit raises ahead of this node. A bridged member's node does not raise,
-        # and Inspect checks itself. With derived caps nothing changes. The swarm that
-        # owns this node decides, not a nested swarm the call runs in.
-        member = current_member.get()
-        if (
-            self.pair is None
-            or not self.charge_sample
-            or (member is not None and member.bridged)
-        ):
+        # cost limit raises ahead of this node. With derived caps nothing changes. The
+        # swarm that owns this node decides, not a nested swarm the call runs in.
+        if self.pair is None or not self.charge_sample:
             return
         if self.stop_swarm is not None:
             # a reached cap stops the swarm even when a tool consumes the sample's error

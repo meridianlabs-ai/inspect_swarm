@@ -1639,3 +1639,134 @@ async def test_a_retrying_bridged_member_spends_nothing_after_its_limit(
     assert line.meter.usage.total_tokens == (
         COMPACTION_TOKENS + generations * TOKENS_PER_CALL
     )
+
+
+# one $2 call against a $1.50 sample cost limit
+CALL_COST = 2.0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bridged", [False, True], ids=["native", "bridged"])
+@pytest.mark.parametrize(
+    "budget,limits,sample_cost,soft_stop,raised,status,ended_by",
+    [
+        # under derive=False the sample's cost limit raises ahead of each swarm node
+        pytest.param(
+            Budget(derive=False),
+            [cost_limit(1.0)],
+            1.5,
+            False,
+            True,
+            "errored",
+            "sample_limit:cost",
+            id="member",
+        ),
+        pytest.param(
+            Budget(cost=1.0, derive=False),
+            [],
+            1.5,
+            False,
+            True,
+            "errored",
+            "sample_limit:cost",
+            id="cap",
+        ),
+        # a $0.70 share each
+        pytest.param(
+            Budget(cost=1.4, split="equal", derive=False),
+            [],
+            1.5,
+            False,
+            True,
+            "errored",
+            "sample_limit:cost",
+            id="share",
+        ),
+        # the lever closes while the call is in flight
+        pytest.param(
+            Budget(derive=False),
+            [],
+            1.5,
+            True,
+            True,
+            "errored",
+            "sample_limit:cost",
+            id="lever",
+        ),
+        # controls: a call below the sample's limit, and derived caps (a $1.425 cap
+        # raises and the sample's limit is not checked, for either kind of member)
+        pytest.param(
+            Budget(derive=False),
+            [cost_limit(1.0)],
+            3.0,
+            False,
+            False,
+            "member_limit:cost",
+            None,
+            id="below-sample",
+        ),
+        pytest.param(
+            Budget(),
+            [cost_limit(1.0)],
+            1.5,
+            False,
+            False,
+            "swarm_cap",
+            None,
+            id="derived",
+        ),
+    ],
+)
+async def test_without_derived_caps_a_sample_cost_limit_raises_ahead_of_a_swarm_node(
+    bridged: bool,
+    budget: Budget,
+    limits: list[Limit],
+    sample_cost: float,
+    soft_stop: bool,
+    raised: bool,
+    status: str,
+    ended_by: str | None,
+) -> None:
+    gate = anyio.Event()
+    script = Script(gate=gate)
+    model = scripted_model(script, cost=CALL_COST)
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("agent")
+        while script.started < 1:
+            await anyio.sleep(0)
+        gate.set()
+        if soft_stop:
+            # released as the stop begins: the call in flight completes
+            return "enough"
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    agent = cli(model, calls=None) if bridged else generator(model, calls=None)
+    # a split needs a second member, which is never started; a cost cap needs its model's price
+    sibling = (
+        [member(generator(scripted_model(cost=CALL_COST)), name="sibling")]
+        if budget.split != "pool"
+        else []
+    )
+    errors: list[LimitExceededError] = []
+    async with sample(cost=sample_cost):
+        try:
+            await swarm(
+                [
+                    member(agent, name="agent", bridged=bridged, limits=limits),
+                    *sibling,
+                ],
+                controller=_controller(run, f"limits_test_sample_cost_{uuid4().hex}"),
+                channels=[],
+                budget=budget,
+            )(AgentState(messages=[ChatMessageUser(content="task")]))
+        except LimitExceededError as error:
+            errors.append(error)
+        ledger = _ledger()
+    assert [e.type for e in errors] == (["cost"] if raised else [])
+    assert script.calls == 1
+    assert ledger.ended_by == ended_by
+    line = next(m for m in ledger.members if m.name == "agent")
+    assert (line.bridged, line.status) == (bridged, status)
