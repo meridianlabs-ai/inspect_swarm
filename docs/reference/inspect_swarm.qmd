@@ -6,6 +6,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 ## Swarms and members
 
 ### swarm
+### baseline
 ### member
 ### users
 

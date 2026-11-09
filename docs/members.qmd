@@ -181,7 +181,7 @@ Only a member whose agent is a `react()`, `react(submit=False)` or `deepagent()`
 
 ## A swarm of one
 
-`swarm(members=react(), channels=[])` is a single agent run under the swarm's rules, with the same records. Use it as the single-agent arm when you compare a swarm with one agent ([Scoring](scoring.qmd#comparisons)). Unlike a plain agent, it returns an empty output when its member does not submit.
+`swarm(members=react(), channels=[])` is a single agent run under the swarm's rules, with the same records. `baseline(react(), result=...)` builds one with the `first` rule and the task's result contract. Use it as the single-agent arm when you compare a swarm with one agent ([Scoring](scoring.qmd#comparisons)). Unlike a plain agent, it returns an empty output when its member does not submit.
 
 ## Agents the swarm refuses
 

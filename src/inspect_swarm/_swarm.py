@@ -34,6 +34,7 @@ from ._channel.messages import is_builtin_messages
 from ._channel.shared_memory import is_builtin_board
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
+from ._controller.leaderless import leaderless
 from ._isolation import (
     UserIsolation,
     check_isolated_roster,
@@ -188,6 +189,35 @@ def swarm(
         return state
 
     return execute
+
+
+def baseline(member: Member | Agent, result: ResultSpec | None = None) -> Agent:
+    """A single agent run as a swarm of one, the baseline arm to compare a swarm with.
+
+    It is `swarm(members=member, controller=leaderless(final="first"), channels=[], result=result)`. It writes the same result record as a swarm, with the same clock and the same answer key and verdict for the submission, so `member_scores()` and the analysis read every arm the same way. Unlike a plain agent, it returns an empty output when its member does not submit.
+
+    Args:
+        member: The agent, or a `member()` record of one member.
+        result: The task's result contract, as the swarm arm passes it.
+
+    Returns:
+        The swarm of one, as an agent.
+
+    Raises:
+        ValueError: If `member` stands for more than one member (`count`), or for any reason `swarm()` refuses it.
+        TypeError: For any reason `swarm()` refuses its arguments.
+    """
+    count = sum(len(names) for names in member_names(_members(member)))
+    if count != 1:
+        raise ValueError(
+            f"baseline() runs one member, and member= stands for {count}. Use swarm() for more than one."
+        )
+    return swarm(
+        members=member,
+        controller=leaderless(final="first"),
+        channels=[],
+        result=result,
+    )
 
 
 def _preamble(

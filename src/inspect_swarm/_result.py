@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, get_args
+from typing import Any, Literal, Protocol, cast, get_args
 
 ResultKind = Literal["answer", "artifact"]
 """What a task's result is: `answer`, the member's answer, which the task's scorer grades without reading it from the environment; or `artifact`, the environment the members leave behind, which the team shares."""
@@ -141,3 +141,17 @@ def verifier_label(verifier: Verifier) -> str:
     if isinstance(qualname, str):
         return qualname
     return type(verifier).__qualname__
+
+
+# A completion's answer key from the contract's `answer_key`, which is task code, so
+# checked as returned rather than as annotated, by its actual class rather than the one
+# it reports.
+def key_answer(
+    key: Callable[[str], str | None], completion: str, member: str
+) -> str | None:
+    answer_key = cast(object, key(completion))
+    if answer_key is not None and not issubclass(type(answer_key), str):
+        raise TypeError(
+            f"The result contract's answer_key must return a str or None, got a {type(answer_key).__name__} for member {member!r}."
+        )
+    return cast(str | None, answer_key)
