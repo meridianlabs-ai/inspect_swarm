@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.0](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.3.0...0.4.0) (2026-11-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* write the swarm's evidence as CommunicationEvent and SwarmEvent ([#147](https://github.com/meridianlabs-ai/inspect_swarm/issues/147))
+
+### Features
+
+* a public bus API for channels with records ([#167](https://github.com/meridianlabs-ai/inspect_swarm/issues/167)) ([cf0fa56](https://github.com/meridianlabs-ai/inspect_swarm/commit/cf0fa561fabd3b52206a60e9e2011119ce531a05))
+* Budget(derive=False) sets no caps of its own ([#165](https://github.com/meridianlabs-ai/inspect_swarm/issues/165)) ([06f37a8](https://github.com/meridianlabs-ai/inspect_swarm/commit/06f37a8dd50df2240cc741e802e39cdb890d4a99))
+* channels report what their results depend on ([#143](https://github.com/meridianlabs-ai/inspect_swarm/issues/143)) ([9ac3bb8](https://github.com/meridianlabs-ai/inspect_swarm/commit/9ac3bb847ae5b32731a04c459f5f2cf9116ab9c4))
+* hold a member at its turn boundaries with boundary callbacks ([#153](https://github.com/meridianlabs-ai/inspect_swarm/issues/153)) ([38faaa6](https://github.com/meridianlabs-ai/inspect_swarm/commit/38faaa6cb165cf2efe4cfbc6d7b06fa6b0d50e89))
+* let a controller replace or leave out a member's preamble ([#166](https://github.com/meridianlabs-ai/inspect_swarm/issues/166)) ([8880be0](https://github.com/meridianlabs-ai/inspect_swarm/commit/8880be081111185632341969d39fe2ef3e9bff3a))
+* persistent members, held idle after an answer and woken with new work ([#155](https://github.com/meridianlabs-ai/inspect_swarm/issues/155)) ([f2123fd](https://github.com/meridianlabs-ai/inspect_swarm/commit/f2123fd3e10534c4e36f5e5899041e67595ef1c6))
+* tell the controller when an idle member has news (MemberNews) ([#157](https://github.com/meridianlabs-ai/inspect_swarm/issues/157)) ([8a33f37](https://github.com/meridianlabs-ai/inspect_swarm/commit/8a33f3769da753801172829bc580aeab5a161011))
+* the critical path links what each channel reports it depends on ([#151](https://github.com/meridianlabs-ai/inspect_swarm/issues/151)) ([82b5f1f](https://github.com/meridianlabs-ai/inspect_swarm/commit/82b5f1fb28d5939e08614c8176fff491957fffb8))
+* the swarm's channels for bridged members, swarm_bridged_tools() ([#142](https://github.com/meridianlabs-ai/inspect_swarm/issues/142)) ([f2a013a](https://github.com/meridianlabs-ai/inspect_swarm/commit/f2a013a72314d5694966e196ea9398c63af16dcb))
+* write the swarm's evidence as CommunicationEvent and SwarmEvent ([#147](https://github.com/meridianlabs-ai/inspect_swarm/issues/147)) ([968ed3f](https://github.com/meridianlabs-ai/inspect_swarm/commit/968ed3f61485c38ef63a2558b4b955a5bbfcae65))
+
+
+### Bug Fixes
+
+* charge the sample's cost limit once per call with inspect-ai 0.3.288 ([#171](https://github.com/meridianlabs-ai/inspect_swarm/issues/171)) ([4ec4998](https://github.com/meridianlabs-ai/inspect_swarm/commit/4ec4998743d1c5f7f907a058fbdc9e6d54c71f33))
+
 ## [0.3.0](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.2.1...0.3.0) (2026-10-30)
 
 
