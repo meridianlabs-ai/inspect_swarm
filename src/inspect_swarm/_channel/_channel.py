@@ -86,9 +86,9 @@ class ChannelRun:
     """What `Channel.open()` gets for one run of the swarm."""
 
     bus: "Bus"
-    """The run's bus, which the channel's tools deliver records through.
+    """The run's bus, which the channel's tools deliver records through with `bus.deliver(Draft(...))`.
 
-    A tool whose result shows the channel's records also reports them with `bus.read(name, records)`, where `name` is the channel's `name` and `records` are the ids of the records the result concerns. The log records the read, and the records the calling member's later work depends on, which the swarm's critical path links. Pass `depends_on=` when the result depends on other records than it concerns: a result that tells the loop a record was committed, without its content, depends on it, and a result built from several records depends on them all. Every id must be one the channel committed in this run, and the call must come from a member's tool call; otherwise it raises `ValueError` or `RuntimeError`.
+    A tool whose result shows the channel's records also reports them with `bus.read(name, records)`, where `name` is the channel's `name` and `records` are the ids of the records the result concerns. The log records the read, and the records the calling member's later work depends on, which the swarm's critical path links. Pass `depends_on=` when the result depends on other records than it concerns: a result that tells the loop a record was committed, without its content, depends on it, and a result built from several records depends on them all. Every id must be one the channel committed in this run, and the call must come from a member's tool call; otherwise it raises `ValueError` or `RuntimeError`. `read()` returns the read's id. See `Bus`.
     """
 
     roster: Sequence[MemberInfo]
@@ -151,10 +151,10 @@ class ToolDeclaration:
 
 @dataclass(frozen=True)
 class WaitSpec:
-    """One call of `swarm_wait`, as the bus asks a `WaitingState` about it."""
+    """A loop and filters checked by a waiting channel, for a `swarm_wait` call or an idle member."""
 
     id: str
-    """The wait's id (`"x-4"`), numbered per run."""
+    """A numbered wait id, or `idle-<member>` for an idle-member query."""
 
     member: str
     """The waiting member's name."""
@@ -190,6 +190,8 @@ class WaitingState(ChannelState, Protocol):
     """The state of a channel whose records wake waits (one that sets `Channel.max_wait`).
 
     The bus calls these methods with no `await` around them. None of them marks anything: a loop acknowledges what a wait names by reading it with the channel's own tool.
+
+    The bus also calls `wakes()` and `news()` for idle persistent members, with `own=True` and no filters. These queries have no `swarm_wait` call. Use `spec.member` and `spec.loop`; the caller may be another member.
     """
 
     def wait_check(self, spec: WaitSpec) -> None:

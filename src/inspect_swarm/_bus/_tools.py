@@ -2,8 +2,9 @@ from inspect_ai.agent import AgentChannel
 from inspect_ai.agent._channel import current_agent_channel
 from inspect_ai.log._samples import sample_active
 from inspect_ai.tool import Tool, ToolSource
+from inspect_ai.util._span import current_agent_span_id
 
-from ._bus import Bus, current_bus
+from ._bus import SwarmBus, current_bus
 
 
 # Holds no state, so one object serves every member, sample and run: the member, its
@@ -23,6 +24,7 @@ class _SwarmTools(ToolSource):
             )
         if context.loop is None:
             context.loop = loop
+            context.loop_span = current_agent_span_id()
             context.acp_bound = _acp_bound(loop)
         return loop_tools(bus, context.loop is loop)
 
@@ -30,7 +32,7 @@ class _SwarmTools(ToolSource):
 # The tools of a loop of a member: the member's own loop gets every channel's, its other
 # loops those of "member"-reach channels; and swarm_wait, when a channel the loop reaches
 # wakes waits.
-def loop_tools(bus: Bus, own: bool) -> list[Tool]:
+def loop_tools(bus: SwarmBus, own: bool) -> list[Tool]:
     tools = [
         tool
         for name, state in bus.states.items()

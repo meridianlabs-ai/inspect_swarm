@@ -36,7 +36,7 @@ swarm.md settled the principles: a swarm-wide cap set the same way as a single a
 - **A limit hit inside a tool does not stop the member.** It becomes a tool error, and the member stops at its next model call.
 - **Cancelling members to stop them loses their in-flight usage.** A cancelled call records nothing, so the ledger can only mark it unknown.
 - **Per-member attribution from model events misses native compaction.**
-- **An Inspect cost node can miss spend repeatedly**, not just for calls in flight: every call that trips any token node below it is never charged to it.
+- **An Inspect cost node is checked late**, not just for calls in flight: a call that trips any token node below it is charged to it but not checked, so it raises one call late, at the next pre-dispatch check. Before inspect_ai 0.3.288 (inspect_ai#6349) such a call was never charged to it at all.
 
 Each of these changes what the swarm's budget code must do. The users who need it are the capability-scaling experiments (swarm.md's first user group): their comparisons rest on the cap being set the same way in every arm and on the ledger being right.
 
@@ -81,7 +81,7 @@ This section covers only what the design depends on. Claims marked *spike* were 
 | Kind | Recorded | Checked | Below the sample |
 |---|---|---|---|
 | token | after each completed call, before the check (`src/inspect_ai/model/_model.py:3082-3089`) | before dispatch with `>=` (`_model.py:3036-3044`, called at `:1570` and on each attempt at `:1625`), and after the call with `>` | Works. A reached limit refuses every later dispatch in its subtree. |
-| cost | after each completed priced call, but only if the token check passed (`_model.py:3091-3095`) | as token | Unreliable as a budget. A call that trips *any* token node never records its cost into cost nodes. This repeats: *spike:* three sequential \$10 calls under `cost_limit(15)`, each inside a child `run()` whose own token limit tripped, made all 3 calls and charged \$0 to the cost node; the sample recorded \$30. |
+| cost | after each completed priced call, before the token check (from inspect_ai 0.3.288, inspect_ai#6349) | as token, but after the token check | Late as a budget. A call that trips *any* token node is charged to cost nodes but not checked against them, so a cost limit it crosses raises only at the next dispatch. *Spike:* three sequential \$10 calls under `cost_limit(15)`, each inside a child `run()` whose own token limit tripped: before 0.3.288 all 3 calls were made and \$0 charged to the cost node (the sample recorded \$30); from 0.3.288, 2 calls are made, \$20 is charged, and the third call's pre-dispatch check raises the cost limit. |
 | turn | once per top-level `generate()`, after it completes (`_model.py:1776-1783`) | after recording, with `>` (`_limit.py:1186-1192`); never before dispatch | Works, but `turn_limit(N)` lets the (N+1)th generation run and raises after it. *Spike:* `turn_limit(3)` on a looping agent made 4 generations. |
 | message | not recorded | the leaf only, against the calling conversation's length (`_limit.py:743-757`, `:1336-1357`), before each generate with `>=` (`_model.py:1027-1029`) and on every append to an `AgentState` or `TaskState` message list (`src/inspect_ai/util/_limited_conversation.py:8-24`) | Per conversation. A member's own `message_limit` replaces the sample's for that member; a node above the members is never checked when members have their own. |
 | time | wall clock from entry | a cancel scope with a deadline; on expiry everything inside is cancelled and the error is raised where the `with` was opened (`_limit.py:1384-1436`) | Works. Calls in flight are cancelled. |
@@ -95,7 +95,7 @@ Two more facts about working time:
 ### Overshoot and connection slots
 
 - A call takes a connection slot before its first pre-dispatch check (`_model.py:1059-1068` acquires the slot around `_generate`, which checks at `:1570` and `:1625`). A call waiting for a slot is checked only once it holds one, so once a token or cost limit is reached only calls already holding a slot can add to it.
-- So a token or cost node is overshot by at most the calls holding a connection slot when it is reached. The number is at most the model's configured maximum connections (`max_connections`, or the adaptive controller's maximum, not its current ceiling: a resize can leave calls admitted under a higher ceiling still running, `src/inspect_ai/util/_concurrency.py:97-111`), which every sample shares, summed over the models the swarm uses. This holds for token nodes and for the swarm's cost cap ([Swarm nodes](#swarm-nodes)), not for Inspect's cost nodes, which can miss calls entirely.
+- So a token or cost node is overshot by at most the calls holding a connection slot when it is reached. The number is at most the model's configured maximum connections (`max_connections`, or the adaptive controller's maximum, not its current ceiling: a resize can leave calls admitted under a higher ceiling still running, `src/inspect_ai/util/_concurrency.py:97-111`), which every sample shares, summed over the models the swarm uses. This holds for token nodes, for the swarm's cost cap ([Swarm nodes](#swarm-nodes)) and, from inspect-ai 0.3.288, for Inspect's cost nodes: a call that trips a token limit still records its cost, and the next generation's pre-dispatch check sees it (before 0.3.288 such a call never reached cost nodes, so they could miss calls entirely). Native compaction, below, is the exception.
 - `Model.compact()` (native compaction) has its own pool of 10 slots per model and **no pre-dispatch check**: it records and checks only after the call (`_model.py:1281-1361`). Each agent loop (a member or a subagent) can dispatch one native compaction after a limit is reached.
 - *Spike (overshoot):* three members of 0.05-second calls under a 1,000-token swarm node finished at 1,050 tokens.
 
@@ -115,7 +115,7 @@ Two more facts about working time:
 
 ### What the nodes record
 
-- `record_and_check_model_usage()` prices a call and stores the cost on its `ModelUsage` *before* recording it into token nodes (`_model.py:3064-3066`, `:3082`). A token node's accumulated `ModelUsage` therefore carries the cost of every call it recorded, including one that then trips a token limit. *Spike:* at 1,050 tokens of overshoot the swarm's cost node read \$1.00, while the per-member token nodes' `ModelUsage.total_cost` summed to \$1.05, equal to the sample's `model_usage`.
+- `record_and_check_model_usage()` prices a call and stores the cost on its `ModelUsage` *before* recording it into token nodes (`_model.py:3064-3066`, `:3082`). A token node's accumulated `ModelUsage` therefore carries the cost of every call it recorded, including one that then trips a token limit. *Spike (before inspect-ai 0.3.288, when a call that tripped a token limit was not recorded into cost nodes):* at 1,050 tokens of overshoot the swarm's cost node read \$1.00, while the per-member token nodes' `ModelUsage.total_cost` summed to \$1.05, equal to the sample's `model_usage`.
 - `ModelUsage.__add__` treats a missing cost as absent, so a sum that includes an unpriced call still has a number (`src/inspect_ai/core/_model_output.py:41-66`). A sum cannot say whether it is complete.
 - Response-cache hits return before any usage is recorded (`_model.py:1537-1564`), so nodes count only newly incurred usage.
 - Approval and review model calls run under `suspend_token_limit()` and `suspend_turn_limit()` (`src/inspect_ai/approval/_apply.py:50`, `src/inspect_ai/review/_apply.py:59`). They are missing from token and turn nodes, but still recorded into cost nodes and the sample's `model_usage`.
@@ -177,6 +177,10 @@ class Budget(BaseModel, frozen=True):
 
     grace: float = 120.0
     """Seconds members are given to finish in-flight work after a stop."""
+
+    derive: bool = True
+    """Whether a cap left None is derived from the sample's limit. False sets no
+    such cap: the sample's own limits then end the swarm as they end any solver."""
 ```
 
 `swarm(..., budget=Budget())` is the default. `Budget` is a frozen pydantic model, not a dataclass, because swarm-api.md requires every `swarm()` argument to reach the log faithfully: a pydantic model is logged as its fields, so two eval-set arms that differ only in their budget get different task identifiers, while a frozen dataclass is logged as its type name and they would be refused as "not distinct" ([swarm-api.md](swarm-api.md#logging-and-replay)). For the same reason the token cap is an `int` or a metering string, never a `TokenLimit` object, which inspect_ai logs as its class name. Replay hands `swarm()` the logged dict, which it validates with `Budget.model_validate()`, as it does for `Member`. Every field is a plain value, so a task can take each as a task parameter and sweep it with `-T`.
@@ -194,6 +198,8 @@ Checks that need the roster or the sample run at swarm start: the weight count m
 - tokens: rounded down to a whole number, with the sample node's metering `type`;
 - time: in seconds from swarm start. Grace is not subtracted; instead every stop's grace is clipped when a sample time limit exists ([Stopping](#stopping)), so a short time limit never fails at start. For example, a 60-second sample limit gives a 57-second cap, and a stop at that point gets at most 1.5 seconds of grace.
 
+Under `derive=False` nothing is derived: a cap left `None` is no cap, as it is under a sample without that limit, an explicit cap is checked and applied as above, and `reserve` has no effect. A sample limit then ends the swarm with its own error, which propagates out of `swarm()` and ends the sample, so no later solver runs. As in any solver, a sample limit error that a tool or handoff turns into a message does not end the run: the next model call of any member raises it again, while a member that returns without another call ends normally. Only a swarm cap stops the swarm from inside a tool ([Stopping](#stopping)). A split with neither a cost nor a token cap is refused at start, as it is under a sample without those limits. A sample cost limit still needs cost data for every member's model (**Cost data** below), since an unpriced call never advances it.
+
 A derived cap at or below zero is an error at start (`ValueError` naming the limit and the usage already spent). An explicit cap larger than the sample's remaining limit is allowed, with a warning that the sample's limit will end the swarm first, without a final step.
 
 This is what makes the cap one sample-level number: a task sets `cost_limit=B` once, and the single-agent arm, the epochs arm and the swarm arm all read it. The swarm stops at `B * (1 - reserve)` and keeps the rest for overshoot and the final step. The other limit kinds a task can set do not derive caps:
@@ -202,15 +208,15 @@ This is what makes the cap one sample-level number: a task sets `cost_limit=B` o
 - a sample **message limit** applies to each member's conversation separately (leaf-only);
 - a sample **working limit** is accepted but is unreliable under a swarm ([Each limit kind](#each-limit-kind)), so the swarm logs a warning at start when one is set.
 
-**Cost data.** When a cost cap applies, the swarm checks at start that every member's configured model has cost data (`_get_model_info_direct(model).cost`), mirroring Inspect's own check for the task's models, and raises `PrerequisiteError` otherwise. A model a member resolves at run time (a subagent's model, for example) cannot be checked in advance. Its calls are counted as unpriced ([The ledger](#the-ledger)) and never charged to a cost cap.
+**Cost data.** When a cost cap applies, or under `derive=False` a sample cost limit, the swarm checks at start that every member's configured model has cost data (`_get_model_info_direct(model).cost`), mirroring Inspect's own check for the task's models, and raises `PrerequisiteError` otherwise. A model a member resolves at run time (a subagent's model, for example) cannot be checked in advance. Its calls are counted as unpriced ([The ledger](#the-ledger)) and never charged to a cost cap.
 
 ### Swarm nodes
 
 The swarm never uses Inspect's own node classes for its stopping rules; it subclasses them. `_SwarmTokenNode(_TokenLimit)` is the token-tree node. For re-created member limits there are also `_SwarmTurnNode(_TurnLimit)` and `_SwarmMessageNode(_MessageLimit)`. Each overrides only the method that raises: `_check_self`, or `check` for the message node, which has no ancestors to check. A member time limit stays an Inspect `time_limit()`, created fresh per invocation: it raises where it was entered, in the member wrapper, not in the sandbox service.
 
-**Cost is metered in the token tree.** An Inspect cost node can miss calls repeatedly ([Each limit kind](#each-limit-kind)). So every swarm node that limits or meters cost is a *pair* that shares one accumulator:
+**Cost is metered in the token tree.** An Inspect cost node is checked only after the token check, so a call that trips a token node reaches it one call late ([Each limit kind](#each-limit-kind)). So every swarm node that limits or meters cost is a *pair* that shares one accumulator:
 
-- A `_SwarmTokenNode` in the token tree. Its `record(usage)` runs for every call recorded in its context before any token check can raise (`_model.py:3082-3089`), adds `usage.total_cost` to the accumulator, and counts the call as unpriced when `total_cost` is `None`. Its `_check_self` compares the accumulator with the cost limit. So the cost check runs in the token check, root to leaf, ahead of every descendant token node. *Spike:* the sequential-child case above, with the \$15 cap held this way, raised after the second call (\$20 recorded) instead of charging nothing.
+- A `_SwarmTokenNode` in the token tree. Its `record(usage)` runs for every call recorded in its context before any token check can raise (`_model.py:3082-3089`), adds `usage.total_cost` to the accumulator, and counts the call as unpriced when `total_cost` is `None`. Its `_check_self` compares the accumulator with the cost limit. So the cost check runs in the token check, root to leaf, ahead of every descendant token node. Under `derive=False`, where the sample's own limits end the swarm, the runtime marks each node the swarm creates, so the budget of the swarm that owns a node decides, not that of a nested swarm the call runs in. Every raise of a marked pair's token-tree node (its cost limit reached, or its lever closed) goes through one gate first: Inspect has already charged the call just recorded to the cost tree (inspect_ai#6349) but checks that tree only after the token check, so the node checks the pair's cost-tree ancestors root first with the same `raise_for_equal` as the token check, as Inspect's cost check would. This covers a call refused before dispatch, with nothing new to charge, when the sample's cost limit has been reached exactly. So the sample's cost limit counts the call and, when it is reached, raises ahead of the pair, as it would in Inspect. A reached cap calls its stop first, so it still stops the swarm when a tool consumes the sample's error. A bridged member's node does not raise, so Inspect charges the call itself. With derived caps, nothing changes: a reached cap stops the swarm; Inspect has charged the call to the sample's cost limit but does not check it for that call, because the cap raises first. *Spike:* the sequential-child case above, with the \$15 cap held this way, raised after the second call (\$20 recorded) instead of charging nothing.
 - A `_SwarmCostNode(_CostLimit)` in the cost tree. Its `record(cost)` adds to the accumulator only while the token tree is suspended (`token_limit_tree.is_suspended()`, true for approval and review calls, `src/inspect_ai/approval/_apply.py:50`). Its `_check_self` compares the same accumulator. Calls outside a suspension are therefore counted once, by the token-tree node, and suspended calls once, by the cost-tree node. Pre-dispatch checks run both `check_token_limit()` and `check_cost_limit()` (`_model.py:3036-3044`), so a reached pair refuses calls on either path.
 
 The swarm meter, the cost cap, each lever, each cost share, the final meter and each re-created member cost limit are pairs. The token cap and token shares are single `_SwarmTokenNode`s with a token limit; a pair's token-tree node also meters tokens for the ledger. Unpriced calls add nothing to the accumulator and are counted separately, so a cost cap never meters them (the ledger reports them).
@@ -540,7 +546,7 @@ In every arm, analysis uses realized cost from the ledger and the sample, not th
 
 **Inspect's `cost_limit()` as the swarm's cost cap.**
 - No subclassing.
-- It never sees a call that trips a token node below it, and with child token limits that happens on every call ([Each limit kind](#each-limit-kind)). A cost cap that can be bypassed indefinitely cannot be a stopping rule, so the cap is metered in the token tree.
+- A call that trips a token node is charged, but the cost check is deferred until the next dispatch. Metering cost in the token tree lets the swarm stop on the call that crosses its cap.
 
 **Stop by cancellation only.** Cancel members' scopes on every stop.
 - Simplest, and fastest to stop.
@@ -593,7 +599,7 @@ All runtime tests use mockllm with scripted outputs, usage and `ModelCost` set t
 - **Pinned inspect_ai behaviour** (each spike above, as a test, so a change upstream fails here):
   - nested `working_limit` is not enforced;
   - `turn_limit(N)` makes N+1 generations;
-  - a token node's `ModelUsage` carries the cost of a call that trips a token limit, while a cost node does not, and sequential child token exhaustion bypasses a `cost_limit()` indefinitely;
+  - a call that trips a token limit is charged to cost nodes too (inspect_ai#6349, 0.3.288), and sequential child token exhaustion reaches a `cost_limit()` one call late;
   - a grouped owned limit error escapes `run()`;
   - a `Limit` object cannot be entered twice;
   - a limit reached inside a tool becomes a `limit` tool error and the member raises at its next generate;
@@ -683,7 +689,7 @@ Adjacent problems noticed and left out, for Ransom to file if wanted:
 - **`turn_limit(N)` pays for N+1 generations** (inspect_ai). There is no pre-dispatch turn check, unlike token and cost.
 - **Native compaction has no pre-dispatch limit check, no model event, and optional usage** (inspect_ai). It can dispatch after a limit is reached, and a cancelled, failed or usage-less native compaction leaves no trace. An event emitted by `Model.compact()` at invocation and completed with its usage, error or cancellation would let the ledger judge it per call instead of treating every run in a process that has loaded a native-compaction provider as incomplete.
 - **Errored model events keep no status code** (inspect_ai). Recording the provider's HTTP status, and whether any output streamed, would let the ledger count a verified pre-inference rejection (such as HTTP 429) as zero spend instead of unknown.
-- **Cost nodes miss every call that trips a token node** (inspect_ai), repeatably with child token limits (`_model.py:3089-3095`). The swarm meters cost in the token tree instead; a general fix would record cost before the token check.
+- **Cost nodes missed every call that trips a token node** (inspect_ai), fixed in 0.3.288 by inspect_ai#6349, which records cost before the token check. The swarm still meters its cost cap in the token tree, so the cap raises on the call that reaches it rather than at the next pre-dispatch check.
 - **`run()` does not catch grouped owned limit errors** (inspect_ai, `_limit.py:179-186`). The swarm's wrapper classifies leaves itself.
 - **`CompactionAuto` swallows a `LimitExceededError` from native compaction** (inspect_ai) and logs it as a compaction failure before falling back.
 - **Checkpoint and resume of nested limit nodes** (inspect_ai and inspect_swarm). Only sample roots are restored.

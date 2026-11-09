@@ -1255,15 +1255,27 @@ async def test_the_cost_check_looks_a_model_up_as_metering_does(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("form", ["built", "factory"])
-async def test_the_cost_check_refuses_an_unpriced_model(form: str) -> None:
-    model = scripted_model()
+@pytest.mark.parametrize(
+    "budget, sample_cost",
+    [
+        pytest.param(Budget(cost=10.0), None, id="swarm-cap"),
+        # no swarm cap, but the sample's cost limit would never see an unpriced call
+        pytest.param(Budget(derive=False), 10.0, id="sample-limit"),
+    ],
+)
+async def test_the_cost_check_refuses_an_unpriced_model(
+    form: str, budget: Budget, sample_cost: float | None
+) -> None:
+    script = Script()
+    model = scripted_model(script)
     record = (
         member(generator(model))
         if form == "built"
         else member(generator, args={"model": model})
     )
     with pytest.raises(PrerequisiteError, match="Missing cost data"):
-        await run_swarm(swarm(record, channels=[], budget=Budget(cost=10.0)))
+        await run_swarm(swarm(record, channels=[], budget=budget), cost=sample_cost)
+    assert script.calls == 0
 
 
 @agent

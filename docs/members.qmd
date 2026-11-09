@@ -76,7 +76,7 @@ These are `react-1` to `react-3`. Names you give with `name` are not numbered ac
 
 ### Members that choose their names
 
-With `choose_name=True` a member is not told its name. Its preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:
+With `choose_name=True` a member is not told its name. The swarm's preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the other members what it is:
 
 ```python
 from inspect_ai.agent import react
@@ -95,7 +95,7 @@ A roster can mix the two, for example a lead you name and workers that name them
 
 A swarm in which any member chooses its name can use only the `filesystem` channel or no channel (`channels=[]`). Other channels, including [shared memory](shared-memory.qmd) and your own, show members to each other by name, so `swarm()` refuses them.
 
-The swarm does not change text you give the member yourself: the sample input, a controller's `start(input=...)`, the agent's prompt, and the sandbox configuration.
+The swarm does not change text you give the member yourself: the sample input, a controller's `start(input=...)` and `start(preamble=...)`, the agent's prompt, and the sandbox configuration. A controller's `start(preamble=...)` uses its text as given, and `preamble=False` leaves the preamble out ([Controllers](controllers.qmd)). Neither adds a request to choose a name.
 
 ## Limits
 
@@ -175,6 +175,7 @@ When a persistent member submits, or a `react(submit=False)` member gives a repl
 - Every answer is a candidate for the swarm's answer: `first` and `last` choose across all of them, and `choose_answer()` takes the member's latest. An answer stays a candidate however the member ends later.
 - A submission in a turn that also calls a `handoff()` is not an answer. Nor is a refusal (`content_filter`) or a reply cut off by the context window.
 - A member stopped or ended while idle ends `submitted`. A member whose loop returns without an answer ends `unsubmitted`, its earlier answers still candidates.
+- While it is idle, another member's write that is news to it reaches the controller as `MemberNews`, and the controller decides whether to wake it ([News for idle members](controllers.qmd#news-for-idle-members)).
 
 Only a member whose agent is a `react()`, `react(submit=False)` or `deepagent()` loop can persist, given directly or returned by a [member builder](#member-builders). The swarm refuses every other agent before it runs: a bridged member, a custom loop, `deepagent()` with background dispatch, and an agent that calls a loop and then checks its result (`checked_solver()` in the examples). In a swarm with `shared_memory()`, a persistent member must have `swarm_tools()` in its own tools, not only in a subagent's.
 

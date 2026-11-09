@@ -4,7 +4,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import anyio
 from anyio.abc import TaskGroup
@@ -63,7 +63,8 @@ from .._record import (
 from .._seam import BoundaryCallback, MemberGate, check_origin
 
 if TYPE_CHECKING:
-    from .._bus._bus import Bus
+    from .._bus._bus import SwarmBus
+    from .._bus._record import Record
     from .._channel._channel import Channel
 
 
@@ -176,10 +177,30 @@ class MemberIdle:
     """The index of the answer it just gave, from 0."""
 
     news: bool
-    """Whether a channel already has news for the member's own loop. Always `False` in this version."""
+    """Whether a channel already has news for the member's own loop: something that would end a `swarm_wait` of that loop that watches everything, such as a file another agent wrote that the member has not viewed. Later writes are reported as `MemberNews`, so a controller that wakes members on news also wakes on this."""
 
 
-ControlEvent = MemberEnded | MemberIdle
+@dataclass(frozen=True)
+class MemberNews:
+    """A record was delivered that is news to an idle persistent member: it would end a `swarm_wait` of the member's own loop that watches everything.
+
+    The controller decides whether to wake the member. Two records give two events, and an earlier event's handling may have woken the member, so check that it is still idle before waking it.
+    """
+
+    member: str
+    """The idle member the record is news to."""
+
+    channel: str
+    """The name of the channel that delivered the record."""
+
+    record: str
+    """The record's id."""
+
+    sender: str
+    """The name of the member that sent the record."""
+
+
+ControlEvent = MemberEnded | MemberIdle | MemberNews
 """An event a controller receives from `SwarmControl.events()`. Later versions add kinds, so test an event's type before reading its fields."""
 
 
@@ -203,18 +224,27 @@ class SwarmControl(Protocol):
         ...
 
     def start(
-        self, member: str | MemberHandle, input: str | list[ChatMessage] | None = None
+        self,
+        member: str | MemberHandle,
+        input: str | list[ChatMessage] | None = None,
+        *,
+        preamble: str | Literal[False] | None = None,
     ) -> None:
         """Start a member, and return at once.
 
-        The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm's input when `input` is `None`, followed by the member's preamble: its name unless `choose_name=True`, its role and the roster size, how the budget is split, and each channel's instructions.
+        The member runs in its own task, span and tool-state scope, with its limits. Its input is `input`, or the swarm's input when `input` is `None`, followed by the member's preamble as a user message. The swarm's preamble gives the member's name unless `choose_name=True`, its role and the roster size, how the budget is split, and each channel's instructions.
+
+        A controller that does not run its members at the same time can replace the swarm's preamble or leave it out. Text passed as `preamble` replaces all of it, channel instructions included, and is used as given, also for a member with `choose_name=True`.
 
         Args:
             member: The member, or its name.
             input: The member's input. `None` gives it the swarm's input.
+            preamble: The member's preamble, a user message after its input. `None` gives it the swarm's preamble; a string replaces the swarm's preamble with that text; `False` leaves it out.
 
         Raises:
             KeyError: If no member has this name.
+            TypeError: If `preamble` is not a string, `False` or `None`.
+            ValueError: If `preamble` is an empty or blank string, or is `False` and the input holds no user message.
             RuntimeError: If the member has already started (a member runs once; `wake()` gives an idle persistent member more work), or the swarm is stopping.
         """
         ...
@@ -423,7 +453,7 @@ class SwarmRun:
         final: FinalName | None = None,
     ) -> None:
         # deferred: the bus imports the channels, which import this module's package
-        from .._bus._bus import Bus
+        from .._bus._bus import SwarmBus
 
         self._shares = shares or {}
         self._members = [
@@ -431,11 +461,12 @@ class SwarmRun:
             for record, name in records
         ]
         # the channel states open here, before any member starts
-        self.bus = Bus(
+        self.bus = SwarmBus(
             self._members,
             {m.name: m.context for m in self._members},
             channels,
         )
+        self.bus.news = self._news
         for m in self._members:
             m.gate.stopping = lambda: self.stop_reason
             m.gate.recheck = self.bus.recheck
@@ -464,6 +495,12 @@ class SwarmRun:
         # final meter around its final step
         self._swarm_meter = CostPair(owner=None, role="meter")
         self._final_meter = CostPair(owner=None, role="meter")
+        if not budget.derive:
+            # the sample's limits end this swarm: its nodes charge the sample for a call
+            # before they raise for it
+            for node in self._nodes():
+                if isinstance(node, SwarmNode):
+                    node.charge_sample = True
         self._controller_scope = anyio.CancelScope()
         self._members_tg: TaskGroup | None = None
         self._runtime_tg: TaskGroup | None = None
@@ -490,18 +527,16 @@ class SwarmRun:
         return self._lookup(name)
 
     def start(
-        self, member: str | MemberHandle, input: str | list[ChatMessage] | None = None
+        self,
+        member: str | MemberHandle,
+        input: str | list[ChatMessage] | None = None,
+        *,
+        preamble: str | Literal[False] | None = None,
     ) -> None:
         m = self._lookup(member if isinstance(member, str) else member.name)
-        if self.stop_reason is not None:
-            raise _Stopping(
-                f"start({m.name!r}): the swarm is stopping ({self.stop_reason}), so no member can start."
-            )
-        if m.state != "pending":
-            raise RuntimeError(
-                f"start({m.name!r}): the member has already started, and a member runs once."
-            )
-        assert self._members_tg is not None and self._member_ctx is not None
+        call = f"start({m.name!r})"
+        # checked before anything changes, so a refused call leaves the member pending
+        _check_preamble(preamble, call)
         messages: list[ChatMessage] = (
             list(self._input)
             if input is None
@@ -509,7 +544,27 @@ class SwarmRun:
             if isinstance(input, str)
             else list(input)
         )
-        messages.append(ChatMessageUser(content=self._preambles[m.name]))
+        if preamble is False and not any(
+            isinstance(message, ChatMessageUser) for message in messages
+        ):
+            raise ValueError(
+                f"{call}: the input has no user message, and preamble=False adds none; pass an input with a user message, or a preamble."
+            )
+        if self.stop_reason is not None:
+            raise _Stopping(
+                f"{call}: the swarm is stopping ({self.stop_reason}), so no member can start."
+            )
+        if m.state != "pending":
+            raise RuntimeError(
+                f"{call}: the member has already started, and a member runs once."
+            )
+        assert self._members_tg is not None and self._member_ctx is not None
+        if preamble is not False:
+            messages.append(
+                ChatMessageUser(
+                    content=self._preambles[m.name] if preamble is None else preamble
+                )
+            )
         m.state = "running"
         m.started = anyio.current_time() - self._start
         self._settle()
@@ -603,7 +658,7 @@ class SwarmRun:
         escaping: BaseException | None = None
         started = False
         ended = False
-        bus_token: "contextvars.Token[Bus | None] | None" = None
+        bus_token: "contextvars.Token[SwarmBus | None] | None" = None
         budget_token: contextvars.Token[BudgetState | None] | None = None
         running: int | None = None
         try:
@@ -917,7 +972,14 @@ class SwarmRun:
     # together, in one synchronous step.
     def _idle(self, m: MemberRun) -> None:
         m.state = "idle"
-        self._queue.append(MemberIdle(m.name, len(m.answer_list) - 1, news=False))
+        self._queue.append(
+            MemberIdle(m.name, len(m.answer_list) - 1, news=self.bus.has_news(m.name))
+        )
+        self._notify()
+
+    # A delivered record that is news to an idle member, from the bus.
+    def _news(self, member: str, record: "Record") -> None:
+        self._queue.append(MemberNews(member, record.channel, record.id, record.sender))
         self._notify()
 
     # A persistent member's hold after its answer was refused: its ending begins, so
@@ -1064,6 +1126,19 @@ class SwarmRun:
     def _notify(self) -> None:
         self._changed.set()
         self._changed = anyio.Event()
+
+
+def _check_preamble(preamble: object, call: str) -> None:
+    if preamble is None or preamble is False:
+        return
+    if not isinstance(preamble, str):
+        raise TypeError(
+            f"{call}: preamble must be a string, False or None, not {type(preamble).__name__}."
+        )
+    if not preamble.strip():
+        raise ValueError(
+            f"{call}: preamble is empty or blank; pass preamble=False to leave the preamble out."
+        )
 
 
 # A wake's input as the messages to append: a string as one new user message, and each

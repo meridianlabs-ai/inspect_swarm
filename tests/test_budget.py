@@ -1,3 +1,4 @@
+import contextlib
 import gc
 import logging
 import math
@@ -19,6 +20,7 @@ from inspect_ai._util.registry import RegistryInfo, set_registry_info
 from inspect_ai.agent import Agent, AgentState, agent, run
 from inspect_ai.dataset import Sample
 from inspect_ai.event import ModelEvent, SampleLimitEvent, SwarmEvent, ToolEvent
+from inspect_ai.log import EvalSample
 from inspect_ai.log._samples import (
     _sample_active,  # pyright: ignore[reportPrivateUsage]
 )
@@ -70,6 +72,7 @@ from inspect_ai.util._limit import (
     record_model_cost,
     record_model_usage,
     record_turn,
+    sample_limits,
     suspend_token_limit,
 )
 from pydantic import ValidationError
@@ -102,7 +105,14 @@ from inspect_swarm._budget import (
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import Calls, SwarmLedger, sample_resumed
 
-from .swarm_runtime import Script, controller, generator, sample, scripted_model
+from .swarm_runtime import (
+    Script,
+    controller,
+    generator,
+    sample,
+    scripted_model,
+    sleeper,
+)
 
 TOKENS_PER_CALL = 50
 
@@ -260,26 +270,35 @@ async def test_pinned_turn_limit_pays_for_one_more_generation() -> None:
 
 
 @pytest.mark.anyio
-async def test_pinned_token_node_carries_cost_that_cost_node_misses() -> None:
+async def test_pinned_a_call_that_trips_a_token_limit_is_charged_to_the_cost_node() -> (
+    None
+):
+    # inspect_ai#6349: the cost tree is charged before the token check can raise
     model = _model(cost_per_call=10.0)
     with cost_limit(None) as cost_node, token_limit(10) as token_node:
         with pytest.raises(LimitExceededError) as raised:
             await model.generate("x")
     assert raised.value.source is token_node
     assert token_node._usage.total_cost == pytest.approx(10.0)
-    assert cost_node.usage == 0.0
+    assert cost_node.usage == pytest.approx(10.0)
 
 
 @pytest.mark.anyio
-async def test_pinned_child_token_exhaustion_bypasses_cost_limit() -> None:
+async def test_pinned_child_token_exhaustion_reaches_cost_limit_one_call_late() -> None:
+    # the child token limit still raises first for the call that crosses the cost
+    # limit, so the cost limit raises at the next call's pre-dispatch check
     outputs = _Outputs()
     model = _model(cost_per_call=10.0, outputs=outputs)
     with cost_limit(15) as cost_node:
-        for _ in range(3):
+        for _ in range(2):
             _, error = await run(_generate_once(model), "go", limits=[token_limit(10)])
             assert error is not None and error.type == "token"
-    assert outputs.calls == 3
-    assert cost_node.usage == 0.0
+        with pytest.raises(LimitExceededError) as raised:
+            await run(_generate_once(model), "go", limits=[token_limit(10)])
+    assert raised.value.source is cost_node
+    assert raised.value.type == "cost"
+    assert outputs.calls == 2
+    assert cost_node.usage == pytest.approx(20.0)
 
 
 @agent
@@ -439,6 +458,7 @@ def test_budget_rejects_token_limit_objects() -> None:
         Budget(cost=10.0, tokens="output:1m", time=60.0, reserve=0.0, grace=0.0),
         Budget(tokens=500, split="equal"),
         Budget(cost=10.0, split=(1, 2)),
+        Budget(derive=False),
     ],
 )
 def test_budget_accepts_valid_fields(budget: Budget) -> None:
@@ -532,6 +552,16 @@ def _sample(
             Budget(cost=3.0, tokens="output:500", time=10.0),
             Caps(cost=3.0, tokens=500, token_type="output", time=10.0),
         ),
+        (
+            {"cost": 10.0, "tokens": 1000, "time": 600.0},
+            Budget(derive=False),
+            Caps(cost=None, tokens=None, token_type="all", time=None),
+        ),
+        (
+            {"cost": 10.0, "tokens": 1000, "time": 600.0},
+            Budget(cost=3.0, derive=False),
+            Caps(cost=3.0, tokens=None, token_type="all", time=None),
+        ),
     ],
 )
 async def test_derive_caps(
@@ -602,6 +632,18 @@ async def test_derive_caps_checks_weight_count_against_roster() -> None:
         derive_caps(Budget(split=(1, 2)), member_count=2)
         with pytest.raises(ValueError, match="2 weights but the swarm has 3 members"):
             derive_caps(Budget(split=(1, 2)), member_count=3)
+
+
+@pytest.mark.anyio
+async def test_a_split_with_no_caps_to_derive_is_refused() -> None:
+    budget = Budget(split="equal", derive=False)
+    with _sample(cost=10.0, tokens=1000):
+        caps = derive_caps(budget, member_count=2)
+    # the sample's limits cannot give the swarm caps, so the remedy names the Budget's
+    with pytest.raises(
+        ValueError, match=r"neither\. Set Budget\.cost or Budget\.tokens, or use"
+    ):
+        share_nodes(budget, caps, ["a", "b"])
 
 
 def test_check_cost_data() -> None:
@@ -1337,6 +1379,359 @@ def _swarm_solver(agent_swarm: Agent) -> Solver:
         return state
 
     return solve
+
+
+@solver
+def _mark_ran() -> Solver:
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        state.store.set("budget_test:after_swarm", True)
+        return state
+
+    return solve
+
+
+def _swarm_then_mark(
+    tmp_path: Path,
+    budget: Budget,
+    cost: float = 1.0,
+    member_limits: Sequence[Limit] = (),
+    calls: int | None = None,
+    **limits: Any,
+) -> EvalSample:
+    # a member that generates `calls` calls of `cost` dollars (None: until stopped),
+    # then a solver that marks that it ran
+    model = scripted_model(cost=cost)
+    agent_swarm = swarm(
+        member(generator(model, calls=calls), limits=list(member_limits)),
+        channels=[],
+        budget=budget,
+    )
+    return _eval_then_mark(tmp_path, agent_swarm, model, **limits)
+
+
+def _eval_then_mark(
+    tmp_path: Path, agent_swarm: Agent, model: Model, **limits: Any
+) -> EvalSample:
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="task")],
+            solver=[_swarm_solver(agent_swarm), _mark_ran()],
+            **limits,
+        ),
+        model=model,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success" and log.samples is not None
+    return log.samples[0]
+
+
+@pytest.mark.parametrize(
+    "limits, kind",
+    [
+        pytest.param({"cost_limit": 10.5}, "cost", id="cost"),
+        pytest.param({"token_limit": 10 * TOKENS_PER_CALL + 25}, "token", id="token"),
+    ],
+)
+def test_without_derived_caps_the_sample_limit_ends_the_swarm(
+    tmp_path: Path, limits: dict[str, Any], kind: str
+) -> None:
+    gc.collect()
+    sample = _swarm_then_mark(tmp_path, Budget(derive=False), **limits)
+    assert sample.limit is not None and sample.limit.type == kind
+    assert "budget_test:after_swarm" not in sample.store
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert ledger.caps == {"cost": None, "tokens": None, "time": None}
+    # the sample's limit error ended the member, not a swarm cap
+    assert ledger.stop_reason != "swarm_cap"
+    assert [m.status for m in ledger.members] == ["errored"]
+    assert ledger.calls == Calls(calls=11)
+
+
+@pytest.mark.parametrize(
+    "cost, member_limit, calls, sample_raises, status, made",
+    [
+        # one call reaches the member's limit and the sample's at once
+        pytest.param(2.0, 1.0, None, True, "errored", 1, id="lower"),
+        # one call reaches both exactly; the next call is refused by both
+        pytest.param(1.5, 1.5, None, True, "errored", 1, id="equal-then-retry"),
+        pytest.param(1.5, 2.0, None, True, "errored", 1, id="higher"),
+        pytest.param(1.5, 1.5, 1, False, "submitted", 1, id="equal-no-retry"),
+    ],
+)
+def test_a_member_cost_limit_leaves_the_sample_cost_limit_to_raise(
+    tmp_path: Path,
+    cost: float,
+    member_limit: float,
+    calls: int | None,
+    sample_raises: bool,
+    status: str,
+    made: int,
+) -> None:
+    # under a $1.50 sample cost limit, as in Inspect: the sample is charged and its
+    # limit, checked root first, raises ahead of the member's own
+    gc.collect()
+    sample = _swarm_then_mark(
+        tmp_path,
+        Budget(derive=False),
+        cost=cost,
+        member_limits=[cost_limit(member_limit)],
+        calls=calls,
+        cost_limit=1.5,
+    )
+    if sample_raises:
+        assert sample.limit is not None and sample.limit.type == "cost"
+        assert "budget_test:after_swarm" not in sample.store
+    else:
+        assert sample.limit is None
+        assert sample.store["budget_test:after_swarm"] is True
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert [m.status for m in ledger.members] == [status]
+    assert ledger.calls == Calls(calls=made)
+
+
+def test_a_member_cost_limit_charges_the_sample_once(tmp_path: Path) -> None:
+    # a $2 call reaches the member's $1 limit but not the $3 sample limit: the
+    # member ends on its own limit and the sample is charged $2, not $4
+    gc.collect()
+    sample = _swarm_then_mark(
+        tmp_path,
+        Budget(derive=False),
+        cost=2.0,
+        member_limits=[cost_limit(1.0)],
+        calls=None,
+        cost_limit=3.0,
+    )
+    assert sample.limit is None
+    assert sample.store["budget_test:after_swarm"] is True
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert [m.status for m in ledger.members] == ["member_limit:cost"]
+    assert ledger.calls == Calls(calls=1)
+
+
+@agent
+def _paused(model: Model, name: str) -> Agent:
+    # two calls, with a pause between them that the test named `name` controls
+    async def execute(state: AgentState) -> AgentState:
+        paused, resume = _PAUSES[name]
+        state.output = await model.generate(state.messages)
+        paused.set()
+        await resume.wait()
+        state.output = await model.generate(state.messages)
+        return state
+
+    return execute
+
+
+_PAUSES: dict[str, tuple[anyio.Event, anyio.Event]] = {}
+
+
+def test_without_derived_caps_a_stop_between_calls_leaves_the_sample_cost_limit_to_raise(
+    tmp_path: Path,
+) -> None:
+    # a $1.50 call reaches the $1.50 sample limit exactly; the member is then ended,
+    # and its next call is refused by the sample's limit before its closed lever
+    gc.collect()
+    model = scripted_model(cost=1.5)
+    name = "budget_test_stop_between_calls"
+
+    async def run(control: SwarmControl) -> StopReason:
+        paused, resume = _PAUSES[name] = (anyio.Event(), anyio.Event())
+        handle = control.members[0]
+        control.start(handle)
+        await paused.wait()
+        handle.end(origin="test")
+        resume.set()
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    agent_swarm = swarm(
+        _paused(model, name),
+        controller=controller(run, name),
+        channels=[],
+        budget=Budget(derive=False),
+    )
+    sample = _eval_then_mark(tmp_path, agent_swarm, model, cost_limit=1.5)
+    assert sample.limit is not None and sample.limit.type == "cost"
+    assert "budget_test:after_swarm" not in sample.store
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert ledger.calls == Calls(calls=1)
+
+
+def test_with_derived_caps_a_call_reaching_the_cap_and_the_sample_limit_stops_the_swarm(
+    tmp_path: Path,
+) -> None:
+    # the default budget is unchanged: the cap, at $1.425, stops the swarm normally;
+    # Inspect charges the call to the sample's cost limit but does not check it,
+    # because the cap raises first
+    gc.collect()
+    sample = _swarm_then_mark(tmp_path, Budget(), cost=2.0, cost_limit=1.5)
+    assert sample.limit is None
+    assert sample.store["budget_test:after_swarm"] is True
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert ledger.stop_reason == "swarm_cap"
+    assert [m.status for m in ledger.members] == ["swarm_cap"]
+
+
+@solver
+def _generate_after_swarm(model: Model) -> Solver:
+    # records the sample cost limit's usage, then makes the solver's next call
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        state.store.set("budget_test:sample_cost_usage", sample_limits().cost.usage)
+        state.output = await model.generate(state.messages)
+        state.store.set("budget_test:after_swarm", True)
+        return state
+
+    return solve
+
+
+def test_with_derived_caps_the_call_reaching_the_cap_refuses_the_next_sample_call(
+    tmp_path: Path,
+) -> None:
+    # the $2 call that reaches the $1.425 cap is charged to the $1.50 sample cost
+    # limit without being checked against it, so the solver's next call is refused
+    # by the sample's limit before it reaches the provider
+    gc.collect()
+    script = Script()
+    model = scripted_model(script, cost=2.0)
+    agent_swarm = swarm(member(generator(model, calls=None)), channels=[])
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="task")],
+            solver=[_swarm_solver(agent_swarm), _generate_after_swarm(model)],
+            cost_limit=1.5,
+        ),
+        model=model,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success" and log.samples is not None
+    sample = log.samples[0]
+    assert sample.store["budget_test:sample_cost_usage"] == pytest.approx(2.0)
+    assert sample.limit is not None and sample.limit.type == "cost"
+    assert "budget_test:after_swarm" not in sample.store
+    assert script.started == 1
+
+
+@agent
+def _consuming(model: Model) -> Agent:
+    # a member whose one call's limit error is consumed, as a tool consumes it
+    async def execute(state: AgentState) -> AgentState:
+        with contextlib.suppress(LimitExceededError):
+            await model.generate(state.messages)
+        return state
+
+    return execute
+
+
+def test_without_derived_caps_an_explicit_cap_reached_with_the_sample_limit_stops_the_swarm(
+    tmp_path: Path,
+) -> None:
+    # one $2 call reaches the $1 cap and the $1.50 sample limit: the sample's error
+    # comes first, and is consumed, but the cap still stops the swarm and so its
+    # waiting peer
+    gc.collect()
+    model = scripted_model(cost=2.0)
+    agent_swarm = swarm(
+        [member(_consuming(model), name="spender"), member(sleeper(5), name="waiter")],
+        channels=[],
+        budget=Budget(cost=1.0, derive=False, grace=0),
+    )
+    sample = _eval_then_mark(tmp_path, agent_swarm, model, cost_limit=1.5)
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert ledger.stop_reason == "swarm_cap"
+    statuses = {m.name: m.status for m in ledger.members}
+    assert statuses == {"spender": "submitted", "waiter": "cancelled"}
+
+
+def test_without_derived_caps_a_call_completing_after_a_stop_is_charged_to_the_sample(
+    tmp_path: Path,
+) -> None:
+    # the member is ended while its $2 call is in flight: the call is charged to the
+    # sample's $1.50 cost limit, whose error escapes, so the next solver does not run
+    gc.collect()
+    script = Script(gate=anyio.Event())
+    model = scripted_model(script, cost=2.0)
+
+    async def run(control: SwarmControl) -> StopReason:
+        handle = control.members[0]
+        control.start(handle)
+        while script.started < 1:
+            await anyio.sleep(0)
+        handle.end(origin="test")
+        assert script.gate is not None
+        script.gate.set()
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    agent_swarm = swarm(
+        generator(model),
+        controller=controller(run, "budget_test_stop_in_flight"),
+        channels=[],
+        budget=Budget(derive=False),
+    )
+    sample = _eval_then_mark(tmp_path, agent_swarm, model, cost_limit=1.5)
+    assert sample.limit is not None and sample.limit.type == "cost"
+    assert "budget_test:after_swarm" not in sample.store
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert ledger.calls == Calls(calls=1)
+
+
+@agent
+def _nested(inner: Agent) -> Agent:
+    # a member that runs a swarm of its own
+    async def execute(state: AgentState) -> AgentState:
+        await run(inner, "inner task")
+        return state
+
+    return execute
+
+
+@pytest.mark.parametrize(
+    "inner_derive", [True, False], ids=["inner-derive", "inner-no"]
+)
+@pytest.mark.parametrize(
+    "outer_derive", [True, False], ids=["outer-derive", "outer-no"]
+)
+def test_the_swarm_that_owns_a_node_decides_whether_it_charges_the_sample(
+    tmp_path: Path, outer_derive: bool, inner_derive: bool
+) -> None:
+    # a $2 call inside a nested swarm, under the outer member's $1 cost limit and a
+    # $1.50 sample cost limit: the outer budget alone decides the outcome
+    gc.collect()
+    model = scripted_model(cost=2.0)
+    inner = swarm(generator(model), channels=[], budget=Budget(derive=inner_derive))
+    outer = swarm(
+        member(_nested(inner), name="outer", limits=[cost_limit(1.0)]),
+        channels=[],
+        budget=Budget(derive=outer_derive),
+    )
+    sample = _eval_then_mark(tmp_path, outer, model, cost_limit=1.5)
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    if outer_derive:
+        # the outer cap, derived at $1.425, stops the outer swarm normally
+        assert sample.limit is None
+        assert sample.store["budget_test:after_swarm"] is True
+        assert ledger.stop_reason == "swarm_cap"
+    else:
+        # the outer member's limit charges the sample, whose error escapes
+        assert sample.limit is not None and sample.limit.type == "cost"
+        assert "budget_test:after_swarm" not in sample.store
+
+
+def test_an_explicit_cap_without_derived_caps_stops_the_swarm(
+    tmp_path: Path,
+) -> None:
+    gc.collect()
+    sample = _swarm_then_mark(tmp_path, Budget(cost=3.0, derive=False), cost_limit=10.5)
+    assert sample.limit is None
+    assert sample.store["budget_test:after_swarm"] is True
+    ledger = SwarmLedger.model_validate(sample.store[LEDGER_KEY])
+    assert ledger.caps == {"cost": 3.0, "tokens": None, "time": None}
+    assert ledger.stop_reason == "swarm_cap"
+    assert [m.status for m in ledger.members] == ["swarm_cap"]
 
 
 @pytest.mark.parametrize(

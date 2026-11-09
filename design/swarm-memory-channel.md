@@ -213,7 +213,7 @@ Why a delta payload and not the whole resulting file: the evidence stays proport
 
    In M2 there is no bus hook, so nothing can have changed since the tool ran and admission repeats the tool's checks; once the hook's `await` exists, admission catches every write that landed during it. A refusal rejects the write with a `ToolError` naming the check, and step 3's `sent` event records it.
 5. **Step 3.** `sent` evidence with the record.
-6. **Step 4.** `apply()` installs the result admission computed (it cannot fail), gives the write the run's next commit sequence number, updates `seen` for the writing loop, writes `delivered` with that number and the applied `files`, and returns, as `delivered.notify`, every running member to whose bound top loop the new version is news ([The status line](#the-status-line)). The test is the writing loop, not the writing member: a member's own top-loop writes are never news to it, but a write by one of its children is, so the parent is listed for its child's writes and deletions as for peers'.
+6. **Step 4.** `apply()` installs the result admission computed (it cannot fail), gives the write the run's next commit sequence number, updates `seen` for the writing loop, writes `delivered` with that number and the applied `files`, and returns, as `delivered.notify`, every running or idle member to whose bound top loop the new version is news ([The status line](#the-status-line)). The test is the writing loop, not the writing member: a member's own top-loop writes are never news to it, but a write by one of its children is, so the parent is listed for its child's writes and deletions as for peers'.
 
 The tool then returns its content-free acknowledgment ([The tool](#the-tool)) and the status line.
 

@@ -11,7 +11,7 @@ from .._channel.messages import builtin_messages
 from .._channel.messages import declarations as messages_declarations
 from .._channel.shared_memory import builtin_board
 from .._channel.shared_memory import declarations as board_declarations
-from ._bus import Bus, current_bus
+from ._bus import SwarmBus, current_bus
 from ._record import current_via
 from ._wait import wait_tool
 
@@ -144,7 +144,7 @@ async def _call(tool: Callable[..., Any], arguments: dict[str, Any]) -> str:
 
 
 # the run's bus, for a call of a bridged tool given with `channels`
-def _bus(tool: str, channels: Sequence[str]) -> Bus:
+def _bus(tool: str, channels: Sequence[str]) -> SwarmBus:
     bus = current_bus.get()
     context = bus.member() if bus is not None else None
     if bus is None or context is None:
@@ -166,7 +166,7 @@ def _bus(tool: str, channels: Sequence[str]) -> Bus:
 
 # the name of the run's state of a built-in channel, by its state's type, which a
 # custom channel cannot take; None when the swarm does not have it
-def _state(bus: Bus, channel: str) -> str | None:
+def _state(bus: SwarmBus, channel: str) -> str | None:
     if channel == "shared_memory":
         return builtin_board(bus.states)
     return builtin_messages(bus.states)

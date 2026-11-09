@@ -37,14 +37,17 @@ from inspect_ai.util import time_limit
 from inspect_swarm import (
     Boundary,
     Budget,
+    ControlEvent,
     Controller,
     Member,
     MemberEnded,
     MemberIdle,
+    MemberNews,
     StopReason,
     SwarmControl,
     leaderless,
     member,
+    messages,
     shared_memory,
     swarm,
     swarm_controller,
@@ -359,35 +362,38 @@ async def test_a_wake_once_the_swarm_is_stopping_ends_the_controller_with_the_st
 @pytest.mark.anyio
 async def test_idle_and_member_idle_are_published_together() -> None:
     script = _Recording([_submit("one"), _submit("two")])
-    checks: list[bool] = []
+    published: list[tuple[bool, str, bool]] = []
+    yielded: list[Any] = []
 
     async def run(control: SwarmControl) -> StopReason:
         runtime = cast(SwarmRun, control)
-        yielded: list[Any] = []
-        done = anyio.Event()
+        a = runtime._lookup("a")  # pyright: ignore[reportPrivateUsage]
+        publish_idle = a.gate.publish_idle
 
-        async def poll() -> None:
-            while not done.is_set():
-                if control.member("a").state == "idle":
-                    answer = control.member("a").answers - 1
-                    checks.append(
-                        MemberIdle("a", answer, False) in [*runtime._queue, *yielded]  # pyright: ignore[reportPrivateUsage]
-                    )
-                await anyio.lowlevel.checkpoint()
+        def holds() -> bool:
+            # an idle member's event is already published
+            seen = [*runtime._queue, *yielded]  # pyright: ignore[reportPrivateUsage]
+            return a.state != "idle" or MemberIdle("a", a.answers - 1, False) in seen
 
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(poll)
-            control.start("a")
-            async with aclosing(control.events()) as events:
-                async for event in events:
-                    yielded.append(event)
-                    if isinstance(event, MemberIdle) and event.answer == 0:
-                        control.wake("a", "again")
-            done.set()
+        # checked as the gate's publication starts and as soon as it returns, before
+        # the member awaits again, so no other task can have run in between
+        def checked() -> None:
+            before = holds()
+            publish_idle()
+            published.append((before, a.state, holds()))
+
+        a.gate.publish_idle = checked
+        control.start("a")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                yielded.append(event)
+                if isinstance(event, MemberIdle) and event.answer == 0:
+                    control.wake("a", "again")
         return "quiescence"
 
     await _run([member(_react(script), name="a", persistent=True)], run)
-    assert checks and all(checks)
+    assert published == [(True, "idle", True), (True, "idle", True)]
+    assert yielded == [MemberIdle("a", 0, False), MemberIdle("a", 1, False)]
 
 
 @pytest.mark.anyio
@@ -1462,3 +1468,202 @@ async def test_an_ending_member_refuses_addressed_records_and_an_idle_one_takes_
     assert resolve("a", ["idle"], members) == ("idle",)
     with pytest.raises(ToolError, match="ending is ending"):
         resolve("a", ["ending"], members)
+
+
+# ---------------------------------------------------------------------------
+# News for idle members
+
+
+def _write(path: str = "/shared_memory/task.md", text: str = "do it") -> ModelOutput:
+    return _call("shared_memory", command="create", path=path, file_text=text)
+
+
+def _view(path: str = "/shared_memory/task.md") -> ModelOutput:
+    return _call("shared_memory", command="view", path=path)
+
+
+def _send(to: str, wake: bool = True) -> ModelOutput:
+    return _call("send_message", to=to, message=f"hi {to}, wake={wake}", wake=wake)
+
+
+def _lead_after_idle(
+    seen: list[ControlEvent], workers: list[str], lead: str = "lead"
+) -> Run:
+    # starts the workers, and the lead once every worker is idle; records every event,
+    # waking no one
+    async def run(control: SwarmControl) -> StopReason:
+        for name in workers:
+            control.start(name)
+        idle: set[str] = set()
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                seen.append(event)
+                if isinstance(event, MemberIdle):
+                    idle.add(event.member)
+                    if idle == set(workers):
+                        control.start(lead)
+        return "quiescence"
+
+    return run
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("tools", [True, False])
+async def test_a_write_while_a_worker_is_idle_is_news_to_it(tools: bool) -> None:
+    # the worker's own write is not news to it; the lead's later write is, unless the
+    # worker never resolved swarm_tools() and so cannot read the board
+    worker = (
+        _react(
+            _Recording([_write("/shared_memory/own.md"), _submit("one")]),
+            tools=[swarm_tools()],
+        )
+        if tools
+        else _react(_Recording([_submit("one")]))
+    )
+    lead = _react(_Recording([_write(), _submit("lead's")]), tools=[swarm_tools()])
+    seen: list[ControlEvent] = []
+    ran = await _run(
+        [
+            member(worker, name="worker", persistent=True),
+            member(lead, name="lead"),
+        ],
+        _lead_after_idle(seen, ["worker"]),
+        channels=[shared_memory()],
+    )
+    delivered = [
+        e
+        for e in ran.events
+        if isinstance(e, CommunicationEvent) and e.kind == "delivered"
+    ]
+    lead_write = delivered[-1]
+    assert lead_write.agent == "lead"
+    news = (
+        [MemberNews("worker", "shared_memory", lead_write.record_ids[0], "lead")]
+        if tools
+        else []
+    )
+    assert seen == [
+        MemberIdle("worker", 0, False),
+        *news,
+        MemberEnded("lead", "submitted", True),
+    ]
+    # the idle worker's own loop sees the record when it is woken, if it has one
+    assert lead_write.data["notify"] == (["worker"] if tools else [])
+
+
+@pytest.mark.anyio
+async def test_only_a_waking_record_to_an_idle_members_own_loop_is_news() -> None:
+    # a message with wake=False, and one to another member, are not news to "a"
+    workers = ["a", "b"]
+    lead = _react(
+        _Recording([_send("a", wake=False), _send("b"), _send("a"), _submit("lead's")]),
+        tools=[swarm_tools()],
+    )
+    seen: list[ControlEvent] = []
+    await _run(
+        [
+            *(
+                member(
+                    _react(_Recording([_submit("one")]), tools=[swarm_tools()]),
+                    name=name,
+                    persistent=True,
+                )
+                for name in workers
+            ),
+            member(lead, name="lead"),
+        ],
+        _lead_after_idle(seen, workers),
+        channels=[messages()],
+    )
+    news = [e for e in seen if isinstance(e, MemberNews)]
+    assert news == [
+        MemberNews("b", "messages", "m-2", "lead"),
+        MemberNews("a", "messages", "m-3", "lead"),
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("viewed", [True, False])
+async def test_member_idle_says_whether_its_own_loop_has_unviewed_news(
+    viewed: bool,
+) -> None:
+    # the lead writes before the worker starts; the worker answers with or without
+    # viewing the file
+    lead = _react(_Recording([_write(), _submit("lead's")]), tools=[swarm_tools()])
+    worker = _react(
+        _Recording([_view(), _submit("one")] if viewed else [_submit("one")]),
+        tools=[swarm_tools()],
+    )
+    seen: list[ControlEvent] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("lead")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                seen.append(event)
+                if isinstance(event, MemberEnded):
+                    control.start("worker")
+        return "quiescence"
+
+    await _run(
+        [member(lead, name="lead"), member(worker, name="worker", persistent=True)],
+        run,
+        channels=[shared_memory()],
+    )
+    assert seen == [
+        MemberEnded("lead", "submitted", True),
+        MemberIdle("worker", 0, not viewed),
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reader", ["own_loop", "subagent"])
+async def test_a_view_clears_news_only_for_the_loop_that_viewed(reader: str) -> None:
+    # three activations: an answer before the lead's write, one after a wake on its
+    # news in which `reader` views the file, and one more
+    viewing = (
+        [_view(), _submit("two")]
+        if reader == "own_loop"
+        else [_call("agent", prompt="look"), _submit("two")]
+    )
+    worker = deepagent(
+        model=scripted_model(_Recording([_submit("one"), *viewing, _submit("three")])),
+        tools=[swarm_tools()],
+        subagents=[
+            research(
+                extra_tools=[swarm_tools()],
+                model=scripted_model(_Recording([_view(), _submit("seen")])),
+            )
+        ],
+        memory=False,
+        todo_write=False,
+    )
+    lead = _react(_Recording([_write(), _submit("lead's")]), tools=[swarm_tools()])
+    seen: list[ControlEvent] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("worker")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                seen.append(event)
+                if isinstance(event, MemberIdle) and event.answer == 0:
+                    control.start("lead")
+                elif isinstance(event, MemberNews):
+                    control.wake(event.member, "look at the board")
+                elif isinstance(event, MemberIdle) and event.answer == 1:
+                    control.wake(event.member, "again")
+        return "quiescence"
+
+    await _run(
+        [member(worker, name="worker", persistent=True), member(lead, name="lead")],
+        run,
+        channels=[shared_memory()],
+    )
+    # the subagent's view clears only its own loop's news
+    still = reader == "subagent"
+    assert [e for e in seen if not isinstance(e, MemberEnded)] == [
+        MemberIdle("worker", 0, False),
+        MemberNews("worker", "shared_memory", "w-1", "lead"),
+        MemberIdle("worker", 1, still),
+        MemberIdle("worker", 2, still),
+    ]

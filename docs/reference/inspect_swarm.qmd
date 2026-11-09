@@ -19,6 +19,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### BoundaryCallback
 ### MemberEnded
 ### MemberIdle
+### MemberNews
 ### ControlEvent
 ### MemberInfo
 ### MemberState
@@ -39,6 +40,11 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### WaitingState
 ### WaitSpec
 ### WaitNews
+### Bus
+### calling_member
+### Caller
+### Draft
+### Delivery
 ### Record
 
 ## Results

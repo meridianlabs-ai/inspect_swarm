@@ -458,7 +458,7 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 - Bridged swarms: Codex multi-agent v2 and Claude Code agent teams in inspect_swe, with their traffic mapped to swarm evidence.
 - Safety hooks: roles as data, per-member prompt, model and tool overrides, joint-monitor helpers on inspect_sentinel, a scheduled execution mode.
 - The bus hook for bridged bus tools and internal records, as a sentinel adapter or on inspect_ai's `SentinelAction` names (swarm-communication.md's open question 1).
-- The evidence event types, `CommunicationEvent` and `SwarmEvent`: an inspect_ai PR, a ts-mono PR and the inspect_swarm switch, in that order ([swarm-event-types.md](swarm-event-types.md#implementation-plan); decision: Ransom, 2026-10-27).
+- The evidence event types, `CommunicationEvent` and `SwarmEvent`: an inspect_ai PR, a ts-mono PR and the inspect_swarm switch, in that order ([swarm-event-types.md](swarm-event-types.md); decision: Ransom, 2026-10-27).
 - ORBIT on inspect_swarm ([swarm-orbit.md](swarm-orbit.md)), including how read results name their records for ORBIT's exposure observer ([swarm-orbit.md P2](swarm-orbit.md#p2-bus-extensions)).
 - Red-team features: forged senders, secret channels, targeted injection.
 - Inspect Scout scanners for coordination failures.

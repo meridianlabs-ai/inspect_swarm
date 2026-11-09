@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import anyio
 import pytest
 from inspect_ai import eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.log import EvalSample
 from inspect_ai.model import (
     ChatMessage,
     ChatMessageAssistant,
+    ChatMessageTool,
     GenerateConfig,
     Model,
     ModelCost,
@@ -20,7 +22,7 @@ from inspect_ai.model import (
     get_model,
     set_model_info,
 )
-from inspect_ai.tool import ToolChoice, ToolInfo
+from inspect_ai.tool import ToolCall, ToolChoice, ToolInfo
 
 from inspect_swarm import swarm_result
 from inspect_swarm._evidence import METRICS_KEY
@@ -36,8 +38,10 @@ Policy = Callable[[str, list[ChatMessage]], ModelOutput]
 _NAME = re.compile(r"You are ([a-z][a-z0-9_-]*), (?:one of|the only)")
 
 
-def _model(policy: Policy, cost: float | None = None) -> Model:
-    """A mockllm model that answers each member's calls with `policy`."""
+def _model(
+    policy: Policy, cost: float | None = None, delays: dict[str, float] | None = None
+) -> Model:
+    """A mockllm model that answers each member's calls with `policy`, each call of a member in `delays` taking that many seconds."""
     name = f"mockllm/examples-{uuid4().hex}"
     if cost is not None:
         set_model_info(
@@ -49,7 +53,7 @@ def _model(policy: Policy, cost: float | None = None) -> Model:
             ),
         )
 
-    def outputs(
+    async def outputs(
         input: list[ChatMessage],
         tools: list[ToolInfo],
         tool_choice: ToolChoice,
@@ -59,6 +63,7 @@ def _model(policy: Policy, cost: float | None = None) -> Model:
             (m for msg in input if (m := _NAME.search(msg.text)) is not None), None
         )
         assert match is not None, "a member's input has its preamble"
+        await anyio.sleep((delays or {}).get(match.group(1), 0))
         return policy(match.group(1), input)
 
     return get_model(name, memoize=False, custom_outputs=outputs)
@@ -196,6 +201,183 @@ def test_budget_sweep(tmp_path: Path) -> None:
         assert ledger.budget.split == "equal"
         assert ledger.caps["cost"] == pytest.approx(1.9)
         assert [m.name for m in ledger.members] == ["react-1", "react-2"]
+
+
+_TASK = re.compile(r"(worker-\d+): (\d+): count the primes from (\d+) to (\d+)")
+_RESULT = re.compile(r"(worker-\d+): (\d+): (\d+)")
+_TASKS_FILE = 'path="/shared_memory/tasks.md"'
+_RESULTS_FILE = 'path="/shared_memory/results.md"'
+
+
+def _primes(first: int, last: int) -> int:
+    return sum(
+        n > 1 and all(n % d for d in range(2, int(n**0.5) + 1))
+        for n in range(first, last + 1)
+    )
+
+
+def _last_call(messages: list[ChatMessage]) -> ToolCall | None:
+    # the call whose result ends the conversation, if a tool result ends it
+    if not isinstance(messages[-1], ChatMessageTool):
+        return None
+    assistant = next(
+        m for m in reversed(messages) if isinstance(m, ChatMessageAssistant)
+    )
+    assert assistant.tool_calls
+    return assistant.tool_calls[0]
+
+
+def _appended(messages: list[ChatMessage], path: str) -> str:
+    # the text the member appended to `path`, every append of the conversation
+    return "\n".join(
+        str(call.arguments["append_text"])
+        for m in messages
+        if isinstance(m, ChatMessageAssistant)
+        for call in m.tool_calls or []
+        if call.function == "shared_memory"
+        and call.arguments.get("command") == "append"
+        and call.arguments.get("path") == path
+    )
+
+
+def _viewed(messages: list[ChatMessage], fence: str) -> str:
+    # the latest view of the file whose fence names `fence`
+    return next(
+        (
+            m.text
+            for m in reversed(messages)
+            if isinstance(m, ChatMessageTool) and fence in m.text
+        ),
+        "",
+    )
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_lead_and_workers(k: int, tmp_path: Path) -> None:
+    workers = [f"worker-{i}" for i in range(1, k + 1)]
+    ranges = [
+        (1, 500),
+        (501, 1000),
+        (1001, 1500),
+        (1501, 2000),
+        (2001, 2500),
+        (2501, 2999),
+    ]
+
+    def lead(messages: list[ChatMessage]) -> ModelOutput:
+        tasks = _TASK.findall(_appended(messages, "/shared_memory/tasks.md"))
+        results = {
+            (w, int(n)): int(c)
+            for w, n, c in _RESULT.findall(_viewed(messages, _RESULTS_FILE))
+        }
+        call = _last_call(messages)
+        if call is not None and call.function == "swarm_wait":
+            return _call(
+                "shared_memory", command="view", path="/shared_memory/results.md"
+            )
+        if call is not None and call.arguments.get("command") == "append":
+            return _call("swarm_wait", path="/shared_memory/results.md")
+        if len(results) == len(ranges):
+            return _call("submit", answer=str(sum(results.values())))
+        # at the start and after each view of the results: each worker whose tasks
+        # are done gets the next range
+        given = {int(t[1]) for t in tasks}
+        free = [n for n in range(1, len(ranges) + 1) if n not in given]
+        lines: list[str] = []
+        # the workers its prompt names, so that a roster that differs leaves tasks
+        # nobody does
+        named = re.search(r"You lead these workers: (.*)\. ", messages[0].text)
+        assert named is not None
+        for worker in named.group(1).split(", "):
+            mine = [int(t[1]) for t in tasks if t[0] == worker]
+            if free and all((worker, n) in results for n in mine):
+                n = free.pop(0)
+                first, last = ranges[n - 1]
+                lines.append(f"{worker}: {n}: count the primes from {first} to {last}")
+        if not lines:
+            return _call("swarm_wait", path="/shared_memory/results.md")
+        return _call(
+            "shared_memory",
+            command="append",
+            path="/shared_memory/tasks.md",
+            append_text="\n".join(lines),
+        )
+
+    def worker(name: str, messages: list[ChatMessage]) -> ModelOutput:
+        # the worker protocol: do every task for it, then view whatever the status
+        # line names before it submits
+        call = _last_call(messages)
+        if call is None:
+            return _call(
+                "shared_memory", command="view", path="/shared_memory/tasks.md"
+            )
+        done = {
+            int(n)
+            for w, n, _ in _RESULT.findall(
+                _appended(messages, "/shared_memory/results.md")
+            )
+            if w == name
+        }
+        pending = [
+            t
+            for t in _TASK.findall(_viewed(messages, _TASKS_FILE))
+            if t[0] == name and int(t[1]) not in done
+        ]
+        if pending:
+            _, n, first, last = pending[0]
+            return _call(
+                "shared_memory",
+                command="append",
+                path="/shared_memory/results.md",
+                append_text=f"{name}: {n}: {_primes(int(first), int(last))}",
+            )
+        if call.arguments.get("command") == "changes":
+            changed = re.findall(r"f-\d+", messages[-1].text)
+            if changed:
+                return _call("shared_memory", command="view", file_id=changed[0])
+            return _call("submit", answer="done")
+        return _call("shared_memory", command="changes")
+
+    def policy(name: str, messages: list[ChatMessage]) -> ModelOutput:
+        return lead(messages) if name == "lead" else worker(name, messages)
+
+    # the lead's turns are slow, so each worker has answered and is idle when the lead
+    # gives it its next task
+    [sample] = _run(
+        "lead_and_workers.py@lead_and_workers_count",
+        _model(policy, delays={"lead": 0.2}),
+        tmp_path,
+        k=k,
+    )
+    assert sample.scores is not None
+    assert [s.value for s in sample.scores.values()] == ["C"]
+    record = _record(sample)
+    assert (record.final.mode, record.final.member) == ("controller", "lead")
+    ledger = swarm_ledger(sample)
+    assert ledger is not None and ledger.stop_reason == "submitted"
+    metrics = {
+        m.name: m
+        for m in SwarmMetrics.model_validate(sample.store[METRICS_KEY]).members
+    }
+    # the lead's appends to the task list
+    writes = metrics["lead"].comm["shared_memory"].records
+    # the lead's prompt names the roster's workers
+    assert [m.name for m in record.members] == ["lead", *workers]
+    for name in workers:
+        # the controller woke the worker for the lead's writes, never again for a
+        # write it had already read
+        assert 3 <= metrics[name].activations <= writes + 1
+        assert metrics[name].answers == metrics[name].activations
+
+
+def test_lead_and_workers_needs_a_worker(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="k must be at least 1"):
+        _run(
+            "lead_and_workers.py@lead_and_workers_count",
+            _model(_answers),
+            tmp_path,
+            k=0,
+        )
 
 
 @pytest.mark.slow

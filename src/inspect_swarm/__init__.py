@@ -5,7 +5,8 @@ Everything in this package is experimental and may change in any release without
 
 from ._budget import Budget, BudgetUsage, SwarmBudget, swarm_budget
 from ._bus._bridged import swarm_bridged_tools
-from ._bus._record import Record
+from ._bus._bus import Bus, Caller, Delivery, calling_member
+from ._bus._record import Draft, Record
 from ._bus._tools import swarm_tools
 from ._channel._channel import (
     Channel,
@@ -24,6 +25,7 @@ from ._controller._control import (
     MemberEnded,
     MemberHandle,
     MemberIdle,
+    MemberNews,
     MemberState,
     SwarmControl,
 )
@@ -52,11 +54,15 @@ __all__ = [
     "BoundaryCallback",
     "Budget",
     "BudgetUsage",
+    "Bus",
+    "Caller",
     "Channel",
     "ChannelRun",
     "ChannelState",
     "ControlEvent",
     "Controller",
+    "Delivery",
+    "Draft",
     "FinalName",
     "FinalRecord",
     "Member",
@@ -64,6 +70,7 @@ __all__ = [
     "MemberHandle",
     "MemberIdle",
     "MemberInfo",
+    "MemberNews",
     "MemberResult",
     "MemberState",
     "Record",
@@ -75,6 +82,7 @@ __all__ = [
     "WaitSpec",
     "WaitingState",
     "__version__",
+    "calling_member",
     "filesystem",
     "leaderless",
     "member",

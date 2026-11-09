@@ -1,7 +1,7 @@
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from inspect_ai.tool import Tool, ToolDef, ToolError
 from inspect_ai.util._span import current_agent_span_id
@@ -22,6 +22,9 @@ from ._channel import (
     swarm_channel,
 )
 from ._params import check_bound, check_rate
+
+if TYPE_CHECKING:
+    from .._bus._bus import SwarmBus
 
 CHANNEL = "shared_memory"
 ROOT = "/shared_memory"
@@ -295,7 +298,9 @@ class _Args:
 class _SharedMemoryState:
     def __init__(self, limits: _Limits, run: ChannelRun) -> None:
         self._limits = limits
-        self._bus = run.bus
+        # the run's own bus, whose members beyond the public `Bus` the built-in
+        # channels use
+        self._bus = cast("SwarmBus", run.bus)
         self._roster = [info.name for info in run.roster]
         # by id, tombstones included, in the order the files were created
         self._files: dict[str, _BoardFile] = {}
@@ -415,10 +420,15 @@ class _SharedMemoryState:
                 seen.setdefault(change.file, 0)
         self._applied[record.id] = changes
         written = [self._files[change.file] for change in changes]
+        # idle members too, when a loop of theirs binds swarm_tools(): their own loop
+        # sees the record when they are woken
         notify = [
             name
             for name in self._roster
-            if self._bus.running(name)
+            if (
+                self._bus.running(name)
+                or (self._bus.idle(name) and self._bus.idle_spec(name) is not None)
+            )
             and any(
                 f.loop != self._top_loop(name)
                 and self._is_news(self._top_loop(name), f)
