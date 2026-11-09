@@ -1,6 +1,6 @@
 import inspect
 from collections import Counter
-from collections.abc import Callable, Generator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from contextlib import AsyncExitStack, ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import Any, TypeVar, assert_never, cast, overload
@@ -499,7 +499,9 @@ class MemberOutcome:
 # own nodes a status, as does a sourceless custom limit error, which the agent raised
 # to stop itself. Anything else (a foreign error) is raised, without the swarm's
 # leaves, after `end` with `errored`; a cancellation from outside ends the member as
-# `cancelled`.
+# `cancelled`. Under users isolation, `reap` stops the processes the member left
+# running, before `end`: it never raises and is shielded from cancellation, so the
+# member's status and error stand.
 async def run_member(
     record: Member,
     name: str,
@@ -514,6 +516,7 @@ async def run_member(
     gate: MemberGate,
     end: Callable[[str, AgentState], None],
     identity: MemberIdentity | None = None,
+    reap: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     status = "cancelled"
     # holds the member's span open after its limits and cancel scope have exited, so
@@ -539,16 +542,20 @@ async def run_member(
             status = "errored"
             raise
         finally:
-            # the state the agent returned, kept through a drain that raised; else the
-            # loop's state at its last boundary
-            end(
-                status,
-                outcome.state
-                if outcome.state is not None
-                else gate.state
-                if gate.state is not None
-                else state,
-            )
+            try:
+                if reap is not None:
+                    await reap()
+            finally:
+                # the state the agent returned, kept through a drain that raised; else
+                # the loop's state at its last boundary
+                end(
+                    status,
+                    outcome.state
+                    if outcome.state is not None
+                    else gate.state
+                    if gate.state is not None
+                    else state,
+                )
 
 
 async def _run_member(

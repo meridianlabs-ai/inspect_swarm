@@ -126,6 +126,8 @@ A `read` is not by itself evidence that the reader saw another member's content:
 | `final` | the chosen member, or `None` | after the stop procedure, in the swarm's span | `span_id`, `mode`, `reason`, `stop_reason`, `answer` | [swarm-scoring.md](swarm-scoring.md) |
 | `result_record` | `None` | once, when the swarm ends, in its span | the `SwarmResultRecord` dump and its `id` | [swarm-result-record.md](swarm-result-record.md#the-event), [The result record](../docs/scoring.qmd#the-result-record) |
 | `ledger`, `metrics` | `None` | once, when the swarm ends, in its span | the model's dump, exactly the store entry `inspect_swarm:ledger` or `inspect_swarm:metrics` | [Analysis](../docs/analysis.qmd) |
+| `isolation` | `None` | under users isolation, after `swarm_start`, in the swarm's span | `sandbox`; `members`, each `name`, `user`, `uid` and `home`; `census_roots`, each `path` and `kind` (`share`, `transient` or `world_writable`); `census_roots_capped` | [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#what-the-runtime-does-at-swarm-start) |
+| `census` | `None` | under users isolation, once the members have ended, before the final step, in the swarm's span | `status` (`ok`, `timeout` or `error`, with `message`); `roots`, each `path`, `kind`, `status` (`ok`, `absent` or `unreadable`, with `error`), `capped`, `members` (by name: `entries`, `bytes` and up to 50 `paths`, each `type` and `path`) and `others` (`entries`, `bytes`) | [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#what-the-topology-makes-measurable) |
 
 So `SwarmLedger.model_validate(event.data)` reads a ledger event, as it reads the store entry.
 

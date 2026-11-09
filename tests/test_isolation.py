@@ -8,6 +8,8 @@ import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent, as_solver, run
 from inspect_ai.dataset import Sample
+from inspect_ai.log import transcript
+from inspect_ai.log._transcript import Transcript
 from inspect_ai.model import ChatMessageUser, ModelName
 from inspect_ai.solver import TaskState, fork
 from inspect_ai.solver._fork import set_task_generate
@@ -15,25 +17,44 @@ from inspect_ai.util import (
     ExecResult,
     SandboxEnvironment,
     sandbox,
+    store,
     subtask,
     tool_state_instance,
 )
+from inspect_ai.util._sandbox._framework_operation import framework_sandbox_operation
 from inspect_ai.util._sandbox._privileged import SHELL_PATH
 from inspect_ai.util._sandbox.context import (
     sandbox_default_context_var,
     sandbox_environments_context_var,
     sandbox_with_environments_context_var,
 )
+from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
 from inspect_ai.util._sandbox.identity import (
     sandbox_identity,
     sandbox_identity_cwd,
     sandbox_identity_user,
 )
 
-from inspect_swarm import Share, UserIsolation, filesystem, member, swarm, users
+from inspect_swarm import (
+    Budget,
+    MemberReap,
+    Share,
+    SwarmResultRecord,
+    UserIsolation,
+    filesystem,
+    leaderless,
+    member,
+    swarm,
+    users,
+)
 from inspect_swarm._budget import current_member
+from inspect_swarm._record import _transcript_result
 
-from .swarm_runtime import run_swarm, sample
+from .swarm_runtime import run_swarm, sample, swarm_events
+
+# what tells the reaping and census scripts from setup's
+_REAP_MARK = "proc_uid()"
+_CENSUS_MARK = "-mindepth 1"
 
 _ROOT_PROBE = "Uid:\t0\t0\t0\t0\nCapEff:\t00000000a80425fb\nsetgroups: allow\n"
 
@@ -48,6 +69,9 @@ class IsolationStub(SandboxEnvironment):
         fail_on: str = "add_users()",
         probe: str = "begin\nend\n",
         stall_on: str | None = None,
+        reap: str = "begin\nkilled 0\nleft 0\nend\n",
+        census: str | None = None,
+        raises: tuple[str, Exception] | None = None,
     ) -> None:
         super().__init__()
         # the group and users setup made
@@ -60,6 +84,12 @@ class IsolationStub(SandboxEnvironment):
         self.fail = fail
         self.fail_on = fail_on
         self.probe = probe
+        self.reap = reap
+        self.census = census
+        self.raises = raises
+        # for each reaping, the uid it was for and the members whose result was written
+        # before it ran
+        self.reaped: list[tuple[str, set[str | None]]] = []
 
     async def exec(
         self,
@@ -79,6 +109,20 @@ class IsolationStub(SandboxEnvironment):
             # a provider that does not answer, for longer than a test waits
             self.stall_timeouts.append(timeout)
             await anyio.sleep(5)
+        if self.raises is not None and self.raises[0] in cmd[2]:
+            raise self.raises[1]
+        if _REAP_MARK in cmd[2]:
+            ended = {e.member for e in swarm_events(transcript(), "member_result")}
+            self.reaped.append((cmd[4], ended))
+            if self.fail is not None and self.fail_on == _REAP_MARK:
+                return self.fail
+            return ExecResult(True, 0, self.reap, "")
+        if _CENSUS_MARK in cmd[2]:
+            # $1 the cap, $2 the member uids, then the roots
+            output = self.census
+            if output is None:
+                output = "begin\n" + "root\n" * len(cmd[6:]) + "end\n"
+            return ExecResult(True, 0, output, "")
         if "/proc/self/status" in cmd[2]:
             return ExecResult(
                 True, 0, _ROOT_PROBE.replace("Uid:\t0", f"Uid:\t{self.uid}"), ""
@@ -162,7 +206,7 @@ class EqualStub(IsolationStub):
 
 @contextmanager
 def environments(
-    **stubs: IsolationStub,
+    **stubs: SandboxEnvironment,
 ) -> Generator[None, None, None]:
     """A sample's sandbox environments, the first its default."""
     tokens = (
@@ -218,7 +262,11 @@ async def test_the_self_test_removes_only_the_directories_it_reserved(
                 await run_swarm(swarm(_scoped(seen), channels=[], isolation="users"))
         else:
             await run_swarm(swarm(_scoped(seen), channels=[], isolation="users"))
-    user, script, removed = stub.calls[-1]
+    # setup's calls: the reaping and census come after
+    setup = [
+        c for c in stub.calls if _REAP_MARK not in c[1] and _CENSUS_MARK not in c[1]
+    ]
+    user, script, removed = setup[-1]
     assert user == "root" and script.endswith('\nrm -rf -- "$@"')
     if fails:
         # each failed after reserving the directory in its home
@@ -229,9 +277,9 @@ async def test_the_self_test_removes_only_the_directories_it_reserved(
     else:
         # the pair check uses the first member's probes; the line that names no
         # reservation is not removed
-        assert stub.calls[-2] == (
+        assert setup[-2] == (
             "swarm-w-2",
-            stub.calls[-2][1],
+            setup[-2][1],
             [
                 "/scratch/w-1",
                 "/scratch/w-1/.swarm-probe-10000000/probe",
@@ -291,7 +339,10 @@ async def test_each_member_runs_as_its_user_after_setup_and_self_test() -> None:
     users = [str(user) for user, _, _ in stub.calls]
     assert users[:3] == ["root", "root", "root"]
     assert sorted(users[3:5]) == sorted(users[5:7]) == ["swarm-w-1", "swarm-w-2"]
-    assert users[7:] == ["swarm-w-2", "root"]
+    # then each member is reaped as root when it ends, and the census runs as root
+    assert users[7:] == ["swarm-w-2", "root", "root", "root", "root"]
+    assert sorted(uid for uid, _ in stub.reaped) == ["61001", "61002"]
+    assert _CENSUS_MARK in stub.calls[-1][1]
     # every path and name reaches the scripts as an argument
     _, setup, args = stub.calls[2]
     assert "swarm-w-1" not in setup and "/scratch" not in setup
@@ -311,9 +362,18 @@ async def test_members_of_a_swarm_without_isolation_run_as_the_default_user() ->
     seen: dict[str, dict[str, str | None]] = {}
     stub = IsolationStub()
     with environments(default=stub):
-        await run_swarm(swarm(_scoped(seen), channels=[]))
+        outcome = await run_swarm(swarm(_scoped(seen), channels=[]))
     assert {s["user"] for s in seen.values()} == {None}
     assert stub.calls == []
+    # the record and metrics hold no isolation evidence
+    assert outcome.record.isolation_incomplete is None
+    for result in outcome.record.members:
+        assert (result.user, result.uid, result.home) == (None, None, None)
+        assert (result.reap, result.foreign_execs) == (None, None)
+    [metrics] = swarm_events(outcome.transcript, "metrics")
+    assert metrics.data["reap_complete"] is None
+    assert swarm_events(outcome.transcript, "isolation") == []
+    assert swarm_events(outcome.transcript, "census") == []
 
 
 @pytest.mark.anyio
@@ -424,7 +484,7 @@ def test_the_local_sandbox_is_refused(tmp_path: Path) -> None:
                     {"path": "/data", "access": "ro"},
                 ]
             ),
-            "You run as the Linux user swarm-w-1, without root. Your private directory is /scratch/w-1 (your $HOME); other members cannot read it. Shared with all members: /shared (read and write), /data (read only). Use $TMPDIR for temporary files. Git refuses a repository another user created until you run git config --global --add safe.directory <path>.",
+            "You run as the Linux user swarm-w-1, without root. Your private directory is /scratch/w-1 (your $HOME); other members cannot read it. Shared with all members: /shared (read and write), /data (read only). Use $TMPDIR for temporary files. Git refuses a repository another user created until you run git config --global --add safe.directory <path>. Processes you leave running are stopped when you finish.",
             id="none",
         ),
         pytest.param(
@@ -433,12 +493,12 @@ def test_the_local_sandbox_is_refused(tmp_path: Path) -> None:
                 shared=[Share(path="/data", access="ro")],
                 peers="read",
             ),
-            "You run as the Linux user swarm-w-1, without root. Your private directory is /home/w-1 (your $HOME); other members can read it but not change it. Shared with all members: /data (read only). Use $TMPDIR for temporary files.",
+            "You run as the Linux user swarm-w-1, without root. Your private directory is /home/w-1 (your $HOME); other members can read it but not change it. Shared with all members: /data (read only). Use $TMPDIR for temporary files. Processes you leave running are stopped when you finish.",
             id="read",
         ),
         pytest.param(
             users(shared=()),
-            "You run as the Linux user swarm-w-1, without root. Your private directory is /scratch/w-1 (your $HOME); other members cannot read it. Use $TMPDIR for temporary files.",
+            "You run as the Linux user swarm-w-1, without root. Your private directory is /scratch/w-1 (your $HOME); other members cannot read it. Use $TMPDIR for temporary files. Processes you leave running are stopped when you finish.",
             id="no-shares",
         ),
     ],
@@ -802,7 +862,11 @@ async def test_one_of_two_swarms_starting_together_in_a_sandbox_is_refused() -> 
     assert sorted(stub.users) == [f"swarm-{made}-1", f"swarm-{made}-2"]
     assert sorted(seen) == [f"{made}-1", f"{made}-2"]
     # one root-access check, one probe and one setup in the sandbox
-    scripts = [script for _, script, _ in stub.calls]
+    scripts = [
+        script
+        for _, script, _ in stub.calls
+        if _REAP_MARK not in script and _CENSUS_MARK not in script
+    ]
     for part in ("/proc/self/status", "echo begin", "add_users()"):
         assert sum(part in script for script in scripts) == 1
 
@@ -845,3 +909,362 @@ async def test_users_isolation_is_refused_inside_an_identity_scope(
     if not isolated:
         # a swarm without isolation keeps the scope it runs in
         assert {(s["user"], s["cwd"]) for s in seen.values()} == {("outer", "/outer")}
+
+
+@agent
+def ends(how: str) -> Agent:
+    """End by returning, by raising, or by waiting until the swarm stops or is cancelled."""
+
+    async def execute(state: AgentState) -> AgentState:
+        if how == "raises":
+            raise RuntimeError("the member's own error")
+        if how == "waits":
+            await anyio.sleep(3600)
+        return state
+
+    return execute
+
+
+def _pair(first: str, second: str, isolation: str | None = "users") -> Agent:
+    return swarm(
+        [
+            member(ends, args={"how": first}, name="a"),
+            member(ends, args={"how": second}, name="b"),
+        ],
+        channels=[],
+        budget=Budget(grace=0),
+        isolation=isolation,  # pyright: ignore[reportArgumentType]
+    )
+
+
+# Runs the swarm in a sample, cancelling it after `cancel_after` seconds if given; returns
+# its record, what it raised, and the sample's transcript.
+async def _run(
+    team: Agent, cancel_after: float | None = None
+) -> tuple[SwarmResultRecord, Exception | None, Transcript]:
+    error: Exception | None = None
+    async with sample() as t:
+        with anyio.move_on_after(cancel_after if cancel_after is not None else 60):
+            try:
+                await run(team, "task")
+            except Exception as ex:
+                error = ex
+        record = _transcript_result(store())
+    assert record is not None
+    return record, error, t
+
+
+_REAPED = "begin\nkilled 2\nleft 0\nkilled-name sleep\nkilled-name python3\nend\n"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "first,second,cancel_after",
+    [
+        # the second is still running when the first's submission stops the swarm
+        pytest.param("returns", "waits", None, id="returned-and-stopped"),
+        pytest.param("raises", "waits", None, id="raised"),
+        pytest.param("waits", "waits", 0.5, id="cancelled-from-outside"),
+    ],
+)
+async def test_each_member_is_reaped_when_it_ends_and_keeps_its_outcome(
+    first: str, second: str, cancel_after: float | None
+) -> None:
+    stub = IsolationStub(reap=_REAPED)
+    with environments(default=stub):
+        record, error, _ = await _run(_pair(first, second), cancel_after)
+    with environments(default=IsolationStub()):
+        plain, plain_error, _ = await _run(_pair(first, second, None), cancel_after)
+    # each member is reaped once, as root, before its result is written
+    assert sorted(uid for uid, _ in stub.reaped) == ["61001", "61002"]
+    for uid, ended in stub.reaped:
+        assert {"61001": "a", "61002": "b"}[uid] not in ended
+    assert all(user == "root" for user, script, _ in stub.calls if _REAP_MARK in script)
+    assert [(m.user, m.uid, m.home) for m in record.members] == [
+        ("swarm-a", 61001, "/scratch/a"),
+        ("swarm-b", 61002, "/scratch/b"),
+    ]
+    for result in record.members:
+        assert result.reap == MemberReap(
+            status="ok", killed=2, killed_names=["sleep", "python3"]
+        )
+    assert record.isolation_incomplete is False
+    # the members end as they do without isolation, with the same error
+    assert [m.status for m in record.members] == [m.status for m in plain.members]
+    assert repr(error) == repr(plain_error)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "stub,reap",
+    [
+        pytest.param(
+            lambda: IsolationStub(),
+            MemberReap(status="ok"),
+            id="ok",
+        ),
+        pytest.param(
+            lambda: IsolationStub(
+                reap="begin\nkilled 3\nleft 2\nkilled-name sleep\nleft-name spinner\nleft-name spinner\nend\n"
+            ),
+            MemberReap(
+                status="survivors",
+                killed=3,
+                killed_names=["sleep"],
+                survivors=2,
+                survivor_names=["spinner", "spinner"],
+            ),
+            id="survivors",
+        ),
+        pytest.param(
+            lambda: IsolationStub(stall_on=_REAP_MARK),
+            MemberReap(
+                status="timeout",
+                message="the sandbox did not finish stopping the member's processes within 0.2 seconds",
+            ),
+            id="stalled",
+        ),
+        pytest.param(
+            lambda: IsolationStub(raises=(_REAP_MARK, TimeoutError("timed out"))),
+            MemberReap(status="timeout", message="timed out"),
+            id="exec-timeout",
+        ),
+        pytest.param(
+            lambda: IsolationStub(raises=(_REAP_MARK, ConnectionError("lost"))),
+            MemberReap(status="error", message="ConnectionError: lost"),
+            id="provider-error",
+        ),
+        pytest.param(
+            lambda: IsolationStub(
+                fail=ExecResult(False, 2, "", "sh: 1: mktemp: not found\n"),
+                fail_on=_REAP_MARK,
+            ),
+            MemberReap(status="error", message="sh: 1: mktemp: not found"),
+            id="failed-command",
+        ),
+        pytest.param(
+            # what a provider that keeps only the last bytes of a long output returns
+            lambda: IsolationStub(reap="left 0\nend\n"),
+            MemberReap(
+                status="error",
+                message="the output of the command that stops the member's processes came back incomplete",
+            ),
+            id="cut-short",
+        ),
+    ],
+)
+async def test_reaping_records_what_it_found_and_never_replaces_the_outcome(
+    stub: Callable[[], IsolationStub],
+    reap: MemberReap,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("inspect_swarm._isolation._REAP_BOUND", 0.2)
+    for how in ("returns", "raises"):
+        team = swarm(
+            member(ends, args={"how": how}, name="w"), channels=[], isolation="users"
+        )
+        start = anyio.current_time()
+        with environments(default=stub()):
+            record, error, t = await _run(team)
+        assert anyio.current_time() - start < 3
+        [result] = record.members
+        assert result.reap == reap
+        # the member's own status and error
+        if how == "returns":
+            assert (result.status, error) == ("submitted", None)
+        else:
+            assert result.status == "errored"
+            assert repr(error) == repr(RuntimeError("the member's own error"))
+        assert record.isolation_incomplete is (reap.status != "ok")
+        [metrics] = swarm_events(t, "metrics")
+        assert metrics.data["reap_complete"] is (reap.status == "ok")
+
+
+@agent
+def custom_tool() -> Agent:
+    """Run sandbox commands as a custom tool would: as root, as a peer, as the member and with no user; and as one of Inspect's own operations would."""
+
+    async def execute(state: AgentState) -> AgentState:
+        context = current_member.get()
+        assert context is not None
+        if context.name == "w-1":
+            for user in ("root", "swarm-w-2", "swarm-w-1", None):
+                await sandbox().exec([SHELL_PATH, "-c", "true"], user=user)
+            # Inspect's own operations, such as the injected tools' launcher
+            with framework_sandbox_operation():
+                await sandbox().exec([SHELL_PATH, "-c", "true"], user="root")
+        return state
+
+    return execute
+
+
+@pytest.mark.anyio
+async def test_foreign_execs_count_a_members_commands_as_another_user() -> None:
+    stub = IsolationStub()
+    team = swarm(
+        member(custom_tool, name="w", count=2),
+        controller=leaderless(stop_on_submission=False),
+        channels=[],
+        isolation="users",
+    )
+    # the sample's proxy, which records each command's user
+    with environments(default=SandboxEnvironmentProxy(stub)):
+        outcome = await run_swarm(team)
+    assert {m.name: m.foreign_execs for m in outcome.record.members} == {
+        "w-1": 2,
+        "w-2": 0,
+    }
+
+
+_PROBE_WRITABLE = (
+    "begin\nwritable /tmp\nwritable /opt/drop\nwritable /shared/inner\nend\n"
+)
+
+_CENSUS = """begin
+root
+path 61001 f /shared/a b
+owner 61001 1 5
+owner 0 2 10
+owner 1000 1 7
+root
+path 61002 l /tmp/link
+path 61002 d /tmp/d
+owner 61002 2 0
+capped
+root
+absent
+root
+path 61001 f /dev/shm/s
+owner 61001 1 3
+error find: '/dev/shm/x': Permission denied
+root
+root
+end
+"""
+
+
+@pytest.mark.anyio
+async def test_the_census_counts_owners_under_the_roots_setup_recorded() -> None:
+    seen: dict[str, dict[str, str | None]] = {}
+    stub = IsolationStub(probe=_PROBE_WRITABLE, census=_CENSUS)
+    isolation = users(
+        shared=[Share(path="/shared", access="rw"), Share(path="/data", access="ro")]
+    )
+    with environments(default=stub):
+        outcome = await run_swarm(
+            swarm(_scoped(seen), channels=[], isolation=isolation)
+        )
+    roots = ["/shared", "/tmp", "/var/tmp", "/dev/shm", "/run/lock", "/opt/drop"]
+    kinds = ["share", "transient", "transient", "transient", "transient"]
+    # a world-writable directory that overlaps a root is left out
+    [isolation_event] = swarm_events(outcome.transcript, "isolation")
+    assert isolation_event.data == {
+        "version": 1,
+        "sandbox": "default",
+        "members": [
+            {"name": "w-1", "user": "swarm-w-1", "uid": 61001, "home": "/scratch/w-1"},
+            {"name": "w-2", "user": "swarm-w-2", "uid": 61002, "home": "/scratch/w-2"},
+        ],
+        "census_roots": [
+            {"path": path, "kind": kind}
+            for path, kind in zip(roots, [*kinds, "world_writable"], strict=True)
+        ],
+        "census_roots_capped": False,
+    }
+    # once the members have ended, as root, with the cap and the member uids
+    [(user, _, args)] = [c for c in stub.calls if _CENSUS_MARK in c[1]]
+    assert (user, args) == ("root", ["10000", "61001 61002", *roots])
+    [census] = swarm_events(outcome.transcript, "census")
+
+    def root(path: str, kind: str, **fields: Any) -> dict[str, Any]:
+        return {
+            "path": path,
+            "kind": kind,
+            "status": "ok",
+            "error": None,
+            "capped": False,
+            "members": {},
+            "others": {"entries": 0, "bytes": 0},
+            **fields,
+        }
+
+    assert census.data == {
+        "version": 1,
+        "status": "ok",
+        "roots": [
+            root(
+                "/shared",
+                "share",
+                members={
+                    "w-1": {
+                        "entries": 1,
+                        "bytes": 5,
+                        "paths": [{"type": "file", "path": "/shared/a b"}],
+                    }
+                },
+                others={"entries": 3, "bytes": 17},
+            ),
+            root(
+                "/tmp",
+                "transient",
+                capped=True,
+                members={
+                    "w-2": {
+                        "entries": 2,
+                        "bytes": 0,
+                        "paths": [
+                            {"type": "symlink", "path": "/tmp/link"},
+                            {"type": "directory", "path": "/tmp/d"},
+                        ],
+                    }
+                },
+            ),
+            root("/var/tmp", "transient", status="absent"),
+            root(
+                "/dev/shm",
+                "transient",
+                status="unreadable",
+                error="find: '/dev/shm/x': Permission denied",
+                members={
+                    "w-1": {
+                        "entries": 1,
+                        "bytes": 3,
+                        "paths": [{"type": "file", "path": "/dev/shm/s"}],
+                    }
+                },
+            ),
+            root("/run/lock", "transient"),
+            root("/opt/drop", "world_writable"),
+        ],
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "stub,data",
+    [
+        pytest.param(
+            lambda: IsolationStub(raises=(_CENSUS_MARK, ConnectionError("lost"))),
+            {"version": 1, "status": "error", "message": "ConnectionError: lost"},
+            id="provider-error",
+        ),
+        pytest.param(
+            lambda: IsolationStub(census="begin\nroot\nend\n"),
+            {
+                "version": 1,
+                "status": "error",
+                "message": "the census's output came back incomplete",
+            },
+            id="cut-short",
+        ),
+    ],
+)
+async def test_a_census_that_fails_is_recorded_and_the_swarm_ends_as_usual(
+    stub: Callable[[], IsolationStub], data: dict[str, Any]
+) -> None:
+    seen: dict[str, dict[str, str | None]] = {}
+    with environments(default=stub()):
+        outcome = await run_swarm(swarm(_scoped(seen), channels=[], isolation="users"))
+    [census] = swarm_events(outcome.transcript, "census")
+    assert census.data == data
+    assert outcome.record.final.member is not None

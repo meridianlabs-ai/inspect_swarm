@@ -39,7 +39,13 @@ from ._controller.leaderless import leaderless
 from ._final import FinalName
 from ._isolation import Share, UserIsolation, users
 from ._member import Member, member
-from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
+from ._record import (
+    FinalRecord,
+    MemberReap,
+    MemberResult,
+    SwarmResultRecord,
+    swarm_result,
+)
 from ._seam import Boundary, BoundaryCallback
 from ._swarm import swarm
 from ._tools import swarm_resources
@@ -72,6 +78,7 @@ __all__ = [
     "MemberIdle",
     "MemberInfo",
     "MemberNews",
+    "MemberReap",
     "MemberResult",
     "MemberState",
     "Record",

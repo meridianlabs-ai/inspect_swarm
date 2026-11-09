@@ -12,6 +12,7 @@ import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent, as_solver
 from inspect_ai.dataset import Sample
+from inspect_ai.event import SwarmEvent
 from inspect_ai.log import EvalSample
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.tool import bash, bash_session, python, text_editor
@@ -24,6 +25,7 @@ from inspect_swarm import (
     member,
     swarm,
     swarm_controller,
+    swarm_result,
     users,
 )
 from inspect_swarm._budget import current_member
@@ -1032,3 +1034,91 @@ def test_members_work_in_worktrees_of_a_shared_repository(tmp_path: Path) -> Non
     assert _ok(results["w-2"][2]).split() == ["base.txt", "w-1.txt", "w-2.txt"]
     assert _ok(results["w-1"][2]).startswith("## linked")
     assert _ok(results["w-1"][3]).startswith("## No commits yet on odd")
+
+
+# the names of the live processes of a member's user (a zombie has exited), and a line
+# that says the check ran
+def _alive(name: str) -> str:
+    return (
+        f"uid=$(id -u swarm-{name}); for d in /proc/[0-9]*; do"
+        ' s=$(cat "$d/status" 2>/dev/null) || continue;'
+        ' case "$s" in *"State:	Z"*) continue ;; esac;'
+        ' printf "%s\\n" "$s" | grep -q "^Uid:	$uid	" && cat "$d/comm";'
+        " done; echo checked"
+    )
+
+
+@pytest.mark.slow
+def test_leftover_processes_are_stopped_and_the_census_attributes_files(
+    tmp_path: Path,
+) -> None:
+    cases = {
+        "reap": Case(
+            runs=[
+                Run(
+                    {"shared": [{"path": "/shared", "access": "rw"}]},
+                    {
+                        "w-1": [
+                            ("bash", "nohup sleep 300 >/dev/null 2>&1 & echo started"),
+                            ("session", "sleep 301 &"),
+                            ("bash", _alive("w-1")),
+                            (
+                                "bash",
+                                "echo one > /shared/w1 && echo t > /tmp/w1 && echo s > /dev/shm/w1 && ln -s /etc/passwd /tmp/w1-link",
+                            ),
+                        ],
+                        # w-2 starts once w-1 has ended
+                        "w-2": [
+                            ("bash", _alive("w-1")),
+                            ("bash", "echo two > /tmp/w2"),
+                        ],
+                    },
+                    after=f"{_alive('w-1')}; {_alive('w-2')}",
+                )
+            ],
+            # an absent root
+            setup="rm -rf /run/lock",
+        )
+    }
+    samples = _eval(tmp_path, cases)
+    results = cases["reap"].results
+    # w-1's processes ran while it did, and were gone when w-2 started
+    running = _ok(results["w-1"][2]).split()
+    assert running[-1] == "checked" and running.count("sleep") == 2, running
+    assert _ok(results["w-2"][0]) == "checked"
+    assert results["after"] == ["checked\nchecked\n"]
+    record = swarm_result(samples["reap"])
+    assert record is not None
+    first, second = record.members
+    assert first.reap is not None and second.reap is not None
+    assert first.reap.status == "ok" and first.reap.killed >= 2
+    assert first.reap.killed_names.count("sleep") == 2
+    assert second.reap.status == "ok"
+    assert record.isolation_incomplete is False
+    assert (first.user, first.home, first.foreign_execs) == (
+        "swarm-w-1",
+        "/scratch/w-1",
+        0,
+    )
+
+    [census] = [
+        e
+        for e in samples["reap"].events
+        if isinstance(e, SwarmEvent) and e.kind == "census"
+    ]
+    data: dict[str, Any] = census.data
+    assert data["status"] == "ok"
+    roots = {root["path"]: root for root in data["roots"]}
+
+    def paths(root: str, name: str) -> list[dict[str, str]]:
+        return roots[root]["members"].get(name, {}).get("paths", [])
+
+    assert {"type": "file", "path": "/shared/w1"} in paths("/shared", "w-1")
+    assert {"type": "file", "path": "/tmp/w1"} in paths("/tmp", "w-1")
+    # a symlink is recorded as a link, without following it
+    assert {"type": "symlink", "path": "/tmp/w1-link"} in paths("/tmp", "w-1")
+    assert {"type": "file", "path": "/tmp/w2"} in paths("/tmp", "w-2")
+    assert {"type": "file", "path": "/dev/shm/w1"} in paths("/dev/shm", "w-1")
+    assert paths("/dev/shm", "w-2") == []
+    assert roots["/run/lock"]["status"] == "absent"
+    assert {root["kind"] for root in data["roots"]} >= {"share", "transient"}

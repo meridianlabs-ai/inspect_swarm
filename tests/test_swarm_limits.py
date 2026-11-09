@@ -202,9 +202,9 @@ async def test_isolation_setup_time_comes_out_of_the_derived_time_cap(
 ) -> None:
     # setup takes 0.6 s of a 1 s sample; a cap derived before it would outlast the
     # sample, whose limit would then end the swarm without its final step
-    async def slow_setup(isolation: object, names: Sequence[str]) -> dict[str, Any]:
+    # a setup that takes time and leaves nothing to reap or count
+    async def slow_setup(isolation: object, names: Sequence[str]) -> None:
         await anyio.sleep(0.6)
-        return {}
 
     monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", slow_setup)
     stop = await run_swarm(
@@ -225,9 +225,9 @@ async def test_an_explicit_time_cap_is_checked_after_isolation_setup(
 ) -> None:
     # a 0.9 s cap fits a 1 s sample until setup takes 0.2 s of it, after which the
     # sample's limit ends the swarm first, as the warning says
-    async def slow_setup(isolation: object, names: Sequence[str]) -> dict[str, Any]:
+    # a setup that takes time and leaves nothing to reap or count
+    async def slow_setup(isolation: object, names: Sequence[str]) -> None:
         await anyio.sleep(setup_time)
-        return {}
 
     monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", slow_setup)
     with (

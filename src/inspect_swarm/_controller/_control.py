@@ -17,6 +17,7 @@ from inspect_ai.util._checkpoint.checkpointer_noop import (
     _NoopCheckpointer,  # pyright: ignore[reportPrivateUsage]
 )
 from inspect_ai.util._store import suspend_store_events
+from pydantic import JsonValue
 from shortuuid import uuid
 
 from .._budget import (
@@ -30,8 +31,15 @@ from .._budget import (
     current_budget,
     is_bridged,
 )
-from .._evidence import MemberTimelines, swarm_event, write_ledger, write_metrics
+from .._evidence import (
+    MemberTimelines,
+    isolation_event,
+    swarm_event,
+    write_ledger,
+    write_metrics,
+)
 from .._final import FinalName, Pick, answer, finalise, settle
+from .._isolation import IsolationSetup, MemberIdentity, reap_member, take_census
 from .._ledger import LedgerInterval, MemberAccount
 from .._member import (
     Member,
@@ -48,10 +56,12 @@ from .._metrics import (
     MemberTimes,
     MemberWiring,
     first_scorer,
+    foreign_execs,
     gate_checks,
     swarm_metrics,
 )
 from .._record import (
+    MemberReap,
     MemberResult,
     MemberState,
     SwarmResultRecord,
@@ -66,7 +76,6 @@ if TYPE_CHECKING:
     from .._bus._bus import SwarmBus
     from .._bus._record import Record
     from .._channel._channel import Channel
-    from .._isolation import MemberIdentity
 
 
 class MemberHandle(Protocol):
@@ -327,7 +336,13 @@ class _Answer:
 # enters. Its lever and limits are created here, once per run, so that a stop can close
 # the lever of a member that has started but whose task has not yet entered it.
 class MemberRun:
-    def __init__(self, record: Member, name: str, share: Sequence[Limit]) -> None:
+    def __init__(
+        self,
+        record: Member,
+        name: str,
+        share: Sequence[Limit],
+        identity: MemberIdentity | None = None,
+    ) -> None:
         self.record = record
         self.name = name
         self.role = record.role
@@ -348,6 +363,11 @@ class MemberRun:
         self.answer_list: list[_Answer] = []
         # counted when it ends
         self.gates = GateChecks()
+        # under users isolation: its Linux user, and, once it has ended, what stopping
+        # its leftover processes found and its commands run as another user
+        self.identity = identity
+        self.reap: MemberReap | None = None
+        self.foreign_execs: int | None = None
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
         self.context = MemberContext(
@@ -433,6 +453,11 @@ class MemberRun:
             first_pass_time=self.gates.first_pass_time,
             persistent=self.persistent,
             answer_times=[a.time for a in self.answer_list],
+            user=None if self.identity is None else self.identity.user,
+            uid=None if self.identity is None else self.identity.uid,
+            home=None if self.identity is None else self.identity.home,
+            reap=self.reap,
+            foreign_execs=self.foreign_execs,
         )
 
 
@@ -453,14 +478,18 @@ class SwarmRun:
         shares: Mapping[str, Sequence[Limit]] | None = None,
         channels: Sequence["Channel"] = (),
         final: FinalName | None = None,
-        identities: Mapping[str, "MemberIdentity"] | None = None,
+        isolation: IsolationSetup | None = None,
     ) -> None:
         # deferred: the bus imports the channels, which import this module's package
         from .._bus._bus import SwarmBus
 
         self._shares = shares or {}
+        # the sandbox, its members' Linux users and the census roots, under users
+        # isolation
+        self._isolation = isolation
+        identities = {} if isolation is None else isolation.identities
         self._members = [
-            MemberRun(record, name, self._shares.get(name, ()))
+            MemberRun(record, name, self._shares.get(name, ()), identities.get(name))
             for record, name in records
         ]
         # the channel states open here, before any member starts
@@ -489,8 +518,6 @@ class SwarmRun:
         # the controller's choice of the answer, once it has made one
         self._pick: Pick | None = None
         self._preambles = preambles
-        # each member's Linux user, under users isolation
-        self._identities = identities or {}
         self._caps = caps
         self._time = time
         self._grace = grace
@@ -670,6 +697,8 @@ class SwarmRun:
             # in the swarm's span, before any member can start
             write_start()
             started = True
+            if self._isolation is not None:
+                isolation_event("isolation", _isolation_data(self._isolation))
             bus_token = current_bus.set(self.bus)
             # for swarm_budget(), in every member's context and the controller's
             budget_token = current_budget.set(
@@ -713,6 +742,8 @@ class SwarmRun:
                     # and skips the final step. Only the swarm's own leaves would leave
                     # nothing to raise.
                     _, _, error = classify_errors(ex, self._nodes(), [])
+                if error is None and self._isolation is not None:
+                    await self._census(self._isolation)
                 if error is None:
                     # the final step, outside the caps: only the sample's limits apply
                     with ExitStack() as final:
@@ -749,6 +780,7 @@ class SwarmRun:
                         final=answer(
                             results, self._final, self._pick, provisional=not ended
                         ),
+                        isolation_incomplete=self._isolation_incomplete(),
                     )
                     failures: list[Exception] = []
                     try:
@@ -875,6 +907,9 @@ class SwarmRun:
                     wall_clock,
                     record.final.member,
                     record.final.answer,
+                    reap_complete=None
+                    if record.isolation_incomplete is None
+                    else not record.isolation_incomplete,
                 )
             )
             timelines.fill(places)
@@ -958,7 +993,29 @@ class SwarmRun:
             m.outcome,
             m.gate,
             end,
-            self._identities.get(m.name),
+            m.identity,
+            None if m.identity is None else functools.partial(self._reap, m),
+        )
+
+    # Stops the processes a member left running, under users isolation; never raises.
+    async def _reap(self, m: MemberRun) -> None:
+        assert self._isolation is not None and m.identity is not None
+        m.reap = await reap_member(self._isolation.environment, m.identity)
+
+    # Users isolation's census, once every member has ended and been reaped: who owns
+    # the files in the shares and the directories every member can write.
+    async def _census(self, isolation: IsolationSetup) -> None:
+        isolation_event("census", await take_census(isolation))
+
+    # Under users isolation, whether a member that started may have left processes
+    # running: its reaping did not end `ok`, or did not run because its task was
+    # cancelled before it began; None without isolation.
+    def _isolation_incomplete(self) -> bool | None:
+        if self._isolation is None:
+            return None
+        return any(
+            m.state != "pending" and (m.reap is None or m.reap.status != "ok")
+            for m in self._members
         )
 
     # A persistent member's answer, from its gate: recorded with its swarm time, as
@@ -1006,6 +1063,18 @@ class SwarmRun:
             assert self._interval is not None
             m.gates = gate_checks(
                 self._interval.events, m.context.span_id, self._scorer, self._start
+            )
+        if m.identity is not None:
+            assert self._interval is not None
+            m.foreign_execs = (
+                0
+                if m.context.span_id is None
+                else foreign_execs(
+                    self._interval.events,
+                    self._interval.places({m.name: m.context.span_id}),
+                    m.name,
+                    m.identity.user,
+                )
             )
         # in the member's span, unless it ended before entering it
         swarm_event(
@@ -1132,6 +1201,22 @@ class SwarmRun:
     def _notify(self) -> None:
         self._changed.set()
         self._changed = anyio.Event()
+
+
+# The isolation event's data: the sandbox, each member's user, uid and home, and the
+# census roots.
+def _isolation_data(isolation: IsolationSetup) -> dict[str, JsonValue]:
+    return {
+        "sandbox": isolation.sandbox,
+        "members": [
+            {"name": name, "user": i.user, "uid": i.uid, "home": i.home}
+            for name, i in isolation.identities.items()
+        ],
+        "census_roots": [
+            {"path": root.path, "kind": root.kind} for root in isolation.census_roots
+        ],
+        "census_roots_capped": isolation.census_roots_capped,
+    }
 
 
 def _check_preamble(preamble: object, call: str) -> None:

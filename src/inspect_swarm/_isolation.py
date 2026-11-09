@@ -16,7 +16,9 @@ from inspect_ai.util._sandbox.context import (
 )
 from inspect_ai.util._sandbox.identity import sandbox_identity, sandbox_identity_active
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, JsonValue
+
+from ._record import MemberReap
 
 if TYPE_CHECKING:
     # at run time this would import the runtime, which imports this module
@@ -69,6 +71,8 @@ def users(
     """Run each member as its own Linux user in one shared sandbox.
 
     When the swarm starts, before any member does, it creates a non-root user `swarm-<member>` for each member, with a new private home directory (the image's `/etc/skel` is not copied), sets up the read-write shares, checks the read-only ones, and checks that the boundaries hold by running commands as the members. It refuses to start if any check fails. Each member then runs inside a sandbox identity scope, so that the built-in tools that run commands in the sandbox (`bash()`, `python()`, `bash_session()`, `text_editor()`, `grep()`, `list_files()` and the `read_file()` tool) run as its user and start in its home. Custom tools' `exec()`, `read_file()` and `write_file()` calls that name no user also run as the member. Raw `exec()` calls keep the sandbox's working directory unless they pass `cwd`; use absolute paths for raw file calls. Its preamble tells it its user and directories.
+
+    When a member ends, the swarm kills every process still running as its user, and records what it found in the member's result (`MemberResult.reap`). If processes survive, or the sandbox does not answer, the result record's `isolation_incomplete` is `True`. When the swarm ends, it records who owns the files in the read-write shares and in `/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock` and the other world-writable directories, as a `census` evidence event.
 
     A member cannot read or change another member's home unless `peers="read"` lets it read, and cannot write a `ro` share. It can still see the other members' processes and command lines, share files through `/tmp`, and connect to their sockets on localhost. Members share one kernel and one sandbox root: this is a default boundary and a record of who made what, not containment.
 
@@ -238,6 +242,26 @@ class MemberIdentity:
     sandbox: str
 
 
+# A directory the census counts the owners of the entries in: a rw share, one of the
+# directories every user writes, or another world-writable directory.
+@dataclass(frozen=True)
+class CensusRoot:
+    path: str
+    kind: Literal["share", "transient", "world_writable"]
+
+
+# What setup leaves for the swarm's run: the sandbox, by its object and its name, each
+# member's identity by member name, and the census roots, with whether the
+# world-writable directories among them were cut at their cap.
+@dataclass(frozen=True)
+class IsolationSetup:
+    environment: SandboxEnvironment
+    sandbox: str
+    identities: dict[str, MemberIdentity]
+    census_roots: list[CensusRoot]
+    census_roots_capped: bool
+
+
 def member_user(name: str) -> str:
     return f"swarm-{name}"
 
@@ -278,6 +302,7 @@ def isolation_preamble(isolation: UserIsolation, name: str) -> str:
         parts.append(
             "Git refuses a repository another user created until you run git config --global --add safe.directory <path>."
         )
+    parts.append("Processes you leave running are stopped when you finish.")
     return " ".join(parts)
 
 
@@ -287,6 +312,10 @@ _GROUP = "inspect-swarm"
 # member uids and gids, and the group's gid, are chosen from this window
 _FIRST_ID = 61000
 _LAST_ID = 61999
+
+# the census scans at most this many world-writable directories besides the shares and
+# the directories every user writes
+_WRITABLE_CAP = 200
 
 
 # Refusals in the scripts below exit with this status and a message on stderr, as
@@ -309,13 +338,15 @@ fail() { printf '%s\n' "$*" >&2; exit 3; }
 # the homes' parent, whose files it would not reach, and a hard-linked file, a device,
 # a socket, a FIFO or a set-id file in a rw share. It does not change a ro share, so it refuses a ro share
 # whose modes would not let members read it, or would let them write it.
+# It also lists the world-writable directories on the root filesystem, for the census.
 # $1 group, $2 first id, $3 last id, $4 1 when there are shares, $5 the homes' parent,
-# then the roots, `--`, and each share's access and path.
+# $6 how many world-writable directories to list, then the roots, `--`, and each
+# share's access and path.
 _PROBE = (
     _PRELUDE
     + r"""
-group=$1 lo=$2 hi=$3 acl=$4 parent=$5
-shift 5
+group=$1 lo=$2 hi=$3 acl=$4 parent=$5 writable_cap=$6
+shift 6
 command -v useradd >/dev/null 2>&1 || fail "users isolation needs useradd in the sandbox (package passwd)"
 command -v groupadd >/dev/null 2>&1 || fail "users isolation needs groupadd in the sandbox (package passwd)"
 command -v awk >/dev/null 2>&1 || fail "users isolation needs awk in the sandbox"
@@ -468,9 +499,19 @@ while [ $# -gt 0 ]; do
   narrow=$(cat -- "$dir/found") || fail "users isolation could not scan the directories in $share"
   [ -z "$narrow" ] || fail "users isolation does not support a directory without owner rwx in a read-write shared directory: $narrow; its owner bits would become the default ACL of the files members create there"
 done
-# the answer: at most one line per id in the window, between markers, so that output a
-# provider cut short is found out rather than read as fewer taken ids. Each step is
-# checked, since a step that fails would otherwise leave out ids or users.
+# the world-writable directories on the root filesystem, the topmost of each tree, which
+# the census scans as places every member can write; a path with a newline is left out,
+# since the answer has one path per line
+nl='
+'
+scan "users isolation could not scan / for world-writable directories" \
+  -P / -xdev -ignore_readdir_race -type d -perm -0002 -prune ! -path "*$nl*" -printf '%p\n'
+head -n $((writable_cap + 1)) "$dir/found" | sed 's/^/writable /' >"$dir/writable" \
+  || fail "users isolation could not list the world-writable directories"
+# the answer: at most one line per id in the window, and the world-writable directories,
+# between markers, so that output a provider cut short is found out rather than read as
+# fewer taken ids. Each step is checked, since a step that fails would otherwise leave
+# out ids or users.
 awk -F: -v g="$group" '$1 == g { print "groupname", $3 }' /etc/group >"$dir/answer" \
   || fail "users isolation could not read /etc/group"
 awk -F: '$1 ~ /^swarm-/ { print "username", $1 }' /etc/passwd >>"$dir/answer" \
@@ -483,6 +524,7 @@ awk -F: '{ n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] ~ /^swarm-/)
 awk -v lo="$lo" -v hi="$hi" '$1 >= lo && $1 <= hi { print "id", $1 }' "$dir/ids" >"$dir/window" \
   || fail "users isolation could not list the ids it found"
 sort -u "$dir/window" >>"$dir/answer" || fail "users isolation could not list the ids it found"
+cat -- "$dir/writable" >>"$dir/answer" || fail "users isolation could not list the world-writable directories"
 echo begin && cat "$dir/answer" && echo end || fail "users isolation could not write the ids it found"
 exit 0
 """
@@ -719,11 +761,11 @@ done
 
 
 # Sets up users isolation in the sandbox, before any member starts: creates the users,
-# homes and shares, and checks that the boundaries hold. Returns each member's
-# identity, by member name.
+# homes and shares, and checks that the boundaries hold. Returns the sandbox, each
+# member's identity and the census roots.
 async def setup_isolation(
     isolation: UserIsolation, names: Sequence[str]
-) -> dict[str, MemberIdentity]:
+) -> "IsolationSetup":
     if sandbox_identity_active():
         raise RuntimeError(
             "users isolation cannot start inside a sandbox identity scope, such as a member of a swarm with users isolation: identity scopes cannot be nested. Run this swarm without isolation, or outside the scope."
@@ -753,7 +795,7 @@ async def _setup(
     env_name: str,
     isolation: UserIsolation,
     names: Sequence[str],
-) -> dict[str, MemberIdentity]:
+) -> "IsolationSetup":
     users_ = [(name, member_user(name), member_home(isolation, name)) for name in names]
     parent = posixpath.dirname(isolation.home)
 
@@ -772,6 +814,7 @@ async def _setup(
         str(_LAST_ID),
         "1" if isolation.shared else "0",
         parent,
+        str(_WRITABLE_CAP),
         *dict.fromkeys(roots),
         "--",
         *(item for share in isolation.shared for item in (share.access, share.path)),
@@ -782,6 +825,7 @@ async def _setup(
     existing_groups: set[str] = set()
     # the groups that list each swarm-* user name as a member
     listed: dict[str, str] = {}
+    writable: list[str] = []
     lines = probe.stdout.splitlines()
     if lines[:1] != ["begin"] or lines[-1:] != ["end"]:
         raise RuntimeError(
@@ -800,6 +844,8 @@ async def _setup(
         elif kind == "listedmember":
             listed_user, _, listed_group = value.partition(" ")
             listed.setdefault(listed_user, listed_group)
+        elif kind == "writable":
+            writable.append(value)
     if existing_group:
         raise RuntimeError(
             f"users isolation: the group {_GROUP} already exists in sandbox {env_name!r}. Users isolation creates it, so the image must not have it."
@@ -846,7 +892,29 @@ async def _setup(
     )
 
     await _self_test(env, env_name, isolation, list(identities.values()))
-    return identities
+    return IsolationSetup(
+        environment=env,
+        sandbox=env_name,
+        identities=identities,
+        census_roots=_census_roots(isolation, writable),
+        census_roots_capped=len(writable) > _WRITABLE_CAP,
+    )
+
+
+# The census roots: the rw shares, the directories every user writes, and the other
+# world-writable directories on the root filesystem, up to the cap. A world-writable
+# directory that overlaps a share or one of the others is left out, so that no entry is
+# counted twice.
+def _census_roots(
+    isolation: UserIsolation, writable: Sequence[str]
+) -> list[CensusRoot]:
+    shares = [share.path for share in isolation.shared if share.access == "rw"]
+    roots = [CensusRoot(path, "share") for path in shares]
+    roots += [CensusRoot(path, "transient") for path in _TRANSIENT]
+    for path in writable[:_WRITABLE_CAP]:
+        if not any(_nested(path, root.path) for root in roots):
+            roots.append(CensusRoot(path, "world_writable"))
+    return roots
 
 
 async def _self_test(
@@ -987,6 +1055,302 @@ def _message(result: ExecResult[str]) -> str:
         # the script's own refusal is its last line
         return text.splitlines()[-1] if text else "refused"
     return text or f"exit status {result.returncode}"
+
+
+# Kills every process in the sandbox whose real uid is the member's, as root: scans
+# /proc, reads each match's Uid line again just before it kills it, so that a pid reused
+# since the scan is not killed, and repeats until a scan finds none or five rounds have
+# run, since a process can start another between rounds. A zombie has exited and waits
+# for its parent to collect it, so it is not counted. Prints the number killed and the
+# number left, and the first 50 names of each, between markers. A name is read up to its
+# first newline, and every character in it other than printable ASCII, and every ':', is
+# printed as '?', so that no name can read as an attachment reference in the record.
+# $1 the member's uid.
+_REAP = (
+    _PRELUDE
+    + r"""
+uid=$1
+nl='
+'
+# $u the process's real uid, and $z set when it is a zombie; $u empty when it has gone
+proc_uid() {
+  u= z=
+  while read -r k v _; do
+    case $k in
+      State:) [ "$v" = Z ] && z=1 ;;
+      Uid:) u=$v; break ;;
+    esac
+  done 2>/dev/null <"/proc/$1/status"
+}
+# a pid killed in an earlier round is counted once
+seen=$(mktemp -d) || fail "could not create a temporary directory"
+trap 'rm -rf "$seen"' EXIT
+killed=0 left=0 knames= lnames= round=0
+while :; do
+  found=0
+  for d in /proc/[0-9]*; do
+    pid=${d#/proc/}
+    proc_uid "$pid"
+    [ "$u" = "$uid" ] && [ -z "$z" ] || continue
+    found=1
+    name=
+    { IFS= read -r name; } 2>/dev/null <"$d/comm"
+    if [ "$round" -lt 5 ]; then
+      proc_uid "$pid"
+      [ "$u" = "$uid" ] && [ -z "$z" ] || continue
+      kill -KILL "$pid" 2>/dev/null || continue
+      [ ! -e "$seen/$pid" ] || continue
+      : >"$seen/$pid"
+      killed=$((killed + 1))
+      [ "$killed" -gt 50 ] || knames="$knames$name$nl"
+    else
+      left=$((left + 1))
+      [ "$left" -gt 50 ] || lnames="$lnames$name$nl"
+    fi
+  done
+  { [ "$found" = 0 ] || [ "$round" -ge 5 ]; } && break
+  round=$((round + 1))
+  sleep 0.1
+done
+names() {
+  printf '%s' "$2" | tr -c '[:print:]\n' '?' | tr ':' '?' | sed "s/^/$1 /"
+}
+{
+  echo begin
+  echo "killed $killed"
+  echo "left $left"
+  names killed-name "$knames" && names left-name "$lnames" && echo end
+} || fail "could not report the processes it killed"
+"""
+)
+
+# Reaping is shielded from cancellation, so that a hard stop does not skip it, and so has
+# bounds of its own: its exec's timeout, and a wall-clock bound past that for a provider
+# that overruns it.
+_REAP_TIMEOUT = 30
+_REAP_BOUND = 40.0
+
+
+# Stops the processes a member left running. Never raises, so that it never replaces
+# the member's own outcome: a failure is its result.
+async def reap_member(env: SandboxEnvironment, identity: MemberIdentity) -> MemberReap:
+    reap: MemberReap | None = None
+    with anyio.move_on_after(_REAP_BOUND, shield=True):
+        reap = await _reap(env, identity)
+    if reap is None:
+        return MemberReap(
+            status="timeout",
+            message=f"the sandbox did not finish stopping the member's processes within {_REAP_BOUND:g} seconds",
+        )
+    return reap
+
+
+async def _reap(env: SandboxEnvironment, identity: MemberIdentity) -> MemberReap:
+    try:
+        result = await privileged_shell(
+            env,
+            _REAP,
+            str(identity.uid),
+            user="root",
+            timeout=_REAP_TIMEOUT,
+            timeout_retry=False,
+        )
+    except TimeoutError as ex:
+        return MemberReap(status="timeout", message=str(ex) or type(ex).__name__)
+    except Exception as ex:
+        return MemberReap(status="error", message=f"{type(ex).__name__}: {ex}")
+    lines = result.stdout.splitlines()
+    if not result.success or lines[:1] != ["begin"] or lines[-1:] != ["end"]:
+        return MemberReap(
+            status="error",
+            message=_message(result)
+            if not result.success
+            else "the output of the command that stops the member's processes came back incomplete",
+        )
+    counts: dict[str, int] = {}
+    names: dict[str, list[str]] = {"killed-name": [], "left-name": []}
+    for line in lines[1:-1]:
+        kind, _, value = line.partition(" ")
+        if kind in names:
+            names[kind].append(value)
+        elif value.isdigit():
+            counts[kind] = int(value)
+    left = counts.get("left", 0)
+    return MemberReap(
+        status="survivors" if left else "ok",
+        killed=counts.get("killed", 0),
+        killed_names=names["killed-name"],
+        survivors=left,
+        survivor_names=names["left-name"],
+    )
+
+
+# Counts who owns the entries under each census root, as root, from the root's own
+# filesystem (-xdev), never following a symlink: for each owner, its entries and the
+# bytes of its regular files, and for each member uid the first 50 entries' types and
+# paths, any newline in a path as '?'. A root stops being counted at the cap, and says
+# so. A root that is not a directory is absent; one the scan could not read all of says
+# so, with find's first error, besides what it counted.
+# $1 the cap, $2 the member uids, space-separated, then the roots.
+_CENSUS = (
+    _PRELUDE
+    + r"""
+cap=$1 members=$2
+shift 2
+dir=$(mktemp -d) || fail "could not create a temporary directory"
+trap 'rm -rf "$dir"' EXIT
+echo begin
+for root in "$@"; do
+  echo root
+  if [ -L "$root" ] || [ ! -d "$root" ]; then
+    echo absent
+    continue
+  fi
+  # find stops once awk has read one entry past the cap
+  find -P "$root" -xdev -ignore_readdir_race -mindepth 1 -printf '%U %y %s %p\0' 2>"$dir/errors" \
+    | tr '\n\0' '?\n' \
+    | awk -v cap="$cap" -v members=" $members " '
+        NR > cap { print "capped"; exit }
+        {
+          n[$1]++
+          if ($2 == "f") b[$1] += $3
+          if (index(members, " " $1 " ") && k[$1]++ < 50) {
+            path = $0
+            sub(/^[^ ]* [^ ]* [^ ]* /, "", path)
+            print "path", $1, $2, path
+          }
+        }
+        END { for (u in n) printf "owner %s %d %.0f\n", u, n[u], b[u] }
+      ' || fail "could not count the entries in $root"
+  # an entry removed while the scan runs is not an error, nor is find's write to a
+  # pipe that awk closed at the cap
+  grep -v -e ': No such file or directory$' -e 'Broken pipe$' "$dir/errors" | head -n 1 | sed 's/^/error /'
+done
+echo end
+"""
+)
+
+# the census's cap on the entries it counts in each root
+_CENSUS_CAP = 10_000
+
+# the census is not shielded, but has the same bounds as reaping
+_CENSUS_TIMEOUT = 60
+_CENSUS_BOUND = 70.0
+
+# find's letters for the types of entry
+_TYPES = {
+    "f": "file",
+    "d": "directory",
+    "l": "symlink",
+    "p": "fifo",
+    "s": "socket",
+    "b": "block_device",
+    "c": "char_device",
+}
+
+
+# Who owns the entries under each census root, once the members have ended: the census
+# event's data. Never raises an error: a failure is its result.
+async def take_census(setup: IsolationSetup) -> dict[str, JsonValue]:
+    data: dict[str, JsonValue] | None = None
+    with anyio.move_on_after(_CENSUS_BOUND):
+        data = await _census(setup)
+    if data is None:
+        return {
+            "status": "timeout",
+            "message": f"the sandbox did not finish the census within {_CENSUS_BOUND:g} seconds",
+        }
+    return data
+
+
+async def _census(setup: IsolationSetup) -> dict[str, JsonValue]:
+    members = {str(i.uid): name for name, i in setup.identities.items()}
+    try:
+        result = await privileged_shell(
+            setup.environment,
+            _CENSUS,
+            str(_CENSUS_CAP),
+            " ".join(members),
+            *(root.path for root in setup.census_roots),
+            user="root",
+            timeout=_CENSUS_TIMEOUT,
+            timeout_retry=False,
+        )
+    except TimeoutError as ex:
+        return {"status": "timeout", "message": str(ex) or type(ex).__name__}
+    except Exception as ex:
+        return {"status": "error", "message": f"{type(ex).__name__}: {ex}"}
+    lines = result.stdout.splitlines()
+    if not result.success or lines[:1] != ["begin"] or lines[-1:] != ["end"]:
+        return {
+            "status": "error",
+            "message": _message(result)
+            if not result.success
+            else "the census's output came back incomplete",
+        }
+    sections: list[list[str]] = []
+    for line in lines[1:-1]:
+        if line == "root":
+            sections.append([])
+        elif sections:
+            sections[-1].append(line)
+    if len(sections) != len(setup.census_roots):
+        return {
+            "status": "error",
+            "message": "the census's output came back incomplete",
+        }
+    roots: list[JsonValue] = [
+        _census_root(root, section, members)
+        for root, section in zip(setup.census_roots, sections, strict=True)
+    ]
+    return {"status": "ok", "roots": roots}
+
+
+# One root's counts: by member, with the member's first paths, and for everyone else.
+def _census_root(
+    root: CensusRoot, lines: list[str], members: Mapping[str, str]
+) -> dict[str, JsonValue]:
+    status = "ok"
+    error: str | None = None
+    capped = False
+    counts: dict[str, dict[str, JsonValue]] = {}
+    paths: dict[str, list[JsonValue]] = {}
+    others = {"entries": 0, "bytes": 0}
+    for line in lines:
+        kind, _, rest = line.partition(" ")
+        if kind == "absent":
+            status = "absent"
+        elif kind == "capped":
+            capped = True
+        elif kind == "error":
+            status, error = "unreadable", rest
+        elif kind == "owner":
+            uid, entries, size = rest.split(" ")
+            if uid in members:
+                counts[members[uid]] = {"entries": int(entries), "bytes": int(size)}
+            else:
+                others["entries"] += int(entries)
+                others["bytes"] += int(size)
+        elif kind == "path":
+            uid, letter, path = rest.split(" ", 2)
+            if uid in members:
+                paths.setdefault(members[uid], []).append(
+                    {"type": _TYPES.get(letter, letter), "path": path}
+                )
+    return {
+        "path": root.path,
+        "kind": root.kind,
+        "status": status,
+        "error": error,
+        "capped": capped,
+        # in roster order, those with entries
+        "members": {
+            name: {**counts[name], "paths": paths.get(name, [])}
+            for name in members.values()
+            if name in counts
+        },
+        "others": dict[str, JsonValue](others),
+    }
 
 
 # The environment named by `users(sandbox=...)`, and its name, checked against the
