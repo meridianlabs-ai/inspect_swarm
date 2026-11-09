@@ -1,7 +1,7 @@
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 import anyio
 import pytest
@@ -1116,8 +1116,9 @@ async def test_foreign_execs_count_a_members_commands_as_another_user() -> None:
     }
 
 
+# a world-writable directory whose name holds a CR and what would read as an id line
 _PROBE_WRITABLE = (
-    "begin\nwritable /tmp\nwritable /opt/drop\nwritable /shared/inner\nend\n"
+    "begin\nwritable /tmp\nwritable /opt/drop\rid 61001\nwritable /shared/inner\nend\n"
 )
 
 _CENSUS = """begin
@@ -1154,7 +1155,14 @@ async def test_the_census_counts_owners_under_the_roots_setup_recorded() -> None
         outcome = await run_swarm(
             swarm(_scoped(seen), channels=[], isolation=isolation)
         )
-    roots = ["/shared", "/tmp", "/var/tmp", "/dev/shm", "/run/lock", "/opt/drop"]
+    roots = [
+        "/shared",
+        "/tmp",
+        "/var/tmp",
+        "/dev/shm",
+        "/run/lock",
+        "/opt/drop\rid 61001",
+    ]
     kinds = ["share", "transient", "transient", "transient", "transient"]
     # a world-writable directory that overlaps a root is left out
     [isolation_event] = swarm_events(outcome.transcript, "isolation")
@@ -1234,7 +1242,7 @@ async def test_the_census_counts_owners_under_the_roots_setup_recorded() -> None
                 },
             ),
             root("/run/lock", "transient"),
-            root("/opt/drop", "world_writable"),
+            root("/opt/drop\rid 61001", "world_writable"),
         ],
     }
 
@@ -1247,6 +1255,18 @@ async def test_the_census_counts_owners_under_the_roots_setup_recorded() -> None
             lambda: IsolationStub(raises=(_CENSUS_MARK, ConnectionError("lost"))),
             {"version": 1, "status": "error", "message": "ConnectionError: lost"},
             id="provider-error",
+        ),
+        pytest.param(
+            # a line the census script does not write
+            lambda: IsolationStub(
+                census="begin\n" + "root\nowner broken\n" * 5 + "end\n"
+            ),
+            {
+                "version": 1,
+                "status": "error",
+                "message": "the census's output could not be read",
+            },
+            id="unreadable-line",
         ),
         pytest.param(
             lambda: IsolationStub(census="begin\nroot\nend\n"),
@@ -1268,3 +1288,26 @@ async def test_a_census_that_fails_is_recorded_and_the_swarm_ends_as_usual(
     [census] = swarm_events(outcome.transcript, "census")
     assert census.data == data
     assert outcome.record.final.member is not None
+    assert outcome.record.final.provisional is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("separator", ["\r", "\v", "\f", "\x1c", "\x85", "\u2028"])
+async def test_a_path_cannot_add_records_to_the_census(separator: str) -> None:
+    # a member's file whose name holds a character Python reads as a line break, then
+    # what would read as a peer's count; the census script ends records with LF only
+    path = f"/tmp/x{separator}owner 61002 50 500"
+    census = f"begin\nroot\npath 61001 f {path}\nowner 61001 1 4\n" + "root\n" * 3
+    stub = IsolationStub(census=census + "end\n")
+    seen: dict[str, dict[str, str | None]] = {}
+    with environments(default=stub):
+        outcome = await run_swarm(
+            swarm(_scoped(seen), channels=[], isolation=users(shared=()))
+        )
+    [census_event] = swarm_events(outcome.transcript, "census")
+    tmp = cast(dict[str, Any], census_event.data)["roots"][0]
+    assert tmp["path"] == "/tmp"
+    assert tmp["members"] == {
+        "w-1": {"entries": 1, "bytes": 4, "paths": [{"type": "file", "path": path}]}
+    }
+    assert outcome.record.final.provisional is False

@@ -826,7 +826,7 @@ async def _setup(
     # the groups that list each swarm-* user name as a member
     listed: dict[str, str] = {}
     writable: list[str] = []
-    lines = probe.stdout.splitlines()
+    lines = _lines(probe.stdout)
     if lines[:1] != ["begin"] or lines[-1:] != ["end"]:
         raise RuntimeError(
             f"users isolation: the id scan's output in sandbox {env_name!r} came back incomplete (the provider may limit command output), so it cannot choose ids that own nothing."
@@ -1049,6 +1049,13 @@ async def _run(
     return result
 
 
+# A script's output lines. Only LF ends a line: the scripts write each record on one
+# line, and a path in a record can hold any other character, such as a CR or a Unicode
+# line separator, which `str.splitlines()` would take for the end of a line.
+def _lines(text: str) -> list[str]:
+    return text.removesuffix("\n").split("\n")
+
+
 def _message(result: ExecResult[str]) -> str:
     text = (result.stderr or result.stdout).strip()
     if result.returncode == _REFUSED:
@@ -1159,7 +1166,7 @@ async def _reap(env: SandboxEnvironment, identity: MemberIdentity) -> MemberReap
         return MemberReap(status="timeout", message=str(ex) or type(ex).__name__)
     except Exception as ex:
         return MemberReap(status="error", message=f"{type(ex).__name__}: {ex}")
-    lines = result.stdout.splitlines()
+    lines = _lines(result.stdout)
     if not result.success or lines[:1] != ["begin"] or lines[-1:] != ["end"]:
         return MemberReap(
             status="error",
@@ -1280,7 +1287,7 @@ async def _census(setup: IsolationSetup) -> dict[str, JsonValue]:
         return {"status": "timeout", "message": str(ex) or type(ex).__name__}
     except Exception as ex:
         return {"status": "error", "message": f"{type(ex).__name__}: {ex}"}
-    lines = result.stdout.splitlines()
+    lines = _lines(result.stdout)
     if not result.success or lines[:1] != ["begin"] or lines[-1:] != ["end"]:
         return {
             "status": "error",
@@ -1299,14 +1306,18 @@ async def _census(setup: IsolationSetup) -> dict[str, JsonValue]:
             "status": "error",
             "message": "the census's output came back incomplete",
         }
-    roots: list[JsonValue] = [
-        _census_root(root, section, members)
-        for root, section in zip(setup.census_roots, sections, strict=True)
-    ]
+    try:
+        roots: list[JsonValue] = [
+            _census_root(root, section, members)
+            for root, section in zip(setup.census_roots, sections, strict=True)
+        ]
+    except ValueError:
+        return {"status": "error", "message": "the census's output could not be read"}
     return {"status": "ok", "roots": roots}
 
 
 # One root's counts: by member, with the member's first paths, and for everyone else.
+# Raises ValueError for a line the census script does not write.
 def _census_root(
     root: CensusRoot, lines: list[str], members: Mapping[str, str]
 ) -> dict[str, JsonValue]:
@@ -1337,6 +1348,8 @@ def _census_root(
                 paths.setdefault(members[uid], []).append(
                     {"type": _TYPES.get(letter, letter), "path": path}
                 )
+        else:
+            raise ValueError(line)
     return {
         "path": root.path,
         "kind": root.kind,

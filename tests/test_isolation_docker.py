@@ -1064,7 +1064,7 @@ def test_leftover_processes_are_stopped_and_the_census_attributes_files(
                             ("bash", _alive("w-1")),
                             (
                                 "bash",
-                                "echo one > /shared/w1 && echo t > /tmp/w1 && echo s > /dev/shm/w1 && ln -s /etc/passwd /tmp/w1-link",
+                                "echo one > /shared/w1 && echo t > /tmp/w1 && echo s > /dev/shm/w1 && ln -s /etc/passwd /tmp/w1-link && : > \"$(printf '/tmp/cr\\rowner 0 50 500')\"",
                             ),
                         ],
                         # w-2 starts once w-1 has ended
@@ -1118,6 +1118,10 @@ def test_leftover_processes_are_stopped_and_the_census_attributes_files(
     # a symlink is recorded as a link, without following it
     assert {"type": "symlink", "path": "/tmp/w1-link"} in paths("/tmp", "w-1")
     assert {"type": "file", "path": "/tmp/w2"} in paths("/tmp", "w-2")
+    # a CR in a name is part of the path, not the end of a record
+    assert {"type": "file", "path": "/tmp/cr\rowner 0 50 500"} in paths("/tmp", "w-1")
+    assert roots["/tmp"]["members"]["w-1"]["entries"] == 3
+    assert roots["/tmp"]["others"]["entries"] < 50
     assert {"type": "file", "path": "/dev/shm/w1"} in paths("/dev/shm", "w-1")
     assert paths("/dev/shm", "w-2") == []
     assert roots["/run/lock"]["status"] == "absent"
