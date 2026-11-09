@@ -341,7 +341,7 @@ class SwarmTimeline:
         begin = _span_begin(span_id)
         if begin.type != AGENT_SPAN_TYPE or begin.name in PHASE_NAMES:
             raise ValueError(
-                f"swarm(): the swarm runs in the span {begin.name!r} of type {begin.type!r}, and its timeline must be rooted at an agent span not named init, solvers or scorers. Run the swarm as a solver, with run(swarm(...), input), or directly from an agent of your own."
+                f"swarm(): the swarm runs in the span {begin.name!r} of type {begin.type!r}, and its timeline must be rooted at an agent span not named init, solvers or scorers. Run the swarm with run(swarm(...), input), or use it as the task's solver."
             )
         if span_id in _active_spans:
             raise ValueError(

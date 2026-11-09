@@ -70,12 +70,13 @@ def swarm(
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
         PrerequisiteError: If the returned agent runs in a sample with checkpointing on: checkpoint and resume are not supported for swarms yet.
-        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if it runs in a span that is not an agent span, in an agent span named `init`, `solvers` or `scorers`, or in the span of another swarm still running, if the sample already has a swarm member named after one of its members, or does not have a sandbox a member names.
+        ValueError: If member names collide, two member names differ only in case, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if it runs in a span that is not an agent span, in an agent span named `init`, `solvers` or `scorers`, or in the span of another swarm still running, if the sample already has a swarm member named after one of its members, or does not have a sandbox a member names.
     """
     records = _members(members)
     names = member_names(records)
     _check_distinct_agents(records, names)
     _check_phase_names(names)
+    _check_case_names(names)
     _check_persistent(records, names)
     roster = [
         MemberInfo(name=name, role=record.role, choose_name=record.choose_name)
@@ -270,6 +271,18 @@ def _check_phase_names(names: Sequence[list[str]]) -> None:
         if name in PHASE_NAMES:
             raise ValueError(
                 f"members=: a member is named {name!r}, which Inspect's timelines read as a phase of the sample. Give the member another name with member(..., name=...)."
+            )
+
+
+# Inspect's timelines lowercase span names, so members whose names differ only in case
+# would share one lane name in the swarm's timeline.
+def _check_case_names(names: Sequence[list[str]]) -> None:
+    seen: dict[str, str] = {}
+    for name in (name for record_names in names for name in record_names):
+        other = seen.setdefault(name.lower(), name)
+        if other != name:
+            raise ValueError(
+                f"members=: members {other!r} and {name!r} differ only in case, and Inspect's timelines lowercase member names, so the log viewer would show them as one. Give the members names that differ in more than case with member(..., name=...)."
             )
 
 

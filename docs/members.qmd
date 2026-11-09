@@ -40,7 +40,7 @@ This swarm has four members: `solver-1` to `solver-3` and `reviewer`. The role i
 
 ## Names
 
-A member is named after its agent (`react`, `deepagent`) unless you give `name`. With `count` above 1 the members are `name-1` to `name-k`. Names must be unique in the swarm. They cannot be `init`, `solvers` or `scorers`, and cannot contain `/` or `#`. The [shared-memory channel](shared-memory.qmd) also needs names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`.
+A member is named after its agent (`react`, `deepagent`) unless you give `name`. With `count` above 1 the members are `name-1` to `name-k`. Names must be unique in the swarm, ignoring case. They cannot be `init`, `solvers` or `scorers`, and cannot contain `/` or `#`. The [shared-memory channel](shared-memory.qmd) also needs names that start with a lowercase letter, followed by at most 47 lowercase letters, digits, `_` or `-`.
 
 Members left on their default name are numbered across the whole roster, not per record. So one member with a different prompt and model takes two records:
 

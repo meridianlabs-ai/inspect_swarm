@@ -739,6 +739,20 @@ def test_a_member_named_like_a_sample_phase_is_refused(name: str) -> None:
         swarm(member(generator(scripted_model()), name=name), channels=[])
 
 
+def test_members_whose_names_differ_only_in_case_are_refused() -> None:
+    # Inspect's timelines lowercase span names, so the two lanes would merge
+    with pytest.raises(
+        ValueError, match="'Reviewer' and 'reviewer' differ only in case"
+    ):
+        swarm(
+            [
+                member(generator(scripted_model()), name="Reviewer"),
+                member(generator(scripted_model()), name="reviewer"),
+            ],
+            channels=[],
+        )
+
+
 @pytest.mark.anyio
 async def test_a_member_name_taken_by_an_earlier_swarm_is_refused() -> None:
     async with sample():
