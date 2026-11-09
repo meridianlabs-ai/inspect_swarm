@@ -3,7 +3,7 @@
 # preamble, with test stand-ins for ORBIT's model wrappers, tool defences and channel.
 
 import json
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from contextlib import aclosing
 from functools import partial
 from typing import Any, Literal
@@ -125,12 +125,15 @@ def _tool_events(ran: _Ran, function: str) -> list[ToolEvent]:
 
 
 class _Schedule:
-    """Holds each member at the boundary that ends its activation, and lets it run one quantum on the controller's go: one generation and its tools under `model_step`, and under `completion` until it submits or reaches a tool-free reply."""
+    """Holds each member at the boundary that ends its activation, and lets it run one quantum on the controller's go: one generation and its tools under `model_step`, and under `completion` until it submits, or for a member in `no_submit`, until it reaches a tool-free reply."""
 
     def __init__(
-        self, on_park: Callable[[str, Boundary], None] = lambda name, b: None
+        self,
+        on_park: Callable[[str, Boundary], None] = lambda name, b: None,
+        no_submit: Collection[str] = (),
     ) -> None:
         self.on_park = on_park
+        self.no_submit = no_submit
         self.control: SwarmControl | None = None
         self.quantum: dict[str, Quantum] = {}
         # "<member>@<boundary index>:<after>" for each park, and "barrier" after each
@@ -146,8 +149,13 @@ class _Schedule:
 
     def _callback(self, name: str) -> BoundaryCallback:
         async def schedule(b: Boundary) -> Result:
-            if b.index and self.quantum[name] == "completion" and b.after != "reply":
-                # a completion activation runs on
+            if (
+                b.index
+                and self.quantum[name] == "completion"
+                and (b.after != "reply" or name not in self.no_submit)
+            ):
+                # a completion activation runs on: a submitting member to its
+                # submission, a `submit=False` member to a tool-free reply
                 return None
             go = self._go[name]
             self.log.append(f"{name}@{b.index}:{b.after}")
@@ -624,8 +632,11 @@ async def test_a_concurrent_step_waits_at_its_barrier_while_a_parked_member_stay
 @pytest.mark.anyio
 async def test_a_completion_activation_runs_to_a_reply_or_to_submission() -> None:
     talker = _Recording([_call("work"), _call("work"), output("my answer")])
-    submitter = _Recording([_call("work"), _call("work"), _call("submit", answer="x")])
-    schedule = _Schedule()
+    # a tool-free reply before its submission does not end its activation
+    submitter = _Recording(
+        [_call("work"), output("thinking"), _call("submit", answer="x")]
+    )
+    schedule = _Schedule(no_submit={"talker"})
 
     async def plan(schedule: _Schedule) -> None:
         await schedule.step(["talker", "submitter"], "completion", concurrent=True)
@@ -638,7 +649,8 @@ async def test_a_completion_activation_runs_to_a_reply_or_to_submission() -> Non
         _scheduled(schedule, plan),
     )
     # the talker ran on through its tool turns and parked at its tool-free reply,
-    # held there until the stop; the submitter ran to its submission
+    # held there until the stop; the submitter ran on past its tool-free reply to its
+    # submission
     assert (talker.calls, submitter.calls) == (3, 3)
     assert _after_start(schedule.log) == ["talker@3:reply", "barrier"]
     assert _statuses(ran) == {"talker": "stopped", "submitter": "submitted"}
