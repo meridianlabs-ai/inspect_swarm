@@ -30,6 +30,7 @@ from ._controller._control import (
     MemberNews,
     MemberState,
     SwarmControl,
+    VerdictSummary,
 )
 from ._controller._controller import (
     Controller,
@@ -41,7 +42,22 @@ from ._controller.leaderless import leaderless
 from ._final import FinalName
 from ._isolation import Share, UserIsolation, users
 from ._member import Member, member
-from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
+from ._record import (
+    FinalRecord,
+    LeftOut,
+    MemberResult,
+    SwarmResultRecord,
+    swarm_result,
+)
+from ._result import (
+    MemberArtifacts,
+    ResultKind,
+    ResultSpec,
+    Verdict,
+    Verifier,
+    answer_result,
+    artifact_result,
+)
 from ._seam import Boundary, BoundaryCallback
 from ._swarm import swarm
 from ._tools import swarm_resources
@@ -68,7 +84,9 @@ __all__ = [
     "Draft",
     "FinalName",
     "FinalRecord",
+    "LeftOut",
     "Member",
+    "MemberArtifacts",
     "MemberEnded",
     "MemberHandle",
     "MemberIdle",
@@ -78,6 +96,8 @@ __all__ = [
     "MemberState",
     "Record",
     "ResolvingState",
+    "ResultKind",
+    "ResultSpec",
     "Share",
     "StopReason",
     "SwarmBudget",
@@ -85,10 +105,15 @@ __all__ = [
     "SwarmResultRecord",
     "Topic",
     "UserIsolation",
+    "Verdict",
+    "VerdictSummary",
+    "Verifier",
     "WaitNews",
     "WaitSpec",
     "WaitingState",
     "__version__",
+    "answer_result",
+    "artifact_result",
     "calling_member",
     "filesystem",
     "leaderless",
