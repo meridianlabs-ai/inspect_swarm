@@ -17,9 +17,9 @@ In three rare cases, a bridged member's recorded status and `ended_by` can diffe
 
 - the bridged agent is cancelled before its CLI exits, after one of its generations reached the sample's limit;
 - a bridge filter makes parallel model calls in one request, and a swarm limit hides the sample's limit;
-- the CLI retries after the member's own limit, and the bridge replaces that limit with a swarm cap, a share or a stop.
+- a CLI retry, or another request already in flight, follows the member's own limit, and the bridge replaces that limit with a swarm cap, a share or a stop.
 
-In the first two, the sample's limit is caught only at the sample's next model call, or not at all if there is none. No extra tokens are spent in any of them. The [limits design](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/design/swarm-limits.md#interactions) gives the outcome of each path.
+In the first two, the sample's limit is caught only at the sample's next model call, or not at all if there is none. In all three, the bridge sends no new model call after it keeps an error, but calls already in flight finish and are charged. The [limits design](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/design/swarm-limits.md#interactions) gives the outcome of each path.
 
 The CLI's own tool calls do not emit Inspect `ToolEvent`s, so the tool-event evidence described here does not cover them, Inspect Sentinel does not see them, and `longest_identical_tool_run` is `null` for bridged members.
 
