@@ -32,6 +32,10 @@ _T = TypeVar("_T")
 OPERATOR = "operator"
 
 # a stop once an error or a cancellation has begun to end the swarm's runtime
+# why a member whose agent and work have ended, whose end is still to be recorded,
+# cannot be paused
+_AGENT_ENDED = "its agent has ended"
+
 _ENDED = "The swarm is ending after an error or a cancellation, and its members still running are being cancelled."
 
 _BRIDGED = (
@@ -293,6 +297,9 @@ class MemberOperator:
             return "The member has not started."
         if m.gate.turn_closed:
             return "The member's agent loop has ended."
+        if m.gate.finished:
+            # its end waits only for its cleanup (reaping, under users isolation)
+            return "The member's agent has ended."
         # the gate ends an ending member at its next boundary, before it drains a message
         return self._ending()
 
@@ -442,6 +449,9 @@ class MemberOperator:
         if self._marked is not None:
             return self._marked
         m = self._member
+        if m.gate.finished:
+            # its end waits only for its cleanup (reaping, under users isolation)
+            return _AGENT_ENDED
         refusal = seam_refusal(m.record, m.context)
         if refusal is not None:
             return refusal
