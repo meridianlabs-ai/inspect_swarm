@@ -28,18 +28,22 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### MemberState
 ### StopReason
 ### FinalName
+### FinalSpec
 
 ## Channels
 
 ### filesystem
 ### shared_memory
 ### messages
+### topics
+### Topic
 ### swarm_tools
 ### swarm_bridged_tools
 ### swarm_channel
 ### Channel
 ### ChannelRun
 ### ChannelState
+### ResolvingState
 ### WaitingState
 ### WaitSpec
 ### WaitNews

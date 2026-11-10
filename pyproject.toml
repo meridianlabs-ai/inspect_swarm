@@ -22,8 +22,9 @@ dependencies = [
     # against.
     "inspect-ai>=0.3.288",
     # imported directly; inspect-ai depends on them too, but a transitive
-    # dependency is not a promise
-    "anyio>=4.0",
+    # dependency is not a promise; `TaskInfo.has_pending_cancellation()` needs a
+    # recent anyio, and inspect-ai already requires this one
+    "anyio>=4.14.2",
     "pydantic>=2.0",
     "shortuuid",
 ]
