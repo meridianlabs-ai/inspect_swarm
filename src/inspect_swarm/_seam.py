@@ -261,6 +261,11 @@ class MemberGate:
         self.withdraw(STARTS_BACKGROUND)
         return admitted
 
+    # Whether one of the member's time limits has run out: it ends at its next
+    # checkpoint, and is never held again.
+    def overdue(self) -> bool:
+        return any(node.overdue() for node in self.time_nodes)
+
     # From the member's nodes when they first find it bridged, as when it runs a
     # bridged subagent: the withdrawable callbacks are withdrawn, one holding the member
     # included.

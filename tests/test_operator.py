@@ -2441,6 +2441,81 @@ async def test_an_ending_member_is_not_reported_paused(how: str) -> None:
     assert _boundaries(ran) == []
 
 
+def _cleans_up(
+    started: anyio.Event, cleaning: anyio.Event, cleanup: anyio.Event
+) -> Callable[[], Awaitable[None]]:
+    """Signals `started`, waits until cancelled, then signals `cleaning` and finishes a shielded cleanup once `cleanup` is set."""
+
+    async def work() -> None:
+        try:
+            started.set()
+            await anyio.sleep_forever()
+        finally:
+            cleaning.set()
+            with anyio.CancelScope(shield=True):
+                await cleanup.wait()
+
+    return work
+
+
+@agent
+def runs(work: Callable[[], Awaitable[None]]) -> Agent:
+    """Run `work`, with no agent loop: a member still in its setup."""
+
+    async def execute(state: AgentState) -> AgentState:
+        await work()
+        return state
+
+    return execute
+
+
+@tool
+def cleans_up(work: Callable[[], Awaitable[None]]) -> Tool:
+    async def execute() -> str:
+        """Run work that cleans up when cancelled."""
+        await work()
+        return "done"
+
+    return execute
+
+
+# A member whose own time limit has run out is not reported paused while it cleans up,
+# though its flag and the latch stay set: the limit ends it, with no hold.
+@pytest.mark.anyio
+@pytest.mark.parametrize("where", ["turn", "setup"])
+@pytest.mark.parametrize("target", ["agent", "group", "both"])
+async def test_a_member_past_its_time_limit_is_not_reported_paused(
+    where: str, target: str
+) -> None:
+    started, cleaning, cleanup = (anyio.Event() for _ in range(3))
+    work = _cleans_up(started, cleaning, cleanup)
+    if where == "turn":
+        inner = _react(_Recording([_call("cleans_up"), _submit()]), cleans_up(work))
+    else:
+        inner = runs(work)
+
+    async def drive(group: OperatorGroup) -> None:
+        a = group.agents["a"]
+        await started.wait()
+        for paused_by in (a, group):
+            if target in ("both", "agent" if paused_by is a else "group"):
+                assert _act(paused_by.pause, dry_run=False).changed
+        assert _act(a.info).paused
+        await cleaning.wait()
+        try:
+            assert not _act(a.info).paused
+            assert "stay paused" not in _act(group.resume, dry_run=True).detail
+            assert "still holds" not in _act(a.resume, dry_run=True).detail
+        finally:
+            # a failed check ends the drive without hanging in the shielded cleanup
+            cleanup.set()
+
+    ran = await _run(_swarm([member(inner, name="a", limits=[time_limit(0.5)])]), drive)
+
+    assert ran.status("a") == "member_limit:time"
+    assert _boundaries(ran) == []
+
+
 @agent
 def works_in_background() -> Agent:
     """Start background work, then wait."""

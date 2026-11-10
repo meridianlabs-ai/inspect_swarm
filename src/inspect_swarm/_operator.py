@@ -455,9 +455,15 @@ class MemberOperator:
         return None
 
     # Whether a pause can hold the member, for what the list and the resume replies
-    # report: it is running, not ending, and pausable. The flags stay as set.
+    # report: it is running, not ending, its time limit has not run out, and it is
+    # pausable. The flags stay as set.
     def holdable(self) -> bool:
-        return self.running and self._ending() is None and self.unpausable() is None
+        return (
+            self.running
+            and self._ending() is None
+            and not self._member.gate.overdue()
+            and self.unpausable() is None
+        )
 
     def _pause_refusal(self) -> str | None:
         m = self._member

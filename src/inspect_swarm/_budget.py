@@ -688,8 +688,11 @@ class SwarmTimeNode(_TimeLimit):
         self._held_since: float | None = None
 
     def overdue(self) -> bool:
-        # its deadline has passed, or its scope already has a cancellation requested
-        scope = self._cancel_scope
+        # its deadline has passed, or its scope already has a cancellation requested;
+        # never before it is entered, when it has no scope
+        scope = getattr(self, "_cancel_scope", None)
+        if scope is None:
+            return False
         return scope.cancel_called or scope.deadline <= anyio.current_time()
 
     async def expire(self) -> None:
