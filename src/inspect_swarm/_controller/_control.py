@@ -36,9 +36,15 @@ from .._budget import (
     current_member,
     is_bridged,
 )
-from .._evidence import MemberTimelines, swarm_event, write_ledger, write_metrics
+from .._evidence import (
+    SwarmTimeline,
+    claim_member_names,
+    swarm_event,
+    write_ledger,
+    write_metrics,
+)
 from .._final import FinalName, Pick, answer, finalise, settle
-from .._ledger import LedgerInterval, MemberAccount
+from .._ledger import LedgerInterval, MemberAccount, SpanPlaces
 from .._member import (
     Member,
     MemberOutcome,
@@ -744,7 +750,8 @@ class SwarmRun:
         registration.enter_context(operator_group(self.operator.name, self.operator))
         # until the try below, whose finally unregisters the group, any error does
         try:
-            timelines = MemberTimelines([m.name for m in self._members])
+            timeline = SwarmTimeline(current_span_id())
+            claim_member_names([m.name for m in self._members])
             interval = self._interval = LedgerInterval(
                 roster=[m.name for m in self._members]
             )
@@ -754,6 +761,7 @@ class SwarmRun:
             # the swarm's span
             self._span_id = current_span_id()
             self._settle()
+            timeline.open()
         except BaseException:
             registration.close()
             raise
@@ -889,7 +897,7 @@ class SwarmRun:
                         failures.append(ex)
                     failures += self._account(
                         interval,
-                        timelines,
+                        timeline,
                         chosen,
                         ended=ended,
                         error=error,
@@ -925,6 +933,7 @@ class SwarmRun:
                     current_bus.reset(bus_token)
                 if running is not None:
                     _swarm_ended(running)
+                timeline.close()
         if error is not None:
             raise error
 
@@ -936,7 +945,7 @@ class SwarmRun:
     def _account(
         self,
         interval: LedgerInterval,
-        timelines: MemberTimelines,
+        timeline: SwarmTimeline,
         chosen: FinalRecord | None,
         *,
         ended: bool,
@@ -977,6 +986,8 @@ class SwarmRun:
         except Exception as ex:
             return [ex]
         failures: list[Exception] = []
+        spans: dict[str, str] = {}
+        places: SpanPlaces | None = None
         # the metrics first, so that a failure to write them is known before the ledger
         # records how the run ended
         try:
@@ -1018,7 +1029,6 @@ class SwarmRun:
                     chosen.answer if chosen is not None else None,
                 )
             )
-            timelines.fill(places)
         except Exception as ex:
             failures.append(ex)
         if (failed or failures) and ledger.stop_reason == OPERATOR:
@@ -1031,6 +1041,12 @@ class SwarmRun:
             write_ledger(ledger)
         except Exception as ex:
             failures.append(ex)
+        # last, so that the swarm's timeline holds its ledger and metrics
+        if places is not None:
+            try:
+                timeline.fill(places, spans.values())
+            except Exception as ex:
+                failures.append(ex)
         return failures
 
     def stop(self, reason: str) -> None:

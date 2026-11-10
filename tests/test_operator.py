@@ -1900,7 +1900,7 @@ async def test_two_swarms_at_once_outside_any_member_are_refused() -> None:
     ran = await _run(two_swarms(), drive)
 
     assert errors == ["The sample already has an operator group named 'swarm'."]
-    assert left == [(["a"], 0)]
+    assert left == [(["swarm"], 0)]
     assert [e.member for e in ran.swarm_events("member_result")] == ["a", "b"]
 
 
