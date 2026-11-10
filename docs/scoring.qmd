@@ -154,7 +154,7 @@ for m in record.members:
 - `materialize` runs inside the member's span, so its sandbox calls appear with the member's grade.
 - `materialize` is given roster names only, never a name a member chose, so paths and branch names come from the task's own layout.
 - Restoring must also remove what the scorer created, so the next member is graded on its own artifact alone.
-- Restoring must finish when the scoring time limit cancels the scorer. Shield it from cancellation and give it a timeout of its own.
+- If the scoring time limit expires while a member is graded, the sample errors and the checkout is left as it was, not restored. That sample records no scores, so nothing reads it.
 - An error from `materialize` or the scorer fails the sample.
 - A sample with no swarm is graded on the environment as it left it, without `materialize`.
 - In a shared sandbox, any member can write into another member's directory or branch. A member's grade says what was in its place when the scorer ran, not what that member did alone.
@@ -169,7 +169,6 @@ Take a task shaped like SWE-bench. The repository is in `/testbed`, where the ta
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-import anyio
 from inspect_ai.util import sandbox
 
 
@@ -193,15 +192,16 @@ class MemberBranches:
             )
             yield
         finally:
-            # shielded, so a scoring time limit cannot stop it halfway
-            with anyio.CancelScope(shield=True):
-                await self.sh(
-                    'rm -rf "$1" && mv "$2" "$1"', self.repo, self.team, timeout=60
-                )
+            # never retried: a second run would delete the restored checkout
+            await self.sh(
+                'rm -rf "$1" && mv "$2" "$1"', self.repo, self.team, retry=False
+            )
 
-    async def sh(self, script: str, *args: str, timeout: int | None = None) -> None:
+    async def sh(self, script: str, *args: str, retry: bool = True) -> None:
         result = await sandbox().exec(
-            ["sh", "-c", f"set -e; {script}", "sh", *args], cwd="/", timeout=timeout
+            ["sh", "-c", f"set -e; {script}", "sh", *args],
+            cwd="/",
+            timeout_retry=retry,
         )
         if not result.success:
             raise RuntimeError(

@@ -11,7 +11,6 @@ from contextlib import aclosing, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import anyio
 import pytest
 from inspect_ai import Task, eval, score  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent
@@ -21,7 +20,7 @@ from inspect_ai.log import EvalLog, EvalSample, read_eval_log
 from inspect_ai.model import ModelOutput
 from inspect_ai.scorer import Score, Scorer, Target, match, scorer
 from inspect_ai.solver import Solver, TaskState
-from inspect_ai.util import SandboxEnvironment, sandbox
+from inspect_ai.util import ExecResult, SandboxEnvironment, sandbox
 from inspect_ai.util._concurrency import init_concurrency
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 
@@ -749,25 +748,44 @@ def test_the_docs_member_branches_grade_each_members_commits(
     assert not (tmp_path / "testbed.team").exists()
 
 
+class _ReplayingSandbox(LocalSandboxEnvironment):
+    """Once `replay` is set, runs each command it may retry a second time, as a sandbox does when it loses a command's response."""
+
+    replay = False
+
+    async def exec(
+        self,
+        cmd: list[str],
+        input: str | bytes | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | None = None,
+        timeout: int | None = None,
+        timeout_retry: bool = True,
+        concurrency: bool = True,
+    ) -> ExecResult[str]:
+        args = (cmd, input, cwd, env, user, timeout, timeout_retry, concurrency)
+        result = await super().exec(*args)
+        if self.replay and timeout_retry:
+            result = await super().exec(*args)
+        return result
+
+
 @pytest.mark.anyio
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
-async def test_the_docs_member_branches_restore_the_team_when_a_grade_is_cancelled(
+async def test_the_docs_member_branches_never_run_a_restore_twice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _member_repo(tmp_path, monkeypatch)
     before = _team_state(repo)
     # the subprocess limiter is bound to the backend that created it
     init_concurrency()
-    environment = LocalSandboxEnvironment()
+    environment = _ReplayingSandbox()
     try:
         branches = _docs_member_branches(lambda: environment)(repo=str(repo))
-        # as when the scoring time limit expires while a member is graded
-        with anyio.CancelScope() as scope:
-            async with branches.materialize("a"):
-                assert (repo / "answer.txt").read_text() == "1"
-                scope.cancel()
-                await anyio.sleep_forever()
-        assert scope.cancelled_caught
+        async with branches.materialize("a"):
+            assert (repo / "answer.txt").read_text() == "1"
+            environment.replay = True
     finally:
         environment.directory.cleanup()
     assert _team_state(repo) == before
