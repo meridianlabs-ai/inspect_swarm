@@ -1535,3 +1535,44 @@ def test_the_census_bounds_the_bytes_of_its_sampled_paths(tmp_path: Path) -> Non
         assert f"omitted {omitted}" in lines
         assert {"owner 61001 60 60", "owner 0 10 20"} <= set(lines)
     assert sum(len(line) for line in out) < 5000 + 1000
+
+
+@pytest.mark.anyio
+async def test_an_end_request_while_a_member_is_reaped_changes_nothing() -> None:
+    # the member's agent raised (a member that returned is draining, which end
+    # requests leave alone anyway); a request while it is reaped, as the operator's
+    # stop makes it, neither cancels the reaping nor becomes the way it ended
+    stub = IsolationStub()
+    stub.reaping, stub.hold_reaping = anyio.Event(), anyio.Event()
+
+    async def run_controller(control: SwarmControl) -> StopReason:
+        control.start("w")
+        assert stub.reaping is not None and stub.hold_reaping is not None
+        await stub.reaping.wait()
+        control.member("w").end(origin="operator")
+        # long enough for the request's grace (0) to run out while it is reaped
+        await anyio.sleep(0.2)
+        stub.hold_reaping.set()
+        events = control.events()
+        async with aclosing(events):
+            async for _ in events:
+                pass
+        return "all_done"
+
+    team = swarm(
+        member(ends, args={"how": "raises"}, name="w"),
+        controller=controller(run_controller, "isolation_test_reaping_end"),
+        channels=[],
+        budget=Budget(grace=0),
+        isolation="users",
+    )
+    with environments(default=stub):
+        record, error, t = await _run(team)
+    assert repr(error) == repr(RuntimeError("the member's own error"))
+    [result] = record.members
+    assert (result.status, result.end_origin) == ("errored", None)
+    assert result.reap == MemberReap(status="ok")
+    [ledger] = swarm_events(t, "ledger")
+    assert [m["cancelled"] for m in cast(dict[str, Any], ledger.data)["members"]] == [
+        False
+    ]

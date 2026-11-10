@@ -440,6 +440,15 @@ fi
 # a user's primary group id is taken even when no group entry has it
 awk -F: '{ print $3 } FILENAME == "/etc/passwd" { print $4 }' /etc/passwd /etc/group >"$dir/ids" \
   || fail "users isolation could not read the ids in /etc/passwd and /etc/group"
+# the real, effective, saved and filesystem user and group ids of the processes running
+# now, such as a task's service started as a bare numeric user, with no passwd entry and
+# no file: a member given its uid would have it killed when reaped. A process that exits
+# while this runs takes no id.
+for s in /proc/[0-9]*/status; do
+  { while read -r k a b c d _; do
+      case $k in Uid:|Gid:) printf '%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" ;; esac
+    done <"$s"; } 2>/dev/null
+done >>"$dir/ids" || fail "users isolation could not list the ids of the running processes"
 while [ "$1" != -- ]; do
   root=$1
   shift
@@ -1099,14 +1108,14 @@ proc_uid() {
     esac
   done 2>/dev/null <"/proc/$1/status"
 }
-# a pid killed in an earlier round is counted once
-seen=$(mktemp -d) || fail "could not create a temporary directory"
-trap 'rm -rf "$seen"' EXIT
+# a pid killed in an earlier round is counted once, by a shell variable named after it,
+# so that nothing here writes to a filesystem a member could have filled
 killed=0 left=0 knames= lnames= round=0
 while :; do
   found=0
   for d in /proc/[0-9]*; do
     pid=${d#/proc/}
+    case $pid in *[!0-9]*) continue ;; esac
     proc_uid "$pid"
     [ "$u" = "$uid" ] && [ -z "$z" ] || continue
     found=1
@@ -1116,8 +1125,8 @@ while :; do
       proc_uid "$pid"
       [ "$u" = "$uid" ] && [ -z "$z" ] || continue
       kill -KILL "$pid" 2>/dev/null || continue
-      [ ! -e "$seen/$pid" ] || continue
-      : >"$seen/$pid"
+      eval "[ -z \"\${seen_$pid-}\" ]" || continue
+      eval "seen_$pid=1"
       killed=$((killed + 1))
       [ "$killed" -gt 50 ] || knames="$knames$name$nl"
     else

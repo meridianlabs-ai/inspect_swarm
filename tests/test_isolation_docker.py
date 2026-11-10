@@ -1157,3 +1157,73 @@ def test_leftover_processes_are_stopped_and_the_census_attributes_files(
     # only world-writable directories on the root filesystem are census roots
     assert roots["/opt/drop"]["kind"] == "world_writable"
     assert "/cache" not in roots
+
+
+# a task's service running as a bare numeric user in the swarm's id window, with no
+# passwd entry and no file
+_SERVICE = "nohup python3 -c 'import os, time; os.setgid(61003); os.setuid(61003); time.sleep(600)' >/dev/null 2>&1 &"
+
+
+@pytest.mark.slow
+def test_a_service_running_as_a_numeric_user_is_not_given_to_a_member(
+    tmp_path: Path,
+) -> None:
+    # setup reserves the ids of the running processes, so no member gets the service's
+    # uid and reaping a member does not stop it
+    alive = "for d in /proc/[0-9]*; do grep -q '^Uid:\t61003\t' $d/status 2>/dev/null && cat $d/comm; done; echo checked"
+    cases = {
+        "service": Case(
+            runs=[
+                Run(
+                    {"shared": []},
+                    {"w-1": [("bash", "id -u")], "w-2": [("bash", "id -u")]},
+                    before=_SERVICE,
+                    after=alive,
+                )
+            ]
+        )
+    }
+    samples = _eval(tmp_path, cases)
+    results = cases["service"].results
+    uids = {int(_ok(results[name][0])) for name in ("w-1", "w-2")}
+    assert 61003 not in uids
+    assert results["after"] == ["python3\nchecked\n"]
+    record = swarm_result(samples["service"])
+    assert record is not None
+    assert [m.reap.killed if m.reap else None for m in record.members] == [0, 0]
+
+
+@pytest.mark.slow
+def test_reaping_needs_no_writable_temporary_storage(tmp_path: Path) -> None:
+    # the member fills a small /tmp, blocks and inodes, before it ends; its background
+    # process is still stopped
+    fill = "i=0; while { : > /tmp/f$i; } 2>/dev/null; do i=$((i+1)); done; dd if=/dev/zero of=/tmp/big bs=1k 2>/dev/null; mktemp -d -p /tmp 2>/dev/null || echo full"
+    cases = {
+        "full": Case(
+            runs=[
+                Run(
+                    {"shared": []},
+                    {
+                        "w-1": [
+                            ("bash", "nohup sleep 300 >/dev/null 2>&1 & echo started"),
+                            ("bash", fill),
+                        ]
+                    },
+                    after=_alive("w-1"),
+                )
+            ]
+        )
+    }
+    samples = _eval(
+        tmp_path, cases, compose_extra="      - /tmp:size=256k,nr_inodes=64,mode=1777\n"
+    )
+    results = cases["full"].results
+    assert _ok(results["w-1"][1]) == "full"
+    assert results["after"] == ["checked\n"]
+    record = swarm_result(samples["full"])
+    assert record is not None
+    [member_result] = record.members
+    assert member_result.reap is not None
+    assert (
+        member_result.reap.status == "ok" and "sleep" in member_result.reap.killed_names
+    )
