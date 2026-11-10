@@ -85,7 +85,7 @@ def swarm(
     Raises:
         TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, `result` is the type name a log records for it, or an argument has the wrong type.
         PrerequisiteError: If the returned agent runs in a sample with checkpointing on: checkpoint and resume are not supported for swarms yet.
-        ValueError: If member names collide, two member names differ only in case, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, a member is persistent while `result` has an `answer_key` or a `verifier`, the controller's `final` chain has `verify` without a verifier in `result`, `vote` without an answer key, `synthesize` without a result contract of kind `answer` or more than once, or a reporter, which the swarm does not run yet, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; under users isolation, if a member name is not a valid user-name suffix, a member chooses its own name or has its own sandbox, or the `filesystem` channel's `scratch` is not `home`, its `shared` is not a `rw` share or its notes file is in none; or, when the returned agent runs, if it runs in a span that is not an agent span, in an agent span named `init`, `solvers` or `scorers`, or in the span of another swarm still running, if the sample already has a swarm member named after one of its members, or does not have a sandbox a member names.
+        ValueError: If member names collide, two member names differ only in case, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the controller's `final` chain has `verify` without a verifier in `result`, `vote` without an answer key, `synthesize` without a result contract of kind `answer` or more than once, or a reporter, which the swarm does not run yet, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; under users isolation, if a member name is not a valid user-name suffix, a member chooses its own name or has its own sandbox, or the `filesystem` channel's `scratch` is not `home`, its `shared` is not a `rw` share or its notes file is in none; or, when the returned agent runs, if it runs in a span that is not an agent span, in an agent span named `init`, `solvers` or `scorers`, or in the span of another swarm still running, if the sample already has a swarm member named after one of its members, or does not have a sandbox a member names.
         RuntimeError: Under users isolation, when the returned agent runs, if it runs inside a sandbox identity scope (such as a member of a swarm with users isolation), another swarm with users isolation in the sample has set up the same sandbox, the sandbox cannot run commands as other users, the image lacks a tool setup needs, a path is unsafe, or the self-test finds a boundary that does not hold.
     """
     records = _members(members)
@@ -115,7 +115,6 @@ def swarm(
     ]
     own_sandboxes = _check_member_sandboxes(runs, resolved_channels)
     resolved_result = _result(result)
-    _check_result_members(resolved_result, records, names)
     chain = final_chain(resolved_controller.final, resolved_result)
     check_chain(chain, resolved_result)
     resolved_isolation = resolve_isolation(isolation)
@@ -377,21 +376,6 @@ def _check_persistent(records: Sequence[Member], names: Sequence[list[str]]) -> 
         if record.bridged:
             raise ValueError(
                 f"Member {record_names[0]!r} is persistent and declared bridged. A bridged member's CLI runs its own turns, so it cannot be held after an answer; a persistent member's agent must be a react() or a deepagent() loop without background dispatch, or a builder that returns one."
-            )
-
-
-# A persistent member gives several submissions, one per answer, and the runtime keys
-# and verifies a member's submission when it ends; until each answer is keyed and
-# verified as it arrives, a contract that keys or verifies refuses persistent members.
-def _check_result_members(
-    result: ResultSpec | None, records: Sequence[Member], names: Sequence[list[str]]
-) -> None:
-    if result is None or (result.answer_key is None and result.verifier is None):
-        return
-    for record, record_names in zip(records, names, strict=True):
-        if record.persistent:
-            raise ValueError(
-                f"Member {record_names[0]!r} is persistent, and the result contract has an answer_key or a verifier. The swarm does not yet key or verify each answer of a persistent member, so it refuses the two together: make the member not persistent, or leave answer_key and verifier out of the contract."
             )
 
 

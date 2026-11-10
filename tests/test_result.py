@@ -157,17 +157,15 @@ def test_a_contract_the_swarm_cannot_use_is_refused(build: Any, error: str) -> N
         pytest.param(answer_result(verifier=Checker()), id="verifier"),
     ],
 )
-def test_a_contract_that_keys_or_verifies_refuses_a_persistent_member(
+def test_a_contract_that_keys_or_verifies_accepts_a_persistent_member(
     result: ResultSpec,
 ) -> None:
+    # each answer is keyed and verified as it is given
     members = [
         member(answers("42"), name="plain"),
         member(react(), name="kept", persistent=True),
     ]
-    with pytest.raises(ValueError, match="Member 'kept' is persistent"):
-        swarm(members, channels=[], result=result)
-    # a contract that only names the kind applies no per-submission work
-    swarm(members, channels=[], result=answer_result())
+    swarm(members, channels=[], result=result)
 
 
 def test_the_builders_set_the_kind() -> None:
