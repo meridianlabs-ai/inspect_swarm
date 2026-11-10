@@ -461,7 +461,6 @@ class MemberResult(BaseModel):        # adds
 
 class FinalRecord(BaseModel):         # adds; reason gains "none_verified" and "no_answer_keys"
     chain: list[str] | None           # mode names, e.g. ["verify", "vote", "first"]; parameters are in the plan
-    votes: dict[str, int] | None      # answer key -> members, when vote ran, from the keys the record holds
     tie: bool                         # vote's plurality was tied and broken by time
     synthesize_error: str | None      # a recovered synthesize failure, when one occurred
 
@@ -473,7 +472,8 @@ class SwarmResultRecord(BaseModel):   # adds
 ```
 
 - **The chain's reasons.** With no answer, `reason` is `no_submissions` when nothing was submitted; otherwise the chain's last mode gave nothing, and it is `none_verified` for `verify` and `no_answer_keys` for `vote`.
-- **Model text in the final record.** The vote's answer keys and the final verdict's explanation come from model output, like the members' values below. `votes` counts the members' keys as the record holds them, so a key the record leaves out of its member is not counted, and the final verdict's explanation is kept or left out (`None`, named in the record's own `left_out`) by the same round trip as a member's.
+- **No vote counts.** The final record keeps no count of votes by answer key: the keys are model text, and a log's processing rewrites values but not dict keys, so with `log_images=False` an image data URI would survive in a key while it is removed from the member. The counts can be rebuilt from the members' `submitted` and `answer_key`, except for a key the record leaves out of its member; `mode`, `member` and `tie` say how the vote chose (decision: Ransom, 2026-11-10).
+- **Model text in the final record.** The final verdict's explanation comes from model output, like the members' values below. It is kept or left out (`None`, named in the record's own `left_out`) by the same round trip as a member's.
 - **Why `output` comes here.** `member_scores` scores each member's output, in final scoring and in re-scoring, and reads the outputs from the record with `swarm_result(state)`. M1 needs neither ([No outputs in M1](#what-the-swarm-records)). Its tests: an output is kept after the member's own limit, and after a hard stop for an agent that updates its state in place.
 - **When they are written.** The runtime keeps them on its run as they arise: a member's output when it ends, with or without a contract, its key and verdict when its submission is recorded and verified, and the chain fields with the provisional answer and the final selection. They enter the record when it is written, as the swarm exits ([When it is written](#what-the-swarm-records)), so no member can read a peer's output, key or verdict from it during the run. The record holds a copy of each output, with its `completion` as the member returned it: validating a `ModelOutput` fills an empty `completion` from its message, so the record keeps an empty one both when it is made and when it is read.
 - **Persistent members.** A persistent member gives a submission at each answer ([swarm-persistent-members.md](swarm-persistent-members.md)), while the record holds one `answer_key` and one `verdict` per member, and the runtime keys and verifies a submission when its member ends. Until each answer is keyed and verified as it arrives, with its key and verdict in the record and its verdict on `MemberIdle`, `swarm()` refuses a persistent member with a contract that has an `answer_key` or a `verifier` (`ValueError`). No task uses the two together yet; per-answer keying and verification is #158 (decision: Ransom, 2026-11-03).
@@ -908,7 +908,7 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
 1. **Result contract and record additions.** Builds on [swarm-result-record.md](swarm-result-record.md#implementation-plan)'s pull request: the added fields enter the record the runtime writes when the swarm ends, and every reader uses `swarm_result()`.
    - `src/inspect_swarm/_result.py`: `ResultSpec`, `answer_result`, `artifact_result`, `Verdict`, `Verifier`, `MemberArtifacts`.
    - `swarm(result=)`, with swarm-api.md's `TypeError` for the string a replay passes.
-   - The record's added fields that this step writes: `MemberResult`'s `output`, `answer_key`, `verdict`, `verdict_time` and `left_out`, and `SwarmResultRecord`'s `kind` and `verifier`. The final record's `chain`, `votes` and `tie`, and `final_verdict`, come with the chain (step 2), and `synthesize_error` with `synthesize` (step 3), the steps that write them.
+   - The record's added fields that this step writes: `MemberResult`'s `output`, `answer_key`, `verdict`, `verdict_time` and `left_out`, and `SwarmResultRecord`'s `kind` and `verifier`. The final record's `chain` and `tie`, and `final_verdict`, come with the chain (step 2), and `synthesize_error` with `synthesize` (step 3), the steps that write them.
    - The runtime verifies submissions, writes `verdict` events, and puts each verdict's `VerdictSummary` on the handle and `MemberEnded` before queuing the event (`_swarm.py`, `_controller/_control.py`, `_evidence.py`).
    - Exports in `src/inspect_swarm/__init__.py`. Tests in `tests/test_result.py`.
 2. **Final-answer chain.**
@@ -916,7 +916,7 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
    - Validation against the result, called from `swarm()`'s construction checks.
    - `leaderless(stop_on_verified=)`, and `final=` on `leaderless()` and `Controller` widened from M2's single `first` or `last` to `FinalSpec` (`_controller/_controller.py`, `_controller/leaderless.py`); `Controller` and `leaderless()` validate `final` with the `TypeAdapter`, and `leaderless()` refuses an explicit chain other than `first`, and `stop_on_verified`, with `stop_on_submission=True` ([What the other designs fix](#what-the-other-designs-fix-for-part-2)). The controller's choice keeps its M2 meaning, ahead of the chain.
    - `swarm()` refuses a chain with `synthesize` until step 3 builds it, and one with a `reporter` until a controller topology uses it.
-   - The chain in the provisional answer and finalisation, including verifying the submissions left unverified and the artifact `final_verdict`; `FinalRecord`'s `chain`, `votes` and `tie`, and `SwarmResultRecord.final_verdict`.
+   - The chain in the provisional answer and finalisation, including verifying the submissions left unverified and the artifact `final_verdict`; `FinalRecord`'s `chain` and `tie`, and `SwarmResultRecord.final_verdict`.
    - Tests extend `tests/test_final.py` and `tests/test_controller.py`.
 3. **`synthesize`.**
    - In `_final.py`, with its prompt template in `src/inspect_swarm/_prompts.py` and its failure classes; `FinalRecord.synthesize_error`.

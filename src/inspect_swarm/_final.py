@@ -202,26 +202,24 @@ def verify(members: Sequence[MemberResult]) -> Candidate | None:
 
 
 # The vote over the submissions' answer keys, one per member, where a submission
-# without a key does not vote: the earliest submission in the plurality group, the
-# votes by key, and whether the plurality was tied, in which case the group whose first
-# submission is earliest wins. The chosen candidate is None when no submission has a
-# key.
+# without a key does not vote: the earliest submission in the plurality group, and
+# whether the plurality was tied, in which case the group whose first submission is
+# earliest wins. The chosen candidate is None when no submission has a key.
 def vote(
     members: Sequence[MemberResult],
-) -> tuple[Candidate | None, dict[str, int], bool]:
+) -> tuple[Candidate | None, bool]:
     keys = {m.name: m.answer_key for m in members if not m.persistent}
     groups: dict[str, list[Candidate]] = {}
     for c in candidates(members):
         key = keys.get(c.name)
         if key is not None:
             groups.setdefault(key, []).append(c)
-    votes = {key: len(group) for key, group in groups.items()}
     if not groups:
-        return None, votes, False
-    most = max(votes.values())
+        return None, False
+    most = max(len(group) for group in groups.values())
     # each group's earliest submission, by swarm time then roster order
     leaders = [min(group, key=_time) for group in groups.values() if len(group) == most]
-    return min(leaders, key=_time), votes, len(leaders) > 1
+    return min(leaders, key=_time), len(leaders) > 1
 
 
 # The answer from the members' results so far: the controller's pick when it made one,
@@ -243,7 +241,6 @@ def answer(
             answer=pick.answer,
             chain=names,
         )
-    votes: dict[str, int] | None = None
     reason = "no_submissions"
     for mode in names:
         tie = False
@@ -251,7 +248,7 @@ def answer(
             chosen = verify(members)
             reason = "none_verified"
         elif mode == "vote":
-            chosen, votes, tie = vote(members)
+            chosen, tie = vote(members)
             reason = "no_answer_keys"
         elif mode == "first":
             chosen = first(members)
@@ -268,7 +265,6 @@ def answer(
                 provisional=provisional,
                 answer=chosen.answer,
                 chain=names,
-                votes=votes,
                 tie=tie,
             )
     if not candidates(members):
@@ -279,7 +275,6 @@ def answer(
         reason=reason,
         provisional=provisional,
         chain=names,
-        votes=votes,
     )
 
 

@@ -145,9 +145,6 @@ class FinalRecord(BaseModel):
     chain: list[str] | None = None
     """The final-answer chain's modes, by name, such as `["verify", "vote", "first"]`. `None` in records written before the chain existed."""
 
-    votes: dict[str, int] | None = None
-    """When the chain's `vote` ran: the number of members that submitted each answer key, as the members' keys are in the record (a key the record leaves out is not counted). `None` otherwise."""
-
     tie: bool = False
     """`vote` chose the answer from a tied plurality, by the earliest submission."""
 
@@ -212,33 +209,23 @@ def write_record(record: SwarmResultRecord) -> None:
 _MODEL_TEXT = ("output", "answer_key", "verdict")
 
 
-# The record's data without the model text: the members', the votes' answer keys and
-# the final verdict.
+# The record's data without the model text: the members' and the final verdict.
 def _authored(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
     members = cast(list[dict[str, JsonValue]], data.get("members", []))
-    final = cast(dict[str, JsonValue], data.get("final", {}))
     return {
         **data,
         "members": [
             {k: v for k, v in m.items() if k not in _MODEL_TEXT} for m in members
         ],
-        "final": {k: v for k, v in final.items() if k != "votes"},
         "final_verdict": None,
     }
 
 
 # The record, its members already as a log gives them back, with its own model text as
-# a log gives it back: the votes counted from the members' keys as the record holds
-# them, and the final verdict, whose explanation is left out, and named in the record's
-# left_out, when the record could not hold it.
+# a log gives it back: the final verdict, whose explanation is left out, and named in
+# the record's left_out, when the record could not hold it.
 def _logged_final(record: SwarmResultRecord) -> SwarmResultRecord:
     update: dict[str, Any] = {}
-    if record.final.votes is not None:
-        votes: dict[str, int] = {}
-        for m in record.members:
-            if m.submitted and m.answer_key is not None:
-                votes[m.answer_key] = votes.get(m.answer_key, 0) + 1
-        update["final"] = record.final.model_copy(update={"votes": votes})
     verdict = record.final_verdict
     if verdict is not None:
         # the verdict's declared fields alone, as for a member's verdict
@@ -260,13 +247,7 @@ def _logged_final(record: SwarmResultRecord) -> SwarmResultRecord:
 # written alone in a copy of the record, at its place in the record.
 def _logged_verdict(record: SwarmResultRecord, verdict: Verdict) -> Verdict | None:
     try:
-        alone = record.model_copy(
-            update={
-                "members": [],
-                "final": record.final.model_copy(update={"votes": None}),
-                "final_verdict": verdict,
-            }
-        )
+        alone = record.model_copy(update={"members": [], "final_verdict": verdict})
         data = alone.model_dump(mode="json")
         if _unresolved(data["final_verdict"]):
             return None

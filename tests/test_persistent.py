@@ -235,7 +235,6 @@ async def test_a_persistent_member_answers_is_held_idle_and_a_wake_continues_its
         "provisional": False,
         "answer": 0,
         "chain": ["first"],
-        "votes": None,
         "tie": False,
     }
     assert "one" in ran.sample.output.completion
@@ -1356,7 +1355,6 @@ async def test_choose_answer_takes_the_latest_answer_and_keeps_it() -> None:
         "provisional": False,
         "answer": 1,
         "chain": ["first"],
-        "votes": None,
         "tie": False,
     }
     assert "two" in ran.sample.output.completion

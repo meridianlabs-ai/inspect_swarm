@@ -35,7 +35,7 @@ When the swarm ends, it writes a record of what it did to the transcript, as an 
     {"name": "react-1", "role": null, "choose_name": false, "state": "ended", "status": "submitted", "submitted": true, "time": 41.2, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null},
     {"name": "react-2", "role": null, "choose_name": false, "state": "ended", "status": "swarm_cap", "submitted": false, "time": 57.9, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null}
   ],
-  "final": {"mode": "first", "member": "react-1", "reason": null, "provisional": false, "chain": ["first"], "votes": null, "tie": false}
+  "final": {"mode": "first", "member": "react-1", "reason": null, "provisional": false, "chain": ["first"], "tie": false}
 }
 ```
 
@@ -48,7 +48,7 @@ When the swarm ends, it writes a record of what it did to the transcript, as an 
 - `answer_key`, `verdict` and `verdict_time` come from the result contract, for a submission ([The result contract](#the-result-contract)). The record's `kind` and `verifier` name the contract's kind and its verifier. Without a contract, all of these are `null`.
 - `left_out` names the member's values that the record leaves out, because it cannot hold them: `output`, `answer_key` or `explanation` (the verdict's). Each such value is `null` in the record. The member's output is still the swarm's answer if it was chosen. Usually `left_out` is empty.
 - `final.chain` is the chain the swarm applied. `final.mode` is the mode that chose the answer (`verify`, `vote`, `first` or `last`) or `controller`, and `final.member` names the chosen member. Under `controller`, `final.reason` is the reason the controller gave. With no answer, `mode` and `member` are `null` and `final.reason` says why: `"no_submissions"`, or, when there were submissions, `"none_verified"` for a chain that ends with `verify` and `"no_answer_keys"` for one that ends with `vote`.
-- When `vote` ran, `final.votes` counts the members that submitted each answer key, as the members' keys are in the record, and `final.tie` is `true` when the largest groups tied.
+- `final.tie` is `true` when `vote` chose from tied groups, by the earliest submission. To count the votes, group the submitted members by `answer_key`.
 - `final_verdict` is the verifier's verdict on the environment after the members have stopped, for an `artifact` task with a verifier ([The result contract](#the-result-contract)). The record's own `left_out` is `["explanation"]` when it cannot hold that verdict's explanation.
 
 The record is a `SwarmEvent` with `kind="result_record"`. Its `data` holds the fields above and an `id`, which the swarm also puts in the sample store under `inspect_swarm:result_id`, so that `swarm_result()` finds the record of the store it is given. Older logs hold the record as an `InfoEvent` with source `inspect_swarm` and `data["type"] == "result_record"`; `swarm_result()` reads both forms. If a limit, error or cancellation ends the swarm before it finalises its answer, the record has the answer so far with `provisional: true`, and that submission is the sample's output: the chain's choice from the submissions and verdicts so far, or the controller's choice once it has made one.

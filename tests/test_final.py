@@ -263,7 +263,6 @@ async def test_no_submissions_give_an_empty_output_though_members_have_outputs()
         "provisional": False,
         "answer": None,
         "chain": ["first"],
-        "votes": None,
         "tie": False,
     }
 
@@ -444,7 +443,6 @@ async def test_a_submission_during_grace_is_chosen_only_without_an_earlier_one(
         "provisional": False,
         "answer": None,
         "chain": ["first"],
-        "votes": None,
         "tie": False,
     }
     assert stop.state.output.completion == expected
@@ -551,7 +549,6 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "provisional": False,
         "answer": None,
         "chain": ["first"],
-        "votes": None,
         "tie": False,
     }
 
@@ -785,7 +782,6 @@ async def test_a_team_swarm_answers_with_its_last_submission() -> None:
         "provisional": False,
         "answer": None,
         "chain": ["last"],
-        "votes": None,
         "tie": False,
     }
     assert (final(stop.transcript).data["mode"], final(stop.transcript).member) == (
@@ -900,7 +896,6 @@ async def test_a_controller_chooses_the_answer_in_place_of_its_final_rule() -> N
         "provisional": False,
         "answer": None,
         "chain": ["last"],
-        "votes": None,
         "tie": False,
     }
     event = final(transcript)
@@ -979,7 +974,6 @@ async def test_a_controllers_choice_is_the_provisional_answer_at_once() -> None:
         "provisional": True,
         "answer": None,
         "chain": ["last"],
-        "votes": None,
         "tie": False,
     }
     assert seen == {"chosen": "a", "later": "a"}
@@ -1051,8 +1045,6 @@ def _submission(
     )
 
 
-_NO_VOTES: dict[str, int] = {}
-
 _PENDING = MemberResult(
     name="pending", role=None, state="pending", status=None, submitted=False, time=None
 )
@@ -1068,7 +1060,7 @@ _PENDING = MemberResult(
                 _submission("b", 2.0, passed=True, value=0.9),
                 _submission("c", 0.5, passed=False, value=1.0),
             ],
-            ("verify", "b", None, None, False),
+            ("verify", "b", None, False),
             id="verify-best-value",
         ),
         pytest.param(
@@ -1077,7 +1069,7 @@ _PENDING = MemberResult(
                 _submission("a", 1.0, passed=True),
                 _submission("b", 2.0, passed=True, value=-5.0),
             ],
-            ("verify", "b", None, None, False),
+            ("verify", "b", None, False),
             id="verify-no-value-ranks-below-any-number",
         ),
         pytest.param(
@@ -1086,7 +1078,7 @@ _PENDING = MemberResult(
                 _submission("a", 2.0, passed=True, value=math.nan),
                 _submission("b", 1.0, passed=True),
             ],
-            ("verify", "b", None, None, False),
+            ("verify", "b", None, False),
             id="verify-nan-ranks-as-no-value",
         ),
         pytest.param(
@@ -1096,7 +1088,7 @@ _PENDING = MemberResult(
                 _submission("b", 1.0, passed=True, value=1.0),
                 _submission("c", 1.0, passed=True, value=1.0),
             ],
-            ("verify", "b", None, None, False),
+            ("verify", "b", None, False),
             id="verify-ties-by-time-then-roster",
         ),
         pytest.param(
@@ -1106,13 +1098,13 @@ _PENDING = MemberResult(
                 _submission("b", 2.0, passed=True, value=math.nan),
                 _submission("c", 3.0, passed=True, value=-math.inf),
             ],
-            ("verify", "c", None, None, False),
+            ("verify", "c", None, False),
             id="verify-no-value-ranks-below-minus-infinity",
         ),
         pytest.param(
             ["verify"],
             [_submission("a", 1.0, passed=False), _submission("b", 2.0)],
-            (None, None, "none_verified", None, False),
+            (None, None, "none_verified", False),
             id="verify-strict-none-passed",
         ),
         pytest.param(
@@ -1122,13 +1114,13 @@ _PENDING = MemberResult(
                 _submission("b", 2.0, key="y"),
                 _submission("c", 3.0, key="y"),
             ],
-            ("vote", "b", None, {"x": 1, "y": 2}, False),
+            ("vote", "b", None, False),
             id="vote-plurality",
         ),
         pytest.param(
             ["vote"],
             [_submission("a", 1.0), _submission("b", 2.0, key="y")],
-            ("vote", "b", None, {"y": 1}, False),
+            ("vote", "b", None, False),
             id="vote-no-key-abstains",
         ),
         pytest.param(
@@ -1139,13 +1131,13 @@ _PENDING = MemberResult(
                 _submission("c", 4.0, key="x"),
                 _submission("d", 5.0, key="y"),
             ],
-            ("vote", "b", None, {"x": 2, "y": 2}, True),
+            ("vote", "b", None, True),
             id="vote-tie-to-the-earliest-group",
         ),
         pytest.param(
             ["vote"],
             [_submission("a", 1.0), _submission("b", 2.0)],
-            (None, None, "no_answer_keys", _NO_VOTES, False),
+            (None, None, "no_answer_keys", False),
             id="vote-strict-no-keys",
         ),
         pytest.param(
@@ -1155,7 +1147,7 @@ _PENDING = MemberResult(
                 _submission("b", 2.0, passed=False, key="y"),
                 _submission("c", 3.0, passed=False, key="y"),
             ],
-            ("vote", "b", None, {"x": 1, "y": 2}, False),
+            ("vote", "b", None, False),
             id="default-falls-through-to-vote",
         ),
         pytest.param(
@@ -1164,19 +1156,19 @@ _PENDING = MemberResult(
                 _submission("a", 2.0, passed=False),
                 _submission("b", 1.0, passed=False),
             ],
-            ("first", "b", None, _NO_VOTES, False),
+            ("first", "b", None, False),
             id="default-falls-through-to-first",
         ),
         pytest.param(
             ["verify", "last"],
             [_submission("a", 1.0, passed=False), _submission("b", 2.0)],
-            ("last", "b", None, None, False),
+            ("last", "b", None, False),
             id="verify-then-last",
         ),
         pytest.param(
             ["verify", "vote", "first"],
             [_PENDING],
-            (None, None, "no_submissions", _NO_VOTES, False),
+            (None, None, "no_submissions", False),
             id="never-started-members-are-never-chosen",
         ),
     ],
@@ -1184,14 +1176,13 @@ _PENDING = MemberResult(
 def test_the_chain_takes_the_first_mode_that_gives_an_answer(
     chain: Any,
     members: list[MemberResult],
-    expected: tuple[str | None, str | None, str | None, dict[str, int] | None, bool],
+    expected: tuple[str | None, str | None, str | None, bool],
 ) -> None:
     chosen = answer(members, chain, None, provisional=False)
     assert (
         chosen.mode,
         chosen.member,
         chosen.reason,
-        chosen.votes,
         chosen.tie,
     ) == expected
     assert chosen.chain == chain
@@ -1428,14 +1419,13 @@ async def test_the_default_chain_verifies_then_votes_then_takes_the_first() -> N
         )
     )
     chain = ["verify", "vote", "first"]
-    for outcome, mode, chosen, votes in [
-        (verified, "verify", "b", None),
-        (voted, "vote", "b", {"7": 1, "8": 2}),
-        (firsts, "first", "a", {}),
+    for outcome, mode, chosen in [
+        (verified, "verify", "b"),
+        (voted, "vote", "b"),
+        (firsts, "first", "a"),
     ]:
         record = outcome.record.final
         assert (record.chain, record.mode, record.member) == (chain, mode, chosen)
-        assert record.votes == votes
         assert final(outcome.transcript).data["mode"] == mode
         assert outcome.state.messages[-1].metadata == {
             "inspect_swarm": {"final": {"mode": mode, "member": chosen}}
@@ -1488,7 +1478,7 @@ async def test_the_provisional_answer_follows_the_chain_after_each_verdict() -> 
 
 
 @pytest.mark.anyio
-async def test_votes_count_the_keys_the_record_holds() -> None:
+async def test_the_vote_counts_keys_the_record_leaves_out() -> None:
     # two members answer with a key the record cannot hold
     stop = await run_swarm(
         swarm(
@@ -1509,12 +1499,43 @@ async def test_votes_count_the_keys_the_record_holds() -> None:
         "a",
         False,
     )
-    assert record.final.votes == {"y": 1}
     assert [(m.answer_key, m.left_out) for m in record.members] == [
         (None, ["output", "answer_key"]),
         (None, ["output", "answer_key"]),
         ("y", []),
     ]
+
+
+def test_a_vote_keeps_no_image_data_in_a_log_without_images(tmp_path: Path) -> None:
+    # two members answer with different image data URIs, which a log without images
+    # removes from the record: the vote keeps no copy of them
+    images = ["data:image/png;base64,Zmlyc3Q=", "data:image/png;base64,c2Vjb25k"]
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
+            _team(("a", images[0], []), ("b", images[1], ["a"]), ("c", "y", ["b"])),
+            controller=leaderless(stop_on_submission=False, final="vote"),
+            channels=[],
+            result=answer_result(answer_key=_key),
+        ),
+    )
+    [log] = eval(
+        task,
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+        log_images=False,
+        display="none",
+    )
+    assert log.status == "success", log.error
+    [sample] = read_eval_log(log.location).samples or []
+    [event] = [
+        e for e in sample.events if isinstance(e, SwarmEvent) and e.kind == RECORD_TYPE
+    ]
+    logged = json.dumps(event.data)
+    assert not any(image.split(",")[1] in logged for image in images)
+    final = event.data["final"]
+    assert isinstance(final, dict)
+    assert (final["mode"], final["member"], final["tie"]) == ("vote", "a", True)
 
 
 class _Environment:
