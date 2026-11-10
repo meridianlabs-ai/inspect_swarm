@@ -208,13 +208,20 @@ def baseline(member: Member | Agent, result: ResultSpec | None = None) -> Agent:
         The swarm of one, as an agent.
 
     Raises:
-        ValueError: If `member` stands for more than one member (`count`), or for any reason `swarm()` refuses it.
+        ValueError: If `member` stands for more than one member (`count`), is persistent, or for any reason `swarm()` refuses it.
         TypeError: For any reason `swarm()` refuses its arguments.
     """
-    count = sum(len(names) for names in member_names(_members(member)))
+    records = _members(member)
+    names = member_names(records)
+    count = sum(len(record_names) for record_names in names)
     if count != 1:
         raise ValueError(
             f"baseline() runs one member, and member= stands for {count}. Use swarm() for more than one."
+        )
+    # read from the record, before any builder runs
+    if records[0].persistent:
+        raise ValueError(
+            f"baseline(): member {names[0][0]!r} is persistent. A baseline's attempt is its member's one submission, and a persistent member gives one at each answer; make the member not persistent."
         )
     return swarm(
         members=member,

@@ -23,7 +23,7 @@ def leaderless(
     Args:
         stop_on_submission: Stop the swarm when the first member ends with a submission.
         final: How the swarm chooses its answer from the submissions: one mode or a chain of modes, tried in order until one gives an answer (see `Controller`). `None` is the default chain for the swarm's result contract: `verify` if it has a verifier, then `vote` if it has an answer key, then `first`. Any other value than `first` or `None` needs `stop_on_submission=False`.
-        stop_on_verified: Stop the swarm when a submission passes the result contract's verifier. Needs `stop_on_submission=False`. Without a verifier, no submission has a verdict, so it never stops the swarm.
+        stop_on_verified: Stop the swarm when a submission passes the result contract's verifier, including any answer of a persistent member. Needs `stop_on_submission=False`. Without a verifier, no submission has a verdict, so it never stops the swarm.
 
     Returns:
         The controller, which returns the stop reason `verified` when a passed submission stopped the swarm, `submitted` when a member's submission stopped it, `quiescence` when every member ended or is idle and at least one is idle, and `all_done` when every member ended.
@@ -51,9 +51,10 @@ def leaderless(
             swarm.start(m)
         async with aclosing(swarm.events()) as events:
             async for event in events:
+                # a persistent member's answer comes with its verdict on MemberIdle
                 if (
                     stop_on_verified
-                    and isinstance(event, MemberEnded)
+                    and isinstance(event, MemberEnded | MemberIdle)
                     and event.verdict is not None
                     and event.verdict.passed
                 ):

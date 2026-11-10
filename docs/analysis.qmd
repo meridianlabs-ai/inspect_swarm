@@ -34,7 +34,7 @@ For each member, in roster order:
 - `gate_checks`, `gate_passes`, `first_pass_time`: its in-loop checks ([Scoring](scoring.qmd#checks-during-the-run)).
 - `comm`, `waits`, `waits_by_outcome`, `wait_time`, `idle_time`: below.
 - `holds`, `held_time`: the turn boundaries at which a controller's callbacks held it, and the seconds it was held. `running_time` includes them ([Boundary callbacks](#boundary-callbacks)). A persistent member's idle holds count too.
-- `activations`, `answers`, `awaiting_work_time`: for a [persistent member](members.qmd#persistent-members), the activations it began (1 at its start, one more for each wake), the answers it gave, and the part of `held_time` it spent idle, waiting for a wake or its end. All 0 for other members.
+- `activations`, `answers`, `awaiting_work_time`: for a [persistent member](members.qmd#persistent-members), the activations it began (1 at its start, one more for each wake), the answers it gave, and the part of `held_time` it spent idle, waiting for a wake or its end. The wait for an answer's verdict, before the member goes idle, is in `held_time` but not in `awaiting_work_time`. All 0 for other members.
 
 ### The critical path
 
@@ -99,7 +99,7 @@ A hash is the SHA-256 of the message as the log serializes it, without its id (a
 
 ### Persistent members
 
-A [persistent member](members.qmd#persistent-members) writes one `answer` event for each answer, in its span, with `answer`, the answer's index from 0. In the result record, its `MemberResult` has `persistent` true and `answer_times`, the swarm time of each answer. `FinalRecord.answer`, and the `final` event's `answer`, say which of the chosen member's answers is the swarm's; they are `null` for other members.
+A [persistent member](members.qmd#persistent-members) writes one `answer` event for each answer, in its span, with `answer`, the answer's index from 0. In the result record, its `MemberResult` has `persistent` true, `answer_times`, the swarm time of each answer, and `answer_results`, each answer's key and verdict ([Scoring](scoring.qmd#the-result-record)). With a verifier, each verdict is a `verdict` event in the swarm's span whose `answer` is that index; a submission's `verdict` event has `answer` `null`. `FinalRecord.answer`, and the `final` event's `answer`, say which of the chosen member's answers is the swarm's; they are `null` for other members.
 
 ### Operator actions
 
