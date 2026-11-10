@@ -29,11 +29,13 @@ from inspect_swarm import (
     Budget,
     Member,
     SwarmControl,
+    Topic,
     member,
     messages,
     shared_memory,
     swarm,
     swarm_tools,
+    topics,
 )
 from inspect_swarm._budget import current_member
 from inspect_swarm._bus._bus import SwarmBus
@@ -537,6 +539,51 @@ async def test_a_wait_with_other_news_ends_with_the_unread_count(
         # the limit cut the middle of the result, and kept the count at its end
         assert "truncated" in message.text
         assert "You have 1 unread message." in message.text
+
+
+_MESSAGE_NEWS = "1 unread message (from a). Call read_messages() to read them."
+_POST_NEWS = "1 unread post in #news (from a). Call read_topics() to read them."
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "message,topic,result",
+    [
+        pytest.param(
+            True,
+            "quiet",
+            f"{_MESSAGE_NEWS}\nUnread posts: #quiet 1.\nYou have 1 unread message and 1 unread post.",
+            id="message-news-and-a-quiet-post",
+        ),
+        pytest.param(
+            True,
+            "news",
+            f"{_MESSAGE_NEWS}\n{_POST_NEWS}\nUnread posts: #news 1.\nYou have 1 unread message and 1 unread post.",
+            id="message-and-post-news",
+        ),
+        pytest.param(
+            False,
+            "news",
+            f"{_POST_NEWS}\nUnread posts: #news 1.\nYou have 1 unread message and 1 unread post.",
+            id="post-news-and-a-quiet-message",
+        ),
+        pytest.param(None, "news", _POST_NEWS, id="post-news-alone"),
+        pytest.param(True, None, _MESSAGE_NEWS, id="message-news-alone"),
+    ],
+)
+async def test_a_wait_ends_with_the_totals_unless_it_is_one_channels_news_alone(
+    message: bool | None, topic: str | None, result: str
+) -> None:
+    channels = [
+        messages(rate=None),
+        topics([Topic(name="news", wake=True), Topic(name="quiet")], rate=None),
+    ]
+    async with messages_run(("a", "b"), *channels) as (r, _):
+        if message is not None:
+            await r.send("a", "b", "x", wake=message)
+        if topic is not None:
+            await r.call("a", "post_topic", topic=topic, message="y")
+        assert await r.call("b", "swarm_wait") == result
 
 
 _NOT_WAKING = "Messages sent with wake=False do not wake this wait; they are counted when it returns for another reason."

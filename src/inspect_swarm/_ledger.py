@@ -121,6 +121,9 @@ class MemberLedger(BaseModel):
     background_cancelled: int = 0
     """Of `background_started`, the tasks that were cancelled: still running when the member's drain ended, or cancelled by an error from the member's work or by the hard stop."""
 
+    end_origin: str | None = None
+    """Who asked the member to end, when an end request decided how it ended, as `MemberResult.end_origin`. `None` when no end request did."""
+
 
 class SwarmLedger(BaseModel):
     """Realized usage and cost of one run of the swarm, and how complete they are.
@@ -178,7 +181,7 @@ class SwarmLedger(BaseModel):
     """How far usage at the end went past each cap, keyed by `cost`, `tokens` and `time`. Only kinds over their cap appear."""
 
     stop_reason: str | None
-    """The reason the swarm stopped its members, from the first stop begun. `None` when no stop began."""
+    """The reason the swarm stopped its members, from the first stop begun. `None` when no stop began, and in place of `operator` when the swarm failed or was cancelled."""
 
     ended_by: str | None
     """The sample limit (`sample_limit:<type>`) or operator interrupt (`operator`) that ended the swarm, even during its own stop. `unknown` when an outside cause may have ended it but cannot be named. `None` when nothing from outside ended it."""
@@ -214,6 +217,8 @@ class MemberAccount:
     # the model calls in flight when a stop or an end cancelled one of the member's
     # boundary callback chains, by event id
     cancelled_calls: Sequence[str] = ()
+    # the origin of the end request that decided how the member ended
+    end_origin: str | None = None
 
 
 # A model event as it last stood, with its live usage object.
@@ -483,6 +488,7 @@ class LedgerInterval:
                 cancelled=m.cancelled or self._in_flight(m, places),
                 background_started=m.background_started,
                 background_cancelled=m.background_cancelled,
+                end_origin=m.end_origin,
             )
             for m in members
         ]

@@ -324,8 +324,8 @@ def _steps_to_answer(
 
 
 # Each member's communication over each of the channels, from the evidence events that
-# name one of the members. Member names are unique in a sample, since each names a
-# timeline, so another swarm's events never name these members.
+# name one of the members. Member names are unique across the swarms in a sample, so
+# another swarm's events never name these members.
 def _comm_metrics(
     events: EventLog, members: Sequence[str], channels: Sequence[str]
 ) -> dict[str, dict[str, CommMetrics]]:

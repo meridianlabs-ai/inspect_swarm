@@ -355,6 +355,9 @@ class MemberContext:
     background_running: int = 0
     # the error for bridge use found after the member started background work
     refusal: RuntimeError | None = None
+    # called, set by the runtime, as soon as an error that ends the member and the swarm
+    # is known in the member's work, before any cleanup awaits
+    fatal: Callable[[], None] = lambda: None
 
 
 def bridged_background_error(name: str) -> RuntimeError:

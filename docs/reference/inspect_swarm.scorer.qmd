@@ -1,0 +1,9 @@
+---
+reference: inspect_swarm.scorer
+description: Per-member scores for tasks scored on their answer.
+---
+
+## Member scores
+
+### member_scores
+### MEMBER_METRICS

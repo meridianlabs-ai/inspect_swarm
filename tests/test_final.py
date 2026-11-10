@@ -9,6 +9,7 @@ from inspect_ai.agent import Agent, AgentState, agent, react
 from inspect_ai.agent import run as run_agent
 from inspect_ai.dataset import Sample
 from inspect_ai.event import SpanBeginEvent, SpanEndEvent, SwarmEvent
+from inspect_ai.log import read_eval_log
 from inspect_ai.log import transcript as current_transcript
 from inspect_ai.model import (
     ChatMessageAssistant,
@@ -477,13 +478,12 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
     assert probed == [(False, False)]
     swarm_evidence = [e for e in transcript.events if isinstance(e, SwarmEvent)]
     kinds = [e.kind for e in swarm_evidence]
-    assert kinds[-4:] == ["final", RECORD_TYPE, "ledger", "metrics"]
+    assert kinds[-4:] == ["final", RECORD_TYPE, "metrics", "ledger"]
     [event] = [e for e in swarm_evidence if e.kind == RECORD_TYPE]
     # in the swarm's span, where the final event is written
     assert event.span_id == final(transcript).data["span_id"]
     assert event.member is None
     assert event.data["id"] == record_id
-    # no member's output: those stay in the members' states
     members = event.data["members"]
     assert isinstance(members, list) and isinstance(members[0], dict)
     assert set(members[0]) == {
@@ -498,6 +498,11 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "gate_checks",
         "gate_passes",
         "first_pass_time",
+        "output",
+        "answer_key",
+        "verdict",
+        "verdict_time",
+        "left_out",
         "persistent",
         "answer_times",
         # users isolation's, null without it
@@ -506,6 +511,7 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "home",
         "reap",
         "foreign_execs",
+        "end_origin",
     }
     started, never = record.members
     assert (started.state, started.status, started.submitted, started.role) == (
@@ -663,7 +669,20 @@ def blank_completion() -> Agent:
 async def test_the_answer_keeps_its_completion() -> None:
     async with sample():
         state = await swarm(blank_completion(), channels=[])(AgentState(messages=[]))
+        [recorded] = _record().members
     assert state.output.completion == ""
+    assert recorded.output is not None and recorded.output.completion == ""
+
+
+def test_the_record_read_from_a_log_keeps_an_empty_completion(tmp_path: Path) -> None:
+    task = Task(
+        dataset=[Sample(input="task")], solver=swarm(blank_completion(), channels=[])
+    )
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    samples = read_eval_log(log.location).samples
+    assert samples is not None
+    [recorded] = _logged(swarm_result(samples[0])).members
+    assert recorded.output is not None and recorded.output.completion == ""
 
 
 @agent
