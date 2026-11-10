@@ -139,7 +139,7 @@ def frontier_math(arm: str = "swarm", k: int = 4, budget: float = 40.0) -> Task:
 - `member_scores(scorer, result, *, value_to_float=value_to_float(), empty_value=0.0) -> Scorer` is a plain builder, not itself registered. `MEMBER_METRICS` is `{"best_member": [mean(), stderr()], "mean_member": [mean(), stderr()]}`. Both are exported from `inspect_swarm.scorer`.
 - A factory that needs parameters takes values Inspect logs and rebuilds (strings, numbers, registered objects) and builds the spec from them.
 - The task's own scorer stays first and unchanged, so the headline is the same scorer in every arm.
-- The arms differ in a task argument (`arm`), so they are distinct in an eval set even though scorers, epochs and `result=` are not hashed into `task_identifier()` ([swarm-api.md Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
+- The arms differ in a task argument (`arm`), so they are distinct in an eval set even though scorers and epochs are not hashed into `task_identifier()` and a contract's contents are not either: `result=` is hashed only as its logged value, `"ResultSpec"` for every contract ([swarm-api.md Task identity](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
 
 ## The final answer
 
@@ -456,7 +456,7 @@ def select_at_k(rows: Sequence[AttemptRow], k: int, chain: str | Sequence[str], 
 
 Nothing here needs an event type, schema change or viewer change beyond [swarm-event-types.md](swarm-event-types.md)'s; the viewer shows the swarm events and dict scores generically. Inspect applies every epoch reducer to every scorer and key, so an epochs arm with `["mean", pass_at(k)]` also shows, for example, `pass_at` of `mean_member`: well defined but not meaningful, and the user's analysis selects the cells that are.
 
-In an eval set, each arm is the same task with different arguments (`arm`, `k`, `budget`), which `eval_set` and inspect_flow sweep and each log carries in `eval.task_args`. The member scorer runs in every arm, so all arms have the same scorer names and `evals_df()` and `samples_df()` line them up. A log whose records have one member is a baseline arm (n is its epochs); more than one, a swarm arm (k is the member count). `task_identifier()` hashes the task's arguments and the solver's parameters, including the controller's `final` and `stop_on_verified`, but not scorers, epochs or `result=`, so arms that differ only in those take the difference from a task argument; otherwise `eval_set` refuses them as not distinct.
+In an eval set, each arm is the same task with different arguments (`arm`, `k`, `budget`), which `eval_set` and inspect_flow sweep and each log carries in `eval.task_args`. The member scorer runs in every arm, so all arms have the same scorer names and `evals_df()` and `samples_df()` line them up. A log whose records have one member is a baseline arm (n is its epochs); more than one, a swarm arm (k is the member count). `task_identifier()` hashes the task's arguments and the solver's parameters, including the controller's `final` and `stop_on_verified` and `swarm()`'s logged `result`, but not scorers or epochs. `result` is logged as `"ResultSpec"` for any contract, so passing one, or passing `None`, can change the identifier, while two contracts that differ only in their contents (kind, answer key, verifier, member artifacts) hash the same. Arms that differ only in scorers, epochs or a contract's contents take the difference from a task argument; otherwise `eval_set` refuses them as not distinct.
 
 ## The cost boundary (deferred)
 
