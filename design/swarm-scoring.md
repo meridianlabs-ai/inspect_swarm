@@ -519,7 +519,7 @@ def final_chain(final: FinalSpec | None, result: ResultSpec | None) -> list[Fina
 | Mode | Needs | Produces | Produces nothing when |
 |---|---|---|---|
 | `verify` | `result.verifier` | The passed candidate (a submission, or any answer of a persistent member, each with its own verdict) with the highest `Verdict.value` (`None` ranks below any number), earliest swarm time on ties, then roster order, then answer order | no submission passed |
-| `vote` | `result.answer_key` | The earliest submission in the plurality group of answer keys; one vote per member (which of a persistent member's answers votes: [Open question 2](#open-questions)); `None` keys do not vote. A tied plurality goes to the group whose first submission is earliest, and `tie` is recorded | no submission has a key |
+| `vote` | `result.answer_key` | The earliest voting candidate in the plurality group of answer keys; one vote per member: a submission's key, or a persistent member's latest keyed answer, which is then its candidate in the group (decision: Ransom, 2026-11-10); `None` keys do not vote. A tied plurality goes to the group whose first voting candidate is earliest, and `tie` is recorded | no submission has a key |
 | `first` | nothing | As in M1 ([The final answer](#the-final-answer-first)) | there are no submissions |
 | `last` | nothing | As in M2 ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)) | there are no submissions |
 | `synthesize` | `kind="answer"` | One extra model call over the submissions ([below](#synthesize)) | there are no submissions, or the call fails recoverably |
@@ -543,13 +543,13 @@ So a task with both gets `["verify", "vote", "first"]`, and one with neither get
 - It takes the verdict before it queues the member's `MemberEnded`, or for a persistent member's answer its `MemberIdle`, so a controller's `stop_on_verified` or escalation sees it, as a `VerdictSummary` without the explanation.
 - The member ends after its agent call and any background drain have finished. The runtime records its state, status, time and output then; its handle exposes the ended state and status, with `verdict` `None` until the verdict is taken. Until its `MemberEnded` is queued it still counts as running for `events()` and for the stop procedure's wait for quiet members, so neither can miss it.
 - Verifier calls run one at a time in the runtime, inside the swarm's span, in the order the submissions ended and the answers were given. Their usage, if any, is the swarm's, not a member's. The limits deep dive meters them under its runtime lever ([swarm-limits.md](swarm-limits.md#swarm-nodes)), which the runtime enters once for both the controller's task and the verifier's.
-- Verification continues through grace. A verifier call that the stop's closed runtime lever or a reached cap refuses leaves that submission unverified, and the hard stop ends verification: a submission not yet verified then is left unverified, and its `MemberEnded` is queued with no verdict. A verdict returned after cancellation (the hard stop's, or the sample's) is discarded, even when the verifier caught the cancellation, and no queued submission's verifier is called after it. Finalisation verifies such submissions (below).
+- Verification continues through grace. A verifier call that the stop's closed runtime lever or a reached cap refuses leaves that submission unverified, and the hard stop ends verification: a submission not yet verified then is left unverified, and its `MemberEnded` is queued with no verdict. A verdict returned after cancellation (the hard stop's, or the sample's) is discarded, even when the verifier caught the cancellation, and no queued submission's verifier is called after it. Finalisation verifies such submissions (below), but not a persistent member's answers: each answer is verified once, on the queue, and one the queue settled without a verdict stays unverified.
 
 **Provisional answer.** M1's rule ([The final answer](#the-final-answer-first)) with the chain in place of `first`. After each submission or verdict, the runtime applies the chain without `synthesize` (which needs a model call) to the submissions so far.
 
 **Finalisation.** M1's finalisation, plus three steps before the final record is written:
 
-1. The runtime verifies any submission not yet verified, including those from members that ended during grace and persistent members' answers.
+1. The runtime verifies any submission not yet verified, including those from members that ended during grace. It never verifies a persistent member's answer here. An answer the queue settled without a verdict (a call the stop refused, the hard stop) stays unverified in the record: the controller has already heard of it without one, on `MemberIdle` or `MemberEnded`, and an `artifact` verifier would now check the environment as the member's later activations and the stop left it, not as it was when the answer was given. Since a member is published idle only once its answer is settled, and the hard stop settles every answer still on the queue, no answer reaches finalisation unsettled.
 2. It runs the chain once more, including `synthesize`.
 3. For an artifact task with a verifier, it takes `final_verdict` ([Shared-artifact tasks](#shared-artifact-tasks-and-per-member-artifacts)).
 
@@ -819,14 +819,14 @@ def select_at_k(rows: Sequence[AttemptRow], k: int, chain: Sequence[str], *, emp
   - the task scorer's value;
   - `final_verdict` (the record's verifier result on the drained environment) and `final` (mode, member, reason);
   - `best_member`, `mean_member` and `complete`;
-  - the per-member states, statuses, keys, verdicts, times and submission flags, and `members_started`;
+  - the per-member states, statuses, keys, verdicts, times and submission flags, and `members_started`; for a persistent member, its `answer_times` and `answer_results` too;
   - `sample_total_usage`;
   - the flag `target_assisted`.
 
   With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons. `samples_df()` with M1's `SwarmColumns`, which has the ledger's realized cost, joins on the same (log, sample id, epoch).
 - **From rows to attempts.** `select_at_k` takes one sample's rows from a baseline arm (its epochs), builds one `Attempt` per row, and returns that sample's select@k:
   - `epoch`;
-  - `submitted`, `time`, `answer_key` and `verdict` from the row's single member: its status `submitted`, its end time, its key, its run-time verdict;
+  - `submitted`, `time`, `answer_key` and `verdict` from the row's single member: its status `submitted`, its end time, its key, its run-time verdict. A persistent member's own key and verdict are `None`, so its attempt is its answer that the record's final selection names instead: the member has answered when `final.member` names it and `final.answer` is set, and `time`, `answer_key` and `verdict` are that answer's entries in `answer_times` and `answer_results`; a persistent member with no answer is unsubmitted, whatever its status. Under `baseline()`'s `leaderless(final="first")` that is its first answer, the only one, since `leaderless` never wakes a member;
   - `final_value` from the task scorer's value;
   - `final_verdict` from the row's `final_verdict`.
 
@@ -841,7 +841,7 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
 
 - **Chain selection** (table-driven, over lists of member results):
   - `verify`: best verdict value, `None` values, ties by time then roster, none passed;
-  - `vote`: plurality, `None` keys abstain, ties by earliest, one vote per member;
+  - `vote`: plurality, `None` keys abstain, ties by earliest, one vote per member; a persistent member votes once, by its latest keyed answer, which is its candidate in the group, even when an earlier answer of its has another key or its latest answer has none;
   - fall-through in the default chain, and the strict single mode leaving an empty answer with its reason;
   - never-started members are never selected;
   - construction errors for each missing need, raised by `swarm()` for the controller's chain and by `leaderless()` for a `Reporter`.
@@ -859,8 +859,8 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
   - with a verifier held on an event, the member stays `running` and held after its answer, `wake()` refuses it, `events()` yields no `MemberIdle`, and its handle's `verdict` is `None`; once released, `idle` and `MemberIdle` come together with the answer's verdict, which the handle then shows, and `awaiting_work_time` excludes the wait while `held_time` includes it;
   - a verifier that returns before the boundary admits the hold: `MemberIdle` is queued at admission with the verdict;
   - a key-only contract: each answer keyed, `MemberIdle` at admission with no verdict;
-  - a stop while the verdict is pending: the member ends `submitted`, the verifier is not called again for the ending, and `MemberEnded` waits for the answer's verdict and carries it; a verifier making a model call after the stop is refused by the closed lever and leaves the answer unverified, with `MemberEnded` queued without a verdict;
-  - the hard stop during that verification leaves the answer unverified and queues the member's `MemberEnded` without a verdict;
+  - a stop while the verdict is pending: the member ends `submitted`, the verifier is not called again for the ending, and `MemberEnded` waits for the answer's verdict and carries it; a verifier making a model call after the stop is refused by the closed lever and leaves the answer unverified, with `MemberEnded` queued without a verdict, and the verifier is called once for that answer in the whole run, finalisation included;
+  - the hard stop during that verification leaves the answer unverified, in the record too, and queues the member's `MemberEnded` without a verdict; the verifier is not called for it again;
   - a model-backed verifier (mockllm) verifies each answer while the swarm runs, its usage in the ledger's `runtime` meter, not the member's;
   - a stop after a wake reports, on `MemberEnded` and the handle, the verdict on the answer given before the wake;
   - an `answer_key` that raises or returns a non-string on the second answer fails the sample, ends the member `errored`, and leaves both answers in `answer_times`, the second with no key;
@@ -899,7 +899,8 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
 - **Rows to attempts, end to end.** From written logs through `attempt_rows` and `select_at_k`:
   - an artifact baseline whose run-time verdict passed but whose `final_verdict` failed (and the reverse) is selected by `final_verdict` only;
   - `result_kind` survives into `select_at_k`;
-  - rows that disagree on `result_kind` raise.
+  - rows that disagree on `result_kind` raise;
+  - a persistent baseline whose one answer passed its verifier gives an attempt with that answer's key, verdict and time, selected by `verify` and voting under `vote`; one that never answered gives an unsubmitted attempt.
 - **Artifact results ignore answer text.** Use an artifact-shaped scorer, which scores the environment and ignores the completion.
   - A passing environment and an empty final output give final@k and team@k 1, not `empty_value`.
   - A member with an empty completion and a passing materialized artifact is graded 1.
@@ -984,6 +985,8 @@ best@k is a closed form on values alone, so it would be a reducer (an inspect_ai
 
 **Snapshot only on a normal return, falling back to the sample total** (for the deferred cost boundary). Budget exhaustion is a normal way for an arm to end, and Inspect still grades those samples. The fallback total would then include grading, which differs between arms. A snapshot in the swarm's `finally` gives limit-ended samples a boundary too.
 
+**Other votes for a persistent member.** Its earliest keyed answer would match `first`, and letting every answer vote would use every key, but a member that answers often would then outweigh its peers. A vote is a member's view, and its latest keyed answer is its current one, as its latest answer is the one `choose_answer()` takes (decision: Ransom, 2026-11-10). A swarm whose persistent workers answer different subtasks gives keys that do not compare, which no rule fixes; it uses `last`, `choose_answer()` or a controller of its own.
+
 **Strict modes only** (verify yields nothing when nothing verifies). Simpler, and it measures the verifier alone. But it makes the default swarm return nothing where an attempt would otherwise be scored on its answer. Strict behaviour stays available as `leaderless(final="verify")`. See [Open question 1](#open-questions).
 
 **`final=` on `swarm()`.** One fewer object. But the valid modes and the default depend on the topology, so the chain is the controller's parameter (swarm-api.md); its semantics are the same either way. Rejected.
@@ -1041,13 +1044,6 @@ Untrusted input reaching the new code:
    - (b) Strict. It measures the verifier alone, and returns no answer more often.
 
    Recommendation: (a). Swarm.md's text on the post-M2 provisional answer and its test bullet match (a), applying the strict reading to `leaderless(final="verify")` only.
-
-2. **Which of a persistent member's answers votes?** Also needed only when the chain is built. Every answer is a candidate for `first`, `last` and `verify`, and each has its own key, but `vote` gives one vote per member so that no member outweighs another.
-   - (a) Its latest keyed answer votes, and the group's earliest candidate is chosen as for any member. A member that revised its answer votes for its current one.
-   - (b) Its earliest keyed answer votes, matching `first`.
-   - (c) Every answer votes. A member that answers often outweighs its peers.
-
-   Recommendation: (a): a vote is a member's view, and its latest answer is its current view, the one `choose_answer()` takes. A swarm whose persistent workers answer different subtasks gives keys that do not compare, which no rule fixes; such a swarm uses `last`, `choose_answer()` or a controller of its own.
 
 ## Not this design
 
