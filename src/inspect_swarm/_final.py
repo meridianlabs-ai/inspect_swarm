@@ -383,10 +383,15 @@ async def synthesize_answer(
             raise
         # the type alone: an error's message can hold model text, such as a refusal's
         return Synthesis(None, f"the model call raised {type(ex).__name__}")
+    # first: an output with no choices, which some providers return, has no stop reason
+    # to read, and its completion is empty
+    empty = "the model's output has an empty completion"
+    if output.empty:
+        return Synthesis(None, empty)
     if output.stop_reason == "content_filter":
         return Synthesis(None, "the model's output stopped with content_filter")
     if output.completion == "":
-        return Synthesis(None, "the model's output has an empty completion")
+        return Synthesis(None, empty)
     return Synthesis(output, None)
 
 

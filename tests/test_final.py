@@ -2008,6 +2008,11 @@ def _empty(input: list[ChatMessage]) -> ModelOutput:
     return output("")
 
 
+# as Inspect's OpenAI-compatible completions adapter returns a response without choices
+def _no_choices(input: list[ChatMessage]) -> ModelOutput:
+    return ModelOutput(model="mockllm", choices=[])
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "respond,error",
@@ -2038,6 +2043,11 @@ def _empty(input: list[ChatMessage]) -> ModelOutput:
             _empty,
             "the model's output has an empty completion",
             id="empty-completion",
+        ),
+        pytest.param(
+            _no_choices,
+            "the model's output has an empty completion",
+            id="no-choices",
         ),
     ],
 )
