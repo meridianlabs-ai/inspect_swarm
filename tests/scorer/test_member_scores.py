@@ -231,7 +231,7 @@ def test_each_member_is_graded_and_aggregated_over_the_members_with_a_value(
         assert (metadata["complete"], metadata["members_valued"]) == (complete, valued)
         assert (metadata["members_total"], metadata["members_started"]) == (4, 4)
         assert metadata["kind"] == "answer"
-        assert metadata["final"]["mode"] == "first"
+        assert metadata["final"]["mode"] == "vote"
         # the copies' scores are not the sample's
         assert set(samples[id].scores or {}) == {"match", "members"}
     for id, (_, outcomes) in GRADES.items():

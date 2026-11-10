@@ -635,6 +635,8 @@ def leaderless(
     """Start every member with the swarm's input; stop at the first submission, or when all have ended."""
     if final is not None and has_reporter(final):   # any `reporter` mode in the chain
         raise ValueError("leaderless: a leaderless swarm has no reporter")
+    if stop_on_submission and (final not in (None, "first", ["first"]) or stop_on_verified):
+        raise ValueError("leaderless: the chain and stop_on_verified need stop_on_submission=False")
 
     async def run(swarm: SwarmControl) -> StopReason:
         for m in swarm.members:
@@ -650,7 +652,7 @@ def leaderless(
     return Controller(run, final=final)
 ```
 
-`stop_on_submission` (M1, on by default; decision: Ransom, 2026-10-21) is meaningful only with the `first` chain: the first submission is then the answer, so nothing the other members do after it can change it. With `verify` or `vote` in the chain a later member can still change the answer. How the two combine, and the default once the default chain is not `first` alone, is for the post-M2 work to settle; refusing the combination is the likely answer. M2 refuses it with `last`: `leaderless(final="last")` raises `ValueError` unless `stop_on_submission=False`. `stop_on_submission=False` keeps every member running to its end, for tasks whose scorer reads a shared artifact after the drain, arms that measure each member's result (team@k), and agents for which any normal return counts as a submission.
+`stop_on_submission` (M1, on by default; decision: Ransom, 2026-10-21) is meaningful only with the `first` chain: the first submission is then the answer, so nothing the other members do after it can change it. With `verify` or `vote` in the chain a later member can still change the answer. So `leaderless()` raises `ValueError` for an explicit `final` other than `first`, and for `stop_on_verified=True`, unless `stop_on_submission=False`, as M2 refuses `last`. The default stays on: `leaderless()` does not know the task's result, so `final=None` is accepted with it, and the default chain then chooses from the submissions made before the members stopped ([swarm-scoring.md](swarm-scoring.md#what-the-other-designs-fix-for-part-2)). `stop_on_submission=False` keeps every member running to its end, for tasks whose scorer reads a shared artifact after the drain, arms that measure each member's result (team@k), and agents for which any normal return counts as a submission.
 
 **A coordinator swarm (later: coordinator topologies, on the later messages channel).** A lead and three workers. All start together; workers wait for the lead's instructions with `swarm_wait` ([swarm-wait.md](swarm-wait.md)), and the lead's submission is the answer. Members with tool sources are registered builders, passed uncalled, so the log can name them and each member gets its own tool source ([Members](#tool-state-and-member-builders)).
 
