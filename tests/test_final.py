@@ -505,7 +505,7 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
     assert probed == [(False, False)]
     swarm_evidence = [e for e in transcript.events if isinstance(e, SwarmEvent)]
     kinds = [e.kind for e in swarm_evidence]
-    assert kinds[-4:] == ["final", RECORD_TYPE, "ledger", "metrics"]
+    assert kinds[-4:] == ["final", RECORD_TYPE, "metrics", "ledger"]
     [event] = [e for e in swarm_evidence if e.kind == RECORD_TYPE]
     # in the swarm's span, where the final event is written
     assert event.span_id == final(transcript).data["span_id"]
@@ -532,6 +532,7 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "left_out",
         "persistent",
         "answer_times",
+        "end_origin",
     }
     started, never = record.members
     assert (started.state, started.status, started.submitted, started.role) == (

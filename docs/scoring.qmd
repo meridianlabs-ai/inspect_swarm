@@ -5,7 +5,7 @@ llms-description: "How the task's scorers score a swarm: which submission is the
 
 ## Overview
 
-A swarm is scored by the task's own scorers. The swarm is the task's solver, so the scorers run after it, on the swarm's output and on whatever the members left in the sandbox, as they would after a single agent. Inspect Swarm adds no scorer of its own; it records what the swarm did, so analysis can read it beside the scores.
+A swarm is scored by the task's own scorers. The swarm is the task's solver, so the scorers run after it, on the swarm's output and on whatever the members left in the sandbox, as they would after a single agent. Inspect Swarm records what the swarm did, so analysis can read it beside the scores. For a task scored on its answer, `member_scores()` also grades each member's output ([Member scores](#member-scores)).
 
 ## The answer and the result record
 
@@ -22,7 +22,7 @@ The default chain depends on the result contract: `verify` if it has a verifier,
 
 A controller of your own can also choose the answer itself, with `choose_answer()`, in place of the chain ([Controllers](controllers.qmd#choosing-the-answer)). A member that ended any other way than submitting is never chosen ([Members](members.qmd#how-a-member-ends)). When no member submitted, the answer is empty. Each answer of a [persistent member](members.qmd#persistent-members) is a submission for `first` and `last`, whatever the member's status later, and ties between two answers of one member go to the earlier one.
 
-The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the mode and the chosen member. Each member's own conversation is in its timeline.
+The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the mode and the chosen member. Each member's own conversation is in its lane of the swarm's timeline.
 
 ### The result record
 
@@ -101,6 +101,51 @@ solver = swarm(
 
 The contract holds the task's functions, so the log records it only as `"ResultSpec"`. Retrying the task rebuilds it. A swarm replayed from its logged arguments (`--solver inspect_swarm/swarm`) cannot rebuild it and raises `TypeError`; to make such a swarm replayable, return it from a registered `@agent` builder.
 
+## Member scores
+
+`member_scores()`, from `inspect_swarm.scorer`, grades each member's output with a scorer of the task's, as if that member had run alone, and gives two values: `best_member`, the best member, and `mean_member`, the mean over the members. It needs the [result contract](#the-result-contract) of an answer task, the same one the swarm is given. The contract holds the task's functions, which a log cannot rebuild, so wrap `member_scores()` in a registered scorer of the task's own with no arguments. Re-scoring rebuilds it by name:
+
+```python
+from inspect_ai import Task, task
+from inspect_ai.agent import react
+from inspect_ai.scorer import Scorer, match, scorer
+
+from inspect_swarm import ResultSpec, answer_result, member, swarm
+from inspect_swarm.scorer import MEMBER_METRICS, member_scores
+
+
+def math_result() -> ResultSpec:
+    return answer_result(answer_key=boxed_number)
+
+
+@scorer(metrics=MEMBER_METRICS)
+def math_members() -> Scorer:
+    return member_scores(match(), math_result())
+
+
+@task
+def math_swarm() -> Task:
+    return Task(
+        dataset=QUESTIONS,
+        solver=swarm(
+            members=member(react, name="solver", count=4),
+            result=math_result(),
+        ),
+        scorer=[match(), math_members()],
+    )
+```
+
+- List it after the task's own scorer, which stays the headline score.
+- The scorer it is given must grade the answer alone. It may run the answer in the sandbox, but must never read the answer from the sandbox, or it would credit the team's work to one member. A scorer that falls back to the sandbox's files needs an answer-only version for `member_scores()`.
+- Each member's grade sees the sample's input, metadata and target, with the member's output as the sample's output and its message after the input. It runs in a span named after the member, within the scorer's span.
+- A member that never started has no value. A member with no output, or only whitespace, gets `empty_value` (0 by default) and is not graded. A member whose grade is `None`, NaN, or more than one value (a dict, list or tuple), or whose output the record left out, has no value either.
+- The values are over the members that have one. When none has, both are NaN, which Inspect counts as unscored. The score's metadata says, for each member, its outcome, value and reason, with its key and verdict from the record; `complete` is `false` when a member that started has no value.
+- Without the contract, with a contract of another kind, or for an `artifact` task, both values are NaN with the reason `kind_not_declared`, `kind_mismatch` or `artifact_without_member_artifacts`. `member_scores()` does not grade member artifacts yet.
+- A sample with no swarm is scored as one member named `solver`, with the sample's output.
+- During the solve, while `state.completed` is `False`, it returns `None`, so attempt loops such as `react(attempts=...)` get the same grades as without it.
+- Re-scoring reads each member's output from the record, so it gives the same scores without the sandbox, or applies a new scorer to every member. A scorer that needs the sandbox cannot be re-scored and raises `ProcessLookupError`.
+- A model-graded scorer is called once more for each member, and that usage counts in the sample's.
+
 ## Scoring what members leave
 
 A scorer that reads the sandbox, rather than the answer, scores what every member left there. With the default `leaderless`, the swarm stops the other members at the first submission, so what they were doing is left half done. When the scorer reads a shared artifact, let every member run to its end with `leaderless(stop_on_submission=False)` ([Controllers](controllers.qmd#leaderless)). The swarm returns after every member and its background work have ended, so the scorer sees the sandbox as the members left it.
@@ -163,7 +208,7 @@ A scorer that runs during the solve, under `react(attempts=...)`, the other atte
 
 The swarm's score is the task's scorer on the swarm's answer, or on what the members left for a scorer that reads the sandbox. Compare it with:
 
-- A single agent at the same budget. A swarm of one, `swarm(members=agent, channels=[])`, runs one agent under the swarm's rules with the same records ([Members](members.qmd#a-swarm-of-one)), so both arms have a ledger. Unlike a plain agent, it returns an empty output when its member does not submit.
+- A single agent at the same budget. `baseline(agent, result=...)` runs one agent as a swarm of one, `swarm(members=agent, controller=leaderless(final="first"), channels=[], result=...)`, with the same records ([Members](members.qmd#a-swarm-of-one)), so both arms have a ledger, and the same answer key and verdict for its submission. Unlike a plain agent, it returns an empty output when its member does not submit.
 - Epochs of a single agent, through Inspect's own reducers on the task's scorer, such as `mean`, `max` and `pass_at_k`:
 
 ```python
@@ -188,4 +233,4 @@ def single_agent() -> Task:
 
 `pass_at_k` and `max` choose with knowledge of the target, and the swarm's answer rule does not, so they are upper references, not like-for-like comparisons.
 
-Compare arms on the cost the log records, not on the caps ([Analysis](analysis.qmd#samples-dataframe)). team@k, the mean member and best@k on graded scores need each member's own score, which Inspect Swarm does not record yet; best@k can be computed from per-epoch values in `samples_df()`.
+Compare arms on the cost the log records, not on the caps ([Analysis](analysis.qmd#samples-dataframe)). For an answer task, `member_scores()` gives team@k as `best_member` (whether any of the k members solved it) and the mean member as `mean_member`. Compare team@k with `pass_at_k` or best@k over epochs of `baseline()` read from the same member scorer, since both choose with knowledge of the target. best@k on graded scores can be computed from per-epoch values in `samples_df()`.
