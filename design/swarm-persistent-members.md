@@ -238,7 +238,7 @@ The fields are documented for users in [Analysis, Persistent members](../docs/an
 - **Idle members in `swarm_wait` results**: telling a waiting lead that a worker went idle, as its result names ends. Today the lead hears of it only through the worker's writes or the all-waiting release.
 - **A `quiescent()` channel hook**, for a channel whose state can keep the swarm going without a delivery.
 - **Per-activation limits**, and scores per answer: `member_scores` grades a member's output, which for a persistent member that ends `submitted` is its last answer (swarm-scoring.md Part 2).
-- **The final-answer chain**, whose `verify` ranks every answer by its own verdict and whose `vote` counts a persistent member once, by its latest keyed answer (decision: Ransom, 2026-11-10; [swarm-scoring.md The final-answer chain](swarm-scoring.md#the-final-answer-chain)).
+- **The final-answer chain**, whose `verify` ranks every answer by its own verdict and whose `vote` counts a persistent member once, by its latest answer, which abstains when it has no key (decision: Ransom, 2026-11-10; [swarm-scoring.md The final-answer chain](swarm-scoring.md#the-final-answer-chain)).
 - **A public `after_answer()` hook** for custom member loops, if one turns up.
 - **Persistent members whose board is read only by subagents**, in a swarm with a waiting channel, which needs news defined for the member across its loops (a member-level seen state in the shared memory) rather than for one loop.
 - **Persistent wrapped agents**: a member whose agent calls a loop and then checks or changes its result (`checked_solver()`, `prover()`) would need the wrapper's completion logic to run at each answer, before it is recorded.

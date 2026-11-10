@@ -519,7 +519,7 @@ def final_chain(final: FinalSpec | None, result: ResultSpec | None) -> list[Fina
 | Mode | Needs | Produces | Produces nothing when |
 |---|---|---|---|
 | `verify` | `result.verifier` | The passed candidate (a submission, or any answer of a persistent member, each with its own verdict) with the highest `Verdict.value` (`None` ranks below any number), earliest swarm time on ties, then roster order, then answer order | no submission passed |
-| `vote` | `result.answer_key` | The earliest voting candidate in the plurality group of answer keys; one vote per member: a submission's key, or a persistent member's latest keyed answer, which is then its candidate in the group (decision: Ransom, 2026-11-10); `None` keys do not vote. A tied plurality goes to the group whose first voting candidate is earliest, and `tie` is recorded | no submission has a key |
+| `vote` | `result.answer_key` | The earliest voting candidate in the plurality group of answer keys; one vote per member: a submission's key, or the key of a persistent member's latest answer, the one `choose_answer()` takes, which is then its candidate in the group; `None` keys do not vote, so a persistent member whose latest answer has no key abstains, whatever its earlier answers' keys (decision: Ransom, 2026-11-10). A tied plurality goes to the group whose first voting candidate is earliest, and `tie` is recorded | no submission has a key |
 | `first` | nothing | As in M1 ([The final answer](#the-final-answer-first)) | there are no submissions |
 | `last` | nothing | As in M2 ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)) | there are no submissions |
 | `synthesize` | `kind="answer"` | One extra model call over the submissions ([below](#synthesize)) | there are no submissions, or the call fails recoverably |
@@ -826,7 +826,7 @@ def select_at_k(rows: Sequence[AttemptRow], k: int, chain: Sequence[str], *, emp
   With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons. `samples_df()` with M1's `SwarmColumns`, which has the ledger's realized cost, joins on the same (log, sample id, epoch).
 - **From rows to attempts.** `select_at_k` takes one sample's rows from a baseline arm (its epochs), builds one `Attempt` per row, and returns that sample's select@k:
   - `epoch`;
-  - `submitted`, `time`, `answer_key` and `verdict` from the row's single member: its status `submitted`, its end time, its key, its run-time verdict. A persistent member's own key and verdict are `None`, so its attempt is its answer that the record's final selection names instead: the member has answered when `final.member` names it and `final.answer` is set, and `time`, `answer_key` and `verdict` are that answer's entries in `answer_times` and `answer_results`; a persistent member with no answer is unsubmitted, whatever its status. Under `baseline()`'s `leaderless(final="first")` that is its first answer, the only one, since `leaderless` never wakes a member;
+  - `submitted`, `time`, `answer_key` and `verdict` from the row's single member: its status `submitted`, its end time, its key, its run-time verdict. A persistent member's own key and verdict are `None`, so its attempt is its answer that the record's final selection names instead: the member has answered when `final.member` names it and `final.answer` is set, and `time`, `answer_key` and `verdict` are that answer's entries in `answer_times` and `answer_results`. A record written before `answer_results` existed holds the answers' times but no results, and reads the field as `[]`: its selected answer is still submitted at its recorded time, with key and verdict `None`, since the record holds neither, so `verify` finds it unverified and `vote` counts it as abstaining; the helper never calls the task's key function or verifier. A persistent member with no answer is unsubmitted, whatever its status. Under `baseline()`'s `leaderless(final="first")` that is its first answer, the only one, since `leaderless` never wakes a member;
   - `final_value` from the task scorer's value;
   - `final_verdict` from the row's `final_verdict`.
 
@@ -841,7 +841,7 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
 
 - **Chain selection** (table-driven, over lists of member results):
   - `verify`: best verdict value, `None` values, ties by time then roster, none passed;
-  - `vote`: plurality, `None` keys abstain, ties by earliest, one vote per member; a persistent member votes once, by its latest keyed answer, which is its candidate in the group, even when an earlier answer of its has another key or its latest answer has none;
+  - `vote`: plurality, `None` keys abstain, ties by earliest, one vote per member; a persistent member votes once, by its latest answer, which is its candidate in the group, even when an earlier answer of its has another key; one whose answer keys are `["42", None]` abstains, and its `42` does not vote;
   - fall-through in the default chain, and the strict single mode leaving an empty answer with its reason;
   - never-started members are never selected;
   - construction errors for each missing need, raised by `swarm()` for the controller's chain and by `leaderless()` for a `Reporter`.
@@ -900,7 +900,8 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
   - an artifact baseline whose run-time verdict passed but whose `final_verdict` failed (and the reverse) is selected by `final_verdict` only;
   - `result_kind` survives into `select_at_k`;
   - rows that disagree on `result_kind` raise;
-  - a persistent baseline whose one answer passed its verifier gives an attempt with that answer's key, verdict and time, selected by `verify` and voting under `vote`; one that never answered gives an unsubmitted attempt.
+  - a persistent baseline whose one answer passed its verifier gives an attempt with that answer's key, verdict and time, selected by `verify` and voting under `vote`; one that never answered gives an unsubmitted attempt;
+  - a persistent baseline from a record without `answer_results` (`answer_times=[t]`, `final.answer=0` and no `answer_results` field) gives a submitted attempt at `t` with no key and no verdict: chosen by `first`, unverified under `verify`, abstaining under `vote`, with no key function or verifier called.
 - **Artifact results ignore answer text.** Use an artifact-shaped scorer, which scores the environment and ignores the completion.
   - A passing environment and an empty final output give final@k and team@k 1, not `empty_value`.
   - A member with an empty completion and a passing materialized artifact is graded 1.
@@ -985,7 +986,7 @@ best@k is a closed form on values alone, so it would be a reducer (an inspect_ai
 
 **Snapshot only on a normal return, falling back to the sample total** (for the deferred cost boundary). Budget exhaustion is a normal way for an arm to end, and Inspect still grades those samples. The fallback total would then include grading, which differs between arms. A snapshot in the swarm's `finally` gives limit-ended samples a boundary too.
 
-**Other votes for a persistent member.** Its earliest keyed answer would match `first`, and letting every answer vote would use every key, but a member that answers often would then outweigh its peers. A vote is a member's view, and its latest keyed answer is its current one, as its latest answer is the one `choose_answer()` takes (decision: Ransom, 2026-11-10). A swarm whose persistent workers answer different subtasks gives keys that do not compare, which no rule fixes; it uses `last`, `choose_answer()` or a controller of its own.
+**Other votes for a persistent member.** Letting every answer vote would use every key, but a member that answers often would then outweigh its peers. Its earliest keyed answer would match `first`, and its latest keyed answer would keep a member voting after an answer with no key, but both vote with an answer the member has since replaced. A vote is a member's view, and its latest answer is its current one, the one `choose_answer()` takes; when that answer has no key, the member abstains, as any member with no key does (decision: Ransom, 2026-11-10). A swarm whose persistent workers answer different subtasks gives keys that do not compare, which no rule fixes; it uses `last`, `choose_answer()` or a controller of its own.
 
 **Strict modes only** (verify yields nothing when nothing verifies). Simpler, and it measures the verifier alone. But it makes the default swarm return nothing where an attempt would otherwise be scored on its answer. Strict behaviour stays available as `leaderless(final="verify")`. See [Open question 1](#open-questions).
 
