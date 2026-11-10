@@ -49,10 +49,12 @@ from .._final import (
     FinalMode,
     FinalName,
     Pick,
+    Synthesis,
     answer,
     chosen_output,
     finalise,
     settle,
+    synthesize_answer,
 )
 from .._ledger import LedgerInterval, MemberAccount, SpanPlaces
 from .._member import (
@@ -587,6 +589,8 @@ class SwarmRun:
         # final step, which awaits it and the submissions left unverified, began
         self._final_verdict: Verdict | None = None
         self._finalising = False
+        # synthesize's outcome, once the final step has called it
+        self._synthesis: Synthesis | None = None
         # the controller's choice of the answer, once it has made one
         self._pick: Pick | None = None
         self._preambles = preambles
@@ -866,6 +870,19 @@ class SwarmRun:
                         self._finalising = True
                         await self._verify_left()
                         await self._take_final_verdict()
+                        synthesis = await synthesize_answer(
+                            self._input,
+                            self._results(),
+                            self._outputs(),
+                            self._answers(),
+                            self._chain,
+                            self._pick,
+                        )
+                        # a model call that caught a cancellation returned: its
+                        # answer is discarded, and the cancellation ends the final
+                        # step here
+                        await _end_if_cancelled()
+                        self._synthesis = synthesis
                         finalise(
                             self._state,
                             self._input,
@@ -876,6 +893,7 @@ class SwarmRun:
                             span_id=self._span_id,
                             stop_reason=self.stop_reason,
                             answers=self._answers(),
+                            synthesis=self._synthesis,
                         )
                     ended = True
         except Exception as ex:
@@ -896,7 +914,11 @@ class SwarmRun:
                     try:
                         results = self._results()
                         chosen = answer(
-                            results, self._chain, self._pick, provisional=not ended
+                            results,
+                            self._chain,
+                            self._pick,
+                            provisional=not ended,
+                            synthesis=self._synthesis,
                         )
                         write_record(
                             SwarmResultRecord(
@@ -920,7 +942,8 @@ class SwarmRun:
                         chosen,
                         ended=ended,
                         error=error,
-                        # the final step awaits the verifier, so a cancellation can end it
+                        # the final step awaits the verifier and synthesize's model
+                        # call, so a cancellation can end it
                         final_cancelled=self._finalising
                         and not ended
                         and isinstance(escaping, anyio.get_cancelled_exc_class()),

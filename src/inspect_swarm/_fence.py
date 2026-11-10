@@ -1,11 +1,19 @@
 from collections.abc import Iterable, Sequence
+from xml.sax.saxutils import escape
+
+# what an XML attribute value in double quotes escapes beyond `&`, `<` and `>`
+_ATTRIBUTE_ENTITIES = {'"': "&quot;", "\n": "&#10;", "\r": "&#13;", "\t": "&#9;"}
 
 
-# Peer text between a fence's tags. Attribute values are swarm-generated, roster names
-# or grammar-checked paths, none of which holds a quote or an angle bracket, so they are
-# written as they are.
+# Peer text between a fence's tags, written as it is: the fence is a label, not a
+# boundary. Attribute values are escaped as XML attribute values. The channels' values
+# (swarm-generated ids, roster names checked against the name grammar, grammar-checked
+# paths) hold nothing to escape, so they are written as they are; synthesize's roster
+# names have no grammar.
 def fence(tag: str, attributes: Sequence[tuple[str, str]], body: str) -> str:
-    attrs = "".join(f' {name}="{value}"' for name, value in attributes)
+    attrs = "".join(
+        f' {name}="{escape(value, _ATTRIBUTE_ENTITIES)}"' for name, value in attributes
+    )
     return f"<{tag}{attrs}>\n{body}\n</{tag}>"
 
 

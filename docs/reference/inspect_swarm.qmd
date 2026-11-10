@@ -29,6 +29,8 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### StopReason
 ### FinalName
 ### FinalSpec
+### synthesize
+### Synthesize
 
 ## Channels
 
