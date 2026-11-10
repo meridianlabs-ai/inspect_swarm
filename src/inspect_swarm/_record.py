@@ -44,6 +44,31 @@ START_TYPE = "swarm_start"
 _LEGACY_RECORD_KEY = "inspect_swarm:result"
 
 
+class MemberReap(BaseModel):
+    """What stopping a member's leftover processes found, under users isolation.
+
+    When a member ends, the swarm kills every process in the sandbox that runs as the member's user, in up to five rounds, since a process can start another between rounds. Processes that have fully exited and wait for their parent to collect them (zombies) are not counted.
+    """
+
+    status: Literal["ok", "survivors", "timeout", "error"]
+    """`ok`: no process of the member's user is left. `survivors`: processes were still running after five rounds. `timeout`: the swarm stopped waiting for the sandbox. `error`: the sandbox could not run the command. Any status but `ok` makes the record's `isolation_incomplete` `True`."""
+
+    killed: int = 0
+    """How many processes were killed: work the member left running after its tool calls returned."""
+
+    killed_names: list[str] = []
+    """The names of the first 50 processes killed (`/proc/<pid>/comm`, at most 15 characters), with every character other than printable ASCII, and every `:`, as `?`."""
+
+    survivors: int = 0
+    """How many processes were still running after five rounds."""
+
+    survivor_names: list[str] = []
+    """The names of the first 50 of them, as for `killed_names`."""
+
+    message: str | None = None
+    """For `timeout` and `error`, what went wrong."""
+
+
 class MemberResult(BaseModel):
     """One member in the swarm's result record."""
 
@@ -123,6 +148,21 @@ class MemberResult(BaseModel):
     end_origin: str | None = None
     """Who asked the member to end, when an end request decided how it ended: `operator` for `inspect ctl sample agent stop`, or the origin a caller gave `MemberHandle.end()`. `None` when no end request did, as for a submission, a member limit or the swarm's own stop."""
 
+    user: str | None = None
+    """Under users isolation, the member's Linux user; `None` otherwise."""
+
+    uid: int | None = None
+    """Under users isolation, the member's user id; `None` otherwise."""
+
+    home: str | None = None
+    """Under users isolation, the member's private directory; `None` otherwise."""
+
+    reap: MemberReap | None = None
+    """Under users isolation, what stopping the processes the member left running found, once the member has ended; `None` before, and without isolation."""
+
+    foreign_execs: int | None = None
+    """Under users isolation, how many commands the member ran in the sandbox as another user, once the member has ended; `None` before, and without isolation. These are `exec()` calls in the member's spans that named a user other than the member's, such as a custom tool's `exec(..., user="root")`, other than Inspect's own sandbox operations (tool injection and its launcher, in-loop scoring). It does not see calls a tool makes on the provider object (`sandbox().as_type(...)`) or file reads and writes. The count includes named-user commands across all sandbox environments in the sample, so it does not by itself identify grants in the users-isolated sandbox."""
+
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
@@ -163,6 +203,9 @@ class SwarmResultRecord(BaseModel):
 
     final: FinalRecord
     """The final answer."""
+
+    isolation_incomplete: bool | None = None
+    """Under users isolation, `True` when some member that started may have left processes running: its reaping found survivors, timed out or failed, or did not run. Analyses of what members left in the sandbox exclude or report such samples. `None` without isolation."""
 
     kind: ResultKind | None = None
     """The result contract's kind, from `swarm(result=...)`; `None` without a contract."""

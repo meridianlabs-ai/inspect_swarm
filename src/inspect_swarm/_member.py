@@ -1,6 +1,6 @@
 import inspect
 from collections import Counter
-from collections.abc import Callable, Generator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from contextlib import AsyncExitStack, ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import Any, TypeVar, assert_never, cast, overload
@@ -501,7 +501,9 @@ class MemberOutcome:
 # does a sourceless custom limit error, which the agent raised to stop itself. Anything
 # else (a foreign error) is raised, without the swarm's
 # leaves, after `end` with `errored`; a cancellation from outside ends the member as
-# `cancelled`.
+# `cancelled`. Under users isolation, `reap` stops the processes the member left
+# running, before `end`: it never raises and is shielded from cancellation, so the
+# member's status and error stand.
 async def run_member(
     record: Member,
     name: str,
@@ -516,6 +518,7 @@ async def run_member(
     gate: MemberGate,
     end: Callable[[str, AgentState], None],
     identity: MemberIdentity | None = None,
+    reap: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     status = "cancelled"
     # holds the member's span open after its limits and cancel scope have exited, so
@@ -549,18 +552,27 @@ async def run_member(
                 # the member ended through the request: the gate ended it at a
                 # boundary or before a turn, or the request closed the member's lever
                 # first and the member ended through it, on a refused call, held idle
-                # after an answer, or a bridged member's cancelled call
+                # after an answer, or a bridged member's cancelled call. Decided here,
+                # before reaping awaits, so a request made while the member is reaped
+                # does not decide how it ended.
                 gate.honoured = True
-            # the state the agent returned, kept through a drain that raised; else the
-            # loop's state at its last boundary
-            end(
-                status,
-                outcome.state
-                if outcome.state is not None
-                else gate.state
-                if gate.state is not None
-                else state,
-            )
+            # synchronously, before reaping awaits: a callback registered after the
+            # wrapper's last supervision check would never run, nor be found
+            gate.finished = True
+            try:
+                if reap is not None:
+                    await reap()
+            finally:
+                # the state the agent returned, kept through a drain that raised; else
+                # the loop's state at its last boundary
+                end(
+                    status,
+                    outcome.state
+                    if outcome.state is not None
+                    else gate.state
+                    if gate.state is not None
+                    else state,
+                )
 
 
 async def _run_member(

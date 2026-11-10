@@ -206,10 +206,10 @@ async def test_isolation_setup_time_comes_out_of_the_derived_time_cap(
     # uses the sample's time at the end of setup, so runner speed cannot break it.
     after_setup: list[float] = []
 
-    async def slow_setup(isolation: object, names: Sequence[str]) -> dict[str, Any]:
+    # a setup that takes time and leaves nothing to reap or count
+    async def slow_setup(isolation: object, names: Sequence[str]) -> None:
         await anyio.sleep(0.1)
         after_setup.append(sample_limits().time.usage)
-        return {}
 
     monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", slow_setup)
     await run_swarm(
@@ -235,11 +235,10 @@ async def test_an_explicit_time_cap_is_checked_after_isolation_setup(
     # runner speed.
     async with sample(time=60):
         with _sample_time_limit() as set_time_limit:
-
-            async def setup(isolation: object, names: Sequence[str]) -> dict[str, Any]:
+            # a setup that leaves nothing to reap or count
+            async def setup(isolation: object, names: Sequence[str]) -> None:
                 if left_after_setup is not None:
                     set_time_limit(left_after_setup)
-                return {}
 
             monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", setup)
             with caplog.at_level(logging.WARNING, logger="inspect_swarm"):

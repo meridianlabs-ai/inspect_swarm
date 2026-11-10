@@ -1,6 +1,6 @@
 import copy
 from collections.abc import Collection, Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from weakref import WeakKeyDictionary
 
 from inspect_ai.event import (
@@ -47,6 +47,18 @@ def swarm_event(
     # synchronous, so that the writes in `finally` blocks run under cancellation too
     transcript()._event(  # pyright: ignore[reportPrivateUsage]
         SwarmEvent(kind=kind, member=member, data={"version": version, **data})
+    )
+
+
+# Users isolation's evidence, in the swarm's span: `isolation` when the swarm starts
+# (the sandbox, each member's user and the census roots) and `census` once its members
+# have ended (who owns the entries under those roots).
+def isolation_event(
+    kind: Literal["isolation", "census"], data: Mapping[str, JsonValue]
+) -> None:
+    # synchronous, as the other evidence is
+    transcript()._event(  # pyright: ignore[reportPrivateUsage]
+        SwarmEvent(kind=kind, member=None, data={"version": 1, **data})
     )
 
 
