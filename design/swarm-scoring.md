@@ -809,28 +809,32 @@ Inspect applies every epoch reducer to every scorer and key. An epochs arm with 
 
 ```python
 def attempt_rows(logs: Sequence[str | EvalLog], *, scorer: str, member_scorer: str) -> list[AttemptRow]: ...
-def select_at_k(rows: Sequence[AttemptRow], k: int, chain: Sequence[str], *, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> float: ...
+def select_at_k(rows: Sequence[AttemptRow], k: int, chain: str | Sequence[str], *, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> float: ...
 ```
 
-- **`AttemptRow`**: one per (log, sample id, epoch), from the sample's record (`swarm_result(sample)`) and scores. It holds:
-  - the log path, the arm labels (`eval.task_args`), the member count and `result_kind` (the record's `kind`);
-  - the task scorer's value;
-  - `final_verdict` (the record's verifier result on the drained environment) and `final` (mode, member, reason);
-  - `best_member`, `mean_member` and `complete`;
-  - the per-member states, statuses, keys, verdicts, times and submission flags, and `members_started`;
+- **`AttemptRow`**: one per (log, sample id, epoch), from the sample's record (`swarm_result(sample)`) and scores, a frozen dataclass. It holds:
+  - `log` (the log's location), `id`, `epoch`, the arm labels `task_args` (`eval.task_args`), `members_total` (the member count) and `result_kind` (the record's `kind`);
+  - `final_value`, the task scorer's value under Inspect's default `value_to_float()`;
+  - `final_verdict` (the record's verifier result on the drained environment) and `final` (the record's `FinalRecord`: mode, member, reason);
+  - `best_member`, `mean_member` and `complete`, from the member scorer;
+  - `members`, the record's `MemberResult`s with their states, statuses, keys, verdicts, times and submission flags, and `members_started`;
   - `sample_total_usage`;
-  - the flag `target_assisted`.
+  - the flags `target_assisted` and `no_solve_usage`.
 
-  With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons. `samples_df()` with M1's `SwarmColumns`, which has the ledger's realized cost, joins on the same (log, sample id, epoch).
+  A missing or NaN score is `None`. A sample with no record (a plain agent) has `final=None` and no members. A log read without its samples, a scorer name no scored sample in a log has, a task scorer whose value is not a single value, and a member scorer whose value is not `member_scores()`'s raise `ValueError`, so a misspelled name never gives a column of `None`.
+
+  With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons; until the boundary is built, every row is. `samples_df()` with M1's `SwarmColumns`, which has the ledger's realized cost, joins on the same (log, sample id, epoch).
 - **From rows to attempts.** `select_at_k` takes one sample's rows from a baseline arm (its epochs), builds one `Attempt` per row, and returns that sample's select@k:
   - `epoch`;
   - `submitted`, `time`, `answer_key` and `verdict` from the row's single member: its status `submitted`, its end time, its key, its run-time verdict;
   - `final_value` from the task scorer's value;
   - `final_verdict` from the row's `final_verdict`.
 
-  The rows' `result_kind` is the `kind` select@k follows.
+  The rows' `result_kind` is the `kind` select@k follows; a record without a contract is read as an answer task, as the swarm reads it.
   - The run-time verdict and `final_verdict` are kept apart, because the environment can change between a member's submission check and the drain. Artifact `verify` reads only `final_verdict`. Nothing derives a verdict from `final_value`, which would select with the target.
   - Rows that disagree on `result_kind` are an error naming the logs.
+  - The chain is applied by the runtime's own selector (`_final.answer()`), each attempt a `MemberResult` named after its epoch, in epoch order, so the modes, tie-breaks and fall-through are the swarm's by construction. For an artifact task each attempt counts as a submission, its verdict is its `final_verdict`, and one cut off before it ended (no end time) orders after every attempt that ended.
+  - `chain` takes one mode name or a sequence of `verify`, `vote`, `first` and `last`. `synthesize` (no epoch analogue), an empty chain, `k` or `max_subsets` below 1, rows of more than one sample, a repeated epoch, and a row whose record has more than one member or a persistent one (not a `baseline()` attempt) raise `ValueError`.
 - **Target-assisted samples.** `target_assisted` is set when the solve phase contains `ScoreEvent(intermediate=True)`: an agent consulted the task's scorer with the target in the loop (for example `react(attempts=...)`). In a swarm that feedback can be shared with peers, so the rows flag those samples for the user's analysis to report separately.
 
 ### Testing after M2
