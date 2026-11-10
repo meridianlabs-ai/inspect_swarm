@@ -472,7 +472,7 @@ class SwarmResultRecord(BaseModel):   # adds
 ```
 
 - **The chain's reasons.** With no answer, `reason` is `no_submissions` when nothing was submitted; otherwise the chain's last mode gave nothing, and it is `none_verified` for `verify` and `no_answer_keys` for `vote`.
-- **No vote counts.** The final record keeps no count of votes by answer key: the keys are model text, and a log's processing rewrites values but not dict keys, so with `log_images=False` an image data URI would survive in a key while it is removed from the member. The counts can be rebuilt from the members' `submitted` and `answer_key`, except for a key the record leaves out of its member; `mode`, `member` and `tie` say how the vote chose (decision: Ransom, 2026-11-10).
+- **No vote counts.** The final record keeps no count of votes by answer key: the keys are model text, and a log's processing rewrites values but not dict keys, so with `log_images=False` an image data URI would survive in a key while it is removed from the member. Grouping the submitted members by their `answer_key` counts the keys the record keeps. A left-out key cannot be counted, and a log can turn different keys into the same text (two image URIs both become the removal placeholder), so these counts may differ from the original vote. `mode`, `member` and `tie` describe the original choice (decision: Ransom, 2026-11-10).
 - **Model text in the final record.** The final verdict's explanation comes from model output, like the members' values below. It is kept or left out (`None`, named in the record's own `left_out`) by the same round trip as a member's.
 - **Why `output` comes here.** `member_scores` scores each member's output, in final scoring and in re-scoring, and reads the outputs from the record with `swarm_result(state)`. M1 needs neither ([No outputs in M1](#what-the-swarm-records)). Its tests: an output is kept after the member's own limit, and after a hard stop for an agent that updates its state in place.
 - **When they are written.** The runtime keeps them on its run as they arise: a member's output when it ends, with or without a contract, its key and verdict when its submission is recorded and verified, and the chain fields with the provisional answer and the final selection. They enter the record when it is written, as the swarm exits ([When it is written](#what-the-swarm-records)), so no member can read a peer's output, key or verdict from it during the run. The record holds a copy of each output, with its `completion` as the member returned it: validating a `ModelOutput` fills an empty `completion` from its message, so the record keeps an empty one both when it is made and when it is read.
@@ -548,6 +548,8 @@ So a task with both gets `["verify", "vote", "first"]`, and one with neither get
 1. The runtime verifies any submission not yet verified, including those from members that ended during grace.
 2. It runs the chain once more, including `synthesize`.
 3. For an artifact task with a verifier, it takes `final_verdict` ([Shared-artifact tasks](#shared-artifact-tasks-and-per-member-artifacts)).
+
+A cancellation ends these steps, even when a verifier catches it and returns: an AnyIO scope's, or asyncio's own task cancellation (`asyncio.timeout()`, `asyncio.wait_for()`), which no AnyIO scope knows of. The verdict that call returned is discarded, the record stays provisional, and the ledger sets `final_cancelled`.
 
 ### `synthesize`
 

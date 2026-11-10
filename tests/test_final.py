@@ -1,8 +1,9 @@
+import asyncio
 import json
 import math
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -1627,48 +1628,116 @@ class _Holds:
         return Verdict(passed=True)
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("catches", [False, True], ids=["propagates", "catches"])
-@pytest.mark.parametrize("kind", ["artifact", "answer"])
-async def test_a_cancellation_during_the_final_step_ends_it(
-    kind: str, catches: bool
-) -> None:
+# A swarm whose final step calls `verifier`: for `artifact`, its call on the final
+# environment, after the run verified the submission; for `answer`, its call on the
+# submission the run left unverified, whose check in the run holds until the swarm's
+# time cap ends it.
+def _final_step_swarm(kind: str, verifier: Any) -> Agent:
     if kind == "artifact":
-        # the submission is verified in the run, and the final verdict holds
-        verifier = _Holds(hold_from=2, catches=catches)
         result = artifact_result(verifier=verifier)
         budget = Budget()
     else:
-        # the run's check holds until the swarm's time cap ends it, so the final step
-        # verifies the submission again, and holds
-        verifier = _Holds(hold_from=1, catches=catches)
         result = answer_result(verifier=verifier)
         budget = Budget(time=0.2, grace=0.05)
-    async with sample():
-        with anyio.move_on_after(1.0) as scope:
-            await run_agent(
-                swarm(
-                    _team(("a", "done", [])),
-                    controller=leaderless(stop_on_submission=False),
-                    channels=[],
-                    budget=budget,
-                    result=result,
-                ),
-                "task",
-            )
-        record = _record()
-        ledger = SwarmLedger.model_validate(store().get(LEDGER_KEY))
-    # the cancellation propagates, and the answer stays provisional, even when the
-    # verifier caught it and returned a verdict
-    assert scope.cancelled_caught
-    assert verifier.calls == ["done", "done"]
+    return swarm(
+        _team(("a", "done", [])),
+        controller=leaderless(stop_on_submission=False),
+        channels=[],
+        budget=budget,
+        result=result,
+    )
+
+
+# The swarm's record and ledger after its final step was ended, by a cancellation or a
+# failure (`cancelled`): the answer stays provisional, and the final step's call left no
+# verdict.
+def _assert_final_step_ended(kind: str, cancelled: bool) -> None:
+    record = _record()
+    ledger = SwarmLedger.model_validate(store().get(LEDGER_KEY))
     assert (record.final.member, record.final.provisional) == ("a", True)
     if kind == "artifact":
         assert record.final_verdict is None
         assert record.members[0].verdict == Verdict(passed=True)
     else:
         assert record.members[0].verdict is None
-    assert (ledger.final_cancelled, ledger.interrupted) == (True, True)
+    assert (ledger.final_cancelled, ledger.interrupted) == (cancelled, True)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("catches", [False, True], ids=["propagates", "catches"])
+@pytest.mark.parametrize("kind", ["artifact", "answer"])
+async def test_a_cancellation_during_the_final_step_ends_it(
+    kind: str, catches: bool
+) -> None:
+    verifier = _Holds(hold_from=2 if kind == "artifact" else 1, catches=catches)
+    async with sample():
+        with anyio.move_on_after(1.0) as scope:
+            await run_agent(_final_step_swarm(kind, verifier), "task")
+        # the cancellation propagates, and the answer stays provisional, even when the
+        # verifier caught it and returned a verdict
+        assert scope.cancelled_caught
+        assert verifier.calls == ["done", "done"]
+        _assert_final_step_ended(kind, cancelled=True)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+@pytest.mark.parametrize("timeout", ["timeout", "wait_for"])
+@pytest.mark.parametrize("kind", ["artifact", "answer"])
+async def test_an_asyncio_timeout_during_the_final_step_ends_it(
+    kind: str, timeout: str
+) -> None:
+    # asyncio's own Task.cancel(), which no AnyIO scope knows of, caught by the verifier
+    verifier = _Holds(hold_from=2 if kind == "artifact" else 1, catches=True)
+    async with sample():
+        running = run_agent(_final_step_swarm(kind, verifier), "task")
+        with pytest.raises(TimeoutError):
+            if timeout == "timeout":
+                async with asyncio.timeout(1.0):
+                    await running
+            else:
+                await asyncio.wait_for(running, 1.0)
+        assert verifier.calls == ["done", "done"]
+        _assert_final_step_ended(kind, cancelled=True)
+
+
+class _FailsInTheFinalStep:
+    """A verifier whose first call passes, or for `holds` waits until cancelled, and whose second, in the final step, raises or returns something other than a `Verdict`."""
+
+    def __init__(self, holds: bool, fails: str) -> None:
+        self.holds = holds
+        self.fails = fails
+        self.calls: list[str] = []
+
+    async def __call__(self, answer: str, metadata: dict[str, Any]) -> Verdict:
+        self.calls.append(answer)
+        if len(self.calls) == 1:
+            if self.holds:
+                await anyio.sleep_forever()
+            return Verdict(passed=True)
+        if self.fails == "raises":
+            raise RuntimeError("the verifier failed")
+        return cast(Verdict, True)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "fails,error,match",
+    [
+        ("raises", RuntimeError, "the verifier failed"),
+        ("invalid", TypeError, "must return a Verdict, got a bool"),
+    ],
+)
+@pytest.mark.parametrize("kind", ["artifact", "answer"])
+async def test_a_verifier_failing_in_the_final_step_fails_the_sample(
+    kind: str, fails: str, error: type[Exception], match: str
+) -> None:
+    verifier = _FailsInTheFinalStep(holds=kind == "answer", fails=fails)
+    async with sample():
+        with pytest.raises(error, match=match):
+            await run_agent(_final_step_swarm(kind, verifier), "task")
+        assert verifier.calls == ["done", "done"]
+        _assert_final_step_ended(kind, cancelled=False)
 
 
 @pytest.mark.anyio

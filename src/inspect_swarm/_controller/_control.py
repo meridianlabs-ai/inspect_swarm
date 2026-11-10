@@ -1,3 +1,4 @@
+import asyncio
 import contextvars
 import functools
 import math
@@ -1354,7 +1355,7 @@ class SwarmRun:
             await self._take_verdict(m, verifier)
             # a verifier that caught a cancellation returned, and its verdict was
             # discarded: the cancellation ends the final step here
-            await anyio.lowlevel.checkpoint_if_cancelled()
+            await _end_if_cancelled()
 
     # In the final step, for an artifact task with a verifier: the verdict on the
     # environment the task's scorer will grade, called with the final answer's
@@ -1374,7 +1375,7 @@ class SwarmRun:
         verdict = await verifier(completion, metadata)
         # a verifier that caught a cancellation returned: its verdict is discarded, and
         # the cancellation ends the final step here
-        await anyio.lowlevel.checkpoint_if_cancelled()
+        await _end_if_cancelled()
         self._final_verdict = _checked_verdict(verdict, "the final environment")
 
     def _verified(self, m: MemberRun) -> None:
@@ -1635,9 +1636,27 @@ def _sample_cause() -> str | None:
     return None
 
 
-# Whether the current task is cancelled, by its own scope or an enclosing one.
+# Whether the current task is cancelled: by its own scope or an enclosing one, or, on
+# asyncio, by the task's own `cancel()` (as `asyncio.timeout()` and `wait_for()` do),
+# which no AnyIO scope knows of and which stays requested after a callee caught it.
 def _cancelled() -> bool:
-    return anyio.current_effective_deadline() == -math.inf
+    if anyio.current_effective_deadline() == -math.inf:
+        return True
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        # not on asyncio
+        return False
+    return task is not None and task.cancelling() > 0
+
+
+# Raises the current task's cancellation, when `_cancelled()`, after a callee that
+# caught it returned.
+async def _end_if_cancelled() -> None:
+    await anyio.lowlevel.checkpoint_if_cancelled()
+    if _cancelled():
+        # asyncio's own cancellation, which the checkpoint does not deliver
+        raise asyncio.CancelledError()
 
 
 # A verifier's result, checked as returned rather than as annotated (task code), by

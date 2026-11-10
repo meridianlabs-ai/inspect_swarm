@@ -14,7 +14,7 @@ def leaderless(
 ) -> Controller:
     """Start every member with the swarm's input; stop at the first submission, or when none is still working.
 
-    By default the swarm stops when the first member submits. The members still running are stopped: they finish the calls they have in flight, within `Budget.grace`, and the ones still running after it are cancelled. The swarm's answer is chosen from the submissions made by then, so with the default `first` nothing the other members do after the first submission can change it.
+    By default the swarm stops when the first member submits. The members still running are stopped: they finish the calls they have in flight, within `Budget.grace`, and the ones still running after it are cancelled. The swarm's answer is chosen from the submissions made by then. The default chain depends on the result contract; with `first` alone, later submissions cannot change the answer.
 
     A persistent member's answer is a submission: it stops the swarm by default. `leaderless` never wakes a member, so with `stop_on_submission=False` a persistent member answers once and stays idle until the swarm stops.
 
