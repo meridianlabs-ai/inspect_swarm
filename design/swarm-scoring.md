@@ -643,8 +643,11 @@ for m in members:                                   # roster order
 - **It is given only roster names**, never names a member chose, so paths and branch names come from the eval author's layout.
 - **It runs after the team score** and restores the team state on exit, so the team score never depends on per-member scoring. A `materialize` that raises propagates and fails the sample, as any scorer error does.
 - **Attribution in a shared sandbox is by convention.** Any member can write into another member's worktree or branch. Per-member artifact scores say "what was on that member's branch", not "what that member did alone". Tool-call evidence can show cross-writes, but only as far as the observation limit in [Security](swarm.md#security) allows.
+- **It runs inside the member's span**, with the inner scoring, so its sandbox calls are attributed to that member's grade.
+- **A member whose output the record left out** is graded with an empty output, since its artifact, not its text, is what is graded.
+- **A plain agent** has no roster name to give `materialize`, and its artifact is the environment it left, so it is graded on the environment as it is, without `materialize`.
 
-`member_artifacts` is its own step in [the plan below](#implementation-plan-after-m2), after `member_scores`. Until it is built, `member_scores()` refuses a contract with `member_artifacts` (`ValueError`), rather than reporting its members unavailable.
+The docs' worked example ([Per-member artifacts](../docs/scoring.qmd#per-member-artifacts)) saves the team's working tree as a git tree object (`git add -A`, `git write-tree`), puts the member's branch in the scored checkout with `git read-tree -u --reset`, leaving `HEAD` on the team's branch, and on exit removes the scorer's files (`git clean -fd`), reads the team's tree back and resets the index to `HEAD`.
 
 ### Comparison quantities
 
@@ -891,7 +894,7 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
   - each member is graded with its artifact in place;
   - the team state is restored on exit and on a scorer error.
 
-  A git-worktree layout test needs Docker and is marked slow, following inspect_ai's conventions.
+  A git-worktree layout test runs the docs' worked example as written, with the local sandbox and a repository on the host, so it needs git but not Docker.
 - **The cost boundary**, if built:
   - `solve_usage` excludes a model-graded scorer's usage and a scorer's native compaction (mockllm compaction usage);
   - it includes the swarm's own compaction and `synthesize`, and counts cache replays as Inspect does;
