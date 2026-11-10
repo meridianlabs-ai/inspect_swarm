@@ -45,6 +45,7 @@ from ._member import Member, member
 from ._record import (
     FinalRecord,
     LeftOut,
+    MemberReap,
     MemberResult,
     SwarmResultRecord,
     swarm_result,
@@ -93,6 +94,7 @@ __all__ = [
     "MemberIdle",
     "MemberInfo",
     "MemberNews",
+    "MemberReap",
     "MemberResult",
     "MemberState",
     "Record",

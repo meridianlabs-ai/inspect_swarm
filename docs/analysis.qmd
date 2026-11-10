@@ -19,6 +19,7 @@ For the swarm:
 - `tokens`, `cost`: everything in the swarm: members, controller and final step.
 - `wall_clock`: seconds from the swarm's start to its end.
 - `never_acted`: members with no completed model call.
+- `reap_complete`: under users isolation, `false` when some member may have left processes running in the sandbox ([The result record](scoring.qmd#the-result-record)); `null` without isolation.
 - `steps_to_answer`: completed model calls of the member whose output is the answer, `null` with no answer. For a persistent member's answer, its calls before that answer.
 - `longest_member_steps`: the largest number of completed model calls of any member.
 - `critical_steps_to_answer`: the number of completed model calls on the longest chain of calls the answer depended on, across members ([The critical path](#the-critical-path)).
