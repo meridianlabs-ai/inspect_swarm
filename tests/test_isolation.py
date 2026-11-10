@@ -107,6 +107,8 @@ class IsolationStub(SandboxEnvironment):
         self.hold_reaping: anyio.Event | None = None
         # seconds a reaping takes, by uid
         self.reap_delay: dict[str, float] = {}
+        # each command's script and whether it asked for a subprocess slot
+        self.concurrency: list[tuple[str, bool]] = []
 
     async def exec(
         self,
@@ -122,6 +124,7 @@ class IsolationStub(SandboxEnvironment):
         # privileged_shell(): [sh, -c, script, sh, *args]
         assert cmd[0] == SHELL_PATH
         self.calls.append((user, cmd[2], cmd[4:]))
+        self.concurrency.append((cmd[2], concurrency))
         if self.stall_on is not None and self.stall_on in cmd[2]:
             # a provider that does not answer, for longer than a test waits
             self.stall_timeouts.append(timeout)
@@ -140,10 +143,10 @@ class IsolationStub(SandboxEnvironment):
                 return self.fail
             return ExecResult(True, 0, self.reap, "")
         if _CENSUS_MARK in cmd[2]:
-            # $1 the cap, $2 the member uids, then the roots
+            # $1 the cap, $2 the member uids, $3 and $4 the path bounds, then the roots
             output = self.census
             if output is None:
-                output = "begin\n" + "root\n" * len(cmd[6:]) + "end\n"
+                output = "begin\n" + "root\n" * len(cmd[8:]) + "end\n"
             return ExecResult(True, 0, output, "")
         if "/proc/self/status" in cmd[2]:
             return ExecResult(
@@ -1146,6 +1149,8 @@ _PROBE_WRITABLE = (
 _CENSUS = """begin
 root
 path 61001 f /shared/a b
+tpath 61001 f /shared/lo
+omitted 3
 owner 61001 1 5
 owner 0 2 10
 owner 1000 1 7
@@ -1203,7 +1208,14 @@ async def test_the_census_counts_owners_under_the_roots_setup_recorded() -> None
     }
     # once the members have ended, as root, with the cap and the member uids
     [(user, _, args)] = [c for c in stub.calls if _CENSUS_MARK in c[1]]
-    assert (user, args) == ("root", ["10000", "61001 61002", *roots])
+    assert (user, args) == ("root", ["10000", "61001 61002", "1024", "1048576", *roots])
+    # reaping and the census do not wait for a subprocess slot behind other commands
+    harness = [
+        c
+        for script, c in stub.concurrency
+        if _REAP_MARK in script or _CENSUS_MARK in script
+    ]
+    assert len(harness) == 3 and not any(harness)
     [census] = swarm_events(outcome.transcript, "census")
 
     def root(path: str, kind: str, **fields: Any) -> dict[str, Any]:
@@ -1215,6 +1227,7 @@ async def test_the_census_counts_owners_under_the_roots_setup_recorded() -> None
             "capped": False,
             "members": {},
             "others": {"entries": 0, "bytes": 0},
+            "paths_omitted": 0,
             **fields,
         }
 
@@ -1229,10 +1242,14 @@ async def test_the_census_counts_owners_under_the_roots_setup_recorded() -> None
                     "w-1": {
                         "entries": 1,
                         "bytes": 5,
-                        "paths": [{"type": "file", "path": "/shared/a b"}],
+                        "paths": [
+                            {"type": "file", "path": "/shared/a b"},
+                            {"type": "file", "path": "/shared/lo", "truncated": True},
+                        ],
                     }
                 },
                 others={"entries": 3, "bytes": 17},
+                paths_omitted=3,
             ),
             root(
                 "/tmp",
@@ -1404,7 +1421,14 @@ async def test_a_member_stopped_while_it_is_reaped_is_not_counted_cancelled(
 # The census script, run here by /bin/sh with `find` replaced by a function that writes
 # the given records and exits with the given status, after writing `errors` to stderr.
 def _census_script(
-    root: Path, records: str, status: int, errors: str = "", cap: int = 3
+    root: Path,
+    records: str,
+    status: int,
+    errors: str = "",
+    cap: int = 3,
+    maxlen: int = 1024,
+    budget: int = 1024 * 1024,
+    roots: int = 1,
 ) -> list[str]:
     fake = (
         "find() {\n"
@@ -1415,7 +1439,17 @@ def _census_script(
     )
     script = _CENSUS_SCRIPT.replace("export LC_ALL=C\n", "export LC_ALL=C\n" + fake, 1)
     result = subprocess.run(
-        ["/bin/sh", "-c", script, "sh", str(cap), "61001", str(root)],
+        [
+            "/bin/sh",
+            "-c",
+            script,
+            "sh",
+            str(cap),
+            "61001",
+            str(maxlen),
+            str(budget),
+            *[str(root)] * roots,
+        ],
         capture_output=True,
         text=True,
         timeout=30,
@@ -1484,3 +1518,20 @@ def test_the_census_reports_a_scan_that_failed(
         assert "owner 61001 3 12" in out
     else:
         assert out[1:] == lines
+
+
+def test_the_census_bounds_the_bytes_of_its_sampled_paths(tmp_path: Path) -> None:
+    # 60 entries of the member with 2,000-byte paths and 10 of another owner, over two
+    # roots: each path is cut to 1,024 bytes, and once 4,096 bytes of paths are written
+    # the rest are counted as omitted, in this root and the next; counts are unchanged
+    long = "/r/" + "x" * 1997
+    rows = rf"61001 f 1 {long}\000" * 60 + r"0 f 2 /r/other\000" * 10
+    out = _census_script(tmp_path, rows, 0, cap=100, maxlen=1024, budget=5000, roots=2)
+    first, second = out[: out.index("root", 1)], out[out.index("root", 1) :]
+    for lines, printed, omitted in ((first, 4, 46), (second, 0, 50)):
+        paths = [line for line in lines if line.startswith("tpath ")]
+        assert paths == [f"tpath 61001 f {long[:1024]}"] * printed
+        assert not any(line.startswith("path ") for line in lines)
+        assert f"omitted {omitted}" in lines
+        assert {"owner 61001 60 60", "owner 0 10 20"} <= set(lines)
+    assert sum(len(line) for line in out) < 5000 + 1000

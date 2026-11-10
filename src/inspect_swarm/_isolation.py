@@ -1171,6 +1171,9 @@ async def _reap(env: SandboxEnvironment, identity: MemberIdentity) -> MemberReap
             user="root",
             timeout=_REAP_TIMEOUT,
             timeout_retry=False,
+            # bounded harness cleanup, which must not wait behind members' and other
+            # samples' commands for a subprocess slot
+            concurrency=False,
         )
     except TimeoutError as ex:
         return MemberReap(status="timeout", message=str(ex) or type(ex).__name__)
@@ -1207,14 +1210,19 @@ async def _reap(env: SandboxEnvironment, identity: MemberIdentity) -> MemberReap
 # bytes of its regular files, and for each member uid the first 50 entries' types and
 # paths, any newline in a path as '?'. A root stops being counted at the cap, and says
 # so. A root that is not a directory is absent; one the scan could not read all of, or
-# whose scan failed, says so, with find's first error or its exit status, besides what
-# it counted.
-# $1 the cap, $2 the member uids, space-separated, then the roots.
+# whose scan failed, says so, with find's first error (its first bytes) or its exit
+# status, besides what it counted. The sampled paths are bounded in bytes, so that the
+# output stays far below what a provider returns: a path longer than the per-path bound
+# is cut to it and marked (`tpath`), and once the paths written reach the census's
+# total bound the rest are counted as omitted (`omitted`); the owners' counts are not
+# affected.
+# $1 the cap, $2 the member uids, space-separated, $3 the per-path bound in bytes, $4
+# the total bound in bytes, then the roots.
 _CENSUS = (
     _PRELUDE
     + r"""
-cap=$1 members=$2
-shift 2
+cap=$1 members=$2 maxlen=$3 budget=$4
+shift 4
 dir=$(mktemp -d) || fail "could not create a temporary directory"
 trap 'rm -rf "$dir"' EXIT
 echo begin
@@ -1224,12 +1232,13 @@ for root in "$@"; do
     echo absent
     continue
   fi
-  rm -f "$dir/status" "$dir/capped"
+  rm -f "$dir/status" "$dir/capped" "$dir/spent"
   # find's status, which a pipeline does not report, is kept in a file; find stops once
   # awk has read one entry past the cap, which awk marks with a file of its own
   { find -P "$root" -xdev -ignore_readdir_race -mindepth 1 -printf '%U %y %s %p\0' 2>"$dir/errors"; echo $? >"$dir/status"; } \
     | tr '\n\0' '?\n' \
-    | awk -v cap="$cap" -v members=" $members " -v flag="$dir/capped" '
+    | awk -v cap="$cap" -v members=" $members " -v flag="$dir/capped" \
+        -v maxlen="$maxlen" -v budget="$budget" -v spentfile="$dir/spent" '
         NR > cap { print "capped"; printf "" > flag; exit }
         {
           n[$1]++
@@ -1237,19 +1246,29 @@ for root in "$@"; do
           if (index(members, " " $1 " ") && k[$1]++ < 50) {
             path = $0
             sub(/^[^ ]* [^ ]* [^ ]* /, "", path)
-            print "path", $1, $2, path
+            kind = "path"
+            # bytes: the script runs in the C locale
+            if (length(path) > maxlen) { path = substr(path, 1, maxlen); kind = "tpath" }
+            if (spent + length(path) > budget) omitted++
+            else { spent += length(path); print kind, $1, $2, path }
           }
         }
-        END { for (u in n) printf "owner %s %d %.0f\n", u, n[u], b[u] }
+        END {
+          for (u in n) printf "owner %s %d %.0f\n", u, n[u], b[u]
+          if (omitted) printf "omitted %d\n", omitted
+          printf "%d", spent > spentfile
+        }
       ' || fail "could not count the entries in $root"
+  spent=$(cat "$dir/spent") || fail "could not count the bytes of the paths in $root"
+  budget=$((budget - spent))
   status=$(cat "$dir/status" 2>/dev/null) || status=unknown
   if [ -e "$dir/capped" ]; then
     # find was stopped at the cap, by SIGPIPE or a write error; an entry removed while
     # the scan ran is not an error
-    other=$(grep -v -e ': No such file or directory$' -e 'Broken pipe$' "$dir/errors" | head -n 1)
+    other=$(grep -v -e ': No such file or directory$' -e 'Broken pipe$' "$dir/errors" | head -n 1 | cut -c "1-$maxlen")
     [ -z "$other" ] || printf 'error %s\n' "$other"
   else
-    other=$(grep -v ': No such file or directory$' "$dir/errors" | head -n 1)
+    other=$(grep -v ': No such file or directory$' "$dir/errors" | head -n 1 | cut -c "1-$maxlen")
     if [ -n "$other" ]; then
       printf 'error %s\n' "$other"
     elif [ "$status" != 0 ] && { [ "$status" != 1 ] || [ ! -s "$dir/errors" ]; }; then
@@ -1265,6 +1284,11 @@ echo end
 
 # the census's cap on the entries it counts in each root
 _CENSUS_CAP = 10_000
+
+# the census's bounds on the bytes of a sampled path, and of all of them: a path is
+# cut to the first, and paths past the second are left out
+_CENSUS_PATH_BYTES = 1024
+_CENSUS_PATHS_BYTES = 1024 * 1024
 
 # the census is not shielded, but has the same bounds as reaping
 _CENSUS_TIMEOUT = 60
@@ -1304,10 +1328,14 @@ async def _census(setup: IsolationSetup) -> dict[str, JsonValue]:
             _CENSUS,
             str(_CENSUS_CAP),
             " ".join(members),
+            str(_CENSUS_PATH_BYTES),
+            str(_CENSUS_PATHS_BYTES),
             *(root.path for root in setup.census_roots),
             user="root",
             timeout=_CENSUS_TIMEOUT,
             timeout_retry=False,
+            # as for reaping: not queued behind members' commands
+            concurrency=False,
         )
     except TimeoutError as ex:
         return {"status": "timeout", "message": str(ex) or type(ex).__name__}
@@ -1353,6 +1381,8 @@ def _census_root(
     counts: dict[str, dict[str, JsonValue]] = {}
     paths: dict[str, list[JsonValue]] = {}
     others = {"entries": 0, "bytes": 0}
+    # sampled paths left out once the census's paths reached their total bound
+    omitted = 0
     for line in lines:
         kind, _, rest = line.partition(" ")
         if kind == "absent":
@@ -1368,12 +1398,19 @@ def _census_root(
             else:
                 others["entries"] += int(entries)
                 others["bytes"] += int(size)
-        elif kind == "path":
+        elif kind in ("path", "tpath"):
             uid, letter, path = rest.split(" ", 2)
             if uid in members:
-                paths.setdefault(members[uid], []).append(
-                    {"type": _TYPES.get(letter, letter), "path": path}
-                )
+                entry: dict[str, JsonValue] = {
+                    "type": _TYPES.get(letter, letter),
+                    "path": path,
+                }
+                if kind == "tpath":
+                    # its first bytes, cut to the per-path bound
+                    entry["truncated"] = True
+                paths.setdefault(members[uid], []).append(entry)
+        elif kind == "omitted":
+            omitted = int(rest)
         else:
             raise ValueError(line)
     return {
@@ -1389,6 +1426,7 @@ def _census_root(
             if name in counts
         },
         "others": dict[str, JsonValue](others),
+        "paths_omitted": omitted,
     }
 
 
