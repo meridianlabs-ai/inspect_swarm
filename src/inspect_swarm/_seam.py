@@ -77,6 +77,19 @@ def ended_reason(origin: str) -> str:
     return f"ended by {origin}"
 
 
+# why a withdrawable callback was withdrawn, as the operator lists it
+STARTS_BACKGROUND = "it starts background work, which would go on while it was held"
+NO_STATE = (
+    "its agent loop does not pass its state, so it cannot be held at a turn boundary"
+)
+LOOP_ENDED = "its agent loop has ended, and a later loop cannot be held"
+BRIDGED = "it is bridged: its CLI runs its own turns, and opens no agent channel"
+
+_BACKGROUND_RUNNING = (
+    "has background work running, so it cannot be held at a turn boundary"
+)
+
+
 # The SHA-256 of a message as the log serializes it, its id excluded: through
 # Inspect's safe serializer, which writes a value JSON cannot hold as null and escapes
 # text UTF-8 cannot encode, such as a lone surrogate.
@@ -90,6 +103,11 @@ def message_hash(message: ChatMessage) -> str:
 class _Registration:
     callback: BoundaryCallback
     origin: str
+    # the runtime's own registration for the operator's pause: withdrawn, with the
+    # reason, wherever the seam would otherwise raise into the member because callbacks
+    # are registered
+    withdraw: Callable[[str], None] | None = None
+    withdrawn: bool = False
 
 
 # One member's turn gate, for one run: installed by the member wrapper around the agent
@@ -113,8 +131,9 @@ class MemberGate:
     in_flight: Callable[[], list[str]] = lambda: []
     ending: Callable[[], None] = lambda: None
     # called when the gate binds the member's own loop, after its stop and end check
-    # and before its callbacks run: the operator's hook
-    loop_bound: Callable[[AgentChannel], None] = lambda channel: None
+    # and before its callbacks run, with whether the loop passed its state: the
+    # operator's hook
+    loop_bound: Callable[[AgentChannel, bool], None] = lambda channel, state: None
     # a persistent member's: set by the runtime, whether the swarm has a channel that
     # wakes waits, what records an answer (the output given), what sets the member
     # `idle` and publishes it, and what sets it `ending` when its hold is refused
@@ -166,6 +185,8 @@ class MemberGate:
     _successor: AgentChannel | None = None
     _index: int = 0
     _chain: anyio.CancelScope | None = None
+    # the callback the chain is awaiting while the member is held
+    _holding: _Registration | None = None
     # the idle member's wake, and the input it brings
     _woken: anyio.Event | None = None
     _wake_input: list[ChatMessage] = field(default_factory=list[ChatMessage])
@@ -207,8 +228,14 @@ class MemberGate:
         self._wake_input = messages
         self._woken.set()
 
-    def register(self, callback: BoundaryCallback, origin: str) -> Callable[[], None]:
-        entry = _Registration(callback, origin)
+    def register(
+        self,
+        callback: BoundaryCallback,
+        origin: str,
+        *,
+        withdraw: Callable[[str], None] | None = None,
+    ) -> Callable[[], None]:
+        entry = _Registration(callback, origin, withdraw)
         self._callbacks.append(entry)
         self.registered = True
 
@@ -217,6 +244,37 @@ class MemberGate:
                 self._callbacks.remove(entry)
 
         return unregister
+
+    # Withdraws the withdrawable callbacks, telling each its reason: they are
+    # unregistered and never run again, one waiting is woken by its own withdraw.
+    def withdraw(self, reason: str) -> None:
+        withdrawn = [r for r in self._callbacks if r.withdraw is not None]
+        for registration in withdrawn:
+            self._callbacks.remove(registration)
+            registration.withdrawn = True
+        for registration in withdrawn:
+            assert registration.withdraw is not None
+            registration.withdraw(reason)
+
+    # From the background owner as the member starts background work: whether a held
+    # member may start it, which only a withdrawable callback holding it allows. The
+    # withdrawable callbacks are withdrawn either way.
+    def background_starting(self) -> bool:
+        holder = self._holding
+        admitted = self.held and holder is not None and holder.withdraw is not None
+        self.withdraw(STARTS_BACKGROUND)
+        return admitted
+
+    # Whether one of the member's time limits has run out: it ends at its next
+    # checkpoint, and is never held again.
+    def overdue(self) -> bool:
+        return any(node.overdue() for node in self.time_nodes)
+
+    # From the member's nodes when they first find it bridged, as when it runs a
+    # bridged subagent: the withdrawable callbacks are withdrawn, one holding the member
+    # included.
+    def bridge_found(self) -> None:
+        self.withdraw(BRIDGED)
 
     def request_end(self, origin: str) -> None:
         # the first request wins; it closes the lever, so the member's next model call
@@ -266,6 +324,8 @@ class MemberGate:
     def closed(self, channel: AgentChannel) -> None:
         if channel is self.context.turn_loop:
             self._turn_closed = True
+            # no later loop can be held
+            self.withdraw(LOOP_ENDED)
         elif channel is self._successor:
             self._successor = None
 
@@ -294,6 +354,8 @@ class MemberGate:
                 return False
             # a second top-level loop, which the seam does not hold
             if self._callbacks:
+                self.withdraw(LOOP_ENDED)
+            if self._callbacks:
                 raise RuntimeError(
                     f"Member {self.name!r} started a second agent loop after its first one ended. A member with boundary callbacks may run only one agent loop."
                 )
@@ -312,7 +374,11 @@ class MemberGate:
         self._check_reader()
         self._end_if_requested()
         if bound:
-            self.loop_bound(channel)
+            self.loop_bound(channel, state is not None)
+        if self._callbacks and state is None:
+            self.withdraw(NO_STATE)
+        if self._callbacks and self.context.background_running:
+            self.withdraw(STARTS_BACKGROUND)
         if not self._callbacks:
             return False
         if state is None:
@@ -320,9 +386,7 @@ class MemberGate:
                 f"Member {self.name!r} has boundary callbacks, but its agent loop does not pass its state to before_turn(), so a callback could not be given its output."
             )
         if self.context.background_running:
-            raise RuntimeError(
-                f"Member {self.name!r} has background work running, so it cannot be held at a turn boundary."
-            )
+            raise RuntimeError(f"Member {self.name!r} {_BACKGROUND_RUNNING}.")
         return await self._hold(index, messages, state)
 
     # A persistent member's board must be read by the loop the gate holds, when the
@@ -365,9 +429,7 @@ class MemberGate:
             )
         if self.context.background_running:
             self.refuse_hold()
-            raise RuntimeError(
-                f"Member {self.name!r} has background work running, so it cannot be held at a turn boundary."
-            )
+            raise RuntimeError(f"Member {self.name!r} {_BACKGROUND_RUNNING}.")
         error = self._reader_error()
         if error is not None:
             self.refuse_hold()
@@ -443,6 +505,9 @@ class MemberGate:
                 # controller hears it, only once its hold is admitted
                 self._woken = anyio.Event()
                 self.publish_idle()
+            else:
+                # the first callback holds the member from the start, for the waits
+                self._set_holder(registrations[0], recheck=False)
             self.recheck()
             ended: str | None = None
             try:
@@ -458,6 +523,24 @@ class MemberGate:
                         # callbacks registered while the member was idle run too
                         registrations = list(self._callbacks)
                     for registration in registrations:
+                        if registration.withdrawn:
+                            continue
+                        if self.context.background_running:
+                            # background work admitted while a withdrawable callback
+                            # held the member: the next holder meets the seam's
+                            # background rule, as at the start of a chain
+                            self.withdraw(STARTS_BACKGROUND)
+                            if registration.withdrawn:
+                                continue
+                            outcome = "error"
+                            detail = {
+                                "origin": _RUNTIME,
+                                "error": RuntimeError.__name__,
+                            }
+                            raise RuntimeError(
+                                f"Member {self.name!r} {_BACKGROUND_RUNNING}."
+                            )
+                        self._set_holder(registration)
                         origins.append(registration.origin)
                         boundary = Boundary(
                             member=self.name,
@@ -495,6 +578,7 @@ class MemberGate:
                 # 5. release
                 self._chain = None
                 self._woken = None
+                self._set_holder(None, recheck=False)
                 for node in self.time_nodes:
                     node.resume()
                 self.context.held = False
@@ -569,6 +653,20 @@ class MemberGate:
                     change={"removed": list[JsonValue](stale)},
                     applied=applied,
                 )
+
+    # The callback the chain awaits now, and for the bus whether it is the operator's
+    # pause, the only withdrawable registration: a member that pause holds is active, so
+    # the waits are rechecked when that changes.
+    def _set_holder(
+        self, registration: _Registration | None, *, recheck: bool = True
+    ) -> None:
+        before = self.context.operator_hold
+        self._holding = registration
+        self.context.operator_hold = (
+            registration is not None and registration.withdraw is not None
+        )
+        if recheck and self.context.operator_hold != before:
+            self.recheck()
 
     # The idle wait, in the chain's cancel scope, so that a stop or an end cancels it;
     # counted as waiting for the sample's working limit. Returns the staged

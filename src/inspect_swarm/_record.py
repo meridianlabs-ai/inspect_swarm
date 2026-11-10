@@ -168,13 +168,13 @@ class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
 
     mode: str | None
-    """The mode that chose the answer: a mode of the controller's `final` chain (`verify`, `vote`, `first` or `last`), or `controller` (the controller's `SwarmControl.choose_answer()`). `None` when there is no answer."""
+    """The mode that chose the answer: a mode of the controller's `final` chain (`verify`, `vote`, `first`, `last` or `synthesize`), or `controller` (the controller's `SwarmControl.choose_answer()`). `None` when there is no answer."""
 
     member: str | None
-    """The member whose output is the answer. `None` when there is no answer."""
+    """The member whose output is the answer. `None` when there is no answer, and under `synthesize`, whose answer is no member's output."""
 
     reason: str | None
-    """Why there is no answer: `no_submissions`, or, when there were submissions, `none_verified` for a chain that ends with `verify` and `no_answer_keys` for one that ends with `vote`. Under the mode `controller`, the reason the controller gave for its choice. Otherwise `None`."""
+    """Why there is no answer: `no_submissions`, or, when there were submissions, what the chain's last mode found: `none_verified` for `verify`, `no_answer_keys` for `vote`, `synthesize_failed` for a `synthesize` call that failed, and `not_synthesized` for a `synthesize` that has not run, in a provisional answer. Under the mode `controller`, the reason the controller gave for its choice. Otherwise `None`."""
 
     provisional: bool
     """`True` when the swarm ended without finalising its answer: a limit, error or cancellation ended it first, or the answer did not fit the sample's message limit."""
@@ -187,6 +187,9 @@ class FinalRecord(BaseModel):
 
     tie: bool = False
     """`vote` chose the answer from a tied plurality, by the earliest submission."""
+
+    synthesize_error: str | None = None
+    """What failed when `synthesize` was called and the chain went on to its next mode: an error from the model, named by its type, or an output with an empty completion or a `content_filter` stop reason. `None` otherwise."""
 
 
 class SwarmResultRecord(BaseModel):

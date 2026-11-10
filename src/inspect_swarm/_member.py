@@ -68,7 +68,7 @@ from ._budget import (
     current_member,
 )
 from ._isolation import MemberIdentity, member_identity
-from ._seam import MemberGate, ended_reason
+from ._seam import BRIDGED, MemberGate, ended_reason
 
 AgentFactory = Callable[..., Agent]
 """A registered `@agent` factory, such as `deepagent`."""
@@ -439,7 +439,7 @@ def member_nodes(
 # while its top-level loop was held.
 def seam_refusal(record: Member, context: MemberContext) -> str | None:
     if context.bridged:
-        return "it is bridged: its CLI runs its own turns, and opens no agent channel"
+        return BRIDGED
     if record.agent is not None:
         if registry_info(record.agent).name == _DEEPAGENT:
             background = registry_params(record.agent).get("background", False)

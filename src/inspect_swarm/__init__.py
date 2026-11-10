@@ -39,7 +39,7 @@ from ._controller._controller import (
     swarm_controller,
 )
 from ._controller.leaderless import leaderless
-from ._final import FinalName, FinalSpec
+from ._final import FinalName, FinalSpec, Synthesize, synthesize
 from ._isolation import Share, UserIsolation, users
 from ._member import Member, member
 from ._record import (
@@ -106,6 +106,7 @@ __all__ = [
     "SwarmBudget",
     "SwarmControl",
     "SwarmResultRecord",
+    "Synthesize",
     "Topic",
     "UserIsolation",
     "Verdict",
@@ -132,6 +133,7 @@ __all__ = [
     "swarm_resources",
     "swarm_result",
     "swarm_tools",
+    "synthesize",
     "topics",
     "users",
 ]

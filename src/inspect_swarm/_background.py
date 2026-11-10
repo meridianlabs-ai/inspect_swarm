@@ -101,7 +101,10 @@ class MemberBackground:
             )
         if self._member.bridged:
             raise bridged_background_error(self._member.name)
-        if self._member.held:
+        # tells the operator, whose pause is withdrawn; a member the operator's pause
+        # holds is released and may start it
+        admitted = self._member.background_starting()
+        if self._member.held and not admitted:
             # a held member does nothing, so its callbacks start no work for it
             raise RuntimeError(
                 f"background(): member {self._member.name!r} is held at a turn boundary, so no background work can start for it."

@@ -1,4 +1,4 @@
-"""Columns for Inspect's `samples_df()` with the swarm's per-sample cost and ledger data, and the ledger's models.
+"""Columns for Inspect's `samples_df()` with the swarm's per-sample cost and ledger data, the ledger's models, and the rows and select@k that compare a swarm with independent attempts.
 
 inspect_swarm supplies only what the swarm records. Reading logs, scores and statistics over the rows (means, fits) are Inspect's and the user's own dataframe work.
 
@@ -31,16 +31,34 @@ The columns read from the ledger are null for a sample with no ledger. A sample 
 The columns read the sample's `store` and `model_usage`, so do not exclude either with `samples_df(exclude_fields=...)`.
 
 The columns hold no per-member data. For that, read the whole ledger with `swarm_ledger()`. It returns a `SwarmLedger`, whose `members` are `MemberLedger`s with a `Meter` and `Calls` each. `SwarmLedger.model_json_schema()` describes every field.
+
+`attempt_rows()` reads one `AttemptRow` per sample and epoch: the swarm's result record, the task scorer's value, the member scorer's `best_member` and `mean_member`, and whether an agent consulted the task's scorers during the solve (`target_assisted`). `select_at_k()` applies a swarm's final-answer chain to k of a sample's `baseline()` epochs at a time, the comparison for a swarm's own answer that does not use the target:
+
+```python
+from collections import defaultdict
+
+from inspect_swarm.analysis import attempt_rows, select_at_k
+
+rows = attempt_rows(["logs/baseline.eval"], scorer="match", member_scorer="math_members")
+by_sample = defaultdict(list)
+for row in rows:
+    by_sample[row.id].append(row)
+values = [select_at_k(sample, 4, ["verify", "vote", "first"]) for sample in by_sample.values()]
+```
 """
 
 from .._ledger import Calls, MemberLedger, Meter, SwarmLedger
 from ._columns import SwarmColumns, swarm_ledger
+from ._scores import AttemptRow, attempt_rows, select_at_k
 
 __all__ = [
+    "AttemptRow",
     "Calls",
     "MemberLedger",
     "Meter",
     "SwarmColumns",
     "SwarmLedger",
+    "attempt_rows",
+    "select_at_k",
     "swarm_ledger",
 ]
