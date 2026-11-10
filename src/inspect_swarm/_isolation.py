@@ -443,11 +443,11 @@ awk -F: '{ print $3 } FILENAME == "/etc/passwd" { print $4 }' /etc/passwd /etc/g
 # the real, effective, saved and filesystem user and group ids of the processes running
 # now, such as a task's service started as a bare numeric user, with no passwd entry and
 # no file: a member given its uid would have it killed when reaped. A process that exits
-# while this runs takes no id.
+# while this runs takes no id, and its status file that cannot be opened is no error.
 for s in /proc/[0-9]*/status; do
   { while read -r k a b c d _; do
       case $k in Uid:|Gid:) printf '%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" ;; esac
-    done <"$s"; } 2>/dev/null
+    done <"$s"; } 2>/dev/null || :
 done >>"$dir/ids" || fail "users isolation could not list the ids of the running processes"
 while [ "$1" != -- ]; do
   root=$1
