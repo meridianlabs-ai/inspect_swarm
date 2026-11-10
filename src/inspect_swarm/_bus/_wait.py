@@ -232,11 +232,10 @@ class Waits:
         unreleased = self._unreleased()
         if not unreleased:
             return
-        # a member held at a turn boundary is not active
+        # a member held at a turn boundary is not active, unless the operator's pause
+        # holds it: the operator means to resume it (decision: Ransom, 2026-11-02)
         if any(
-            self._bus.running(name)
-            and not self._waiting(name)
-            and not self._contexts[name].held
+            self._bus.running(name) and not self._waiting(name) and not self._held(name)
             for name in self._roster
         ):
             return
@@ -447,6 +446,12 @@ class Waits:
         waiter.reason = reason
         waiter.event.set()
         self._clock(waiter)
+
+    def _held(self, name: str) -> bool:
+        # judged by the callback holding the member now, never by those that have
+        # returned or not yet run
+        context = self._contexts[name]
+        return context.held and not context.operator_hold
 
     def _waiting(self, name: str) -> bool:
         # the member's own loop has an unreleased waiter, and none of the member's
