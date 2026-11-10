@@ -519,7 +519,7 @@ def final_chain(final: FinalSpec | None, result: ResultSpec | None) -> list[Fina
 | Mode | Needs | Produces | Produces nothing when |
 |---|---|---|---|
 | `verify` | `result.verifier` | The passed candidate (a submission, or any answer of a persistent member, each with its own verdict) with the highest `Verdict.value` (`None` ranks below any number), earliest swarm time on ties, then roster order, then answer order | no submission passed |
-| `vote` | `result.answer_key` | The earliest voting candidate in the plurality group of answer keys; one vote per member: a submission's key, or the key of a persistent member's latest answer, the one `choose_answer()` takes, which is then its candidate in the group; `None` keys do not vote, so a persistent member whose latest answer has no key abstains, whatever its earlier answers' keys (decision: Ransom, 2026-11-10). A tied plurality goes to the group whose first voting candidate is earliest, and `tie` is recorded | no submission has a key |
+| `vote` | `result.answer_key` | The earliest voting candidate in the plurality group of answer keys; one vote per member: a submission's key, or the key of a persistent member's latest answer, the one `choose_answer()` takes, which is then its candidate in the group; `None` keys do not vote, so a persistent member whose latest answer has no key abstains, whatever its earlier answers' keys (decision: Ransom, 2026-11-10). A tied plurality goes to the group whose first voting candidate is earliest, and `tie` is recorded | no member votes |
 | `first` | nothing | As in M1 ([The final answer](#the-final-answer-first)) | there are no submissions |
 | `last` | nothing | As in M2 ([`last` and the controller's choice](#last-and-the-controllers-choice-m2)) | there are no submissions |
 | `synthesize` | `kind="answer"` | One extra model call over the submissions ([below](#synthesize)) | there are no submissions, or the call fails recoverably |
@@ -630,7 +630,7 @@ For `kind="artifact"`:
 - **The final-answer chain** still runs and sets `output`, because some scorers read the output text and fall back to the environment (Frontier-CS). `synthesize` is rejected.
 - **The verifier**, when given, checks the environment, not an answer.
   - It is called with the submitting member's completion and the sample metadata whenever a member submits.
-  - A controller can stop on it (`leaderless(stop_on_verified=True)`, [swarm-api.md](swarm-api.md#examples)).
+  - A controller can stop on it (`leaderless(stop_on_verified=True)`, [swarm-api.md](swarm-api.md#examples)), on a passing verdict carried by `MemberEnded` or, for a persistent member's answer, by `MemberIdle`.
   - Members still working when it fires keep editing until the stop procedure ends them, so the environment that is scored can differ from the one that was verified.
 - **`final_verdict`** is therefore taken in finalisation, after the stop procedure, on the environment that will be scored. The runtime calls the verifier once more with the final answer's completion, or `""` when there is no final answer. Analysis compares it with the run-time verdicts and with the team score.
 - **Per-member scores** are unavailable unless the task supplies `member_artifacts`.
@@ -846,6 +846,7 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
   - fall-through in the default chain, and the strict single mode leaving an empty answer with its reason;
   - never-started members are never selected;
   - construction errors for each missing need, raised by `swarm()` for the controller's chain and by `leaderless()` for a `Reporter`.
+- **`stop_on_verified`** (`tests/test_controller.py`, with the chain): `leaderless(final="verify", stop_on_verified=True, stop_on_submission=False)` returns `verified` at a non-persistent member's passing `MemberEnded`, and at a persistent member's passing answer through its `MemberIdle` while another member is still running, which the stop then ends; a failing verdict on either event does not stop the swarm.
 - **Chain types** (`tests/test_final.py`, beside swarm-api.md's logging test of the same chain):
   - `final_chain()` builds the default from the result;
   - a chain mixing strings, `synthesize(model=get_model(...), prompt=...)` and `reporter(...)`, logged through a controller's params, validates back from the logged JSON and from the dicts `create_registry_object()` passes, with the `Model` rebuilt;
@@ -858,7 +859,6 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
 - **Each answer of a persistent member** (`tests/test_persistent.py`, beside the other persistent tests; a scripted worker that answers `42`, is woken and answers `7`, with a key and a verifier that record their calls):
   - each answer is keyed and verified once, in order, with its own completion, and never again when the member ends; `answer_results` holds `42` and `7` with their verdicts and verdict times after their `answer_times`; the member's own `answer_key` and `verdict` are `None`; `first` chooses `42`, and the `verdict` events carry `answer` 0 and 1 in the swarm's span;
   - with a verifier held on an event, the member stays `running` and held after its answer, `wake()` refuses it, `events()` yields no `MemberIdle`, and its handle's `verdict` is `None`; once released, `idle` and `MemberIdle` come together with the answer's verdict, which the handle then shows, and `awaiting_work_time` excludes the wait while `held_time` includes it;
-  - a verifier that returns before the boundary admits the hold: `MemberIdle` is queued at admission with the verdict;
   - a key-only contract: each answer keyed, `MemberIdle` at admission with no verdict;
   - a stop while the verdict is pending: the member ends `submitted`, the verifier is not called again for the ending, and `MemberEnded` waits for the answer's verdict and carries it; a verifier making a model call after the stop is refused by the closed lever and leaves the answer unverified, with `MemberEnded` queued without a verdict, and the verifier is called once for that answer in the whole run, finalisation included;
   - the hard stop during that verification leaves the answer unverified, in the record too, and queues the member's `MemberEnded` without a verdict; the verifier is not called for it again;
@@ -935,7 +935,7 @@ Optional, after M2, in any order with swarm.md's menu, subject to the dependenci
 2. **Final-answer chain.**
    - `src/inspect_swarm/_final.py` widens M2's `FinalName` and gains `Synthesize`, `Reporter`, `FinalMode`, `FinalSpec` and `final_chain()`.
    - Validation against the result, called from `swarm()`'s construction checks.
-   - `leaderless(stop_on_verified=)`, and `final=` on `leaderless()` and `Controller` widened from M2's single `first` or `last` to `FinalSpec` (`_controller/_controller.py`, `_controller/leaderless.py`); `leaderless()` validates its `final` with the `TypeAdapter`, and settles how M1's `stop_on_submission` combines with a chain other than `first` (M2 already refuses it with `last`). The controller's choice keeps its M2 meaning, ahead of the chain.
+   - `leaderless(stop_on_verified=)`, which returns `verified` at the first passing verdict on a `MemberEnded` or, for a persistent member's answer, a `MemberIdle`, and `final=` on `leaderless()` and `Controller` widened from M2's single `first` or `last` to `FinalSpec` (`_controller/_controller.py`, `_controller/leaderless.py`); `leaderless()` validates its `final` with the `TypeAdapter`, and settles how M1's `stop_on_submission` combines with a chain other than `first` (M2 already refuses it with `last`). The controller's choice keeps its M2 meaning, ahead of the chain.
    - The chain in the provisional answer and finalisation, including verifying the submissions left unverified and the artifact `final_verdict`; `FinalRecord`'s `chain`, `votes` and `tie`, and `SwarmResultRecord.final_verdict`.
    - Tests extend `tests/test_final.py` and `tests/test_controller.py`.
 3. **`synthesize`.**

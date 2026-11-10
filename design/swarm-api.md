@@ -641,7 +641,8 @@ def leaderless(
             swarm.start(m)
         async with contextlib.aclosing(swarm.events()) as events:   # released on the early return
             async for event in events:
-                if stop_on_verified and isinstance(event, MemberEnded) and event.verdict and event.verdict.passed:
+                # a persistent member's answer carries its verdict on MemberIdle
+                if stop_on_verified and isinstance(event, (MemberEnded, MemberIdle)) and event.verdict and event.verdict.passed:
                     return "verified"
                 if stop_on_submission and event.submitted:
                     return "submitted"
@@ -831,7 +832,7 @@ All in inspect_swarm, with mockllm, on asyncio and trio, no network or Docker:
   - `-T channels=filesystem` (a string) and `-T channels=filesystem,messages` (a list) both resolve.
 - `tests/test_controller.py`:
   - `leaderless` starts every member and returns `submitted` at the first submission, soft-stopping the members still running, while a member that ends without a submission does not stop it; with `stop_on_submission=False` every member runs to its end and it returns `all_done`; after M2, with `stop_on_verified` it returns `verified` at the first passed verdict;
-  - (after M2) a delayed verifier: the last member's agent returns before its verdict is taken, and `events()` still yields that member's `MemberEnded` with the verdict before it ends, so `stop_on_verified` and `escalate` see it;
+  - (after M2) a delayed verifier: the last member's agent returns before its verdict is taken, and `events()` still yields that member's `MemberEnded` with the verdict before it ends, so `stop_on_verified` and `escalate` see it; a persistent member's passing answer stops `leaderless(stop_on_verified=True, stop_on_submission=False)` through its `MemberIdle` while another member is still running;
   - a custom controller (`escalate`) starts members later and with custom input; `start()` twice raises; `events()` ends when nothing runs; a second iterator raises while one is open, including one that competes in the interval after a waiting iterator is woken (the woken one keeps its event); an open iterator holds its events until it is closed;
   - returning while members run goes through the soft stop: in-flight mockllm calls complete and are recorded, members get status `stopped`, and only a member still running after `Budget.grace` is cancelled; the swarm cap and time cap take the same path with reasons `swarm_cap` and `swarm_time`, and `run` is cancelled;
   - stop ordering, with barriers: a controller that runs a scout first (`escalate` after M2; in M1 one that starts the workers when the scout ends) runs its scout while the time cap (and, separately, the swarm cap) fires; the scout ends unverified during grace. No pending worker starts (a `start()` attempted after the stop began raises `RuntimeError`), no member model call is dispatched after the stop began, cancelling `run` does not cancel the scout's member task, and the never-started workers are recorded as not started;
