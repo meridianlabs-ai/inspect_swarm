@@ -128,19 +128,25 @@ class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
 
     mode: str | None
-    """The mode that chose the answer: `first` or `last` (the controller's `final` rule), or `controller` (the controller's `SwarmControl.choose_answer()`). `None` when there is no answer."""
+    """The mode that chose the answer: a mode of the controller's `final` chain (`verify`, `vote`, `first` or `last`), or `controller` (the controller's `SwarmControl.choose_answer()`). `None` when there is no answer."""
 
     member: str | None
     """The member whose output is the answer. `None` when there is no answer."""
 
     reason: str | None
-    """Why there is no answer: `no_submissions`. Under the mode `controller`, the reason the controller gave for its choice. Otherwise `None`."""
+    """Why there is no answer: `no_submissions`, or, when there were submissions, `none_verified` for a chain that ends with `verify` and `no_answer_keys` for one that ends with `vote`. Under the mode `controller`, the reason the controller gave for its choice. Otherwise `None`."""
 
     provisional: bool
     """`True` when the swarm ended without finalising its answer: a limit, error or cancellation ended it first, or the answer did not fit the sample's message limit."""
 
     answer: int | None = None
     """Which of a persistent member's answers is the swarm's answer, from 0. `None` for other members, and when there is no answer."""
+
+    chain: list[str] | None = None
+    """The final-answer chain's modes, by name, such as `["verify", "vote", "first"]`. `None` in records written before the chain existed."""
+
+    tie: bool = False
+    """`vote` chose the answer from a tied plurality, by the earliest submission."""
 
 
 class SwarmResultRecord(BaseModel):
@@ -161,6 +167,12 @@ class SwarmResultRecord(BaseModel):
     verifier: str | None = None
     """A label for the result contract's verifier, for audit: its `name`, else its qualified name; `None` without one."""
 
+    final_verdict: Verdict | None = None
+    """For an `artifact` task with a verifier: the verifier's verdict on the environment after the members have stopped, called with the final answer's completion, or `""` without one. `None` otherwise."""
+
+    left_out: list[LeftOut] = []
+    """The record's own values left out, as for a member's `left_out`: `explanation`, the final verdict's explanation. Empty when nothing was left out."""
+
     # serialized as Inspect serializes a sample (`EvalSample`), which keeps NaN and
     # infinities, the members' outputs included
     model_config = ConfigDict(ser_json_inf_nan="constants")
@@ -173,9 +185,8 @@ def write_record(record: SwarmResultRecord) -> None:
     # such as one nested in a member
     forget_record()
     id = uuid4().hex
-    record = record.model_copy(
-        update={"members": [_logged_member(record, m) for m in record.members]}
-    )
+    members = [_logged_member(record, m) for m in record.members]
+    record = _logged_final(record.model_copy(update={"members": members}))
     data: dict[str, JsonValue] = {"id": id, **record.model_dump(mode="json")}
     logged = _as_logged(data)
     # the members' model text is held as a log gives it back; the rest is the task
@@ -198,7 +209,7 @@ def write_record(record: SwarmResultRecord) -> None:
 _MODEL_TEXT = ("output", "answer_key", "verdict")
 
 
-# The record's data without the members' model text.
+# The record's data without the model text: the members' and the final verdict.
 def _authored(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
     members = cast(list[dict[str, JsonValue]], data.get("members", []))
     return {
@@ -206,7 +217,48 @@ def _authored(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
         "members": [
             {k: v for k, v in m.items() if k not in _MODEL_TEXT} for m in members
         ],
+        "final_verdict": None,
     }
+
+
+# The record, its members already as a log gives them back, with its own model text as
+# a log gives it back: the final verdict, whose explanation is left out, and named in
+# the record's left_out, when the record could not hold it.
+def _logged_final(record: SwarmResultRecord) -> SwarmResultRecord:
+    update: dict[str, Any] = {}
+    verdict = record.final_verdict
+    if verdict is not None:
+        # the verdict's declared fields alone, as for a member's verdict
+        logged = Verdict(verdict.passed, verdict.value)
+        if verdict.explanation is not None:
+            explained = _logged_verdict(
+                record, Verdict(verdict.passed, verdict.value, verdict.explanation)
+            )
+            if explained is None:
+                update["left_out"] = [*record.left_out, "explanation"]
+            else:
+                logged = explained
+        update["final_verdict"] = logged
+    return record.model_copy(update=update)
+
+
+# The final verdict as the record gives it back from a log, or None when the log
+# cannot write or read it, or its explanation reads as an attachment reference. It is
+# written alone in a copy of the record, at its place in the record.
+def _logged_verdict(record: SwarmResultRecord, verdict: Verdict) -> Verdict | None:
+    try:
+        alone = record.model_copy(update={"members": [], "final_verdict": verdict})
+        data = alone.model_dump(mode="json")
+        if _unresolved(data["final_verdict"]):
+            return None
+        logged = _as_logged(data)
+        if _unresolved(logged["final_verdict"]):
+            return None
+        return SwarmResultRecord.model_validate(
+            logged, context=get_deserializing_context()
+        ).final_verdict
+    except ValueError:
+        return None
 
 
 # A member with its output, answer key and verdict explanation as a log gives them
