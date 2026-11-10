@@ -112,6 +112,9 @@ class MemberGate:
     recheck: Callable[[], None] = lambda: None
     in_flight: Callable[[], list[str]] = lambda: []
     ending: Callable[[], None] = lambda: None
+    # called when the gate binds the member's own loop, after its stop and end check
+    # and before its callbacks run: the operator's hook
+    loop_bound: Callable[[AgentChannel], None] = lambda channel: None
     # a persistent member's: set by the runtime, whether the swarm has a channel that
     # wakes waits, what records an answer (the output given), what sets the member
     # `idle` and publishes it, and what sets it `ending` when its hold is refused
@@ -136,6 +139,17 @@ class MemberGate:
     state: AgentState | None = None
     # the origin of the first end request
     end_origin: str | None = None
+    # set by the member wrapper while the member's background work drains after its
+    # agent returned, a phase the drain's own grace bounds
+    draining: bool = False
+    # set where the end request decides how the member ends: its first boundary or a
+    # closed lever, a normal return or the drain after it, the request consumed before
+    # setup, or its grace timer's cancellation. A request that something else beat
+    # (a limit, the swarm's stop, a cancellation from outside) leaves it unset.
+    honoured: bool = False
+    # the gate ended the member for the end request, at a boundary or before a turn,
+    # whichever stop closed the lever first
+    end_raised: bool = False
     holds: int = 0
     held_time: float = 0.0
     # the model calls in flight when a stop or an end cancelled a chain, so the ledger
@@ -155,6 +169,16 @@ class MemberGate:
     @property
     def held(self) -> bool:
         return self.context.held
+
+    # the index of the own loop's latest boundary, None before its first
+    @property
+    def boundary_index(self) -> int | None:
+        return self._index - 1 if self._index else None
+
+    # the own loop has bound and its block has exited
+    @property
+    def turn_closed(self) -> bool:
+        return self._turn_closed
 
     # Whether callbacks were registered, or the member is persistent, but the member's
     # own loop never reached the gate, so they never ran.
@@ -252,7 +276,8 @@ class MemberGate:
         if self.task is None or anyio.get_current_task().id != self.task:
             return False
         loop = self.context.turn_loop
-        if loop is None:
+        bound = loop is None
+        if bound:
             self.context.turn_loop = channel
         elif loop is not channel:
             if not self._turn_closed:
@@ -282,6 +307,8 @@ class MemberGate:
             return await self._idle(index, messages, state)
         self._check_reader()
         self._end_if_requested()
+        if bound:
+            self.loop_bound(channel)
         if not self._callbacks:
             return False
         if state is None:
@@ -363,6 +390,7 @@ class MemberGate:
         if pending == "end":
             assert self.end_origin is not None
             reason = ended_reason(self.end_origin)
+            self.end_raised = True
         else:
             reason = self.stopping() or "stopped"
         raise self.lever.stop_error(reason)

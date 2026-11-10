@@ -1,7 +1,7 @@
 from collections.abc import Callable, Coroutine, Sequence
 from contextvars import Token
 from types import TracebackType
-from typing import Any, TypeVarTuple, Unpack
+from typing import Any, TypeVarTuple, Unpack, cast
 
 import anyio
 from anyio.abc import TaskGroup
@@ -22,6 +22,15 @@ def self_stop(error: BaseException) -> bool:
         and error.type == "custom"
         and error.source is None
     )
+
+
+# A cancellation, bare or grouped with nothing else.
+def cancellation(error: BaseException) -> bool:
+    cancelled = anyio.get_cancelled_exc_class()
+    if isinstance(error, BaseExceptionGroup):
+        group = cast(BaseExceptionGroup[BaseException], error)
+        return group.split(cancelled)[1] is None
+    return isinstance(error, cancelled)
 
 
 # The owner of one member's background work: the target of inspect_ai's
@@ -128,7 +137,14 @@ class MemberBackground:
             raise
         except LimitExceededError as ex:
             if not (self_stop(ex) or any(ex.source is node for node in self._contain)):
+                self._member.fatal()
                 raise
+        except BaseException as ex:
+            if not cancellation(ex):
+                # it ends the member and the swarm; the runtime learns of it before the
+                # owner cancels and waits for the other tasks
+                self._member.fatal()
+            raise
         finally:
             self.running -= 1
             self._member.background_running -= 1

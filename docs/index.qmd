@@ -119,6 +119,7 @@ Each member's events are in a timeline named after it, so the log viewer can sho
 - [Channels](channels.qmd) and [Shared Memory](shared-memory.qmd): how members share information, and waiting for each other.
 - [Budgets](budget.qmd) and [Sandboxes](sandboxes.qmd): the swarm's caps and splits, and shared or per-member sandboxes.
 - [Scoring](scoring.qmd), [Analysis](analysis.qmd) and [Restrictions](restrictions.qmd): the answer and the result record, metrics, the ledger, and what the swarm does not support or record.
+- [Operators](operators.qmd): messaging and stopping members of a running swarm with `inspect ctl`.
 
 The [examples](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/examples) are runnable tasks for each of these. The designs behind the swarm are in [design/](https://github.com/meridianlabs-ai/inspect_swarm/tree/main/design).
 
