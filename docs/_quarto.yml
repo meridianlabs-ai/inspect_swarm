@@ -35,6 +35,7 @@ inspect-docs:
         - href: channels.qmd
         - href: shared-memory.qmd
         - href: messages.qmd
+        - href: topics.qmd
     - text: Resources
       contents:
         - href: budget.qmd

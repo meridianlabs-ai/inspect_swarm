@@ -10,6 +10,7 @@ from pydantic import JsonValue
 from .._budget import MemberContext
 from .._channel._channel import WaitingState, WaitSpec
 from .._channel.messages import MessagesState
+from .._channel.topics import TopicsState
 from .._evidence import comm_waited
 from ._record import Record, current_via
 
@@ -22,10 +23,14 @@ Outcome = Literal[
 
 _NOT_WAKING = "Messages sent with wake=False do not wake this wait; they are counted when it returns for another reason. "
 
+_NOT_WAKING_POSTS = "Posts in topics that do not wake their readers do not wake this wait; they are counted when it returns for another reason. "
+
 _RELEASES = "It also returns when every member is waiting, has ended or has not started, when the swarm is stopping, or after `timeout` seconds. "
 
+_BOARD_SOURCE = "a shared memory file where you watch has a change you have not viewed (another agent's write, including your own subagents')"
+
 _DESCRIPTION = (
-    "Wait until there is something for you to look at in the swarm: a shared memory file where you watch has a change you have not viewed (another agent's write, including your own subagents'), or another member has ended. "
+    f"Wait until there is something for you to look at in the swarm: {_BOARD_SOURCE}, or another member has ended. "
     "Returns at once if that is already so, and keeps returning while a changed file there stays unviewed, so view what it names, or narrow `path`, or watch one file with `file_id`. "
     + _RELEASES
     + "It returns file ids and member names, never file content. "
@@ -43,13 +48,41 @@ _MESSAGES_DESCRIPTION = (
 )
 
 _BOTH_DESCRIPTION = (
-    "Wait until there is something for you to look at in the swarm: an unread message sent to you with wake=True, a shared memory file where you watch has a change you have not viewed (another agent's write, including your own subagents'), or another member has ended. "
+    f"Wait until there is something for you to look at in the swarm: an unread message sent to you with wake=True, {_BOARD_SOURCE}, or another member has ended. "
     "Returns at once if that is already so, and keeps returning while such a message stays unread or a changed file there stays unviewed, so read your messages with read_messages and view the files it names, or narrow `path`, or watch one file with `file_id`. "
     + _NOT_WAKING
     + _RELEASES
     + "It returns counts, file ids and member names, never message or file content. "
     "Use it instead of polling with sleep."
 )
+
+
+# with the topics channel, which only the member's own loop reaches, and the messages
+# channel or a board channel if the loop reaches them
+def _topics_description(messages: bool, board: bool) -> str:
+    sources = [
+        *(["an unread message sent to you with wake=True"] if messages else []),
+        "an unread post in a topic that wakes its readers",
+        *([_BOARD_SOURCE] if board else []),
+    ]
+    unread = "such a message or post" if messages else "such a post"
+    reads = "read_messages and read_topics" if messages else "read_topics"
+    keeps = f"{unread} stays unread"
+    acknowledge = f"read {'them' if messages else 'it'} with {reads}"
+    if board:
+        keeps += " or a changed file there stays unviewed"
+        acknowledge += " and view the files it names, or narrow `path`, or watch one file with `file_id`"
+    kinds = [*(["message"] if messages else []), "post", *(["file"] if board else [])]
+    content = " or ".join([", ".join(kinds[:-1]), kinds[-1]] if kinds[:-1] else kinds)
+    return (
+        f"Wait until there is something for you to look at in the swarm: {', '.join(sources)}, or another member has ended. "
+        f"Returns at once if that is already so, and keeps returning while {keeps}, so {acknowledge}. "
+        + (_NOT_WAKING if messages else "")
+        + _NOT_WAKING_POSTS
+        + _RELEASES
+        + f"It returns counts, {'file ids, ' if board else ''}topic names and member names, never {content} content. "
+        "Use it instead of polling with sleep."
+    )
 
 
 # a bridged member's: it never counts as waiting, so no all-waiting release ends its
@@ -297,8 +330,8 @@ class Waits:
                 else reason
             )
             lines: list[str] = []
-            # the lines of the messages channel's news, which count unread messages
-            counting = 0
+            # the lines of the news of the channels the status lines count, by channel
+            counting: dict[str, int] = {}
             for channel in channels:
                 state = self._states[channel]
                 news = state.news(spec)
@@ -310,8 +343,8 @@ class Waits:
                     )
                     lines.extend(news.lines)
                     files.extend(news.files)
-                    if isinstance(state, MessagesState):
-                        counting = len(news.lines)
+                    if isinstance(state, MessagesState | TopicsState):
+                        counting[channel] = len(news.lines)
             reported = self._reported.setdefault(spec.loop, set())
             ends = [
                 (member, status)
@@ -323,10 +356,19 @@ class Waits:
             release = _release_line(outcome, name, effective)
             if release is not None:
                 lines.append(release)
-            # the result ends with the count of unread messages unless it is only the
-            # messages' news, so that truncating the middle of a longer one keeps it
+            # the result ends with the status lines, whose totals truncating the middle
+            # of a longer result keeps, unless it is only one counting channel's news,
+            # whose line leads with its count, and no other has an unread record
             unread = self._bus.status(context)
-            if unread is not None and (not counting or len(lines) > counting):
+            only = (
+                next(iter(counting))
+                if len(counting) == 1 and len(lines) == sum(counting.values())
+                else None
+            )
+            if unread is not None and (
+                only is None
+                or any(self._bus.unread(name, c) for c in self._states if c != only)
+            ):
                 lines.append(unread)
             # named, so that this loop's later waits do not report them again
             reported.update(member for member, _ in ends)
@@ -359,11 +401,13 @@ class Waits:
                 )
 
     def _make_tool(self, channels: Sequence[str]) -> Tool:
-        messages = [isinstance(self._states[c], MessagesState) for c in channels]
+        states = [self._states[c] for c in channels]
         return wait_tool(
             self.wait,
-            messages=any(messages),
-            board=not all(messages),
+            messages=any(isinstance(s, MessagesState) for s in states),
+            topics=any(isinstance(s, TopicsState) for s in states),
+            # any other waiting channel is described as the shared memory
+            board=not all(isinstance(s, MessagesState | TopicsState) for s in states),
             timeout=f"Seconds to wait at most (default and maximum: {self.max_wait}).",
         )
 
@@ -440,8 +484,8 @@ class Waits:
             waiter.idle_since = None
 
 
-# swarm_wait, described for the channels it waits on: the messages channel's wait takes
-# no filter, the shared memory's (`board`) a path or file id. `wait` is its body, called
+# swarm_wait, described for the channels it waits on: the messages and topics channels'
+# waits take no filter, the shared memory's (`board`) a path or file id. `wait` is its body, called
 # with the path, the file id and the timeout; a bridged member's is described for how
 # its waits end.
 def wait_tool(
@@ -451,8 +495,11 @@ def wait_tool(
     board: bool,
     timeout: str,
     bridged: bool = False,
+    topics: bool = False,
 ) -> Tool:
     def describe(description: str) -> str:
+        if topics:
+            description = _topics_description(messages, board)
         return _bridged(description) if bridged else description
 
     if not board:
