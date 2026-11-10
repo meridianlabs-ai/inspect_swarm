@@ -1579,21 +1579,29 @@ async def test_an_end_request_while_a_member_is_reaped_changes_nothing() -> None
 
 
 @pytest.mark.anyio
-async def test_the_operator_cannot_pause_or_message_a_member_being_reaped() -> None:
+async def test_the_operator_cannot_pause_message_or_stop_a_member_being_reaped() -> (
+    None
+):
     # the member's agent has ended and its end waits for its reaping: a pause or a
-    # message could never reach it
+    # message could never reach it, and a stop changes nothing
     stub = IsolationStub()
     stub.reaping, stub.hold_reaping = anyio.Event(), anyio.Event()
     actions: list[dict[str, str | None]] = []
+    stops: list[tuple[bool, str]] = []
 
     async def run_controller(control: SwarmControl) -> StopReason:
         control.start("w")
         assert stub.reaping is not None and stub.hold_reaping is not None
         await stub.reaping.wait()
-        info = cast(Any, control).operator.members["w"].info_now()
+        operator = cast(Any, control).operator.members["w"]
+        info = operator.info_now()
         actions.append(
             {"pause": info.actions["pause"], "message": info.actions["message"]}
         )
+        # a stop, dry run and actual, changes nothing either
+        for dry_run in (True, False):
+            outcome = operator._stop(dry_run)
+            stops.append((outcome.changed, outcome.detail))
         stub.hold_reaping.set()
         events = control.events()
         async with aclosing(events):
@@ -1615,4 +1623,7 @@ async def test_the_operator_cannot_pause_or_message_a_member_being_reaped() -> N
             "message": "The member's agent has ended.",
         }
     ]
-    assert [m.status for m in outcome.record.members] == ["submitted"]
+    cleaning_up = "The member's agent and its work have ended: it ends once its leftover processes are stopped."
+    assert stops == [(False, f"Dry run: {cleaning_up}"), (False, cleaning_up)]
+    [result] = outcome.record.members
+    assert (result.status, result.end_origin) == ("submitted", None)

@@ -36,6 +36,9 @@ OPERATOR = "operator"
 # cannot be paused
 _AGENT_ENDED = "its agent has ended"
 
+# what a stop of such a member does: nothing
+_CLEANING_UP = "The member's agent and its work have ended: it ends once its leftover processes are stopped."
+
 _ENDED = "The swarm is ending after an error or a cancellation, and its members still running are being cancelled."
 
 _BRIDGED = (
@@ -576,6 +579,9 @@ class MemberOperator:
             return OperatorOutcome(
                 changed=False, detail=_dry(dry_run, "The member has ended.")
             )
+        if m.gate.finished:
+            # its end waits only for its cleanup, which a stop neither speeds nor stops
+            return OperatorOutcome(changed=False, detail=_dry(dry_run, _CLEANING_UP))
         if m.gate.end_origin is not None:
             return OperatorOutcome(
                 changed=False, detail=_dry(dry_run, "The member is already ending.")
