@@ -1147,7 +1147,7 @@ async def test_the_ledger_is_written_after_the_final_step() -> None:
     # so that the final meter it reports covers the final step
     stop = await run_swarm(swarm(generator(scripted_model()), channels=[]))
     kinds = [e.kind for e in stop.transcript.events if isinstance(e, SwarmEvent)]
-    assert kinds[-4:] == ["final", "result_record", "ledger", "metrics"]
+    assert kinds[-4:] == ["final", "result_record", "metrics", "ledger"]
 
 
 @tool

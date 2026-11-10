@@ -35,6 +35,7 @@ inspect-docs:
         - href: channels.qmd
         - href: shared-memory.qmd
         - href: messages.qmd
+        - href: topics.qmd
     - text: Resources
       contents:
         - href: budget.qmd
@@ -43,6 +44,7 @@ inspect-docs:
       contents:
         - href: scoring.qmd
         - href: analysis.qmd
+        - href: operators.qmd
         - href: restrictions.qmd
   sidebar: unified
   external_refs:
