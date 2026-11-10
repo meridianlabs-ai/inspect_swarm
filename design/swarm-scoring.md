@@ -819,18 +819,19 @@ def select_at_k(rows: Sequence[AttemptRow], k: int, chain: Sequence[str], *, emp
   - the task scorer's value;
   - `final_verdict` (the record's verifier result on the drained environment) and `final` (mode, member, reason);
   - `best_member`, `mean_member` and `complete`;
-  - the per-member states, statuses, keys, verdicts, times and submission flags, and `members_started`; for a persistent member, its `answer_times` and `answer_results` too;
+  - the per-member states, statuses, keys, verdicts, times, submission flags and `persistent` flags, and `members_started`;
   - `sample_total_usage`;
   - the flag `target_assisted`.
 
   With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons. `samples_df()` with M1's `SwarmColumns`, which has the ledger's realized cost, joins on the same (log, sample id, epoch).
 - **From rows to attempts.** `select_at_k` takes one sample's rows from a baseline arm (its epochs), builds one `Attempt` per row, and returns that sample's select@k:
   - `epoch`;
-  - `submitted`, `time`, `answer_key` and `verdict` from the row's single member: its status `submitted`, its end time, its key, its run-time verdict. A persistent member's own key and verdict are `None`, so its attempt is its answer that the record's final selection names instead: the member has answered when `final.member` names it and `final.answer` is set, and `time`, `answer_key` and `verdict` are that answer's entries in `answer_times` and `answer_results`. A record written before `answer_results` existed holds the answers' times but no results, and reads the field as `[]`: its selected answer is still submitted at its recorded time, with key and verdict `None`, since the record holds neither, so `verify` finds it unverified and `vote` counts it as abstaining; the helper never calls the task's key function or verifier. A persistent member with no answer is unsubmitted, whatever its status. Under `baseline()`'s `leaderless(final="first")` that is its first answer, the only one, since `leaderless` never wakes a member;
+  - `submitted`, `time`, `answer_key` and `verdict` from the row's single member: its status `submitted`, its end time, its key, its run-time verdict;
   - `final_value` from the task scorer's value;
   - `final_verdict` from the row's `final_verdict`.
 
   The rows' `result_kind` is the `kind` select@k follows.
+  - A row whose member is persistent raises `ValueError`, naming its log, sample id and epoch. A persistent member's attempt is one of its answers, not its end, and these rules read only the member's own end, key and verdict, which stay `None` for it ([Not this design](#not-this-design)). `baseline()` takes a member record, so a persistent one can reach the helper; it is refused rather than read as unsubmitted.
   - The run-time verdict and `final_verdict` are kept apart, because the environment can change between a member's submission check and the drain. Artifact `verify` reads only `final_verdict`. Nothing derives a verdict from `final_value`, which would select with the target.
   - Rows that disagree on `result_kind` are an error naming the logs.
 - **Target-assisted samples.** `target_assisted` is set when the solve phase contains `ScoreEvent(intermediate=True)`: an agent consulted the task's scorer with the target in the loop (for example `react(attempts=...)`). In a swarm that feedback can be shared with peers, so the rows flag those samples for the user's analysis to report separately.
@@ -900,8 +901,7 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
   - an artifact baseline whose run-time verdict passed but whose `final_verdict` failed (and the reverse) is selected by `final_verdict` only;
   - `result_kind` survives into `select_at_k`;
   - rows that disagree on `result_kind` raise;
-  - a persistent baseline whose one answer passed its verifier gives an attempt with that answer's key, verdict and time, selected by `verify` and voting under `vote`; one that never answered gives an unsubmitted attempt;
-  - a persistent baseline from a record without `answer_results` (`answer_times=[t]`, `final.answer=0` and no `answer_results` field) gives a submitted attempt at `t` with no key and no verdict: chosen by `first`, unverified under `verify`, abstaining under `vote`, with no key function or verifier called.
+  - a baseline of a persistent member raises `ValueError` naming its log, sample id and epoch.
 - **Artifact results ignore answer text.** Use an artifact-shaped scorer, which scores the environment and ignores the completion.
   - A passing environment and an empty final output give final@k and team@k 1, not `empty_value`.
   - A member with an empty completion and a passing materialized artifact is graded 1.
@@ -1055,3 +1055,4 @@ Untrusted input reaching the new code:
 - **Per-member trajectory scoring.** Scorers that read tool calls or intermediate messages would need each member's conversation in a scorer-readable form.
 - **Harness-validity and cost as scores.** Showing a member that never acted, or realized cost, as `Score`s so they appear in eval-set summaries (Observer and limits work).
 - **A verifier library.** Common verifiers (run visible tests, check a format, a model judge with no target) as reusable functions.
+- **Persistent baselines in select@k.** `select_at_k` refuses a persistent member's baseline. Reading its attempt would take one of its answers (the one `final.answer` names, with its time, key and verdict from `answer_times` and `answer_results`), keep the member's stop time for artifact tasks, and handle records written without `answer_results`; that can be its own design if a comparison needs persistent baselines (decision: Ransom, 2026-11-10).
