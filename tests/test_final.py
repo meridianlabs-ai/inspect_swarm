@@ -544,6 +544,7 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "left_out",
         "persistent",
         "answer_times",
+        "answer_results",
         # users isolation's, null without it
         "user",
         "uid",

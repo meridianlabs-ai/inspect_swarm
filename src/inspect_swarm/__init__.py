@@ -43,6 +43,7 @@ from ._final import FinalName, FinalSpec, Synthesize, synthesize
 from ._isolation import Share, UserIsolation, users
 from ._member import Member, member
 from ._record import (
+    AnswerResult,
     FinalRecord,
     LeftOut,
     MemberReap,
@@ -70,6 +71,7 @@ except ImportError:
 
 
 __all__ = [
+    "AnswerResult",
     "Boundary",
     "BoundaryCallback",
     "Budget",
