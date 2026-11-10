@@ -5,20 +5,24 @@ llms-description: "How the task's scorers score a swarm: which submission is the
 
 ## Overview
 
-A swarm is scored by the task's own scorers. The swarm is the task's solver, so the scorers run after it, on the swarm's output and on whatever the members left in the sandbox, as they would after a single agent. Inspect Swarm adds no scorer of its own; it records what the swarm did, so analysis can read it beside the scores.
+A swarm is scored by the task's own scorers. The swarm is the task's solver, so the scorers run after it, on the swarm's output and on whatever the members left in the sandbox, as they would after a single agent. Inspect Swarm records what the swarm did, so analysis can read it beside the scores. For a task scored on its answer, `member_scores()` also grades each member's output ([Member scores](#member-scores)).
 
 ## The answer and the result record
 
 ### The answer
 
-The controller's `final` rule chooses the swarm's answer from the members' submissions:
+The controller's `final` chain chooses the swarm's answer from the members' submissions. It is one mode, or a list of modes tried in order until one gives an answer:
 
-- `first`, the default: the member that submitted earliest, by the swarm's clock, with ties broken by roster order.
+- `first`: the member that submitted earliest, by the swarm's clock, with ties broken by roster order.
 - `last`: the latest submission, again with ties broken by roster order. `leaderless(stop_on_submission=False, final="last")` gives it, for a team whose members build on each other's work ([Controllers](controllers.qmd#leaderless)).
+- `verify`: the submission that passed the verifier with the highest `value`, then the earliest. A verdict without a value, or with a NaN value, ranks below any number. It needs a verifier in the [result contract](#the-result-contract), and gives nothing when no submission passed.
+- `vote`: the most common answer key, one vote per member; a submission whose key is `None` does not vote. The answer is the earliest submission with that key. A tie goes to the key submitted first. It needs an `answer_key` in the result contract, and gives nothing when no submission has a key.
 
-A controller of your own can also choose the answer itself, with `choose_answer()`, in place of the rule ([Controllers](controllers.qmd#choosing-the-answer)). A member that ended any other way than submitting is never chosen ([Members](members.qmd#how-a-member-ends)). When no member submitted, the answer is empty. Each answer of a [persistent member](members.qmd#persistent-members) is a submission for these rules, whatever the member's status later, and ties between two answers of one member go to the earlier one.
+The default chain depends on the result contract: `verify` if it has a verifier, then `vote` if it has an answer key, then `first`. So a task with both gets `["verify", "vote", "first"]`: when nothing passes, the swarm votes, and when no submission has a key, it takes the first. A task without a contract gets `first`. A single mode is strict: with `final="verify"`, no passed submission means no answer. `swarm()` raises `ValueError` for a chain the contract cannot support, such as `verify` without a verifier.
 
-The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the mode and the chosen member. Each member's own conversation is in its timeline.
+A controller of your own can also choose the answer itself, with `choose_answer()`, in place of the chain ([Controllers](controllers.qmd#choosing-the-answer)). A member that ended any other way than submitting is never chosen ([Members](members.qmd#how-a-member-ends)). When no member submitted, the answer is empty. Each answer of a [persistent member](members.qmd#persistent-members) is a submission for `first` and `last`, whatever the member's status later, and ties between two answers of one member go to the earlier one.
+
+The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the mode and the chosen member. Each member's own conversation is in its lane of the swarm's timeline.
 
 ### The result record
 
@@ -31,7 +35,7 @@ When the swarm ends, it writes a record of what it did to the transcript, as an 
     {"name": "react-1", "role": null, "choose_name": false, "state": "ended", "status": "submitted", "submitted": true, "time": 41.2, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null},
     {"name": "react-2", "role": null, "choose_name": false, "state": "ended", "status": "swarm_cap", "submitted": false, "time": 57.9, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null}
   ],
-  "final": {"mode": "first", "member": "react-1", "reason": null, "provisional": false}
+  "final": {"mode": "first", "member": "react-1", "reason": null, "provisional": false, "chain": ["first"], "tie": false}
 }
 ```
 
@@ -43,9 +47,11 @@ When the swarm ends, it writes a record of what it did to the transcript, as an 
 - `output` is the member's `ModelOutput` when it ended, however it ended (left out above).
 - `answer_key`, `verdict` and `verdict_time` come from the result contract, for a submission ([The result contract](#the-result-contract)). The record's `kind` and `verifier` name the contract's kind and its verifier. Without a contract, all of these are `null`.
 - `left_out` names the member's values that the record leaves out, because it cannot hold them: `output`, `answer_key` or `explanation` (the verdict's). Each such value is `null` in the record. The member's output is still the swarm's answer if it was chosen. Usually `left_out` is empty.
-- `final.mode` is `first`, `last` or `controller`, and `final.member` names the chosen member. Under `controller`, `final.reason` is the reason the controller gave. With no submission, `mode` and `member` are `null` and `final.reason` is `"no_submissions"`.
+- `final.chain` is the chain the swarm applied. `final.mode` is the mode that chose the answer (`verify`, `vote`, `first` or `last`) or `controller`, and `final.member` names the chosen member. Under `controller`, `final.reason` is the reason the controller gave. With no answer, `mode` and `member` are `null` and `final.reason` says why: `"no_submissions"`, or, when there were submissions, `"none_verified"` for a chain that ends with `verify` and `"no_answer_keys"` for one that ends with `vote`.
+- `final.tie` is `true` when `vote` chose from tied groups, by the earliest submission. Grouping the submitted members by their `answer_key` counts the keys the record keeps. A left-out key cannot be counted, and a log can turn different keys into the same text, so these counts may differ from the original vote. `mode`, `member` and `tie` describe the original choice.
+- `final_verdict` is the verifier's verdict on the environment after the members have stopped, for an `artifact` task with a verifier ([The result contract](#the-result-contract)). The record's own `left_out` is `["explanation"]` when it cannot hold that verdict's explanation.
 
-The record is a `SwarmEvent` with `kind="result_record"`. Its `data` holds the fields above and an `id`, which the swarm also puts in the sample store under `inspect_swarm:result_id`, so that `swarm_result()` finds the record of the store it is given. Older logs hold the record as an `InfoEvent` with source `inspect_swarm` and `data["type"] == "result_record"`; `swarm_result()` reads both forms. If a limit, error or cancellation ends the swarm before it finalises its answer, the record has the answer so far with `provisional: true`, and that submission is the sample's output: the first submission so far, the latest under `last`, or the controller's choice once it has made one.
+The record is a `SwarmEvent` with `kind="result_record"`. Its `data` holds the fields above and an `id`, which the swarm also puts in the sample store under `inspect_swarm:result_id`, so that `swarm_result()` finds the record of the store it is given. Older logs hold the record as an `InfoEvent` with source `inspect_swarm` and `data["type"] == "result_record"`; `swarm_result()` reads both forms. If a limit, error or cancellation ends the swarm before it finalises its answer, the record has the answer so far with `provisional: true`, and that submission is the sample's output: the chain's choice from the submissions and verdicts so far, or the controller's choice once it has made one.
 
 `swarm_result()` returns `None` when no swarm ran in the sample. It raises `ValueError` for a sample it cannot read the record of: one read without its events or attachments, one written by an inspect_swarm that kept the record in the store under `inspect_swarm:result`, or one that holds a swarm's events but whose store names no record, as for a sample recovered from a crashed eval.
 
@@ -87,12 +93,58 @@ solver = swarm(
 - `answer_key` maps a completion to a comparable answer, or `None` when it has none. The swarm records the key of each submission. It never sees the target.
 - `verifier` is the task's own check: visible tests, a proof checker, a format check, a model judge. The swarm calls it on each submission while the members run, one at a time, with the submission's completion and the sample's metadata. It may use `sandbox()`. It is never given the target, and must not call `score()`, which runs the task's scorers with the target. Its model calls count against the swarm's cap as the swarm's own, not a member's.
 - The record keeps each verdict (`passed`, an optional `value` and an `explanation`). A controller sees `passed` and `value` on the member's handle and its `MemberEnded` event, never the explanation ([Controllers](controllers.qmd#writing-a-controller)).
-- A submission can be left without a verdict when the swarm stops: once the stop has begun the verifier's model calls are refused, and a verifier still running at the hard stop is cancelled. A verdict it returns after it is cancelled is ignored, and the verifier is not called for submissions still waiting.
+- A submission can be left without a verdict when the swarm stops: once the stop has begun the verifier's model calls are refused, and a verifier still running at the hard stop is cancelled. A verdict it returns after it is cancelled is ignored, and the verifier is not called for submissions still waiting. The swarm's final step then verifies each submission left without a verdict, before it chooses the answer. Their `MemberEnded` events have no verdict. The final step's model calls count against the sample's limits, not the swarm's cap.
+- For an `artifact` task, the verifier checks the environment. Members still working after a passing check can change it, so the final step calls the verifier once more, after the members have stopped, with the final answer's completion, or `""` without one. The record keeps that verdict as `final_verdict`.
 - An exception from `answer_key` or the verifier fails the sample, and so does a result of the wrong type: a key that is not a string or `None`, or a `Verdict` whose `passed` is not a bool, `value` not a float, an int a float holds exactly, or `None`, or `explanation` not a string or `None`. The record keeps the member's end and output, and any key or verdict recorded before the error. Like other task code, `answer_key` and the verifier are trusted to honour cancellation, return their real types and build a `Verdict` the ordinary way: these checks catch mistakes, not code written to get past them.
-- The contract does not change which submission is the answer.
+- With the default `final` chain, the contract's verifier and answer key choose the answer ([The answer](#the-answer)).
 - A contract with an `answer_key` or a `verifier` does not yet work with [persistent members](members.qmd#persistent-members), whose every answer is a submission: `swarm()` raises `ValueError` for the two together. Keying and verifying each answer is [#158](https://github.com/meridianlabs-ai/inspect_swarm/issues/158).
 
 The contract holds the task's functions, so the log records it only as `"ResultSpec"`. Retrying the task rebuilds it. A swarm replayed from its logged arguments (`--solver inspect_swarm/swarm`) cannot rebuild it and raises `TypeError`; to make such a swarm replayable, return it from a registered `@agent` builder.
+
+## Member scores
+
+`member_scores()`, from `inspect_swarm.scorer`, grades each member's output with a scorer of the task's, as if that member had run alone, and gives two values: `best_member`, the best member, and `mean_member`, the mean over the members. It needs the [result contract](#the-result-contract) of an answer task, the same one the swarm is given. The contract holds the task's functions, which a log cannot rebuild, so wrap `member_scores()` in a registered scorer of the task's own with no arguments. Re-scoring rebuilds it by name:
+
+```python
+from inspect_ai import Task, task
+from inspect_ai.agent import react
+from inspect_ai.scorer import Scorer, match, scorer
+
+from inspect_swarm import ResultSpec, answer_result, member, swarm
+from inspect_swarm.scorer import MEMBER_METRICS, member_scores
+
+
+def math_result() -> ResultSpec:
+    return answer_result(answer_key=boxed_number)
+
+
+@scorer(metrics=MEMBER_METRICS)
+def math_members() -> Scorer:
+    return member_scores(match(), math_result())
+
+
+@task
+def math_swarm() -> Task:
+    return Task(
+        dataset=QUESTIONS,
+        solver=swarm(
+            members=member(react, name="solver", count=4),
+            result=math_result(),
+        ),
+        scorer=[match(), math_members()],
+    )
+```
+
+- List it after the task's own scorer, which stays the headline score.
+- The scorer it is given must grade the answer alone. It may run the answer in the sandbox, but must never read the answer from the sandbox, or it would credit the team's work to one member. A scorer that falls back to the sandbox's files needs an answer-only version for `member_scores()`.
+- Each member's grade sees the sample's input, metadata and target, with the member's output as the sample's output and its message after the input. It runs in a span named after the member, within the scorer's span.
+- A member that never started has no value. A member with no output, or only whitespace, gets `empty_value` (0 by default) and is not graded. A member whose grade is `None`, NaN, or more than one value (a dict, list or tuple), or whose output the record left out, has no value either.
+- The values are over the members that have one. When none has, both are NaN, which Inspect counts as unscored. The score's metadata says, for each member, its outcome, value and reason, with its key and verdict from the record; `complete` is `false` when a member that started has no value.
+- Without the contract, with a contract of another kind, or for an `artifact` task, both values are NaN with the reason `kind_not_declared`, `kind_mismatch` or `artifact_without_member_artifacts`. `member_scores()` does not grade member artifacts yet.
+- A sample with no swarm is scored as one member named `solver`, with the sample's output.
+- During the solve, while `state.completed` is `False`, it returns `None`, so attempt loops such as `react(attempts=...)` get the same grades as without it.
+- Re-scoring reads each member's output from the record, so it gives the same scores without the sandbox, or applies a new scorer to every member. A scorer that needs the sandbox cannot be re-scored and raises `ProcessLookupError`.
+- A model-graded scorer is called once more for each member, and that usage counts in the sample's.
 
 ## Scoring what members leave
 
@@ -156,7 +208,7 @@ A scorer that runs during the solve, under `react(attempts=...)`, the other atte
 
 The swarm's score is the task's scorer on the swarm's answer, or on what the members left for a scorer that reads the sandbox. Compare it with:
 
-- A single agent at the same budget. A swarm of one, `swarm(members=agent, channels=[])`, runs one agent under the swarm's rules with the same records ([Members](members.qmd#a-swarm-of-one)), so both arms have a ledger. Unlike a plain agent, it returns an empty output when its member does not submit.
+- A single agent at the same budget. `baseline(agent, result=...)` runs one agent as a swarm of one, `swarm(members=agent, controller=leaderless(final="first"), channels=[], result=...)`, with the same records ([Members](members.qmd#a-swarm-of-one)), so both arms have a ledger, and the same answer key and verdict for its submission. Unlike a plain agent, it returns an empty output when its member does not submit.
 - Epochs of a single agent, through Inspect's own reducers on the task's scorer, such as `mean`, `max` and `pass_at_k`:
 
 ```python
@@ -181,4 +233,4 @@ def single_agent() -> Task:
 
 `pass_at_k` and `max` choose with knowledge of the target, and the swarm's answer rule does not, so they are upper references, not like-for-like comparisons.
 
-Compare arms on the cost the log records, not on the caps ([Analysis](analysis.qmd#samples-dataframe)). team@k, the mean member and best@k on graded scores need each member's own score, which Inspect Swarm does not record yet; best@k can be computed from per-epoch values in `samples_df()`.
+Compare arms on the cost the log records, not on the caps ([Analysis](analysis.qmd#samples-dataframe)). For an answer task, `member_scores()` gives team@k as `best_member` (whether any of the k members solved it) and the mean member as `mean_member`. Compare team@k with `pass_at_k` or best@k over epochs of `baseline()` read from the same member scorer, since both choose with knowledge of the target. best@k on graded scores can be computed from per-epoch values in `samples_df()`.

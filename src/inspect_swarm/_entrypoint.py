@@ -5,4 +5,5 @@
 from ._channel.filesystem import filesystem as filesystem
 from ._channel.messages import messages as messages
 from ._channel.shared_memory import shared_memory as shared_memory
+from ._channel.topics import topics as topics
 from ._controller.leaderless import leaderless as leaderless

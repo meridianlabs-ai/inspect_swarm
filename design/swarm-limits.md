@@ -386,7 +386,7 @@ The runtime runs members in its own task group inside the swarm nodes. Its handl
 
 Member limits are not exhaustion. The wrapper records them as statuses, and the member's siblings continue.
 
-The runtime keeps the swarm's own `AgentState.messages` to the task input plus the final assistant message. Member conversations live in their spans and timelines. A concatenation of members' conversations would be checked against the sample's message limit when `as_solver()` copies it ([How errors reach the runner](#how-errors-reach-the-runner)).
+The runtime keeps the swarm's own `AgentState.messages` to the task input plus the final assistant message. Member conversations live in their spans, the lanes of the swarm's timeline. A concatenation of members' conversations would be checked against the sample's message limit when `as_solver()` copies it ([How errors reach the runner](#how-errors-reach-the-runner)).
 
 ### The final step and the reserve
 
