@@ -200,49 +200,54 @@ async def test_grace_is_clipped_to_half_the_samples_remaining_time() -> None:
 async def test_isolation_setup_time_comes_out_of_the_derived_time_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # setup takes 0.6 s of a 1 s sample; a cap derived before it would outlast the
-    # sample, whose limit would then end the swarm without its final step
+    # the cap is derived from the time the sample has left once setup has ended. A cap
+    # derived before setup would be larger by setup's time and could outlast the
+    # sample, whose limit would then end the swarm without its final step. The bound
+    # uses the sample's time at the end of setup, so runner speed cannot break it.
+    after_setup: list[float] = []
+
     # a setup that takes time and leaves nothing to reap or count
     async def slow_setup(isolation: object, names: Sequence[str]) -> None:
-        await anyio.sleep(0.6)
+        await anyio.sleep(0.1)
+        after_setup.append(sample_limits().time.usage)
 
     monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", slow_setup)
-    stop = await run_swarm(
-        swarm(sleeper(), channels=[], isolation="users", budget=Budget(grace=0)),
-        time=1,
+    await run_swarm(
+        swarm(sleeper(0), channels=[], isolation="users"),
+        time=60,
     )
-    assert stop.reason == "swarm_time"
-    assert statuses(stop) == {"sleeper": "cancelled"}
+    [used] = after_setup
+    cap = SwarmLedger.model_validate(store().get(LEDGER_KEY)).caps["time"]
+    assert cap is not None and cap <= 60 * (1 - Budget().reserve) - used
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("setup_time,warned", [(0.2, True), (0, False)])
+@pytest.mark.parametrize("left_after_setup,warned", [(10, True), (None, False)])
 async def test_an_explicit_time_cap_is_checked_after_isolation_setup(
-    setup_time: float,
+    left_after_setup: int | None,
     warned: bool,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # a 0.9 s cap fits a 1 s sample until setup takes 0.2 s of it, after which the
-    # sample's limit ends the swarm first, as the warning says
-    # a setup that takes time and leaves nothing to reap or count
-    async def slow_setup(isolation: object, names: Sequence[str]) -> None:
-        await anyio.sleep(setup_time)
+    # a 30 s cap fits a 60 s sample until setup leaves it 10 s, after which the
+    # sample's limit would end the swarm first, as the warning says. Setup shortens the
+    # sample's time limit by a live override, so the time it leaves does not depend on
+    # runner speed.
+    async with sample(time=60):
+        with _sample_time_limit() as set_time_limit:
+            # a setup that leaves nothing to reap or count
+            async def setup(isolation: object, names: Sequence[str]) -> None:
+                if left_after_setup is not None:
+                    set_time_limit(left_after_setup)
 
-    monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", slow_setup)
-    with (
-        caplog.at_level(logging.WARNING, logger="inspect_swarm"),
-        pytest.raises(LimitExceededError) if warned else nullcontext(),
-    ):
-        await run_swarm(
-            swarm(
-                sleeper(),
-                channels=[],
-                isolation="users",
-                budget=Budget(time=0.9, grace=0),
-            ),
-            time=1,
-        )
+            monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", setup)
+            with caplog.at_level(logging.WARNING, logger="inspect_swarm"):
+                await swarm(
+                    sleeper(0),
+                    channels=[],
+                    isolation="users",
+                    budget=Budget(time=30),
+                )(AgentState(messages=[ChatMessageUser(content="task")]))
     warnings = [
         r.getMessage()
         for r in caplog.records
@@ -1032,8 +1037,8 @@ async def test_a_cancellation_the_sample_does_not_explain_records_an_unknown_end
 
 
 @contextmanager
-def _expiring_time_limit() -> Generator[Callable[[], None]]:
-    # ends the sample's time limit when called, as a live override of 0 from
+def _sample_time_limit() -> Generator[Callable[[int], None]]:
+    # sets the sample's time limit when called, as a live override from
     # `inspect ctl config` does, so a test orders it after its own events
     task_id = uuid4().hex
     limits = sample_limits()
@@ -1044,9 +1049,18 @@ def _expiring_time_limit() -> Generator[Callable[[], None]]:
         message=cast(_MessageLimit, limits.message),
     ):
         try:
-            yield lambda: set_sample_limit_override(task_id, "time_limit", 0)
+            yield lambda seconds: set_sample_limit_override(
+                task_id, "time_limit", seconds
+            )
         finally:
             set_sample_limit_override(task_id, "time_limit", None)
+
+
+@contextmanager
+def _expiring_time_limit() -> Generator[Callable[[], None]]:
+    # ends the sample's time limit when called, as a live override of 0 does
+    with _sample_time_limit() as set_time_limit:
+        yield lambda: set_time_limit(0)
 
 
 @agent
