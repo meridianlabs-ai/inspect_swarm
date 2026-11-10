@@ -2215,11 +2215,21 @@ def returns_when_set(inner: Agent, release: anyio.Event) -> Agent:
 
 # swarm_wait counts a member the operator's pause holds as active, judged by the
 # callback holding it now: b's wait times out while the operator holds a, and returns
-# all_waiting while another caller's callback does.
+# all_waiting while another caller's callback does, a caller's callback labelled
+# `operator` included.
 @pytest.mark.anyio
-@pytest.mark.parametrize("order", ["operator", "scheduler_first", "operator_first"])
+@pytest.mark.parametrize(
+    "order,label",
+    [
+        ("operator", "scheduler"),
+        ("scheduler_first", "scheduler"),
+        ("scheduler_first", "operator"),
+        ("operator_first", "scheduler"),
+        ("operator_first", "operator"),
+    ],
+)
 async def test_swarm_wait_counts_a_member_the_operator_holds_as_active(
-    order: str,
+    order: str, label: str
 ) -> None:
     started, release, paused, mid, go = (anyio.Event() for _ in range(5))
     scheduling, scheduled = anyio.Event(), anyio.Event()
@@ -2255,11 +2265,11 @@ async def test_swarm_wait_counts_a_member_the_operator_holds_as_active(
 
     async def run_controller(control: SwarmControl) -> str:
         if order == "scheduler_first":
-            control.member("a").on_boundary(schedule, origin="scheduler")
+            control.member("a").on_boundary(schedule, origin=label)
         control.start("a")
         await paused.wait()
         if order == "operator_first":
-            control.member("a").on_boundary(schedule, origin="scheduler")
+            control.member("a").on_boundary(schedule, origin=label)
         while not control.member("a").held:
             await anyio.sleep(0.01)
         control.start("b")
@@ -2376,6 +2386,59 @@ async def test_the_swarm_pause_holds_every_member_and_its_resume_leaves_own_paus
         ("b", 1, ["operator"]),
         ("c", 0, ["operator"]),
     ]
+
+
+# A member that is ending is not reported paused, and the resume replies do not say a
+# pause still holds it, though its flag and the latch stay set.
+@pytest.mark.anyio
+@pytest.mark.parametrize("how", ["member", "controller", "swarm", "pending", "setup"])
+async def test_an_ending_member_is_not_reported_paused(how: str) -> None:
+    started, release, ready, end_now, ended_now = (anyio.Event() for _ in range(5))
+    script = _Recording([_call("slow", seconds=0), _submit()])
+    if how == "setup":
+        inner = _after(ready, _react(script), entered=started)
+    else:
+        inner = _react(script, _slow(started, release))
+
+    async def run_controller(control: SwarmControl) -> str:
+        if how == "pending":
+            await end_now.wait()
+        else:
+            control.start("a")
+        if how == "controller":
+            await end_now.wait()
+            control.member("a").end(origin="test")
+            ended_now.set()
+        if how == "pending":
+            await release.wait()
+            control.start("a")
+        return await _drain(control)
+
+    async def drive(group: OperatorGroup) -> None:
+        a = group.agents["a"]
+        if how != "pending":
+            await started.wait()
+        assert _act(a.pause, dry_run=False).changed
+        assert _act(group.pause, dry_run=False).changed
+        assert _act(a.info).paused
+        if how == "controller":
+            end_now.set()
+            await ended_now.wait()
+        else:
+            assert _act((group if how == "swarm" else a).stop, dry_run=False).changed
+            end_now.set()
+        assert not _act(a.info).paused
+        assert (
+            _act(group.resume, dry_run=True).detail == "Dry run: The swarm is resumed."
+        )
+        assert _act(a.resume, dry_run=True).detail == "Dry run: Resumed."
+        release.set()
+        ready.set()
+
+    ran = await _run(_swarm([member(inner, name="a")], run_controller), drive)
+
+    assert ran.status("a") == "stopped"
+    assert _boundaries(ran) == []
 
 
 @agent

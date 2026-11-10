@@ -11,7 +11,6 @@ from .._budget import MemberContext
 from .._channel._channel import WaitingState, WaitSpec
 from .._channel.messages import MessagesState
 from .._evidence import comm_waited
-from .._operator import OPERATOR
 from ._record import Record, current_via
 
 if TYPE_CHECKING:
@@ -408,7 +407,7 @@ class Waits:
         # judged by the callback holding the member now, never by those that have
         # returned or not yet run
         context = self._contexts[name]
-        return context.held and context.holder != OPERATOR
+        return context.held and not context.operator_hold
 
     def _waiting(self, name: str) -> bool:
         # the member's own loop has an unreleased waiter, and none of the member's

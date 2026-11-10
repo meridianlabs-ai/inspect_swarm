@@ -345,10 +345,11 @@ class MemberContext:
     # whether the member's boundary callbacks are running, for the bus's all-waiting
     # check and the background owner
     held: bool = False
-    # the origin of the boundary callback the gate is awaiting while the member is held,
-    # None between callbacks and in a persistent member's idle wait: the bus counts a
-    # member held by the operator's pause as active
-    holder: str | None = None
+    # whether the boundary callback the gate is awaiting while the member is held is the
+    # operator's pause, the runtime's own registration rather than a caller's callback
+    # labelled `operator`; False between callbacks and in a persistent member's idle
+    # wait: the bus counts a member held by the operator's pause as active
+    operator_hold: bool = False
     # set when the member first uses a tool from swarm_bridged_tools(), which a member
     # whose loop swarm_tools() binds cannot also use
     bridge_used: bool = False

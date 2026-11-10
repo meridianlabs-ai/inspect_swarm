@@ -176,11 +176,7 @@ class SwarmOperator:
             for m in self.members.values():
                 m.sync()
         detail = "The swarm is resumed."
-        own = [
-            name
-            for name, m in self.members.items()
-            if m.running and m.paused and m.unpausable() is None
-        ]
+        own = [name for name, m in self.members.items() if m.paused and m.holdable()]
         if own:
             detail += f" These members stay paused on their own until resumed one by one: {', '.join(own)}."
         return OperatorOutcome(changed=True, detail=_dry(dry_run, detail))
@@ -262,7 +258,7 @@ class MemberOperator:
             state=m.state,
             status=m.status,
             activity=self._activity(),
-            paused=self.running and self._wanted() and self.unpausable() is None,
+            paused=self._wanted() and self.holdable(),
             actions=actions,
         )
 
@@ -458,6 +454,11 @@ class MemberOperator:
                 return LOOP_ENDED
         return None
 
+    # Whether a pause can hold the member, for what the list and the resume replies
+    # report: it is running, not ending, and pausable. The flags stay as set.
+    def holdable(self) -> bool:
+        return self.running and self._ending() is None and self.unpausable() is None
+
     def _pause_refusal(self) -> str | None:
         m = self._member
         if m.state == "ended":
@@ -545,7 +546,7 @@ class MemberOperator:
             self.paused = False
             self.sync()
         detail = "Resumed." if changed else "The member is not paused on its own."
-        if self._swarm.latched and self.running and self.unpausable() is None:
+        if self._swarm.latched and self.holdable():
             detail += (
                 " The swarm's pause still holds it: resume the group to release it."
             )

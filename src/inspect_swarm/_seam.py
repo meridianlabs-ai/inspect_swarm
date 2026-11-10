@@ -645,15 +645,18 @@ class MemberGate:
                     applied=applied,
                 )
 
-    # The callback the chain awaits now, and its origin for the bus, which rechecks the
-    # waits when that origin changes: a member the operator's pause holds is active.
+    # The callback the chain awaits now, and for the bus whether it is the operator's
+    # pause, the only withdrawable registration: a member that pause holds is active, so
+    # the waits are rechecked when that changes.
     def _set_holder(
         self, registration: _Registration | None, *, recheck: bool = True
     ) -> None:
-        before = self.context.holder
+        before = self.context.operator_hold
         self._holding = registration
-        self.context.holder = None if registration is None else registration.origin
-        if recheck and self.context.holder != before:
+        self.context.operator_hold = (
+            registration is not None and registration.withdraw is not None
+        )
+        if recheck and self.context.operator_hold != before:
             self.recheck()
 
     # The idle wait, in the chain's cancel scope, so that a stop or an end cancels it;
