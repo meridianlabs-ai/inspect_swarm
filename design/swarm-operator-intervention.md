@@ -22,19 +22,13 @@ The pieces already existed: the turn seam holds a member between turns and ends 
 
 ## At a glance
 
-```
-inspect ctl sample agent list    TASK SID [EPOCH]
-inspect ctl sample agent message TASK SID [EPOCH] --agent NAME (--text TEXT | --file PATH) [--interrupt] [--dry-run]
-inspect ctl sample agent pause   TASK SID [EPOCH] (--agent NAME | --group NAME) [--dry-run]
-inspect ctl sample agent resume  TASK SID [EPOCH] (--agent NAME | --group NAME) [--dry-run]
-inspect ctl sample agent stop    TASK SID [EPOCH] (--agent NAME | --group NAME) [--dry-run]
-```
+The commands and what each does to a member are [Operators](../docs/operators.qmd)'s. Underneath, each action maps onto the swarm as follows:
 
 | Action | A member (`--agent`) | The swarm (`--group`) |
 |---|---|---|
-| `message` | an operator `UserMessage` at its next turn; with `--interrupt`, its turn is cancelled and it continues with the message now; refused for bridged members | none (no broadcast) |
-| `pause` / `resume` | its own loop held at its next boundary by a turn-seam callback, origin `operator`; refused for members with background work and bridged members | a latch over the swarm's members, members started while it is set included; nested swarms have their own groups |
-| `stop` | `end(origin="operator")`: `stopped`, or `cancelled` past the grace period, unless the member's status was already decided; the rest of the swarm goes on | `stop("operator")`: the swarm's orderly stop, final answer, then the sample's scorers |
+| `message` | an operator `UserMessage` posted to the member's own loop; with `--interrupt`, then `interrupt(Cancel(reason="user_cancel"))` on that loop ([Messages](#messages)) | none (no broadcast) |
+| `pause` / `resume` | the member's own flag, held by a turn-seam callback with origin `operator` ([Pause](#pause)) | a latch over the swarm's members, members started while it is set included |
+| `stop` | the seam's `end(origin="operator")` ([Stop](#stop)) | the swarm's `stop("operator")` |
 
 [Supported members](#supported-members) gives each member shape's actions.
 
@@ -140,7 +134,7 @@ A swarm run inside a member's work (a tool that calls `run(swarm(...))`, or `mem
 
 The runtime takes no new stop while it unwinds after an error or a cancellation, since a stop would start a grace timer in a task group that is closing. `_active()` is false before the runtime starts, once its supervisor task has ended, once an error from a member or the controller is known, and once a cancellation has reached the runtime. The error is latched where it is first known: in the member wrapper before it leaves the background owner (whose teardown can wait on shielded cleanup), in the owner as a background task's error escapes it, before a member's `errored` result is published, and as an error leaves the controller's task, before the task group reacts. An operator's action runs in another task, so the guard asks the swarm's task, saved by `run()` as an anyio `TaskInfo`, through `has_pending_cancellation()`, and reads the runtime scope's `cancel_called` for the time after that task has taken the cancellation.
 
-**The guard is best effort; the record is not** (decision: Ransom, 2026-11-05). A stop that reaches the run during its teardown before the guard knows, by a path it does not see (a member's error raised in a group with a cancellation is one), is accepted and may answer `changed: true` for a change that never shows in the record. What holds is the record: `_account()` writes the ledger's `stop_reason` as `null` instead of `operator` whenever the run fails or is cancelled, whichever path led there, an operator's stop made before the failure included. A run fails when it did not complete its final step, or when its result record or metrics could not be written, so `_account()` writes the metrics before the ledger and the ledger last. The rule covers the run's own ending only (`stop_reason`, `interrupted`, `ended_by`, the swarm's error): each member keeps the ending it actually had, so a held member a late stop ends records `stopped` with `end_origin` `operator` (decision: Ransom, 2026-11-05).
+**The guard is best effort; the record is not** (decision: Ransom, 2026-11-05). A stop that reaches the run during its teardown before the guard knows, by a path it does not see (a member's error raised in a group with a cancellation is one), is accepted and may answer `changed: true` for a change that never shows in the record. What holds is the record: `_account()` writes the ledger's `stop_reason` as `null` instead of `operator` whenever the run is known to fail or be cancelled when the ledger is written, whichever path led there, an operator's stop made before the failure included. That covers a run that did not complete its final step, or whose result record or metrics could not be written, which is why `_account()` writes the metrics before the ledger. One failure comes after it: `_account()` fills the swarm's timeline once the ledger is written, so that the timeline holds the ledger and the metrics, and `run()` raises an error from that fill without revising the ledger, so a run that fails only there keeps `stop_reason` `operator`. The rule covers the run's own ending only (`stop_reason`, `interrupted`, `ended_by`, the swarm's error): each member keeps the ending it actually had, so a held member a late stop ends records `stopped` with `end_origin` `operator` (decision: Ransom, 2026-11-05).
 
 ### The swarm
 
@@ -231,3 +225,4 @@ Bridged members are stop-only (decision: Ransom, 2026-10-30): their CLI runs its
 - **A retunable swarm time cap**, if operators' long pauses turn out to need one.
 - **Operator controls on trio**, which would need inspect_ai's control server to run there.
 - **Pausing members with background work**, which the seam's background rules would have to allow ([Alternatives considered](#alternatives-considered)).
+- **A failed timeline fill after an operator's stop.** The ledger is written before the timeline is filled, so a run that fails only there keeps `stop_reason` `operator` ([The stop guard](#the-stop-guard)); [Operators, Stopping the swarm](../docs/operators.qmd#stopping-the-swarm) and [Analysis, The ledger](../docs/analysis.qmd#the-ledger) state the broader guarantee. Closing the gap, in the runtime or in those docs, is separate work.
