@@ -1,3 +1,4 @@
+import asyncio
 import contextvars
 import functools
 import math
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import anyio
+import anyio.lowlevel
 from anyio import TaskInfo
 from anyio.abc import TaskGroup
 from inspect_ai._control.operator import operator_group
@@ -45,7 +47,15 @@ from .._evidence import (
     write_ledger,
     write_metrics,
 )
-from .._final import FinalName, Pick, answer, finalise, settle
+from .._final import (
+    FinalMode,
+    FinalName,
+    Pick,
+    answer,
+    chosen_output,
+    finalise,
+    settle,
+)
 from .._isolation import IsolationSetup, MemberIdentity, reap_member, take_census
 from .._ledger import LedgerInterval, MemberAccount, SpanPlaces
 from .._member import (
@@ -546,7 +556,7 @@ class SwarmRun:
         budget: Budget,
         shares: Mapping[str, Sequence[Limit]] | None = None,
         channels: Sequence["Channel"] = (),
-        final: FinalName | None = None,
+        chain: Sequence[FinalName | FinalMode] = ("first",),
         result: ResultSpec | None = None,
         isolation: IsolationSetup | None = None,
     ) -> None:
@@ -595,8 +605,13 @@ class SwarmRun:
             m.context.fatal = self._fail
         self._state = state
         self._input = list(input)
-        self._final: FinalName | None = final
+        # the final-answer chain, which check_chain() has checked against the result
+        self._chain = list(chain)
         self._result = result
+        # an artifact task's verdict on the environment after the stop, and whether the
+        # final step, which awaits it and the submissions left unverified, began
+        self._final_verdict: Verdict | None = None
+        self._finalising = False
         # the controller's choice of the answer, once it has made one
         self._pick: Pick | None = None
         self._preambles = preambles
@@ -875,12 +890,15 @@ class SwarmRun:
                     with ExitStack() as final:
                         for node in self._final_meter.nodes:
                             final.enter_context(node)
+                        self._finalising = True
+                        await self._verify_left()
+                        await self._take_final_verdict()
                         finalise(
                             self._state,
                             self._input,
                             self._results(),
                             self._outputs(),
-                            self._final,
+                            self._chain,
                             self._pick,
                             span_id=self._span_id,
                             stop_reason=self.stop_reason,
@@ -905,7 +923,7 @@ class SwarmRun:
                     try:
                         results = self._results()
                         chosen = answer(
-                            results, self._final, self._pick, provisional=not ended
+                            results, self._chain, self._pick, provisional=not ended
                         )
                         write_record(
                             SwarmResultRecord(
@@ -918,6 +936,7 @@ class SwarmRun:
                                 if self._result is not None
                                 and self._result.verifier is not None
                                 else None,
+                                final_verdict=self._final_verdict,
                                 isolation_incomplete=self._isolation_incomplete(),
                             )
                         )
@@ -929,6 +948,10 @@ class SwarmRun:
                         chosen,
                         ended=ended,
                         error=error,
+                        # the final step awaits the verifier, so a cancellation can end it
+                        final_cancelled=self._finalising
+                        and not ended
+                        and isinstance(escaping, anyio.get_cancelled_exc_class()),
                         failed=not ended or bool(failures),
                     )
                     # the error or cancellation that ended the swarm stays the one
@@ -978,6 +1001,7 @@ class SwarmRun:
         *,
         ended: bool,
         error: BaseException | None,
+        final_cancelled: bool,
         failed: bool,
     ) -> list[Exception]:
         wall_clock = anyio.current_time() - self._start
@@ -1008,8 +1032,7 @@ class SwarmRun:
                 stop_reason=self.stop_reason,
                 ended_by=None if ended else _exhaustion(error),
                 interrupted=not ended,
-                # M1's final step does not await, so nothing can cancel it
-                final_cancelled=False,
+                final_cancelled=final_cancelled,
             )
         except Exception as ex:
             return [ex]
@@ -1295,6 +1318,8 @@ class SwarmRun:
             # that an error, which fails the sample, leaves the answer and the record
             # agreeing
             m.answer_key = key_answer(key, m.agent_state.output.completion, m.name)
+            # the key may change the answer under vote
+            self._settle()
         if (
             m.submitted
             and self._verifier() is not None
@@ -1363,26 +1388,7 @@ class SwarmRun:
             # cancelled while the verifier ran, which caught the cancellation and
             # returned: the submission stays unverified
             return
-        # by actual classes rather than the ones the values report
-        if not issubclass(type(verdict), Verdict):
-            raise TypeError(
-                f"The result contract's verifier must return a Verdict, got a {type(verdict).__name__} for member {m.name!r}."
-            )
-        verdict = cast(Verdict, verdict)
-        # task code, so checked as returned rather than as annotated
-        passed = cast(object, verdict.passed)
-        value = cast(object, verdict.value)
-        explanation = cast(object, verdict.explanation)
-        # the values themselves are not printed: an int too long to print, or a repr()
-        # that raises, would replace this error
-        if not (
-            type(passed) is bool
-            and (value is None or _exact_float(value))
-            and (explanation is None or issubclass(type(explanation), str))
-        ):
-            raise TypeError(
-                f"The result contract's verifier must return a Verdict whose passed is a bool, value a float (or an int a float holds exactly) or None and explanation a str or None, got passed of type {type(passed).__name__}, value of type {type(value).__name__} and explanation of type {type(explanation).__name__} for member {m.name!r}."
-            )
+        verdict = _checked_verdict(verdict, f"member {m.name!r}")
         m.verified = verdict
         m.verified_time = anyio.current_time() - self._start
         # in the swarm's span; the explanation stays in the record
@@ -1394,6 +1400,48 @@ class SwarmRun:
             value=verdict.value,
             time=m.verified_time,
         )
+        # the verdict may change the answer under verify
+        self._settle()
+
+    # In the final step: the submissions the run left unverified, which ended during
+    # grace or whose verification the stop refused or ended, in the order they ended.
+    # Their `MemberEnded` events were queued without a verdict, so only the record and
+    # the answer see these.
+    async def _verify_left(self) -> None:
+        verifier = self._verifier()
+        if verifier is None:
+            return
+        left = [
+            m
+            for m in self._members
+            if m.submitted and not m.persistent and m.verified is None
+        ]
+        for m in sorted(left, key=lambda m: m.time or 0.0):
+            await self._take_verdict(m, verifier)
+            # a verifier that caught a cancellation returned, and its verdict was
+            # discarded: the cancellation ends the final step here
+            await _end_if_cancelled()
+
+    # In the final step, for an artifact task with a verifier: the verdict on the
+    # environment the task's scorer will grade, called with the final answer's
+    # completion, or "" without one. An error from it fails the sample.
+    async def _take_final_verdict(self) -> None:
+        verifier = self._verifier()
+        if verifier is None or self._result is None or self._result.kind != "artifact":
+            return
+        chosen = answer(self._results(), self._chain, self._pick, provisional=True)
+        completion = (
+            ""
+            if chosen.member is None
+            else chosen_output(chosen, self._outputs(), self._answers()).completion
+        )
+        active = sample_state()
+        metadata = active.metadata if active is not None else {}
+        verdict = await verifier(completion, metadata)
+        # a verifier that caught a cancellation returned: its verdict is discarded, and
+        # the cancellation ends the final step here
+        await _end_if_cancelled()
+        self._final_verdict = _checked_verdict(verdict, "the final environment")
 
     def _verified(self, m: MemberRun) -> None:
         assert m.status is not None
@@ -1407,7 +1455,7 @@ class SwarmRun:
             self._state,
             self._results(),
             self._outputs(),
-            self._final,
+            self._chain,
             self._pick,
             provisional=True,
             answers=self._answers(),
@@ -1671,9 +1719,52 @@ def _sample_cause() -> str | None:
     return None
 
 
-# Whether the current task is cancelled, by its own scope or an enclosing one.
+# Whether the current task is cancelled: by its own scope or an enclosing one, or, on
+# asyncio, by the task's own `cancel()` (as `asyncio.timeout()` and `wait_for()` do),
+# which no AnyIO scope knows of and which stays requested after a callee caught it.
 def _cancelled() -> bool:
-    return anyio.current_effective_deadline() == -math.inf
+    if anyio.current_effective_deadline() == -math.inf:
+        return True
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        # not on asyncio
+        return False
+    return task is not None and task.cancelling() > 0
+
+
+# Raises the current task's cancellation, when `_cancelled()`, after a callee that
+# caught it returned.
+async def _end_if_cancelled() -> None:
+    await anyio.lowlevel.checkpoint_if_cancelled()
+    if _cancelled():
+        # asyncio's own cancellation, which the checkpoint does not deliver
+        raise asyncio.CancelledError()
+
+
+# A verifier's result, checked as returned rather than as annotated (task code), by
+# its actual classes rather than the ones its values report; `subject` names what it
+# judged, for the error.
+def _checked_verdict(verdict: object, subject: str) -> Verdict:
+    if not issubclass(type(verdict), Verdict):
+        raise TypeError(
+            f"The result contract's verifier must return a Verdict, got a {type(verdict).__name__} for {subject}."
+        )
+    verdict = cast(Verdict, verdict)
+    passed = cast(object, verdict.passed)
+    value = cast(object, verdict.value)
+    explanation = cast(object, verdict.explanation)
+    # the values themselves are not printed: an int too long to print, or a repr() that
+    # raises, would replace this error
+    if not (
+        type(passed) is bool
+        and (value is None or _exact_float(value))
+        and (explanation is None or issubclass(type(explanation), str))
+    ):
+        raise TypeError(
+            f"The result contract's verifier must return a Verdict whose passed is a bool, value a float (or an int a float holds exactly) or None and explanation a str or None, got passed of type {type(passed).__name__}, value of type {type(value).__name__} and explanation of type {type(explanation).__name__} for {subject}."
+        )
+    return verdict
 
 
 # A number the record's float field holds exactly: a float, or an int a float equals.
