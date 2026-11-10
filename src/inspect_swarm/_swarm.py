@@ -170,9 +170,9 @@ def swarm(
             )
             for i, info in enumerate(roster)
         }
-        identities = None
+        isolation = None
         if resolved_isolation is not None:
-            identities = await setup_isolation(
+            isolation = await setup_isolation(
                 resolved_isolation, [info.name for info in roster]
             )
             caps = rederive_time_cap(resolved_budget, caps)
@@ -189,7 +189,7 @@ def swarm(
             channels=resolved_channels,
             chain=chain,
             result=resolved_result,
-            identities=identities,
+            isolation=isolation,
         ).run(resolved_controller.run)
         return state
 

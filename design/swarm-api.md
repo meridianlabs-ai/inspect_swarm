@@ -620,7 +620,7 @@ swarm(
 )
 ```
 
-The built-in it uses, as it is after M2. In M1 its only parameter is `stop_on_submission`, and M2 adds `final`, `first` or `last`: it starts every member and returns `submitted` at the first submission, or `all_done` when every member has ended:
+The built-in it uses, as it is after M2. In M1 its only parameter is `stop_on_submission`, and M2 adds `final`, `first` or `last`: it starts every member and returns `submitted` at the first submission, or `all_done` when every member has ended. The sketch below shows its shape; the controller as built, including how it treats a persistent member's `MemberIdle`, is [`leaderless.py`](../src/inspect_swarm/_controller/leaderless.py):
 
 ```python
 import contextlib

@@ -12,6 +12,7 @@ import pytest
 from inspect_ai import Task, eval  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent, as_solver
 from inspect_ai.dataset import Sample
+from inspect_ai.event import SwarmEvent
 from inspect_ai.log import EvalSample
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.tool import bash, bash_session, python, text_editor
@@ -24,6 +25,7 @@ from inspect_swarm import (
     member,
     swarm,
     swarm_controller,
+    swarm_result,
     users,
 )
 from inspect_swarm._budget import current_member
@@ -1032,3 +1034,196 @@ def test_members_work_in_worktrees_of_a_shared_repository(tmp_path: Path) -> Non
     assert _ok(results["w-2"][2]).split() == ["base.txt", "w-1.txt", "w-2.txt"]
     assert _ok(results["w-1"][2]).startswith("## linked")
     assert _ok(results["w-1"][3]).startswith("## No commits yet on odd")
+
+
+# the names of the live processes of a member's user (a zombie has exited), and a line
+# that says the check ran
+def _alive(name: str) -> str:
+    return (
+        f"uid=$(id -u swarm-{name}); for d in /proc/[0-9]*; do"
+        ' s=$(cat "$d/status" 2>/dev/null) || continue;'
+        ' case "$s" in *"State:	Z"*) continue ;; esac;'
+        ' printf "%s\\n" "$s" | grep -q "^Uid:	$uid	" && cat "$d/comm";'
+        " done; echo checked"
+    )
+
+
+# starts a thread that keeps writing to /tmp/zl.out, then ends the main thread
+_ZOMBIE_LEADER = """cat > ~/zl.py <<'PY'
+import ctypes, threading, time
+def work():
+    while True:
+        with open("/tmp/zl.out", "a") as f:
+            f.write("x")
+        time.sleep(0.1)
+threading.Thread(target=work).start()
+time.sleep(0.3)
+ctypes.CDLL(None).pthread_exit(None)
+PY
+nohup python3 ~/zl.py >/dev/null 2>&1 &
+sleep 1; echo started"""
+
+
+@pytest.mark.slow
+def test_leftover_processes_are_stopped_and_the_census_attributes_files(
+    tmp_path: Path,
+) -> None:
+    cases = {
+        "reap": Case(
+            runs=[
+                Run(
+                    {"shared": [{"path": "/shared", "access": "rw"}]},
+                    {
+                        "w-1": [
+                            ("bash", "nohup sleep 300 >/dev/null 2>&1 & echo started"),
+                            # a process whose main thread exits while another thread
+                            # keeps writing: its leader is a zombie, its group is live
+                            ("bash", _ZOMBIE_LEADER),
+                            ("session", "sleep 301 &"),
+                            ("bash", _alive("w-1")),
+                            (
+                                "bash",
+                                "echo one > /shared/w1 && echo t > /tmp/w1 && echo s > /dev/shm/w1 && ln -s /etc/passwd /tmp/w1-link && : > \"$(printf '/tmp/cr\\rowner 0 50 500')\"",
+                            ),
+                        ],
+                        # w-2 starts once w-1 has ended
+                        "w-2": [
+                            ("bash", _alive("w-1")),
+                            ("bash", "echo two > /tmp/w2"),
+                            (
+                                "bash",
+                                'a=$(wc -c </tmp/zl.out); sleep 1; b=$(wc -c </tmp/zl.out); [ "$a" = "$b" ] && echo stopped',
+                            ),
+                        ],
+                    },
+                    after=f"{_alive('w-1')}; {_alive('w-2')}",
+                )
+            ],
+            # an absent root; a world-writable directory on the root filesystem, and
+            # one on a filesystem of its own (a mount, whose files the id scan does not
+            # reach), with a file a uid in the window owns
+            setup="rm -rf /run/lock && mkdir -m 777 /opt/drop && touch /cache/old && chown 61003 /cache/old",
+        )
+    }
+    samples = _eval(tmp_path, cases, compose_extra="      - /cache:mode=1777\n")
+    results = cases["reap"].results
+    # w-1's processes ran while it did, and were gone when w-2 started
+    running = _ok(results["w-1"][3]).split()
+    assert running[-1] == "checked" and running.count("sleep") == 2, running
+    assert _ok(results["w-2"][0]) == "checked"
+    assert _ok(results["w-2"][2]) == "stopped"
+    assert results["after"] == ["checked\nchecked\n"]
+    record = swarm_result(samples["reap"])
+    assert record is not None
+    first, second = record.members
+    assert first.reap is not None and second.reap is not None
+    assert first.reap.status == "ok" and first.reap.killed >= 2
+    assert first.reap.killed_names.count("sleep") == 2
+    assert "python3" in first.reap.killed_names
+    assert second.reap.status == "ok"
+    assert record.isolation_incomplete is False
+    assert (first.user, first.home, first.foreign_execs) == (
+        "swarm-w-1",
+        "/scratch/w-1",
+        0,
+    )
+
+    [census] = [
+        e
+        for e in samples["reap"].events
+        if isinstance(e, SwarmEvent) and e.kind == "census"
+    ]
+    data: dict[str, Any] = census.data
+    assert data["status"] == "ok"
+    roots = {root["path"]: root for root in data["roots"]}
+
+    def paths(root: str, name: str) -> list[dict[str, str]]:
+        return roots[root]["members"].get(name, {}).get("paths", [])
+
+    assert {"type": "file", "path": "/shared/w1"} in paths("/shared", "w-1")
+    assert {"type": "file", "path": "/tmp/w1"} in paths("/tmp", "w-1")
+    # a symlink is recorded as a link, without following it
+    assert {"type": "symlink", "path": "/tmp/w1-link"} in paths("/tmp", "w-1")
+    assert {"type": "file", "path": "/tmp/w2"} in paths("/tmp", "w-2")
+    # a CR in a name is part of the path, not the end of a record
+    assert {"type": "file", "path": "/tmp/cr\rowner 0 50 500"} in paths("/tmp", "w-1")
+    # w1, w1-link, the CR file and the thread's output
+    assert roots["/tmp"]["members"]["w-1"]["entries"] == 4
+    assert roots["/tmp"]["others"]["entries"] < 50
+    assert {"type": "file", "path": "/dev/shm/w1"} in paths("/dev/shm", "w-1")
+    assert paths("/dev/shm", "w-2") == []
+    assert roots["/run/lock"]["status"] == "absent"
+    assert {root["kind"] for root in data["roots"]} >= {"share", "transient"}
+    # only world-writable directories on the root filesystem are census roots
+    assert roots["/opt/drop"]["kind"] == "world_writable"
+    assert "/cache" not in roots
+
+
+# a task's service running as a bare numeric user in the swarm's id window, with no
+# passwd entry and no file
+_SERVICE = "nohup python3 -c 'import os, time; os.setgid(61003); os.setuid(61003); time.sleep(600)' >/dev/null 2>&1 &"
+
+
+@pytest.mark.slow
+def test_a_service_running_as_a_numeric_user_is_not_given_to_a_member(
+    tmp_path: Path,
+) -> None:
+    # setup reserves the ids of the running processes, so no member gets the service's
+    # uid and reaping a member does not stop it
+    alive = "for d in /proc/[0-9]*; do grep -q '^Uid:\t61003\t' $d/status 2>/dev/null && cat $d/comm; done; echo checked"
+    cases = {
+        "service": Case(
+            runs=[
+                Run(
+                    {"shared": []},
+                    {"w-1": [("bash", "id -u")], "w-2": [("bash", "id -u")]},
+                    before=_SERVICE,
+                    after=alive,
+                )
+            ]
+        )
+    }
+    samples = _eval(tmp_path, cases)
+    results = cases["service"].results
+    uids = {int(_ok(results[name][0])) for name in ("w-1", "w-2")}
+    assert 61003 not in uids
+    assert results["after"] == ["python3\nchecked\n"]
+    record = swarm_result(samples["service"])
+    assert record is not None
+    assert [m.reap.killed if m.reap else None for m in record.members] == [0, 0]
+
+
+@pytest.mark.slow
+def test_reaping_needs_no_writable_temporary_storage(tmp_path: Path) -> None:
+    # the member fills a small /tmp, blocks and inodes, before it ends; its background
+    # process is still stopped
+    fill = "i=0; while { : > /tmp/f$i; } 2>/dev/null; do i=$((i+1)); done; dd if=/dev/zero of=/tmp/big bs=1k 2>/dev/null; mktemp -d -p /tmp 2>/dev/null || echo full"
+    cases = {
+        "full": Case(
+            runs=[
+                Run(
+                    {"shared": []},
+                    {
+                        "w-1": [
+                            ("bash", "nohup sleep 300 >/dev/null 2>&1 & echo started"),
+                            ("bash", fill),
+                        ]
+                    },
+                    after=_alive("w-1"),
+                )
+            ]
+        )
+    }
+    samples = _eval(
+        tmp_path, cases, compose_extra="      - /tmp:size=256k,nr_inodes=64,mode=1777\n"
+    )
+    results = cases["full"].results
+    assert _ok(results["w-1"][1]) == "full"
+    assert results["after"] == ["checked\n"]
+    record = swarm_result(samples["full"])
+    assert record is not None
+    [member_result] = record.members
+    assert member_result.reap is not None
+    assert (
+        member_result.reap.status == "ok" and "sleep" in member_result.reap.killed_names
+    )
