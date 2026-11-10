@@ -1,6 +1,6 @@
 ---
 reference: inspect_swarm.scorer
-description: Per-member scores for tasks scored on their answer.
+description: Per-member scores for tasks scored on their answer or on each member's artifact.
 ---
 
 ## Member scores

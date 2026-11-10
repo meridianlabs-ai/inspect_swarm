@@ -45,6 +45,7 @@ from inspect_swarm import (
     MemberNews,
     StopReason,
     SwarmControl,
+    Topic,
     leaderless,
     member,
     messages,
@@ -52,6 +53,7 @@ from inspect_swarm import (
     swarm,
     swarm_controller,
     swarm_tools,
+    topics,
 )
 from inspect_swarm import _member as member_module
 from inspect_swarm._bus._address import resolve
@@ -232,6 +234,9 @@ async def test_a_persistent_member_answers_is_held_idle_and_a_wake_continues_its
         "reason": None,
         "provisional": False,
         "answer": 0,
+        "chain": ["first"],
+        "tie": False,
+        "synthesize_error": None,
     }
     assert "one" in ran.sample.output.completion
 
@@ -1350,6 +1355,9 @@ async def test_choose_answer_takes_the_latest_answer_and_keeps_it() -> None:
         "reason": "the second",
         "provisional": False,
         "answer": 1,
+        "chain": ["first"],
+        "tie": False,
+        "synthesize_error": None,
     }
     assert "two" in ran.sample.output.completion
     assert ran.sample.messages[-1].text == ran.sample.output.completion
@@ -1579,6 +1587,51 @@ async def test_only_a_waking_record_to_an_idle_members_own_loop_is_news() -> Non
     assert news == [
         MemberNews("b", "messages", "m-2", "lead"),
         MemberNews("a", "messages", "m-3", "lead"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_only_a_post_in_a_waking_topic_is_news_to_an_idle_reader() -> None:
+    # a post in a quiet topic is not news to "a"; one in a waking topic is news to its
+    # reader alone
+    workers = ["a", "b"]
+    declared = [
+        Topic(name="quiet", readers=["a"], writers=["lead"]),
+        *(
+            Topic(name=f"orders-{w}", readers=[w], writers=["lead"], wake=True)
+            for w in workers
+        ),
+    ]
+    lead = _react(
+        _Recording(
+            [
+                _call("post_topic", topic=topic, message="go")
+                for topic in ("quiet", "orders-b", "orders-a")
+            ]
+            + [_submit("lead's")]
+        ),
+        tools=[swarm_tools()],
+    )
+    seen: list[ControlEvent] = []
+    await _run(
+        [
+            *(
+                member(
+                    _react(_Recording([_submit("one")]), tools=[swarm_tools()]),
+                    name=name,
+                    persistent=True,
+                )
+                for name in workers
+            ),
+            member(lead, name="lead"),
+        ],
+        _lead_after_idle(seen, workers),
+        channels=[topics(declared)],
+    )
+    news = [e for e in seen if isinstance(e, MemberNews)]
+    assert news == [
+        MemberNews("b", "topics", "p-2", "lead"),
+        MemberNews("a", "topics", "p-3", "lead"),
     ]
 
 

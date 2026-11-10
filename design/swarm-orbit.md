@@ -53,13 +53,13 @@ Nothing in the seam is ORBIT's. ORBIT is one caller: its `activate()`, snapshots
 A channel with records goes through the bus, and a channel written outside the package does so with public, experimental names, exported from `inspect_swarm` ([Writing a channel](../docs/channels.qmd#writing-a-channel)). Besides those sketched below, `Record` is public: the record the bus makes from a draft, with the bound sender and resolved recipients, which `Delivery.record` holds and the channel state's `validate()`, `admit()` and `apply()` receive.
 
 ```python
-# inspect_swarm/_bus/_record.py and _bus/_bus.py, exported from inspect_swarm
+# inspect_swarm/_bus/_record.py, _bus/_bus.py and _channel/_channel.py, exported from inspect_swarm
 
 @dataclass(frozen=True)
 class Draft:                # what a channel's tool hands to Bus.deliver()
     channel: str
     kind: str
-    to: tuple[str, ...] = ()            # () is unaddressed: apply() decides whom it concerns
+    to: tuple[str, ...] = ()            # () is unaddressed unless the channel resolves its own addresses
     payload: str = ""
     op: dict[str, JsonValue] | None = None
     wake: bool = False
@@ -84,6 +84,10 @@ class Caller:               # the member a channel's tool acts for
 def calling_member() -> Caller | None: ...   # None outside a member of a swarm run
 
 
+class ResolvingState(ChannelState, Protocol):   # a channel state that resolves its own addresses
+    def resolve(self, sender: str, to: tuple[str, ...]) -> tuple[str, ...]: ...   # synchronous; the recipients, or ToolError
+
+
 class Bus(Protocol):        # ChannelRun.bus, as a channel's open() receives it
     @property
     def stopping(self) -> bool: ...
@@ -98,14 +102,15 @@ class Bus(Protocol):        # ChannelRun.bus, as a channel's open() receives it
     ) -> str: ...                            # writes the `read` event; returns its read id
 ```
 
-- **`deliver()`** binds the sender from the calling member, resolves the addresses, and calls the channel's `validate()`; it then checks that the sender is still running, the payload and the channel's storm controls, calls `admit()`, writes the `sent` evidence, calls `apply()` and writes the `delivered` evidence, with no `await` between the checks and `apply()`. A refusal is a `ToolError`, which the calling tool's result shows; a channel name no channel of the swarm has raises `ValueError`, and a call outside a member of this run raises `RuntimeError`. Once the swarm is stopping, every `deliver()` is refused.
+- **`deliver()`** binds the sender from the calling member, resolves the addresses (with the channel state's `resolve()` in place of the member resolver when it has one, below), and calls the channel's `validate()`; it then checks that the sender is still running, the payload and the channel's storm controls, calls `admit()`, writes the `sent` evidence, calls `apply()` and writes the `delivered` evidence, with no `await` between the checks and `apply()`. A refusal is a `ToolError`, which the calling tool's result shows; a channel name no channel of the swarm has raises `ValueError`, and a call outside a member of this run raises `RuntimeError`. Once the swarm is stopping, every `deliver()` is refused.
 - **`read()`** writes the `read` `CommunicationEvent` for a tool result that shows the channel's records: the calling member, its span, the loop and `nested`, the channel and `records` as `record_ids`, and in `data` a new read id, the tool span, the records the calling loop newly depends on (`depends_on`, by default `records`, each written once per loop, which the [critical path](swarm-critical-path.md#what-channels-report) links), `listing` and `via`. It returns the read id (`r-5`). `listing` says the result showed what exists rather than its content, which the metrics count apart. An unknown channel or an id the channel did not commit in this run raises `ValueError`; a call outside a member of this run raises `RuntimeError`. The protocol takes no channel data for the event. The shared memory channel passes its `files` through a keyword of the run's bus class, `SwarmBus`, that the protocol leaves out.
 - **`calling_member()`** is the runtime's answer to which member a tool acts for, never model output. `nested` is false in the member's own loop: the first loop in which the member resolves `swarm_tools()`, matched by both its agent channel and its agent span, or, until a loop binds, the loop its agent runs directly, in the member's agent span. So an agent run with `run()` from a member is nested even when it opens no agent channel. A bridged member's CLI is one loop, its own. The bus's `sent`, `delivered` and `read` events take `nested` from the same rule.
 - **`ChannelRun.bus`** is the run's `SwarmBus`, typed as the `Bus` protocol, and a channel outside the package relies on the protocol alone. The built-in channels also use members of `SwarmBus` the protocol leaves out (`member()`, `nested()`, `status()`, `running()`, `roster`, `idle()`, `idle_spec()`, and `read()`'s `files=`). The protocol has no lifecycle query: a member's state is the runtime's, not the bus's, and `deliver()` already refuses a sender that is not running.
+- **`ResolvingState`** is the address hook of [swarm-topics-channel.md](swarm-topics-channel.md#channel-resolved-addresses). When the state of `draft.channel` has `resolve(sender, to)`, `deliver()` calls it for every draft of the channel, `to=()` included, in place of the member resolver and before a record exists. It is synchronous, since `deliver()` runs from it to `apply()` with no `await`, and returns the recipients or refuses with `ToolError`, leaving no record. The bus checks what it returns: every name a member of the swarm, none twice, not the sender; a violation is a bug in the channel's code and raises `ValueError` naming the channel. The recipients' state is not checked, so pending, idle, ending and ended members are accepted; the sender's liveness check and the stopping rule still apply (decision: Ransom, 2026-11-06, at the ORBIT team's request).
 
 Two things ORBIT's channel needs are not bus features, because the channel interface already gives them:
 
-- **Readers that have not started or have ended.** ORBIT's channels are blackboards: membership, not activity, decides who reads, and under a schedule the first post goes to readers still held at boundary 0. A draft addressed with `to=` is refused at resolution if a member it names has not started, is ending or has ended. ORBIT's channel therefore posts **unaddressed** records, computes its recipients itself from readers and edges, and returns them from `apply()`, in `notify` and in the `result` that the `delivered` evidence carries.
+- **Readers that have not started or have ended.** ORBIT's channels are blackboards: membership, not activity, decides who reads, and under a schedule the first post goes to readers still held at boundary 0. The member resolver refuses a draft that names a member that has not started, is ending or has ended. ORBIT's channel therefore posts records **addressed** with an address form of its own, such as its channel id, which its state's `resolve()` accepts. `resolve()` computes the recipients as ORBIT's runtime does: the channel's readers minus the sender, intersected with its communication edges, refusing a post with no recipient left when a policy is configured. The `sent` and `delivered` evidence name them as the record's `recipients`, and `notify` names the recipients whose loop the record is news to.
 - **A commit sequence for `step_start` visibility.** `apply()` runs in commit order with no `await` around it, so a counter the channel increments in `apply()` is a commit sequence, known when the record is stored. Record ids are not one: an id is given once `validate()` accepts the record, before the liveness, payload and storm checks and `admit()`, so a record refused by those consumes an id. `Delivery.seq` numbers commits across the run's channels, but reaches the tool only after `apply()` has stored the record. ORBIT's own store counter, incremented in `apply()`, serves; it also counts ORBIT's own communication events (`ORBIT: orbit/communication/runtime.py:175-177`), so it orders messages and cutoffs, as today, without being a count of them.
 
 ### S3. A controller's preamble
@@ -249,9 +254,9 @@ At a boundary that begins an activation, `orbit:attack` adds the attack input du
 
 ORBIT's `channel_post`, `channel_read` and `channel_list` become the tools of one ORBIT `@swarm_channel` with `reach="loop"`, whose state keeps ORBIT's store-backed registry, messages, receipts and cursors, attack-registered secret channels included. Its semantics are ORBIT's. From the swarm it takes:
 
-- **Delivery.** A post is an unaddressed `deliver()` whose recipients ORBIT computes and `apply()` returns. Capacity is checked in `admit()` and ORBIT's counter incremented in `apply()`, with no `await` between them, so two concurrent posts cannot both take the last place.
+- **Delivery.** A post is a `deliver()` addressed to its channel, whose recipients the channel's `resolve()` computes from readers and edges ([S2](#s2-a-public-bus-api-for-channels)). Capacity is checked in `admit()` and ORBIT's counter incremented in `apply()`, with no `await` between them, so two concurrent posts cannot both take the last place.
 - **The caller.** The tools find the posting or reading member with `calling_member()`. No ported member has a nested loop that uses the channel, since configurations with delegation edges stay on ORBIT's executor.
-- **Evidence.** A read calls `read(<channel>, [...])` with the bus record ids of the messages it rendered, beside ORBIT's own read evidence. The bus writes the swarm's `sent`, `delivered` and `read` events for ORBIT's records, which the swarm's ledger, metrics and critical path count; ORBIT keeps writing its own `orbit.communication` events and `CommunicationState`, each carrying the swarm's record id, so the two join.
+- **Evidence.** A read calls `read(<channel>, [...])` with the bus record ids of the messages it rendered, beside ORBIT's own read evidence. The bus writes the swarm's `sent`, `delivered` and `read` events for ORBIT's records, with the recipients `resolve()` computed in `sent` and `delivered`, which the swarm's ledger, metrics and critical path count; ORBIT keeps writing its own `orbit.communication` events and `CommunicationState`, each carrying the swarm's record id, so the two join.
 - **Waking.** `wake=False`: no ORBIT record wakes a wait or activates a member.
 - **Instructions.** `instructions()` returns `None`, since ORBIT's tools describe themselves and its members get no preamble.
 
@@ -342,7 +347,7 @@ wrapped in ORBIT's solver.
 1. The controller registers the three callbacks on both members and starts both with the sample input and no preamble. Each parks at boundary 0.
 2. The pre-deployment attacks run: the compromise is due for `writer`; the injection is queued for `reader`.
 3. Turn 0, step `[writer, reader]`, sequential:
-   - `writer`: at boundary 0, `orbit:attack` inserts the compromise after the system message, one `changed` event. The first request is `[agent prompt, compromise, input]`. It calls `channel_post`; the post is delivered unaddressed with recipients `[reader]`. Its next boundary (`after == "tools"`) ends the activation.
+   - `writer`: at boundary 0, `orbit:attack` inserts the compromise after the system message, one `changed` event. The first request is `[agent prompt, compromise, input]`. It calls `channel_post`; the post is addressed to its channel, whose `resolve()` gives the recipients `[reader]`, and `sent` and `delivered` name them. Its next boundary (`after == "tools"`) ends the activation.
    - `reader`: `orbit:attack` appends `[Output from channel_read]: <payload>`, and `orbit:defense` has `dual_llm` rewrite it under the same id, from a quarantined call charged to the reader: two `changed` events. The first request is `[agent prompt, input, quarantined summary, notice "team: 1 unread"]`. Its `channel_read` result is replaced by `dual_llm`'s tool wrapper. Its next boundary ends the activation.
 4. Turn 1, step `[reader]`: the reader gives a tool-free reply, reaching a boundary with `after == "reply"`.
 5. The plan is exhausted and the controller returns `schedule_exhausted`. The stop ends both held members `stopped`; neither submitted, so the swarm's `final` is `no_submissions`.
@@ -394,7 +399,9 @@ ORBIT's port refuses each of these with a `ValueError` naming the setting, and t
 
 **Importing the bus's private names.** ORBIT could import from `inspect_swarm._bus`, as the built-in channels do. But private names change without notice, and the sender binding and the evidence must be the bus's, not a copy. Rejected for the public protocol.
 
-**Bus extensions for ORBIT's channel**: a `recipients="roster"` channel attribute so that addressed records reach pending and ended readers, and a commit sequence handed to `apply()`. Rejected: an unaddressed record with recipients the channel computes reaches the same readers, and `apply()` already runs in commit order.
+**Bus extensions for ORBIT's channel**: a `recipients="roster"` channel attribute so that addressed records reach pending and ended readers, and a commit sequence handed to `apply()`. Rejected: a channel state's `resolve()` reaches the same readers and also computes them from readers and edges, which a roster-wide attribute cannot, and `apply()` already runs in commit order.
+
+**Unaddressed posts, with recipients the channel computes in `apply()`.** Needs no address hook. But the `sent` and `delivered` events would name no recipients, which would be only in `apply()`'s `result`. Rejected for `resolve()`, so ORBIT's recipients are in the standard records (decision: Ransom, 2026-11-06, at the ORBIT team's request).
 
 **Exposure reporting through the swarm** (`record_exposure()`, coverage declarations and kept notice texts on the bus). The swarm would only relay ORBIT's claims, which ORBIT's own events already carry. Rejected.
 
@@ -418,7 +425,7 @@ ORBIT's port refuses each of these with a `ValueError` naming the setting, and t
 
 ## Compatibility
 
-- **inspect_swarm** is experimental throughout. The public bus names are `Draft`, `Record`, `Delivery`, `Caller`, `calling_member` and `Bus`; the built-in channels write their events with the same schemas. A custom agent's `run()` descendants count as nested loops, which affects message restrictions, shared memory's own-loop tracking and status lines, and wait ownership for them. `start(preamble=)` and `Budget.derive` default to the behaviour without them.
+- **inspect_swarm** is experimental throughout. The public bus names are `Draft`, `Record`, `Delivery`, `Caller`, `calling_member`, `Bus` and `ResolvingState`; the built-in channels write their events with the same schemas. A custom agent's `run()` descendants count as nested loops, which affects message restrictions, shared memory's own-loop tracking and status lines, and wait ownership for them. `start(preamble=)` and `Budget.derive` default to the behaviour without them.
 - **ORBIT logs.** Logs already written keep their readers. A ported run writes ORBIT's events as today, plus the swarm's communication and swarm events and ORBIT's answer record; ORBIT's store models and viewer overview are unchanged.
 - **Python and concurrency.** inspect_swarm requires Python 3.11+ and runs on asyncio and trio, so ORBIT's controller and callbacks use anyio.
 
