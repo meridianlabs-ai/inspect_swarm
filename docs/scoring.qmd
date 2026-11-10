@@ -154,7 +154,7 @@ for m in record.members:
 - `materialize` runs inside the member's span, so its sandbox calls appear with the member's grade.
 - `materialize` is given roster names only, never a name a member chose, so paths and branch names come from the task's own layout.
 - Restoring must also remove what the scorer created, so the next member is graded on its own artifact alone.
-- If the scoring time limit expires while a member is graded, the sample errors and the checkout is left as it was, not restored. That sample records no scores, so nothing reads it.
+- If scoring times out while a member is graded, the sample errors and the checkout may be left unrestored. Scores from earlier scorers, such as the team's, can remain in the log. A retry starts in a fresh sandbox.
 - An error from `materialize` or the scorer fails the sample.
 - A sample with no swarm is graded on the environment as it left it, without `materialize`.
 - In a shared sandbox, any member can write into another member's directory or branch. A member's grade says what was in its place when the scorer ran, not what that member did alone.
