@@ -2,7 +2,7 @@
 
 ## Overview
 
-`member(..., choose_name=True)` leaves the swarm's name for a member out of everything the swarm tells it. Instead of opening with "You are react-1", the member's preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the others what it is. Its role, if it has one, is still stated. The swarm keeps its own name for the member for everything it tracks (timelines, spans, tool-state scopes, budget shares, the ledger and the result record), so the option changes only what the agent is told.
+`member(..., choose_name=True)` leaves the swarm's name for a member out of everything the swarm tells it. Instead of opening with "You are react-1", the member's preamble says how many agents are in the swarm and asks it to choose a name for itself and tell the others what it is. Its role, if it has one, is still stated. The swarm keeps its own name for the member for everything it tracks (timeline lanes, spans, tool-state scopes, budget shares, the ledger and the result record), so the option changes only what the agent is told.
 
 The `filesystem` channel, the default, works with the option: a member that chooses is told to keep its work in a directory named with the name it chose, and when any member chooses, the members the eval author named are told that their directory may be taken too. The filesystem channel and `channels=[]` are the only configurations accepted: `swarm()` refuses every other channel beside a member that chooses its name, because channels with records show members to each other by the swarm's names and a user channel's instructions cannot be checked for the name. The result record says which members chose their own names; the name a member chose is in its transcript, not in the swarm's records.
 
@@ -49,7 +49,7 @@ Text the eval author gives the member is not changed and not checked: the sample
 
 ## What the swarm keeps
 
-The swarm's name for a member (`member(name=...)`, or the agent's registry name, numbered when several members share it) names everything the swarm tracks, with or without the option: the member's timeline, agent span, tool-state scope, budget share, ledger entry and result record entry. A name in the swarm's records and tools is one the eval author chose ([swarm-api.md Records, logging and names](swarm-api.md#records-logging-and-names), the Names bullet), and status lines contain only names the eval author or controller assigned ([swarm.md Delivery](swarm.md#delivery-peer-messages-are-model-output)); the option keeps both rules.
+The swarm's name for a member (`member(name=...)`, or the agent's registry name, numbered when several members share it) names everything the swarm tracks, with or without the option: the member's agent span (its lane in the swarm's timeline), tool-state scope, budget share, ledger entry and result record entry. A name in the swarm's records and tools is one the eval author chose ([swarm-api.md Records, logging and names](swarm-api.md#records-logging-and-names), the Names bullet), and status lines contain only names the eval author or controller assigned ([swarm.md Delivery](swarm.md#delivery-peer-messages-are-model-output)); the option keeps both rules.
 
 The flag travels with the member:
 
