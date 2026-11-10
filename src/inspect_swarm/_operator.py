@@ -176,7 +176,11 @@ class SwarmOperator:
             for m in self.members.values():
                 m.sync()
         detail = "The swarm is resumed."
-        own = [name for name, m in self.members.items() if m.running and m.paused]
+        own = [
+            name
+            for name, m in self.members.items()
+            if m.running and m.paused and m.unpausable() is None
+        ]
         if own:
             detail += f" These members stay paused on their own until resumed one by one: {', '.join(own)}."
         return OperatorOutcome(changed=True, detail=_dry(dry_run, detail))
@@ -503,10 +507,10 @@ class MemberOperator:
         if self._changed is not None:
             self._changed.set()
 
-    # The boundary callback: waits while the member is paused, as waiting time, until a
-    # resume, a new pause or a withdrawal changes that.
+    # The boundary callback: waits while the member is paused and pausable, as waiting
+    # time, until a resume, a new pause or a withdrawal changes that.
     async def _hold(self, boundary: Boundary) -> None:
-        while self._marked is None and self._wanted():
+        while self._wanted() and self.unpausable() is None:
             self._changed = anyio.Event()
             with suspend_working_limit():
                 await self._changed.wait()
@@ -541,7 +545,7 @@ class MemberOperator:
             self.paused = False
             self.sync()
         detail = "Resumed." if changed else "The member is not paused on its own."
-        if self._swarm.latched and self.running:
+        if self._swarm.latched and self.running and self.unpausable() is None:
             detail += (
                 " The swarm's pause still holds it: resume the group to release it."
             )

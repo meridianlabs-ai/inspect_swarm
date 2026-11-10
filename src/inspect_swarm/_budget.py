@@ -360,6 +360,9 @@ class MemberContext:
     # called, set by the member's gate, as the member starts background work: it
     # withdraws the operator's pause, and says whether a held member may start it
     background_starting: Callable[[], bool] = lambda: False
+    # called, set by the member's gate, when the member is first found bridged: it
+    # withdraws the operator's pause
+    bridge_found: Callable[[], None] = lambda: None
     # the error for bridge use found after the member started background work
     refusal: RuntimeError | None = None
     # called, set by the runtime, as soon as an error that ends the member and the swarm
@@ -397,6 +400,7 @@ class SwarmNode(Limit):
         member = current_member.get()
         if member is not None and not member.bridged and in_bridge_model_generate():
             member.bridged = True
+            member.bridge_found()
             if member.background:
                 # its nodes would now cancel the member, background work and all, with
                 # no error to say why; a raise here would end the sample, so the member

@@ -55,7 +55,7 @@ An interrupt loses what the turn was doing. The cancelled tool calls return no r
 
 Some members cannot be paused. They keep running, and `list` shows why in their `pause` action:
 
-- Bridged members, which take only `stop`.
+- Bridged members, which take only `stop`. A member found bridged as it runs, such as one that runs a bridged agent as a subagent, keeps running from then on, even if it was paused before.
 - Members with background work: `deepagent()` with background dispatch, and any member that has started work with `background()`. Their background work would go on while the member was held. A member whose background dispatch the swarm cannot see in advance, such as a `deepagent(background=True)` built by an `@agent` function of its own, can be paused until it first starts background work; its pause then ends and it runs on. To freeze such a member, use `inspect ctl task pause --now`, which holds every sample in the task at its next model call.
 - A member whose agent loop does not pass its state to `before_turn()`, or whose agent loop has ended.
 

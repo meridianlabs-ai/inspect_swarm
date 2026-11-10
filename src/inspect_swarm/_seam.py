@@ -83,6 +83,7 @@ NO_STATE = (
     "its agent loop does not pass its state, so it cannot be held at a turn boundary"
 )
 LOOP_ENDED = "its agent loop has ended, and a later loop cannot be held"
+BRIDGED = "it is bridged: its CLI runs its own turns, and opens no agent channel"
 
 _BACKGROUND_RUNNING = (
     "has background work running, so it cannot be held at a turn boundary"
@@ -259,6 +260,12 @@ class MemberGate:
         admitted = self.held and holder is not None and holder.withdraw is not None
         self.withdraw(STARTS_BACKGROUND)
         return admitted
+
+    # From the member's nodes when they first find it bridged, as when it runs a
+    # bridged subagent: the withdrawable callbacks are withdrawn, one holding the member
+    # included.
+    def bridge_found(self) -> None:
+        self.withdraw(BRIDGED)
 
     def request_end(self, origin: str) -> None:
         # the first request wins; it closes the lever, so the member's next model call

@@ -5,7 +5,7 @@ import contextvars
 import gc
 import os
 import tempfile
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, ParamSpec, TypeVar
@@ -71,7 +71,7 @@ from .swarm_runtime import (
     sleeper,
     wait,
 )
-from .test_background_members import _Deep, _dispatch, _hold
+from .test_background_members import _bridged_call, _Deep, _dispatch, _hold
 from .test_turn_seam import no_state_loop, two_loops
 
 _P = ParamSpec("_P")
@@ -2009,6 +2009,9 @@ def _waits(ran: _Ran) -> list[str]:
 
 
 _BACKGROUND = "The member cannot be paused: it starts background work, which would go on while it was held."
+_BRIDGED = (
+    "The member is bridged: its CLI reads no agent channel, so it takes only stop."
+)
 
 
 @pytest.mark.anyio
@@ -2446,19 +2449,15 @@ def _owns_a_task_group(
     script: Script,
     started: anyio.Event,
     paused: anyio.Event,
-    release: anyio.Event,
-    finish: anyio.Event,
+    helper_task: Callable[[], Coroutine[Any, Any, None]],
+    *tools: Tool,
 ) -> Agent:
-    """A member whose wrapper owns a task group around its react loop, and passes it to a tool that starts a helper and returns once `paused` is set; once `release` is set, the helper starts background work that runs until `finish` is set."""
+    """A member whose wrapper owns a task group around its react loop, and passes it to a tool that starts `helper_task` in it and returns once `paused` is set; `tools` are the loop's other tools."""
 
     @agent
     def owns_a_task_group() -> Agent:
         async def execute(state: AgentState) -> AgentState:
             async with anyio.create_task_group() as tg:
-
-                async def helper_task() -> None:
-                    await release.wait()
-                    background(finish.wait)
 
                 @tool
                 def helper() -> Tool:
@@ -2471,7 +2470,7 @@ def _owns_a_task_group(
 
                     return execute
 
-                state = await _react(script, helper())(state)
+                state = await _react(script, helper(), *tools)(state)
             return state
 
         return execute
@@ -2484,7 +2483,7 @@ def _owns_a_task_group(
 # another caller's callback holds it, or holds it next with the work still running,
 # the seam's rule applies to that caller.
 @pytest.mark.anyio
-@pytest.mark.parametrize("target", ["agent", "group"])
+@pytest.mark.parametrize("target", ["agent", "group", "both"])
 @pytest.mark.parametrize("other", ["none", "returned", "holding", "after"])
 async def test_background_work_started_while_paused_withdraws_the_pause(
     target: str, other: str
@@ -2511,10 +2510,16 @@ async def test_background_work_started_while_paused_withdraws_the_pause(
             proceed.set()
         return await _drain(control)
 
+    async def helper_task() -> None:
+        await release.wait()
+        background(finish.wait)
+
     async def drive(group: OperatorGroup) -> None:
         a = group.agents["a"]
         await started.wait()
-        assert _act((a if target == "agent" else group).pause, dry_run=False).changed
+        for paused_by in (a, group):
+            if target in ("both", "agent" if paused_by is a else "group"):
+                assert _act(paused_by.pause, dry_run=False).changed
         paused.set()
         if other != "after":
             proceed.set()
@@ -2527,13 +2532,21 @@ async def test_background_work_started_while_paused_withdraws_the_pause(
         await _until(lambda: _act(a.info).actions["pause"] == _BACKGROUND)
         assert not _act(a.info).paused
         assert _act(a.pause, dry_run=False).refused == _BACKGROUND
+        if target == "both":
+            # neither pause can hold it now, so neither resume says the other still
+            # does
+            assert (
+                _act(group.resume, dry_run=True).detail
+                == "Dry run: The swarm is resumed."
+            )
+            assert _act(a.resume, dry_run=False).detail == "Resumed."
         finish.set()
 
     ran = await _run(
         _swarm(
             [
                 member(
-                    _owns_a_task_group(script, started, proceed, release, finish),
+                    _owns_a_task_group(script, started, proceed, helper_task),
                     name="a",
                 )
             ],
@@ -2557,6 +2570,70 @@ async def test_background_work_started_while_paused_withdraws_the_pause(
         assert ran.status("a") == "submitted"
         origins = ["test", "operator"] if other == "returned" else ["operator"]
         assert _boundaries(ran)[-1] == ("a", 1, origins)
+
+
+# A member found bridged after its pause was accepted, as when it runs a bridged
+# subagent, is not held: the pause is withdrawn as the bridge is found, during its turn
+# or while the pause holds it, and it runs on.
+@pytest.mark.anyio
+@pytest.mark.parametrize("target", ["agent", "group"])
+@pytest.mark.parametrize("when", ["in_turn", "held"])
+async def test_a_member_found_bridged_after_its_pause_is_not_held(
+    target: str, when: str
+) -> None:
+    started, paused, bridged, release, running, finish = (
+        anyio.Event() for _ in range(6)
+    )
+    script = _Recording([_call("helper"), _call("slow", seconds=0), _submit()])
+
+    async def helper_task() -> None:
+        await release.wait()
+        await _bridged_call(scripted_model())
+        bridged.set()
+
+    async def drive(group: OperatorGroup) -> None:
+        a = group.agents["a"]
+        await started.wait()
+        assert _act((a if target == "agent" else group).pause, dry_run=False).changed
+        if when == "in_turn":
+            release.set()
+            await bridged.wait()
+        paused.set()
+        if when == "held":
+            await _until(lambda: _activity(group, "a") == "held")
+            release.set()
+        # past the boundary, running
+        await running.wait()
+        info = _act(a.info)
+        assert (info.paused, info.actions["pause"], info.actions["resume"]) == (
+            False,
+            _BRIDGED,
+            _BRIDGED,
+        )
+        if target == "group":
+            assert _act(group.resume, dry_run=False).detail == "The swarm is resumed."
+        finish.set()
+
+    ran = await _run(
+        _swarm(
+            [
+                member(
+                    _owns_a_task_group(
+                        script,
+                        started,
+                        bridged if when == "in_turn" else paused,
+                        helper_task,
+                        _slow(running, finish),
+                    ),
+                    name="a",
+                )
+            ]
+        ),
+        drive,
+    )
+
+    assert ran.status("a") == "submitted"
+    assert _boundaries(ran) == ([] if when == "in_turn" else [("a", 1, ["operator"])])
 
 
 @agent

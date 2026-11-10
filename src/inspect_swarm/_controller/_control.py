@@ -401,6 +401,7 @@ class MemberRun:
             persistent=record.persistent,
         )
         self.context.background_starting = self.gate.background_starting
+        self.context.bridge_found = self.gate.bridge_found
 
     @property
     def submitted(self) -> bool:
