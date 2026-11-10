@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 
 # Peer text between a fence's tags. Attribute values are swarm-generated, roster names
@@ -16,3 +16,18 @@ def with_lines(result: str, *lines: str | None) -> str:
 
 def utf8_bytes(text: str) -> int:
     return len(text.encode("utf-8"))
+
+
+# The fenced records, in order, that one read shows: the first whole, then each that
+# keeps the result within `budget`, where `size` is the result's size without them. It
+# draws from `fenced` only until a record does not fit, so a lazy iterable renders no
+# more of a long backlog than one record past what is shown.
+def pack(fenced: Iterable[str], size: int, budget: int) -> list[str]:
+    shown: list[str] = []
+    for text in fenced:
+        grown = size + utf8_bytes(text) + (len("\n") if shown else 0)
+        if shown and grown > budget:
+            break
+        shown.append(text)
+        size = grown
+    return shown

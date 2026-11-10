@@ -2,13 +2,13 @@
 
 ## Overview
 
-With `channels=[topics([...])]`, the eval author declares named rooms, **topics**, each with the members that read it, the members that write it, whether it is private and whether a post wakes its readers. Members get three tools: `post_topic` posts to a topic, `read_topics` returns the posts the caller has not read yet, oldest first and fenced with the poster's name, and `list_topics` lists the topics the caller can see and who reads and writes each. A post is addressed to the topic (`#team-a`) and reaches every reader by membership, not activity: a reader that has not started yet, or one held idle, finds the post unread when it next looks, as on a blackboard. Every post goes through the swarm's bus like a message, so it gets the bus's sender binding, storm controls and `sent`, `delivered` and `read` evidence, and the swarm's own tools end with a status line counting the caller's unread posts. Posts wake a reader's `swarm_wait` only in topics the author marks `wake=True`. A private topic does not exist for a member outside it: its name never appears in that member's preamble, lists, status lines or errors.
+With `channels=[topics([...])]`, the eval author declares named rooms, **topics**, each with the members that read it, the members that write it and whether a post wakes its readers. Members get three tools: `post_topic` posts to a topic, `read_topics` returns the posts the caller has not read yet, oldest first and fenced with the poster's name, and `list_topics` lists the caller's topics and who reads and writes each. A post is addressed to the topic (`#team-a`) and reaches every reader by membership, not activity: a reader that has not started yet, or one held idle, finds the post unread when it next looks, as on a blackboard. Every post goes through the swarm's bus like a message, so it gets the bus's sender binding, storm controls and `sent`, `delivered` and `read` evidence, and the swarm's own tools end with a status line counting the caller's unread posts. Posts wake a reader's `swarm_wait` only in topics the author marks `wake=True`. A topic exists only for its readers and writers: for any other member its name never appears in the member's preamble, lists, status lines or errors.
 
 Who may talk to whom in a topic is its `readers` and `writers`; the design adds no member-pair routes, on the bus or for the messages channel, which keeps letting every member message every other. With topics alone, an experiment can run team rooms, a hub and spokes, or a pipeline of stages as configuration, with identical members across arms. `topics()` with no arguments is one room, `#general`, that every member reads and writes.
 
 ## Background
 
-A deep dive under [swarm-communication.md](swarm-communication.md), which designs the bus and anticipates this channel: "A board post is `kind="post"` addressed to a channel id whose subscribers are the recipients; the channel id is resolved by the board's resolver" ([How channels plug into the bus](swarm-communication.md#how-channels-plug-into-the-bus)), with `#`-prefixed channel ids reserved in the address grammar ([Addressing](swarm-communication.md#addressing)). It builds on the messages channel (the same design), the shared-memory channel ([swarm-memory-channel.md](swarm-memory-channel.md)), `swarm_wait` ([swarm-wait.md](swarm-wait.md)), persistent members ([swarm-persistent-members.md](swarm-persistent-members.md)) and the public bus API, S2, of [swarm-orbit.md](swarm-orbit.md#s2-a-public-bus-api-for-channels). ORBIT keeps its own channel on that API; this design changes nothing ORBIT's port relies on ([ORBIT's channel](#orbits-channel-what-is-general-and-what-is-orbits)).
+A deep dive under [swarm-communication.md](swarm-communication.md), which designs the bus and anticipates this channel: "A board post is `kind="post"` addressed to a channel id whose subscribers are the recipients; the channel id is resolved by the board's resolver" ([How channels plug into the bus](swarm-communication.md#how-channels-plug-into-the-bus)), with `#`-prefixed channel ids reserved in the address grammar ([Addressing](swarm-communication.md#addressing)). It builds on the messages channel (the same design), the shared-memory channel ([swarm-memory-channel.md](swarm-memory-channel.md)), `swarm_wait` ([swarm-wait.md](swarm-wait.md)), persistent members ([swarm-persistent-members.md](swarm-persistent-members.md)) and the public bus API, S2, of [swarm-orbit.md](swarm-orbit.md#s2-a-public-bus-api-for-channels). ORBIT keeps its own channel on that API, and resolves its posts' recipients with the public address hook this design adds, so they appear in the `sent` and `delivered` evidence ([Channel-resolved addresses](#channel-resolved-addresses); [ORBIT's channel](#orbits-channel-what-is-general-and-what-is-orbits)).
 
 It keeps the standing decisions of those designs. The ones it leans on most: peer text reaches a member only as tool output, fenced, with the sender the bus bound (decision: Ransom, 2026-10-07); the swarm adds no message to a member's conversation, and members learn of changes from tools (2026-10-27); the status line ends the results of the swarm's own tools only (2026-10-30); a design serves the shapes real use has and refuses the rest loudly (2026-10-08).
 
@@ -28,11 +28,11 @@ The research questions swarm.md lists ask for exactly these as configuration: "W
 
 Goals:
 
-- A built-in `topics` channel: rooms declared by the eval author with readers, writers, a private flag and opt-in wake; `post_topic`, `read_topics` and `list_topics`; per-reader unread tracking; delivery by membership, to readers whatever their state.
+- A built-in `topics` channel: rooms declared by the eval author with readers, writers and opt-in wake, each visible only to its members; `post_topic`, `read_topics` and `list_topics`; per-reader unread tracking; delivery by membership, to readers whatever their state.
 - The bus's machinery for it unchanged in kind: sender binding, fencing, storm controls, evidence, the status line, `swarm_wait`, news for idle persistent members.
 - Who may talk to whom in a topic is its readers and writers, declared per topic. Each channel decides its own communication restrictions, and some have none (decision: Ransom, 2026-11-05).
 - The experiment topologies it serves, each as configuration: a common room, team rooms, a hub and spokes, and a pipeline ([Topologies](#topologies)). The scope is those.
-- The topics channel uses only the bus operations S2 makes public, plus four in-package integrations named below ([How this sits on S2](#how-this-sits-on-s2)), so it does not change ORBIT's port.
+- The topics channel uses only the bus operations S2 makes public, a public protocol for channel-resolved addresses that this design adds to S2, and three in-package integrations named below ([How this sits on S2](#how-this-sits-on-s2)). ORBIT's channel resolves its recipients with the same protocol (decision: Ransom, 2026-11-06, at the ORBIT team's request).
 
 Non-goals:
 
@@ -70,7 +70,7 @@ Only what this design depends on. Paths are relative to `src/inspect_swarm/` unl
 
 ### Channel arguments in the log
 
-A list of pydantic models given to a `@swarm_channel` factory is logged as a list of their fields, and replay passes those dicts back to the factory: a factory given `[Topic(name="team-a", readers=["a", "b"], private=True)]` and `rate=(10, 30.0)` logs `{"topics": [{"name": "team-a", "readers": ["a", "b"], "private": True}], "rate": [10, 30.0]}` in the plan step, and `create_registry_object()` calls it again with the dict and the list. So a factory takes models or mappings, as `swarm()` takes `Member` records or mappings (`_swarm.py:250-252`).
+A list of pydantic models given to a `@swarm_channel` factory is logged as a list of their fields, and replay passes those dicts back to the factory: a factory given `[Topic(name="team-a", readers=["a", "b"], wake=True)]` and `rate=(10, 30.0)` logs `{"topics": [{"name": "team-a", "readers": ["a", "b"], "wake": True}], "rate": [10, 30.0]}` in the plan step, and `create_registry_object()` calls it again with the dict and the list. So a factory takes models or mappings, as `swarm()` takes `Member` records or mappings (`_swarm.py:250-252`).
 
 ### Who uses rooms today
 
@@ -91,7 +91,7 @@ ORBIT's `ChannelConfig` is an id, an optional display name, `readers`, `writers`
 | Delivery by membership: readers that have not run yet get the post | Yes ([Delivery by membership](#delivery-by-membership)) |
 | Communication edges, intersected with readers | Left out: a topic's readers and writers are its restriction, and a pair that must not talk is in no room together ([Alternatives considered](#alternatives-considered)) |
 | Capacity: every accepted post fits one read | Yes, by bytes, as the messages channel does ([Reading](#reading)) |
-| `private` | Hides the topic from non-members, and is in the logged configuration for analysis ([Private topics](#private-topics)) |
+| `private`, a label the collusion scorer reads | No counterpart: every topic is visible only to its members ([Who sees a topic](#who-sees-a-topic)); ORBIT's own channel keeps its label |
 | Per-reader read cursors | Per-reader unread tracking, per member, not per session: a member's own loop is the one reader ([Reading](#reading)) |
 | NDJSON read format, store state and counter, `step_start` cutoffs, attack-created `secret:` channels, `notify`/`auto` delivery and dialogue projections, exposure | ORBIT's; left out |
 | Rereads from an explicit cursor (`after_sequence`), the caller's own posts in its reads, paged `channel_list` | Left out: no use here needs them ([Not this design](#not-this-design)) |
@@ -132,9 +132,6 @@ class Topic(BaseModel, frozen=True):
     writers: Literal["all"] | list[str] = "all"
     """The members that post to it, in the same form."""
 
-    private: bool = False
-    """Whether only its readers and writers know it exists."""
-
     wake: bool = False
     """Whether a post ends its readers' `swarm_wait` and is news for an idle reader."""
 
@@ -148,7 +145,7 @@ def topics(
 ) -> Channel: ...
 ```
 
-- **The string `"topics"`** in `channels=` gives the default: one public topic, `#general`, that every member reads and writes, with no wake. `-T channels=filesystem,topics` selects it from the command line.
+- **The string `"topics"`** in `channels=` gives the default: one topic, `#general`, that every member reads and writes, with no wake. `-T channels=filesystem,topics` selects it from the command line.
 - **Logging.** `Topic` is a pydantic model, so a list of them is logged as their fields and two arms that differ in any topic are distinct; replay passes the logged dicts back, which `topics()` validates into `Topic`s, as `swarm()` does for `Member` records ([Channel arguments in the log](#channel-arguments-in-the-log)). `Topic` is exported from `inspect_swarm`.
 - **Validation when `topics()` is called** (`ValueError`, naming the topic): at least one topic, each a `Topic` or a mapping validated into one; each name in the grammar and not in the reserved form `c-<digits>` (`c-3`; `c-red` and `orders` are valid), `topic name c-3 is reserved for swarm-assigned ids`; no two topics with one name; `readers` and `writers` either `"all"` or a non-empty list without repeats; `max_bytes`, `max_wait` at least 1 and `rate` as the messages channel checks them (`_channel/_params.py`).
 - **`check(roster)`** at `swarm()` construction (`ValueError`): every member name in the address grammar and not reserved, as the messages channel requires, since names appear in fences; every name a topic lists is a member; and each topic has a writer with at least one reader other than itself, since otherwise no post could reach anyone (a topic whose only reader is its only writer).
@@ -161,7 +158,7 @@ Each is configuration only; the members are the same in every arm.
 
 **A common room**, the blackboard baseline beside "filesystem only" and "messages": `channels=["filesystem", "topics"]`.
 
-**Team rooms.** Two teams with a private room each, and an announcement room the leads write and everyone reads:
+**Team rooms.** Two teams with a room each, and an announcement room the leads write and everyone reads:
 
 ```python
 red = ["red-1", "red-2", "red-3"]
@@ -169,8 +166,8 @@ blue = ["blue-1", "blue-2", "blue-3"]
 swarm(
     members=[member(worker, name="red", count=3), member(worker, name="blue", count=3)],
     channels=[topics([
-        Topic(name="red", readers=red, writers=red, private=True),
-        Topic(name="blue", readers=blue, writers=blue, private=True),
+        Topic(name="red", readers=red, writers=red),
+        Topic(name="blue", readers=blue, writers=blue),
         Topic(name="announcements", writers=["red-1", "blue-1"], wake=True),
     ])],
 )
@@ -178,12 +175,12 @@ swarm(
 
 A red member never learns that `#blue` exists. Topics do not restrict the messages channel: an arm whose teams must talk only in their rooms leaves direct messages out.
 
-**A hub and spokes.** A lead gives each worker its own orders in a private topic and reads every report:
+**A hub and spokes.** A lead gives each worker its own orders in a topic of its own and reads every report:
 
 ```python
 workers = [f"worker-{i}" for i in range(1, k + 1)]
 topics([
-    *(Topic(name=f"orders-{w}", readers=[w], writers=["lead"], private=True, wake=True) for w in workers),
+    *(Topic(name=f"orders-{w}", readers=[w], writers=["lead"], wake=True) for w in workers),
     Topic(name="reports", readers=["lead"], writers=workers, wake=True),
 ])
 ```
@@ -207,12 +204,14 @@ The `#` prefix keeps topic addresses apart from member names, as the address gra
 
 #### Channel-resolved addresses
 
-A channel state may resolve its own records' addresses. If the state of `draft.channel` has a method `resolve(sender: str, to: tuple[str, ...]) -> tuple[str, ...]`, step 0 of `deliver()` calls it in place of the member resolver; otherwise nothing changes. It returns the recipients or raises `ToolError`, before a record exists, as an unresolvable member address does today. It is an internal protocol of the package (`ResolvingState` in `_channel/_channel.py`, not exported), used by the topics state only; S2's `Bus` protocol, `Draft` and `Delivery` are unchanged, and a channel written on S2 keeps the member resolver or posts unaddressed records, as ORBIT's does.
+A channel state may resolve its own records' addresses. If the state of `draft.channel` has a method `resolve(sender: str, to: tuple[str, ...]) -> tuple[str, ...]`, step 0 of `deliver()` calls it in place of the member resolver; otherwise nothing changes. It returns the recipients or raises `ToolError`, before a record exists, as an unresolvable member address does today. It is synchronous and must not await, since steps 0 to 4 of `deliver()` run with no `await`, so the recipients agree with what `apply()` sees.
+
+The protocol is public, `ResolvingState`, exported from `inspect_swarm` beside `Bus`, `Draft`, `Delivery`, `Caller` and `calling_member` (decision: Ransom, 2026-11-06, at the ORBIT team's request: their channel computes its own recipients and wants them in the standard `sent` and `delivered` records rather than only in `apply()`'s result). The topics state and ORBIT's channel use it ([swarm-orbit.md S2](swarm-orbit.md#s2-a-public-bus-api-for-channels)). The bus checks what `resolve()` returns: every name a member of the swarm, none twice, and not the sender. A violation is a bug in the channel's code and raises `ValueError` naming the channel, as a read naming a record the channel did not commit does. The recipients' state is not checked: pending, idle, ending and ended members are accepted. The sender's liveness check and the stopping rule are unchanged. S2's `Bus` protocol, `Draft` and `Delivery` are unchanged, and a channel without `resolve()` keeps the member resolver or posts unaddressed records.
 
 The topics state's `resolve()`:
 
 1. `to` holds exactly one address, `#<name>`; otherwise "post to one topic at a time, such as #orders.".
-2. The topic exists and the sender can see it (any public topic, and a private one it reads or writes); otherwise `no topic #<name>; your topics are #a, #b.`, the same text for a private topic the sender is not in as for a name that does not exist ([Private topics](#private-topics)).
+2. The topic exists and the sender reads or writes it; otherwise `no topic #<name>; your topics are #a, #b.`, the same text for a topic the sender is not in as for a name that does not exist ([Who sees a topic](#who-sees-a-topic)).
 3. The sender is a writer; otherwise `you cannot post to #<name>; its writers are lead.`.
 4. The recipients are its readers other than the sender, **whatever their state**: pending, running, idle, ending or ended ([Delivery by membership](#delivery-by-membership)).
 
@@ -228,11 +227,11 @@ A post reaches every reader the topic lists, not only those running when it is p
 
 The messages channel keeps its rule: a direct message to a pending, ending or ended member is refused, because an inbox is a member's and a message to someone who will never read it is a failed send; an explicitly addressed idle persistent member accepts it, and the `all` address selects only running members ([Addressing and liveness](#addressing-and-liveness)). A topic's history is the room's, and a reader that arrives later reads what was said before it came.
 
-#### Private topics
+#### Who sees a topic
 
-A private topic exists only for its readers and writers. For every other member its name never appears in the member's preamble, `list_topics`, status lines, `swarm_wait` results or tool errors, and naming it gets the same error as a name that does not exist. A public topic is listed to every member, with its readers and writers, so members know the rooms they are not in and who is in them. The flag is in the logged configuration, so analysis can tell private traffic apart (ORBIT's collusion scorer uses its label for that).
+Visibility follows membership: a topic exists for a member only if the member reads or writes it. For every other member its name never appears in the member's preamble, `list_topics`, status lines, `swarm_wait` results, a post's result or tool errors, and naming it gets the same error as a name that does not exist. There is no public or private flag (decision: Ransom, 2026-11-09: "make it all private and drop the flag"), so members never learn of rooms they are not in or who is in them.
 
-Private here is a visibility rule, not an access rule: access is `readers` and `writers` in both cases, and the evidence holds every post, private or not, for whoever reads the log.
+This is a visibility rule, not an access rule: access is `readers` and `writers`, and the evidence holds every post for whoever reads the log. The logged configuration has every topic with its readers and writers, so analysis can tell one room's traffic from another's.
 
 ### The tools
 
@@ -246,13 +245,13 @@ All three are offered to the member's own loop only and refuse a call from anoth
 
 **`read_topics(topic: str | None = None) -> str`**
 
-- Without `topic`, the caller's unread posts in every topic it reads, in commit order; with it, those in that topic, which the caller must read (a topic it does not read is `you do not read #reports.`; a private one it is not in, the unknown-topic error).
-- Packs whole posts up to the read budget, marks exactly those read, in the synchronous step that builds the result, and reports them with the bus's in-package `Bus.read("topics", ids)`, as `read_messages` does, which writes the `read` event and the critical path's links ([How this sits on S2](#how-this-sits-on-s2)). Built with `max_output=0`, as `read_messages` is, so no output limit cuts a fence.
+- Without `topic`, the caller's unread posts in every topic it reads, in commit order; with it, those in that topic, which the caller must read (a topic it writes but does not read is `you do not read #reports.`; one it is not in, the unknown-topic error).
+- Packs whole posts up to the read budget, marks exactly those read, in the synchronous step that builds the result, and reports them with the bus's `Bus.read("topics", ids)`, as `read_messages` does, which writes the `read` event and the critical path's links ([How this sits on S2](#how-this-sits-on-s2)). Built with `max_output=0`, as `read_messages` is, so no output limit cuts a fence.
 - Never blocks; a reader with nothing unread waits with `swarm_wait`.
 
 **`list_topics() -> str`**
 
-One line per topic the caller can see, in declaration order: `#orders-worker-2 (private): readers worker-2; writers lead; you read. 1 unread.`, `#reports: readers lead; writers worker-1, worker-2; you post.`, and, for a public topic the caller is not in, `#red: readers red-1, red-2, red-3; writers red-1, red-2, red-3; you are not in it.` `"all"` is shown as `all members`. It shows no peer text and writes no evidence, as `list_members` does.
+One line per topic the caller reads or writes, in declaration order: `#orders-worker-2: readers worker-2; writers lead; you read. 1 unread.`, `#reports: readers lead; writers worker-1, worker-2; you post.` `"all"` is shown as `all members`. It shows no peer text and writes no evidence, as `list_members` does.
 
 #### Reading
 
@@ -321,19 +320,19 @@ Two changes in `_bus/_wait.py`:
 
 ### Instructions
 
-The channel's `instructions(member)` is a fixed template with only author-given names: what the three tools do; that posts are shown between `<topic_post>` tags whose `from` attribute names the poster; the member's own topics with its access, `You read and post in #general; you read #orders-worker-2; you post in #reports.`, or `You are in no topic.`; for topics it reads that wake, `A post in #orders-worker-2 ends swarm_wait.`; and that the results of the swarm's tools count unread posts. Public topics the member is not in are left to `list_topics`, and private ones it is not in are never named. It names no other member.
+The channel's `instructions(member)` is a fixed template with only author-given names: what the three tools do; that posts are shown between `<topic_post>` tags whose `from` attribute names the poster; the member's own topics with its access, `You read and post in #general; you read #orders-worker-2; you post in #reports.`, or `You are in no topic.`; for topics it reads that wake, `A post in #orders-worker-2 ends swarm_wait.`; and that the results of the swarm's tools count unread posts. Topics the member is not in are never named. It names no other member.
 
 ### Evidence
 
-No new event or field. Posts write `sent`, `delivered` and `read` events with `channel="topics"`, as messages do ([swarm-communication.md Evidence and provenance](swarm-communication.md#evidence-and-provenance)): `sent` with the record, its `to` (`["#orders"]`) and its `recipients`, with `routed_out` empty in its data as for every record; `delivered` with the recipients and the commit sequence; `read` with the posts a read showed. A wait stays one bus-wide `waited` event with `channel=None`, as today (`_evidence.py:270-280`), with `"topics"` in its `wait.channels` when it watches the topics channel, and its `depends_on` naming the posts its news showed; the ledger's wait path reads it unchanged (`_ledger.py:330-342`). The communication metrics, the ledger and the critical path read them by channel name, so they count topics with no change ([Current behaviour](#the-bus)). Analysis reads a topic's privacy, readers and writers from the logged channel configuration.
+No new event or field. Posts write `sent`, `delivered` and `read` events with `channel="topics"`, as messages do ([swarm-communication.md Evidence and provenance](swarm-communication.md#evidence-and-provenance)): `sent` with the record, its `to` (`["#orders"]`) and its `recipients`, with `routed_out` empty in its data as for every record; `delivered` with the recipients and the commit sequence; `read` with the posts a read showed. A wait stays one bus-wide `waited` event with `channel=None`, as today (`_evidence.py:270-280`), with `"topics"` in its `wait.channels` when it watches the topics channel, and its `depends_on` naming the posts its news showed; the ledger's wait path reads it unchanged (`_ledger.py:330-342`). The communication metrics, the ledger and the critical path read them by channel name, so they count topics with no change ([Current behaviour](#the-bus)). Analysis reads a topic's readers and writers from the logged channel configuration.
 
 ### How this sits on S2
 
-The topics channel posts through the operation S2 makes public ([swarm-orbit.md S2](swarm-orbit.md#s2-a-public-bus-api-for-channels)), `deliver(Draft)`, and finds its caller with `calling_member()`. It lives in the package and uses four integrations S2 does not publish, each a built-in channel's, as the messages channel's are today: channel-resolved addresses, the in-package `Bus.read()` (S2's `record_read()` writes the same `read` event but takes no `depends_on`, and a read must link the posts it showed for the critical path, as `read_messages` does), the status line and the `swarm_wait` description. ORBIT's port is unchanged: its channel posts unaddressed records with recipients it computes, calls `record_read()`, and takes no part in the status line.
+The topics channel uses the public `deliver(Draft)`, `Bus.read()` and `ResolvingState` operations. As a built-in channel, it also uses three in-package integrations: the member/loop and lifecycle guards shared with messages, the status lines, and the `swarm_wait` description. The status integration includes the unread counts used by the wait's trailing-count rule. ORBIT's channel resolves its own recipients and reports reads with the public `Bus.read()`; it does not use the built-in status lines.
 
 ## Alternatives considered
 
-**Unaddressed posts, with recipients the channel computes in `apply()`.** S2's pattern for ORBIT, needing no bus change. But the `sent` event would name no recipients, `delivered`'s typed `recipients`, "the agents it reached", would be empty for every post, and a reader's unread posts would be the channel's own bookkeeping beside the bus's records. Rejected for a built-in channel; ORBIT keeps the pattern.
+**Unaddressed posts, with recipients the channel computes in `apply()`.** S2's pattern for ORBIT, needing no bus change. But the `sent` event would name no recipients, `delivered`'s typed `recipients`, "the agents it reached", would be empty for every post, and a reader's unread posts would be the channel's own bookkeeping beside the bus's records. Rejected; ORBIT's channel resolves its recipients with `resolve()` too, so that its `sent` and `delivered` records name them.
 
 **A `recipients="roster"` class attribute**, lifting the liveness check for a channel's addresses. swarm-orbit.md rejected it for ORBIT. It is not enough here either: `#orders` still has to resolve to the topic's readers, which only the channel knows. The resolver hook does both.
 
@@ -349,7 +348,7 @@ The topics channel posts through the operation S2 makes public ([swarm-orbit.md 
 
 **Communication edges inside a topic**, ORBIT's edges intersected with a topic's readers. A room's readers are its audience; a pair that must not talk is put in no room together, which the hub-and-spokes example does with a topic per worker. Rejected as a second restriction on one room.
 
-**ORBIT's `private` as a label only.** Simpler. But a public and a private topic would then behave identically in the swarm, and a team experiment could not keep one team's room unknown to the other. Rejected for a visibility rule that the label also records.
+**A public/private flag.** Public topics would let members see rooms they are not in and who is in them, and a team experiment would have to remember to mark each team's room private to keep it unknown to the other team. Rejected for one behaviour, visibility by membership (decision: Ransom, 2026-11-09).
 
 **Rooms as shared-memory files** (`/shared_memory/rooms/red.md`). No new channel. But the board has no readers or writers, no privacy, no per-reader unread posts, and wakes every waiter of a path on every write. Rejected.
 
@@ -358,19 +357,19 @@ The topics channel posts through the operation S2 makes public ([swarm-orbit.md 
 ## Compatibility and migration
 
 - **Stored formats.** No new event type or field: posts write today's communication events, with a new channel name, kind (`post`) and id prefix (`p`); `routed_out` stays empty. The viewer's generated types and the swarm's evidence version are unchanged.
-- **Public API.** New: `topics` and `Topic`. Without topics, every tool's schema, description and output is unchanged: the status line, the wait description and its trailing count behave as today.
+- **Public API.** New: `topics`, `Topic` and `ResolvingState`. Without topics, every tool's schema, description and output is unchanged: the status line, the wait description and its trailing count behave as today.
 - **Existing swarms with the messages channel** gain nothing they did not ask for.
 - **Bridged members** are refused beside `topics` by today's rule, with today's message naming the channel.
-- **ORBIT's port** is unchanged ([How this sits on S2](#how-this-sits-on-s2)).
+- **ORBIT's port** posts addressed records resolved by its channel's `resolve()` in place of unaddressed ones ([swarm-orbit.md S2](swarm-orbit.md#s2-a-public-bus-api-for-channels)).
 - **inspect_ai**: no change.
 
 ## Security
 
 - **Untrusted input reaching the new code:** the post text, the `topic` argument and `reply_to`, all model output, and through the bridge none (bridged members are refused).
   - The text is stored and delivered as typed, inside a fence that is a label, never a boundary; it is bounded by `max_bytes`, and a lone surrogate is refused by the bus's existing check. It never reaches a status line, a wait result, a preamble or an error.
-  - `topic` is checked against the topics the caller can see; any other value gets the same error, which lists only those topics, so the error reveals no private topic. `reply_to` must be an id the caller has posted or read.
+  - `topic` is checked against the topics the caller reads or writes; any other value gets the same error, which lists only those topics, so the error reveals no topic the caller is not in. `reply_to` must be an id the caller has posted or read.
 - **Sender identity** is bound by the bus from the member context, as for every record; no argument sets it.
-- **Private topics** are hidden from non-members in every text the swarm writes for them: preamble, list, status line, wait result, errors, and a post's result, which only a writer, a member of the topic, receives. The log holds everything, for its readers.
+- **Topics** are hidden from non-members in every text the swarm writes for them: preamble, list, status line, wait result, errors, and a post's result, which only a writer, a member of the topic, receives. The log holds everything, for its readers.
 - **Topics are the author's**, validated at construction; no model output changes them.
 - **What topics do not stop**: communication through the messages channel, shared sandboxes, shared state or shared tool instances. Members that share a sandbox, the shared memory or a shared tool instance can still talk through it, as swarm-communication.md says of messages ([The filesystem channel](swarm-communication.md#the-filesystem-channel)); an arm whose topology must be the only path gives members their own sandboxes and leaves the messages channel and shared state out.
 
@@ -378,21 +377,21 @@ The topics channel posts through the operation S2 makes public ([swarm-orbit.md 
 
 All async tests are `@pytest.mark.anyio` and run on asyncio and trio through the repository's fixture; members are mockllm `react()` agents with scripted tool calls. Nothing needs network, Docker or a model provider.
 
-- **`tests/test_topics_channel.py`** (construction): the default is one public `#general` for all; each `ValueError` of `topics()` and `check()` with its message (bad and repeated names, a reserved `c-3` given as a `Topic` and as a mapping beside an accepted `c-red`, empty or repeated readers, an unknown member, a topic no post could leave, bounds); a list of `Topic`s and a list of mappings give the same channel; logging and replay round-trip, and two arms that differ in one topic's `private` or `wake` have different task identifiers (in `tests/test_api_log.py`); instructions name the member's own topics and access and no private topic it is not in; `swarm()` refuses a bridged member and a member with `choose_name=True` beside `topics`.
+- **`tests/test_topics_channel.py`** (construction): the default is one `#general` for all; each `ValueError` of `topics()` and `check()` with its message (bad and repeated names, a reserved `c-3` given as a `Topic` and as a mapping beside an accepted `c-red`, empty or repeated readers, an unknown member, a topic no post could leave, bounds); a list of `Topic`s and a list of mappings give the same channel; logging and replay round-trip, a mapping with a `private` field is refused as an unknown field; two arms that differ in one topic's `wake` have different task identifiers; instructions name the member's own topics and access and no topic it is not in; `swarm()` refuses a bridged member and a member with `choose_name=True` beside `topics`.
 - **`tests/test_topics.py`** (runtime):
   - a post reaches readers and not the poster; a reader's `read_topics()` returns it fenced, marks it read, and writes a `read` event with its id; `sent` and `delivered` name `to=["#orders"]` and the readers;
   - membership delivery: a post to a pending reader is unread when a controller starts it later; to an ended reader, delivered and never read; a post by a member that has ended is refused with liveness evidence;
-  - permissions: a non-writer's post, a read of a topic the caller does not read, and an unknown topic each give their error with no record; a private topic is absent from a non-member's preamble, `list_topics`, status lines and errors, and naming it gives the unknown-topic text exactly;
+  - permissions: a non-writer's post, a read of a topic the caller does not read, and an unknown topic each give their error with no record; a topic is absent from a non-member's preamble, `list_topics`, status lines and errors, and naming it gives the unknown-topic text exactly; `list_topics` shows only the caller's topics;
   - reading: across topics in commit order; with `topic`, only that topic's, and the result ends with the other-topics line after a partial, an empty and a draining read; the read budget with the longest names, every topic in the other-topics line and a payload at `max_bytes` fits one read; packing stops at the budget and the remainder line counts the rest; `max_output=0` with a small `max_tool_output`;
   - storm controls: `max_bytes` and `rate` refusals with their controls in `sent`;
   - the status line on `post_topic`, `list_topics`, `send_message`, `list_members`, `shared_memory` and `swarm_wait`, with messages and topics both open in both orders of `channels=`, and none in a deepagent's `general()` subagent, which gets none of the topics tools; the summary line is last; with 48-character topic names and `max_tool_output=100`, the truncated result of each of those tools still holds both totals, in both channel orders; with topics open and no unread post, and with no topics channel, each output is today's;
-  - waiting: a post in a `wake=True` topic ends a reader's wait and names topics and posters; a `wake=False` post does not, and is counted when the wait ends for another reason; `depends_on` of a wait with news includes the quiet posts; a persistent reader held idle gets `MemberNews` for a waking post and not for a quiet one; the wait description with topics alone, with messages, and with the shared memory; the trailing counts (`tests/test_wait.py`, table-driven): only message news with unread posts ends with the topics count, message and topic news ends with both, only topic news ends with the messages count, and the existing messages-only truncation test is unchanged.
-- **`tests/test_bus.py`**: a channel state with `resolve()` gets its addresses resolved by it, recipients whatever their state, and a `ToolError` from it leaves no record; a state without one keeps the member resolver.
-- **`tests/test_metrics.py`**: topics counted per member like messages.
+  - waiting: a post in a `wake=True` topic ends a reader's wait and names topics and posters; a `wake=False` post does not, and is counted when the wait ends for another reason; `depends_on` of a wait with news includes the quiet posts; a persistent reader held idle gets `MemberNews` for a waking post and not for a quiet one (`tests/test_persistent.py`); the wait description with topics alone, with messages, and with the shared memory; the trailing counts (`tests/test_wait.py`, table-driven): only message news with unread posts ends with the topics count, message and topic news ends with both, only topic news ends with the messages count, and the existing messages-only truncation test is unchanged;
+  - metrics: topics counted per member like messages.
+- **`tests/test_bus.py`**: a channel written only with public names whose state resolves its own addresses gets those names as the typed `recipients` of `sent` and `delivered`, whatever the recipients' state; a `ToolError` from `resolve()` leaves no record; a returned non-member, duplicate or the sender raises `ValueError`; a state without `resolve()` keeps the member resolver.
 
 ## Implementation plan
 
-1. **The topics channel.** `src/inspect_swarm/_channel/topics.py` (`Topic`, `topics()`, its validation, `check()`, `instructions()`, `TopicsState` with `resolve()`, `validate()`, `admit()`, `apply()`, the three tools, the read budget, the status line and the `WaitingState` methods); `_channel/_channel.py` (`ResolvingState`); `_bus/_bus.py` (step 0 calls a state's `resolve()`; `status()` composes the topics detail line and the summary line); `_bus/_wait.py` (`topics` in `wait_tool()` and `_make_tool()`, the per-channel trailing count; the status output in place of the messages line); `_channel/messages.py` (`list_members` adds the topics line); `src/inspect_swarm/__init__.py` (`Topic`, `topics`) and the entry point's imports; `docs/topics.qmd` (the topologies above as examples), `docs/channels.qmd` (the list of built-in channels), `docs/_quarto.yml`. Tests: `test_topics_channel.py`, `test_topics.py`, the topics cases of `test_bus.py`, `test_wait.py`, `test_api_log.py` and `test_metrics.py`.
+1. **The topics channel.** `src/inspect_swarm/_channel/topics.py` (`Topic`, `topics()`, its validation, `check()`, `instructions()`, `TopicsState` with `resolve()`, `validate()`, `admit()`, `apply()`, the three tools, the read budget, the status line and the `WaitingState` methods); `_channel/_channel.py` (`ResolvingState`, public); `_bus/_bus.py` (step 0 calls a state's `resolve()` and checks what it returns; `status()` composes the topics detail line and the summary line); `_bus/_wait.py` (`topics` in `wait_tool()` and `_make_tool()`, the per-channel trailing count; the status output in place of the messages line); `_channel/messages.py` (`send_message` and `list_members` end with `bus.status()`, which adds the topics line); `src/inspect_swarm/__init__.py` (`Topic`, `topics`, `ResolvingState`) and the entry point's imports; `docs/topics.qmd` (the topologies above as examples), `docs/channels.qmd` (the list of built-in channels, and a channel resolving its own addresses), `docs/_quarto.yml`. Tests: `test_topics_channel.py`, `test_topics.py`, the resolver cases of `test_bus.py`, `test_wait.py` and `test_persistent.py`.
 
 ## Open questions
 
@@ -404,6 +403,5 @@ None.
 - **Rereading a topic's history** with a cursor, as ORBIT's `after_sequence` does, and showing a poster its own posts.
 - **Bridged members on topics**: declarations for `swarm_bridged_tools(["topics"])` and its `swarm_wait`.
 - **`swarm_wait` describes a custom waiting channel as the shared memory**, with its `path` and `file_id` parameters (`_bus/_wait.py:356-363`). A user channel that wakes waits needs its own wait description and filter; this design leaves that rule as it is.
-- **Channel-resolved addresses for user channels**: making `ResolvingState` public, with S2, once a channel outside the package needs it.
 - **A hub-and-spoke version of the lead-and-workers example** on topics, waking only the worker a task is for.
 - **Restrictions for the messages channel**, such as `messages(routes=...)`. Each channel decides its own; the messages channel can add one if an experiment needs direct messages under a topology (decision: Ransom, 2026-11-05).

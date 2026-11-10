@@ -6,6 +6,7 @@ from inspect_ai._eval.evalset import EvalSetArgsInTaskIdentifier, task_identifie
 from inspect_ai._eval.loader import resolve_tasks
 from inspect_ai.agent import react
 from inspect_ai.dataset import Sample
+from inspect_ai.event import ScoreEvent
 from inspect_ai.model import GenerateConfig, Model, ModelOutput, get_model
 from inspect_ai.scorer import (
     CORRECT,
@@ -13,12 +14,14 @@ from inspect_ai.scorer import (
     Score,
     Scorer,
     Target,
+    Value,
     accuracy,
     scorer,
 )
 from inspect_ai.solver import TaskState
 
-from inspect_swarm import member, swarm
+from inspect_swarm import answer_result, member, swarm
+from inspect_swarm.scorer import MEMBER_METRICS, member_scores
 
 from .swarm_runtime import Script, scripted_model
 
@@ -94,3 +97,65 @@ def test_arms_differing_in_scorer_are_distinct_only_by_task_argument() -> None:
     )
     # swapped in code, they are not
     assert _identifier(_task(True, _MODEL)) == _identifier(_task(False, _MODEL))
+
+
+@scorer(metrics=[accuracy()])
+def recorded(passing: bool, completed: list[bool]) -> Scorer:
+    async def score(state: TaskState, target: Target) -> Score:
+        completed.append(state.completed)
+        return Score(value=CORRECT if passing else INCORRECT)
+
+    return score
+
+
+@scorer(metrics=MEMBER_METRICS)
+def loop_members(passing: bool, completed: list[bool]) -> Scorer:
+    return member_scores(recorded(passing, completed), answer_result())
+
+
+def _attempt_loop(
+    tmp_path: Path, passing: bool, completed: list[bool] | None
+) -> tuple[int, list[Value]]:
+    # the model calls the members made, and the in-loop grades they got
+    script = Script(respond=lambda _: _submit())
+    scorers = [verdict(passing)]
+    if completed is not None:
+        scorers.append(loop_members(passing, completed))
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="What is the answer?", target="42")],
+            solver=swarm(
+                member(
+                    react,
+                    args={"model": scripted_model(script), "attempts": 3},
+                    count=2,
+                ),
+                channels=[],
+                result=answer_result(),
+            ),
+            scorer=scorers,
+        ),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success", log.error
+    assert log.samples is not None
+    [sample] = log.samples
+    grades = [
+        e.score.value
+        for e in sample.events
+        if isinstance(e, ScoreEvent) and e.intermediate
+    ]
+    return script.calls, grades
+
+
+@pytest.mark.parametrize("passing", [True, False])
+def test_member_scores_leaves_the_attempt_loop_unchanged(
+    tmp_path: Path, passing: bool
+) -> None:
+    completed: list[bool] = []
+    without = _attempt_loop(tmp_path / "without", passing, None)
+    assert _attempt_loop(tmp_path / "with", passing, completed) == without
+    # its scorer grades the members only after the solve
+    assert completed and all(completed)

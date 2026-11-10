@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -196,8 +197,67 @@ async def test_grace_is_clipped_to_half_the_samples_remaining_time() -> None:
 
 
 @pytest.mark.anyio
+async def test_isolation_setup_time_comes_out_of_the_derived_time_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # setup takes 0.6 s of a 1 s sample; a cap derived before it would outlast the
+    # sample, whose limit would then end the swarm without its final step
+    async def slow_setup(isolation: object, names: Sequence[str]) -> dict[str, Any]:
+        await anyio.sleep(0.6)
+        return {}
+
+    monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", slow_setup)
+    stop = await run_swarm(
+        swarm(sleeper(), channels=[], isolation="users", budget=Budget(grace=0)),
+        time=1,
+    )
+    assert stop.reason == "swarm_time"
+    assert statuses(stop) == {"sleeper": "cancelled"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("setup_time,warned", [(0.2, True), (0, False)])
+async def test_an_explicit_time_cap_is_checked_after_isolation_setup(
+    setup_time: float,
+    warned: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # a 0.9 s cap fits a 1 s sample until setup takes 0.2 s of it, after which the
+    # sample's limit ends the swarm first, as the warning says
+    async def slow_setup(isolation: object, names: Sequence[str]) -> dict[str, Any]:
+        await anyio.sleep(setup_time)
+        return {}
+
+    monkeypatch.setattr("inspect_swarm._swarm.setup_isolation", slow_setup)
+    with (
+        caplog.at_level(logging.WARNING, logger="inspect_swarm"),
+        pytest.raises(LimitExceededError) if warned else nullcontext(),
+    ):
+        await run_swarm(
+            swarm(
+                sleeper(),
+                channels=[],
+                isolation="users",
+                budget=Budget(time=0.9, grace=0),
+            ),
+            time=1,
+        )
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if "is above the sample's remaining time limit" in r.getMessage()
+    ]
+    assert len(warnings) == (1 if warned else 0)
+
+
+@pytest.mark.anyio
 async def test_the_first_stop_wins() -> None:
-    # two members reach the cap, and the time cap fires during grace
+    # two members reach the cap, and the time cap fires during grace. The time cap's
+    # timer starts with the swarm, so the cap must come first on wall-clock time: the
+    # time cap is long enough to cover a slow runner's first model calls, and the grace
+    # is twice it, so the sleeper is still running when the time cap fires
+    time_cap = 1.0
     spender = member(
         generator, args={"model": scripted_model(), "calls": None}, count=2
     )
@@ -205,8 +265,14 @@ async def test_the_first_stop_wins() -> None:
         swarm(
             [spender, sleeper()],
             channels=[],
-            budget=Budget(tokens=2 * TOKENS_PER_CALL, time=0.1, grace=0.3),
+            budget=Budget(
+                tokens=2 * TOKENS_PER_CALL, time=time_cap, grace=2 * time_cap
+            ),
         )
+    )
+    reached = {m.name: m.time for m in stop.record.members if m.name != "sleeper"}
+    assert all(t is not None and t < time_cap for t in reached.values()), (
+        f"the cap was reached after the time cap: {reached}"
     )
     assert stop.reason == "swarm_cap"
     assert statuses(stop) == {
@@ -1081,7 +1147,7 @@ async def test_the_ledger_is_written_after_the_final_step() -> None:
     # so that the final meter it reports covers the final step
     stop = await run_swarm(swarm(generator(scripted_model()), channels=[]))
     kinds = [e.kind for e in stop.transcript.events if isinstance(e, SwarmEvent)]
-    assert kinds[-4:] == ["final", "result_record", "ledger", "metrics"]
+    assert kinds[-4:] == ["final", "result_record", "metrics", "ledger"]
 
 
 @tool

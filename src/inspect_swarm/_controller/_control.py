@@ -1,5 +1,6 @@
 import contextvars
 import functools
+import math
 from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
@@ -7,11 +8,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import anyio
+from anyio import TaskInfo
 from anyio.abc import TaskGroup
+from inspect_ai._control.operator import operator_group
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai.agent import Agent, AgentState
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import ChatMessage, ChatMessageUser, ModelOutput
+from inspect_ai.solver._task_state import sample_state
 from inspect_ai.util import Limit, current_span_id, sample_limits
 from inspect_ai.util._checkpoint.checkpointer_noop import (
     _NoopCheckpointer,  # pyright: ignore[reportPrivateUsage]
@@ -19,6 +23,7 @@ from inspect_ai.util._checkpoint.checkpointer_noop import (
 from inspect_ai.util._store import suspend_store_events
 from shortuuid import uuid
 
+from .._background import cancellation
 from .._budget import (
     Budget,
     BudgetState,
@@ -28,11 +33,18 @@ from .._budget import (
     SwarmNode,
     SwarmTimeNode,
     current_budget,
+    current_member,
     is_bridged,
 )
-from .._evidence import MemberTimelines, swarm_event, write_ledger, write_metrics
+from .._evidence import (
+    SwarmTimeline,
+    claim_member_names,
+    swarm_event,
+    write_ledger,
+    write_metrics,
+)
 from .._final import FinalName, Pick, answer, finalise, settle
-from .._ledger import LedgerInterval, MemberAccount
+from .._ledger import LedgerInterval, MemberAccount, SpanPlaces
 from .._member import (
     Member,
     MemberOutcome,
@@ -51,21 +63,37 @@ from .._metrics import (
     gate_checks,
     swarm_metrics,
 )
+from .._operator import OPERATOR, SwarmOperator
 from .._record import (
+    FinalRecord,
     MemberResult,
     MemberState,
     SwarmResultRecord,
+    _refuse_author_objects,  # pyright: ignore[reportPrivateUsage]
     _swarm_ended,  # pyright: ignore[reportPrivateUsage]
     _swarm_started,  # pyright: ignore[reportPrivateUsage]
     write_record,
     write_start,
 )
+from .._result import ResultSpec, Verdict, Verifier, key_answer, verifier_label
 from .._seam import BoundaryCallback, MemberGate, check_origin
 
 if TYPE_CHECKING:
     from .._bus._bus import SwarmBus
     from .._bus._record import Record
     from .._channel._channel import Channel
+    from .._isolation import MemberIdentity
+
+
+@dataclass(frozen=True)
+class VerdictSummary:
+    """A verifier's verdict as a controller sees it: whether the submission passed and its graded value, never the explanation."""
+
+    passed: bool
+    """Whether the submission passed."""
+
+    value: float | None
+    """The verdict's graded value, if the verifier gave one; higher is better."""
 
 
 class MemberHandle(Protocol):
@@ -99,6 +127,11 @@ class MemberHandle(Protocol):
     @property
     def submitted(self) -> bool:
         """Whether the member ended with a submission (status `submitted`)."""
+        ...
+
+    @property
+    def verdict(self) -> VerdictSummary | None:
+        """The verdict on the member's submission, when the swarm's result contract has a verifier. `None` without one, before the verdict is taken, or when the swarm's stop left the submission unverified."""
         ...
 
     @property
@@ -141,7 +174,7 @@ class MemberHandle(Protocol):
     def end(self, *, origin: str) -> None:
         """End the member `stopped`, with the reason `ended by <origin>`.
 
-        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary. A pending member ends at its first boundary once started. If the member is still running when the swarm's grace period has passed since the request (or since a pending member started), its turn or its cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output. A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
+        A held member ends at once: the waiting callback is cancelled, later ones do not run, and no change of theirs is applied. A running member's next model call is refused and it ends at its next boundary. A pending member ends as soon as it is started, before its setup and with no model call. If the member is still running when the swarm's grace period has passed since the request, its turn, setup or cleanup included, it is cancelled and ends `cancelled`. A member whose agent returns after the request ends `stopped`, whatever its output. A member whose background work is draining after its agent returned keeps the status its return gave (the drain keeps its own grace period), except that a return without a submission (`unsubmitted`) ends `stopped`. A second call, or a call for a member that has ended, changes nothing. The other members and the swarm go on.
 
         Args:
             origin: Names the caller in the evidence, as for `on_boundary()`.
@@ -164,6 +197,9 @@ class MemberEnded:
 
     submitted: bool
     """Whether it ended with a submission."""
+
+    verdict: VerdictSummary | None = None
+    """The verdict on its submission, as `MemberHandle.verdict`. With a verifier, the event waits for the verdict, so it has one unless the swarm's stop left the submission unverified."""
 
 
 @dataclass(frozen=True)
@@ -347,6 +383,15 @@ class MemberRun:
         self.answer_list: list[_Answer] = []
         # counted when it ends
         self.gates = GateChecks()
+        # its submission's key, and the verdict on it with the swarm time it was taken
+        self.answer_key: str | None = None
+        self.verified: Verdict | None = None
+        self.verified_time: float | None = None
+        # ended, with its submission waiting for its verdict
+        self.verifying = False
+        # its output held an object from task code, so it is never read again, and the
+        # record leaves it out
+        self.refused = False
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
         self.context = MemberContext(
@@ -365,6 +410,12 @@ class MemberRun:
     @property
     def submitted(self) -> bool:
         return self.status == "submitted"
+
+    @property
+    def verdict(self) -> VerdictSummary | None:
+        if self.verified is None:
+            return None
+        return VerdictSummary(self.verified.passed, self.verified.value)
 
     @property
     def held(self) -> bool:
@@ -417,6 +468,20 @@ class MemberRun:
             "member_limit:time",
         )
 
+    # the origin of the end request that decided how the member ended, once it has:
+    # None when no end request did (a submission, a member limit, the swarm's stop)
+    @property
+    def end_origin(self) -> str | None:
+        origin = self.gate.end_origin
+        if origin is None or not self.gate.honoured or self.state != "ended":
+            return None
+        if self.status in ("stopped", "cancelled"):
+            return origin
+        if self.status == "submitted" and self.gate.answered:
+            # a persistent member ended while idle keeps its last answer
+            return origin
+        return None
+
     def result(self) -> MemberResult:
         return MemberResult(
             name=self.name,
@@ -430,8 +495,17 @@ class MemberRun:
             gate_checks=self.gates.checks,
             gate_passes=self.gates.passes,
             first_pass_time=self.gates.first_pass_time,
+            # a copy, so that the record never shares the member's own output
+            output=self.agent_state.output.model_copy()
+            if self.state == "ended" and not self.refused
+            else None,
+            left_out=["output"] if self.refused else [],
+            answer_key=self.answer_key,
+            verdict=self.verified,
+            verdict_time=self.verified_time,
             persistent=self.persistent,
             answer_times=[a.time for a in self.answer_list],
+            end_origin=self.end_origin,
         )
 
 
@@ -452,6 +526,8 @@ class SwarmRun:
         shares: Mapping[str, Sequence[Limit]] | None = None,
         channels: Sequence["Channel"] = (),
         final: FinalName | None = None,
+        result: ResultSpec | None = None,
+        identities: Mapping[str, "MemberIdentity"] | None = None,
     ) -> None:
         # deferred: the bus imports the channels, which import this module's package
         from .._bus._bus import SwarmBus
@@ -481,12 +557,26 @@ class SwarmRun:
             if isinstance(node, SwarmNode):
                 node.stop_swarm = self.stop
         self._by_name = {m.name: m for m in self._members}
+        # the swarm as an operator group, registered for its run
+        self.operator = SwarmOperator(
+            self._members,
+            lambda: self.stop_reason,
+            self.stop,
+            self.bus.waits.in_wait,
+            self._active,
+        )
+        for m in self._members:
+            m.gate.loop_bound = self.operator.members[m.name].loop_bound
+            m.context.fatal = self._fail
         self._state = state
         self._input = list(input)
         self._final: FinalName | None = final
+        self._result = result
         # the controller's choice of the answer, once it has made one
         self._pick: Pick | None = None
         self._preambles = preambles
+        # each member's Linux user, under users isolation
+        self._identities = identities or {}
         self._caps = caps
         self._time = time
         self._grace = grace
@@ -505,8 +595,18 @@ class SwarmRun:
         self._controller_scope = anyio.CancelScope()
         self._members_tg: TaskGroup | None = None
         self._runtime_tg: TaskGroup | None = None
+        # set when the supervisor returns or is cancelled
+        self._supervisor_ended = False
+        # set as an error from a member or the controller leaves it, ending the swarm
+        self._failed = False
+        # the task running the swarm, set by run()
+        self._host: TaskInfo | None = None
         self._member_ctx: contextvars.Context | None = None
         self._queue: deque[ControlEvent] = deque()
+        # submissions waiting for their verdicts, in the order they ended, and the
+        # scope the hard stop cancels to end verification
+        self._unverified: deque[MemberRun] = deque()
+        self._verifying = anyio.CancelScope()
         self._changed = anyio.Event()
         self._iterating = False
         self._stopped = anyio.Event()
@@ -571,13 +671,10 @@ class SwarmRun:
         self._settle()
         # from the saved context, so the member's lever is a child of the caps and never
         # of the runtime lever, whichever task starts it
+        # a member ended while pending ends in its task before any setup
         self._member_ctx.copy().run(
             self._members_tg.start_soon, self._run_member, m, messages, name=m.name
         )
-        if m.gate.end_origin is not None:
-            # ended while pending: it ends at its first boundary, its grace counted from
-            # now
-            self._end_timer(m)
         self._notify()
 
     def wake(
@@ -644,16 +741,30 @@ class SwarmRun:
         from .._bus._bus import current_bus
 
         _refuse_checkpointing()
-        timelines = MemberTimelines([m.name for m in self._members])
-        interval = self._interval = LedgerInterval(
-            roster=[m.name for m in self._members]
-        )
-        self._scorer = first_scorer()
-        self._start = anyio.current_time()
-        self.bus.waits.start = self._start
-        # the swarm's span
-        self._span_id = current_span_id()
-        self._settle()
+        # the operator group, refused before the swarm claims anything when another
+        # swarm running in the sample has its name; nothing awaits between here and the
+        # saving of its context below, so no action runs before it
+        outer = current_member.get()
+        self.operator.name = "swarm" if outer is None else f"swarm:{outer.name}"
+        registration = ExitStack()
+        registration.enter_context(operator_group(self.operator.name, self.operator))
+        # until the try below, whose finally unregisters the group, any error does
+        try:
+            timeline = SwarmTimeline(current_span_id())
+            claim_member_names([m.name for m in self._members])
+            interval = self._interval = LedgerInterval(
+                roster=[m.name for m in self._members]
+            )
+            self._scorer = first_scorer()
+            self._start = anyio.current_time()
+            self.bus.waits.start = self._start
+            # the swarm's span
+            self._span_id = current_span_id()
+            self._settle()
+            timeline.open()
+        except BaseException:
+            registration.close()
+            raise
         error: BaseException | None = None
         # what escaped the swarm, which the finally below must not replace
         escaping: BaseException | None = None
@@ -680,6 +791,9 @@ class SwarmRun:
                     },
                 )
             )
+            # the context the operator's actions run in, as a member's or the
+            # controller's calls do
+            self.operator.context = contextvars.copy_context()
             # from here until the end of the finally below, swarm_result() refuses
             # reads in this sample
             running = _swarm_started()
@@ -695,12 +809,32 @@ class SwarmRun:
                         async with anyio.create_task_group() as members_tg:
                             self._members_tg = members_tg
                             self._member_ctx = contextvars.copy_context()
-                            async with anyio.create_task_group() as runtime_tg:
-                                self._runtime_tg = runtime_tg
-                                runtime_tg.start_soon(self._supervise, runtime_tg)
-                                if self._time is not None:
-                                    runtime_tg.start_soon(self._time_cap, self._time)
-                                runtime_tg.start_soon(self._run_controller, controller)
+                            self._host = anyio.get_current_task()
+                            try:
+                                async with anyio.create_task_group() as runtime_tg:
+                                    self._runtime_tg = runtime_tg
+                                    runtime_tg.start_soon(self._supervise, runtime_tg)
+                                    if self._time is not None:
+                                        runtime_tg.start_soon(
+                                            self._time_cap, self._time
+                                        )
+                                    # the controller and the verifier inherit the
+                                    # runtime lever, which is entered once
+                                    with ExitStack() as lever:
+                                        for node in self._runtime_lever.nodes:
+                                            lever.enter_context(node)
+                                        runtime_tg.start_soon(
+                                            self._controller_task, controller
+                                        )
+                                        verifier = self._verifier()
+                                        if verifier is not None:
+                                            runtime_tg.start_soon(
+                                                self._verify, verifier
+                                            )
+                            finally:
+                                # the runtime has ended: members still unwinding are
+                                # being cancelled, and nothing more can be scheduled
+                                self._runtime_tg = None
                 except (Exception, BaseExceptionGroup) as ex:
                     # a foreign error from a member or the controller, or on trio a
                     # cancellation grouped with errors, which the wrappers do not
@@ -739,20 +873,35 @@ class SwarmRun:
                 # started, the record first, provisional unless the final step
                 # completed, then the accounting
                 if started:
-                    results = self._results()
-                    record = SwarmResultRecord(
-                        members=results,
-                        final=answer(
-                            results, self._final, self._pick, provisional=not ended
-                        ),
-                    )
                     failures: list[Exception] = []
+                    chosen: FinalRecord | None = None
                     try:
-                        write_record(record)
+                        results = self._results()
+                        chosen = answer(
+                            results, self._final, self._pick, provisional=not ended
+                        )
+                        write_record(
+                            SwarmResultRecord(
+                                members=results,
+                                final=chosen,
+                                kind=self._result.kind
+                                if self._result is not None
+                                else None,
+                                verifier=verifier_label(self._result.verifier)
+                                if self._result is not None
+                                and self._result.verifier is not None
+                                else None,
+                            )
+                        )
                     except Exception as ex:
                         failures.append(ex)
                     failures += self._account(
-                        interval, timelines, record, ended=ended, error=error
+                        interval,
+                        timeline,
+                        chosen,
+                        ended=ended,
+                        error=error,
+                        failed=not ended or bool(failures),
                     )
                     # the error or cancellation that ended the swarm stays the one
                     # raised, else the first failure here; the others become its notes
@@ -776,6 +925,7 @@ class SwarmRun:
             finally:
                 # last, so that the bus and the budget are current through the final
                 # step and the ledger, and restored however the swarm ends
+                registration.close()
                 interval.close()
                 if budget_token is not None:
                     current_budget.reset(budget_token)
@@ -783,20 +933,24 @@ class SwarmRun:
                     current_bus.reset(bus_token)
                 if running is not None:
                     _swarm_ended(running)
+                timeline.close()
         if error is not None:
             raise error
 
     # The ledger and the metrics of a swarm that started, written however it ends, even
-    # when its record could not be; returns what failed rather than raising it, so that
-    # the error that ended the swarm stays the one raised.
+    # when its record could not be (`chosen` is the record's final answer, `None` when
+    # it could not be made); returns what failed rather than raising it, so that the
+    # error that ended the swarm stays the one raised. `failed` says whether the run
+    # already fails: it did not complete its final step, or its record was not written.
     def _account(
         self,
         interval: LedgerInterval,
-        timelines: MemberTimelines,
-        record: SwarmResultRecord,
+        timeline: SwarmTimeline,
+        chosen: FinalRecord | None,
         *,
         ended: bool,
         error: BaseException | None,
+        failed: bool,
     ) -> list[Exception]:
         wall_clock = anyio.current_time() - self._start
         try:
@@ -815,12 +969,14 @@ class SwarmRun:
                         background_started=m.outcome.background_started,
                         background_cancelled=m.outcome.background_cancelled,
                         cancelled_calls=list(m.gate.cancelled_calls),
+                        end_origin=m.end_origin,
                     )
                     for m in self._members
                 ],
                 runtime=self._runtime_lever,
                 final=self._final_meter,
                 swarm=self._swarm_meter,
+                # the operator's stop is settled below, once the metrics write is known
                 stop_reason=self.stop_reason,
                 ended_by=None if ended else _exhaustion(error),
                 interrupted=not ended,
@@ -830,10 +986,10 @@ class SwarmRun:
         except Exception as ex:
             return [ex]
         failures: list[Exception] = []
-        try:
-            write_ledger(ledger)
-        except Exception as ex:
-            failures.append(ex)
+        spans: dict[str, str] = {}
+        places: SpanPlaces | None = None
+        # the metrics first, so that a failure to write them is known before the ledger
+        # records how the run ended
         try:
             spans = {
                 m.name: m.context.span_id
@@ -869,13 +1025,28 @@ class SwarmRun:
                     list(self.bus.states),
                     self.bus.waits.max_wait is not None,
                     wall_clock,
-                    record.final.member,
-                    record.final.answer,
+                    chosen.member if chosen is not None else None,
+                    chosen.answer if chosen is not None else None,
                 )
             )
-            timelines.fill(places)
         except Exception as ex:
             failures.append(ex)
+        if (failed or failures) and ledger.stop_reason == OPERATOR:
+            # a run that failed or was cancelled keeps that ending: an operator's stop
+            # is not recorded, as one can reach the run while it tears down, before the
+            # stop guard knows (decision: Ransom, 2026-11-05). The metrics do not read
+            # the stop reason.
+            ledger = ledger.model_copy(update={"stop_reason": None})
+        try:
+            write_ledger(ledger)
+        except Exception as ex:
+            failures.append(ex)
+        # last, so that the swarm's timeline holds its ledger and metrics
+        if places is not None:
+            try:
+                timeline.fill(places, spans.values())
+            except Exception as ex:
+                failures.append(ex)
         return failures
 
     def stop(self, reason: str) -> None:
@@ -883,6 +1054,8 @@ class SwarmRun:
         # no member can start once a stop has begun
         if self.stop_reason is not None:
             return
+        # before anything changes, so that an error here leaves the swarm as it was
+        grace = self._grace_now()
         # first, so that no record commits once a stop has begun
         self.bus.close()
         self.stop_reason = reason
@@ -897,24 +1070,38 @@ class SwarmRun:
             # a held member ends at once, at its boundary
             m.gate.cancel_chain()
         self._runtime_lever.close(reason)
-        self._effective_grace = self._grace_now()
+        self._effective_grace = grace
         self._stopped.set()
+
+    # The controller's task: an error leaving it ends the swarm, so the stop guard closes
+    # as it leaves, before the task group learns of it (on asyncio, a callback later).
+    async def _controller_task(
+        self, controller: Callable[["SwarmControl"], Awaitable[str]]
+    ) -> None:
+        try:
+            await self._run_controller(controller)
+        except BaseException as ex:
+            if not cancellation(ex):
+                self._fail()
+            raise
+
+    # An error from a member or the controller that ends the swarm is known: from now on
+    # the stop guard refuses.
+    def _fail(self) -> None:
+        self._failed = True
 
     async def _run_controller(
         self, controller: Callable[["SwarmControl"], Awaitable[str]]
     ) -> None:
         error: Exception | None = None
         reason: object = None
-        with ExitStack() as lever:
-            for node in self._runtime_lever.nodes:
-                lever.enter_context(node)
-            with self._controller_scope:
-                try:
-                    reason = await controller(self)
-                except Exception as ex:
-                    error = ex
-            if self._controller_scope.cancelled_caught:
-                return
+        with self._controller_scope:
+            try:
+                reason = await controller(self)
+            except Exception as ex:
+                error = ex
+        if self._controller_scope.cancelled_caught:
+            return
         if error is not None:
             rest = _without_refusals(error)
             if rest is None:
@@ -933,6 +1120,11 @@ class SwarmRun:
 
     async def _run_member(self, m: MemberRun, input: list[ChatMessage]) -> None:
         def end(status: str, state: AgentState) -> None:
+            if status == "errored":
+                # the member's error leaves its task and ends the swarm: the stop guard
+                # closes before its result is published, if the member's work has not
+                # already closed it
+                self._fail()
             if m.answer_list and status == "submitted":
                 # a persistent member ended after an answer: its last answer
                 state.output = m.answer_list[-1].output
@@ -954,11 +1146,13 @@ class SwarmRun:
             m.outcome,
             m.gate,
             end,
+            self._identities.get(m.name),
         )
 
     # A persistent member's answer, from its gate: recorded with its swarm time, as
     # evidence in the member's span, and settled, since it may now be the answer.
     def _answer(self, m: MemberRun, output: ModelOutput) -> None:
+        self._approve(m, output)
         index = len(m.answer_list)
         m.answer_list.append(
             _Answer(
@@ -994,6 +1188,18 @@ class SwarmRun:
         # the member counts as live until its event is queued
         m.state = "ended"
         m.status = status
+        refusal: TypeError | None = None
+        if not m.refused:
+            try:
+                self._approve(m, m.agent_state.output)
+            except TypeError as ex:
+                refusal = ex
+        if m.refused:
+            # however it ended, a refused output ends it `errored`, before its ending
+            # is published, settled or accounted; its own output is never read again,
+            # by the answer or the record
+            status = m.status = "errored"
+            m.agent_state.output = ModelOutput()
         # releases the other members' waits
         self.bus.member_ended(m.name, status)
         m.time = anyio.current_time() - self._start
@@ -1002,7 +1208,9 @@ class SwarmRun:
             m.gates = gate_checks(
                 self._interval.events, m.context.span_id, self._scorer, self._start
             )
-        # in the member's span, unless it ended before entering it
+        # in the member's span, unless it ended before entering it: the operator's
+        # messages it never drained, then its result
+        self.operator.members[m.name].ended()
         swarm_event(
             "member_result",
             member=m.name,
@@ -1010,9 +1218,122 @@ class SwarmRun:
             status=status,
             time=m.time,
             sandbox=m.sandbox,
+            end_origin=m.end_origin,
         )
         self._settle()
-        self._queue.append(MemberEnded(m.name, status, m.submitted))
+        if refusal is not None:
+            # after the member's end is recorded, as for a failing answer key
+            raise refusal
+        key = self._result.answer_key if self._result is not None else None
+        if m.submitted and key is not None:
+            # task code, after the member's end is recorded and its output settled, so
+            # that an error, which fails the sample, leaves the answer and the record
+            # agreeing
+            m.answer_key = key_answer(key, m.agent_state.output.completion, m.name)
+        if (
+            m.submitted
+            and self._verifier() is not None
+            and not self._verifying.cancel_called
+        ):
+            # counts as running until its verdict is taken and its event queued
+            m.verifying = True
+            self._unverified.append(m)
+        else:
+            self._queue.append(MemberEnded(m.name, status, m.submitted))
+        self._notify()
+
+    # An output from a member, checked before the runtime settles or records it (by
+    # `_answer()` for a persistent member's answer, and `_end()` for its ending
+    # output): only Inspect's output classes and model data. One that holds anything else fails the sample with a `TypeError`, and
+    # the member's outputs are not read again. Task code is trusted, so this promises
+    # the error and the partial record, not that none of the object's own methods ran
+    # before it (decision: Ransom, 2026-11-04).
+    def _approve(self, m: MemberRun, output: ModelOutput) -> None:
+        try:
+            _refuse_author_objects(output, m.name)
+        except TypeError:
+            m.refused = True
+            raise
+
+    def _verifier(self) -> Verifier | None:
+        return self._result.verifier if self._result is not None else None
+
+    # The submissions' verdicts, one at a time in the order they ended, in the swarm's
+    # span and under the runtime lever, each before its member's event is queued. The
+    # hard stop ends it, and a submission it has not verified by then, or whose
+    # verification the swarm's stop refused, has no verdict. Once cancelled, by the
+    # hard stop or the sample's own cancellation, it calls no further verifier, even
+    # when the one running caught the cancellation and returned.
+    async def _verify(self, verifier: Verifier) -> None:
+        with self._verifying:
+            while not _cancelled():
+                while self._unverified and not _cancelled():
+                    m = self._unverified[0]
+                    await self._take_verdict(m, verifier)
+                    self._unverified.popleft()
+                    self._verified(m)
+                if not _cancelled():
+                    await self._changed.wait()
+        while self._unverified:
+            self._verified(self._unverified.popleft())
+
+    async def _take_verdict(self, m: MemberRun, verifier: Verifier) -> None:
+        active = sample_state()
+        metadata = active.metadata if active is not None else {}
+        verdict: object = None
+        error: Exception | None = None
+        try:
+            verdict = await verifier(m.agent_state.output.completion, metadata)
+        except Exception as ex:
+            error = ex
+        if error is not None:
+            # the lever closed by the stop, or a reached cap, refused its model call
+            _, _, foreign = classify_errors(
+                error, self._caps, self._runtime_lever.nodes
+            )
+            if foreign is not None:
+                raise foreign
+            return
+        if _cancelled():
+            # cancelled while the verifier ran, which caught the cancellation and
+            # returned: the submission stays unverified
+            return
+        # by actual classes rather than the ones the values report
+        if not issubclass(type(verdict), Verdict):
+            raise TypeError(
+                f"The result contract's verifier must return a Verdict, got a {type(verdict).__name__} for member {m.name!r}."
+            )
+        verdict = cast(Verdict, verdict)
+        # task code, so checked as returned rather than as annotated
+        passed = cast(object, verdict.passed)
+        value = cast(object, verdict.value)
+        explanation = cast(object, verdict.explanation)
+        # the values themselves are not printed: an int too long to print, or a repr()
+        # that raises, would replace this error
+        if not (
+            type(passed) is bool
+            and (value is None or _exact_float(value))
+            and (explanation is None or issubclass(type(explanation), str))
+        ):
+            raise TypeError(
+                f"The result contract's verifier must return a Verdict whose passed is a bool, value a float (or an int a float holds exactly) or None and explanation a str or None, got passed of type {type(passed).__name__}, value of type {type(value).__name__} and explanation of type {type(explanation).__name__} for member {m.name!r}."
+            )
+        m.verified = verdict
+        m.verified_time = anyio.current_time() - self._start
+        # in the swarm's span; the explanation stays in the record
+        swarm_event(
+            "verdict",
+            member=m.name,
+            span_id=m.context.span_id,
+            passed=verdict.passed,
+            value=verdict.value,
+            time=m.verified_time,
+        )
+
+    def _verified(self, m: MemberRun) -> None:
+        assert m.status is not None
+        m.verifying = False
+        self._queue.append(MemberEnded(m.name, m.status, m.submitted, m.verdict))
         self._notify()
 
     # the provisional answer, after each change
@@ -1051,8 +1372,29 @@ class SwarmRun:
     # (a wrapper's `finally`, react's MCP teardown) may run long, so either way it gets
     # the effective grace. A pending member's starts when it is started.
     def _ending(self, m: MemberRun) -> None:
-        if m.state in ("running", "ending"):
+        # a draining member's drain has a grace of its own, and once the runtime has
+        # begun to end the members still unwinding are being cancelled
+        if m.state in ("running", "ending") and not m.gate.draining and self._active():
             self._end_timer(m)
+
+    # Whether the runtime can still take a stop: false before it starts, once it has
+    # ended, and from the moment an error (a member's or the controller's) or a
+    # cancellation from outside begins to tear it down, while its members unwind. A
+    # stop then would start a timer in a task group that is closing. Best effort: a stop
+    # it misses is accepted, and _account() keeps the failure in the ledger.
+    def _active(self) -> bool:
+        runtime = self._runtime_tg
+        return (
+            runtime is not None
+            and not self._supervisor_ended
+            and not self._failed
+            and not runtime.cancel_scope.cancel_called
+            # a cancellation that has reached the task running the swarm and that it has
+            # not yet seen: a member's error, a scope around the swarm, or a cancel of
+            # the task itself. An operator's action runs in another task, so it asks
+            # the swarm's task rather than its own.
+            and not (self._host is not None and self._host.has_pending_cancellation())
+        )
 
     # end()'s grace: the member is cancelled, as the hard stop cancels one, if it is
     # still running when the effective grace has passed. The deadline is fixed now, so
@@ -1067,6 +1409,9 @@ class SwarmRun:
             while m.started_not_ended:
                 await self._changed.wait()
         if m.started_not_ended:
+            if not m.context.scope.cancel_called:
+                # the request's grace, not another cancellation, ends the member
+                m.gate.honoured = True
             m.context.scope.cancel()
 
     # the model calls in flight now, for the turn gate's cancelled chains
@@ -1078,17 +1423,24 @@ class SwarmRun:
         self.stop("swarm_time")
 
     async def _supervise(self, runtime_tg: TaskGroup) -> None:
-        await self._stopped.wait()
-        # grace: members finish the calls they have in flight and are refused the next
-        with anyio.move_on_after(self._effective_grace):
+        try:
+            await self._stopped.wait()
+            # grace: members finish the calls they have in flight and are refused the
+            # next
+            with anyio.move_on_after(self._effective_grace):
+                await self._until_quiet()
+            # hard stop, which also ends verification
+            for m in self._members:
+                if m.started_not_ended:
+                    m.context.scope.cancel()
+            self._verifying.cancel()
             await self._until_quiet()
-        # hard stop
-        for m in self._members:
-            if m.started_not_ended:
-                m.context.scope.cancel()
-        await self._until_quiet()
-        # ends the time cap's timer
-        runtime_tg.cancel_scope.cancel()
+            # ends the time cap's timer
+            runtime_tg.cancel_scope.cancel()
+        finally:
+            # once every member has ended, or when a cancellation reaches the runtime,
+            # whichever scope it comes from
+            self._supervisor_ended = True
 
     def _grace_now(self) -> float:
         # the final step keeps at least half the sample's remaining time
@@ -1115,13 +1467,16 @@ class SwarmRun:
                 f"No member named {name!r}; the members are {', '.join(self._by_name)}."
             ) from None
 
-    # live for the controller's iterator: a member working, or one whose ending has
-    # begun and whose `MemberEnded` is still to come; an idle member is not
+    # live for the controller's iterator: a member working, one whose ending has begun
+    # and whose `MemberEnded` is still to come, or one waiting for its verdict; an idle
+    # member is not
     def _live(self) -> bool:
-        return any(m.state in ("running", "ending") for m in self._members)
+        return any(
+            m.state in ("running", "ending") or m.verifying for m in self._members
+        )
 
     async def _until_quiet(self) -> None:
-        while any(m.started_not_ended for m in self._members):
+        while any(m.started_not_ended or m.verifying for m in self._members):
             await self._changed.wait()
 
     def _notify(self) -> None:
@@ -1231,3 +1586,21 @@ def _sample_cause() -> str | None:
     if time.limit is not None and time.usage >= time.limit:
         return "sample_limit:time"
     return None
+
+
+# Whether the current task is cancelled, by its own scope or an enclosing one.
+def _cancelled() -> bool:
+    return anyio.current_effective_deadline() == -math.inf
+
+
+# A number the record's float field holds exactly: a float, or an int a float equals.
+def _exact_float(value: object) -> bool:
+    cls = type(value)
+    if issubclass(cls, float):
+        return True
+    if cls is bool or not issubclass(cls, int):
+        return False
+    try:
+        return float(cast(int, value)) == value
+    except OverflowError:
+        return False

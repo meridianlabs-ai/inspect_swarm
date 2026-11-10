@@ -2,7 +2,7 @@ import logging
 import math
 from collections.abc import Callable, Mapping, Sequence, Set
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import Literal
 
@@ -116,8 +116,9 @@ class Caps:
     time: float | None
 
 
-def derive_caps(budget: Budget, member_count: int) -> Caps:
-    # run at swarm start, inside the sample
+def derive_caps(budget: Budget, member_count: int, check_time: bool = True) -> Caps:
+    # run at swarm start, inside the sample; without check_time, an explicit time cap
+    # is compared with the sample's time limit later, by rederive_time_cap()
     if isinstance(budget.split, tuple) and len(budget.split) != member_count:
         raise ValueError(
             f"Budget.split has {len(budget.split)} weights but the swarm has {member_count} members."
@@ -151,15 +152,28 @@ def derive_caps(budget: Budget, member_count: int) -> Caps:
         cost=_cap("cost", budget.cost, limits.cost, budget),
         tokens=tokens,
         token_type=token_type,
-        time=_cap("time", budget.time, limits.time, budget),
+        time=_cap("time", budget.time, limits.time, budget, check_time),
     )
 
 
+def rederive_time_cap(budget: Budget, caps: Caps) -> Caps:
+    # the caps with a time cap derived from the sample's time limit again, after work
+    # at swarm start (users isolation's setup) that used sample time the first
+    # derivation counted on; an explicit time cap is fixed, and compared with the time
+    # the sample has left now
+    return replace(caps, time=_cap("time", budget.time, sample_limits().time, budget))
+
+
 def _cap(
-    kind: str, explicit: float | None, sample: Limit, budget: Budget
+    kind: str,
+    explicit: float | None,
+    sample: Limit,
+    budget: Budget,
+    check: bool = True,
 ) -> float | None:
     if explicit is not None:
-        _check_explicit(kind, explicit, sample)
+        if check:
+            _check_explicit(kind, explicit, sample)
         return explicit
     return _derived(kind, sample, budget.reserve) if budget.derive else None
 
@@ -341,6 +355,9 @@ class MemberContext:
     background_running: int = 0
     # the error for bridge use found after the member started background work
     refusal: RuntimeError | None = None
+    # called, set by the runtime, as soon as an error that ends the member and the swarm
+    # is known in the member's work, before any cleanup awaits
+    fatal: Callable[[], None] = lambda: None
 
 
 def bridged_background_error(name: str) -> RuntimeError:
