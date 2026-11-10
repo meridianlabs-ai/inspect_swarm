@@ -2013,8 +2013,8 @@ _BACKGROUND = "The member cannot be paused: it starts background work, which wou
 
 @pytest.mark.anyio
 async def test_a_paused_member_is_held_at_its_next_boundary_until_resumed() -> None:
-    started = anyio.Event()
-    script = _Recording([_call("slow", seconds=0.2), _submit()])
+    started, release = anyio.Event(), anyio.Event()
+    script = _Recording([_call("slow", seconds=0), _submit()])
 
     async def drive(group: OperatorGroup) -> None:
         a = group.agents["a"]
@@ -2029,6 +2029,7 @@ async def test_a_paused_member_is_held_at_its_next_boundary_until_resumed() -> N
         assert not _act(a.pause, dry_run=False).changed
         info = _act(a.info)
         assert (info.paused, info.activity) == (True, "in_turn")
+        release.set()
         await _until(lambda: _activity(group, "a") == "held")
         # longer than the member's time limit, which does not run while it is held
         await anyio.sleep(1)
@@ -2042,7 +2043,7 @@ async def test_a_paused_member_is_held_at_its_next_boundary_until_resumed() -> N
         _swarm(
             [
                 member(
-                    _react(script, _slow(started)),
+                    _react(script, _slow(started, release)),
                     name="a",
                     limits=[time_limit(0.5)],
                 )
@@ -2069,8 +2070,8 @@ async def test_a_paused_member_is_held_at_its_next_boundary_until_resumed() -> N
 async def test_a_pause_before_the_first_boundary_holds_the_member_there(
     when: str,
 ) -> None:
-    ready, go, started = anyio.Event(), anyio.Event(), anyio.Event()
-    script = _Recording([_call("slow", seconds=0.2), _submit()])
+    ready, go, started, release = (anyio.Event() for _ in range(4))
+    script = _Recording([_call("slow", seconds=0), _submit()])
 
     async def run_controller(control: SwarmControl) -> str:
         await go.wait()
@@ -2099,12 +2100,13 @@ async def test_a_pause_before_the_first_boundary_holds_the_member_there(
         assert _act(target.resume, dry_run=False).changed
         await started.wait()
         _act(a.pause, dry_run=False)
+        release.set()
         await _until(lambda: _activity(group, "a") == "held")
         _act(a.resume, dry_run=False)
 
     ran = await _run(
         _swarm(
-            [member(_after(ready, _react(script, _slow(started))), name="a")],
+            [member(_after(ready, _react(script, _slow(started, release))), name="a")],
             run_controller,
         ),
         drive,
@@ -2216,7 +2218,7 @@ def returns_when_set(inner: Agent, release: anyio.Event) -> Agent:
 async def test_swarm_wait_counts_a_member_the_operator_holds_as_active(
     order: str,
 ) -> None:
-    started, paused, mid, go = (anyio.Event() for _ in range(4))
+    started, release, paused, mid, go = (anyio.Event() for _ in range(5))
     scheduling, scheduled = anyio.Event(), anyio.Event()
     if order == "operator":
         # timed out while the operator holds a, then news of a's end once resumed
@@ -2265,6 +2267,7 @@ async def test_swarm_wait_counts_a_member_the_operator_holds_as_active(
         await started.wait()
         _act(a.pause, dry_run=False)
         paused.set()
+        release.set()
         if order == "operator":
             await _until(lambda: waiter.calls == 2)
         elif order == "scheduler_first":
@@ -2283,8 +2286,8 @@ async def test_swarm_wait_counts_a_member_the_operator_holds_as_active(
             [
                 member(
                     _react(
-                        _Recording([_call("slow", seconds=0.2), _submit()]),
-                        _slow(started),
+                        _Recording([_call("slow", seconds=0), _submit()]),
+                        _slow(started, release),
                     ),
                     name="a",
                 ),
@@ -2304,10 +2307,10 @@ async def test_swarm_wait_counts_a_member_the_operator_holds_as_active(
 async def test_the_swarm_pause_holds_every_member_and_its_resume_leaves_own_pauses() -> (
     None
 ):
-    go = anyio.Event()
+    go, release = anyio.Event(), anyio.Event()
     started = {name: anyio.Event() for name in "abc"}
     scripts = {
-        name: _Recording([_call("slow", seconds=0.2), _submit()]) for name in "abc"
+        name: _Recording([_call("slow", seconds=0), _submit()]) for name in "abc"
     }
 
     async def run_controller(control: SwarmControl) -> str:
@@ -2326,6 +2329,7 @@ async def test_the_swarm_pause_holds_every_member_and_its_resume_leaves_own_paus
         assert not _act(group.pause, dry_run=False).changed
         assert _act(group.info).paused
         _act(a.pause, dry_run=False)
+        release.set()
         await _until(lambda: _activity(group, "a") == _activity(group, "b") == "held")
         go.set()
         await _until(lambda: _activity(group, "c") == "held")
@@ -2356,7 +2360,7 @@ async def test_the_swarm_pause_holds_every_member_and_its_resume_leaves_own_paus
     ran = await _run(
         _swarm(
             [
-                member(_react(scripts[name], _slow(started[name])), name=name)
+                member(_react(scripts[name], _slow(started[name], release)), name=name)
                 for name in "abc"
             ],
             run_controller,
@@ -2439,9 +2443,13 @@ async def test_members_with_background_work_cannot_be_paused() -> None:
 
 
 def _owns_a_task_group(
-    script: Script, started: anyio.Event, release: anyio.Event, finish: anyio.Event
+    script: Script,
+    started: anyio.Event,
+    paused: anyio.Event,
+    release: anyio.Event,
+    finish: anyio.Event,
 ) -> Agent:
-    """A member whose wrapper owns a task group around its react loop, and passes it to a tool that starts a helper; once `release` is set, the helper starts background work that runs until `finish` is set."""
+    """A member whose wrapper owns a task group around its react loop, and passes it to a tool that starts a helper and returns once `paused` is set; once `release` is set, the helper starts background work that runs until `finish` is set."""
 
     @agent
     def owns_a_task_group() -> Agent:
@@ -2458,6 +2466,7 @@ def _owns_a_task_group(
                         """Start a helper that outlives this call."""
                         tg.start_soon(helper_task)
                         started.set()
+                        await paused.wait()
                         return "started"
 
                     return execute
@@ -2480,7 +2489,9 @@ def _owns_a_task_group(
 async def test_background_work_started_while_paused_withdraws_the_pause(
     target: str, other: str
 ) -> None:
-    started, release, finish, held_by_other, paused = (anyio.Event() for _ in range(5))
+    started, release, finish, held_by_other, paused, proceed = (
+        anyio.Event() for _ in range(6)
+    )
     script = _Recording([_call("helper"), _submit()])
     ran_other: list[int] = []
 
@@ -2497,6 +2508,7 @@ async def test_background_work_started_while_paused_withdraws_the_pause(
         if other == "after":
             await paused.wait()
             control.member("a").on_boundary(other_callback, origin="test")
+            proceed.set()
         return await _drain(control)
 
     async def drive(group: OperatorGroup) -> None:
@@ -2504,6 +2516,8 @@ async def test_background_work_started_while_paused_withdraws_the_pause(
         await started.wait()
         assert _act((a if target == "agent" else group).pause, dry_run=False).changed
         paused.set()
+        if other != "after":
+            proceed.set()
         await _until(lambda: _activity(group, "a") == "held")
         if other == "holding":
             await held_by_other.wait()
@@ -2519,7 +2533,7 @@ async def test_background_work_started_while_paused_withdraws_the_pause(
         _swarm(
             [
                 member(
-                    _owns_a_task_group(script, started, release, finish),
+                    _owns_a_task_group(script, started, proceed, release, finish),
                     name="a",
                 )
             ],
@@ -2705,8 +2719,8 @@ async def test_a_pause_reaches_only_the_swarm_it_is_addressed_to(nesting: str) -
 # member after a scheduler lets it go.
 @pytest.mark.anyio
 async def test_a_pause_holds_a_member_after_an_earlier_scheduler_releases_it() -> None:
-    started, go = anyio.Event(), anyio.Event()
-    script = _Recording([_call("slow", seconds=0.2), _submit()])
+    started, release, go = anyio.Event(), anyio.Event(), anyio.Event()
+    script = _Recording([_call("slow", seconds=0), _submit()])
     released: list[int] = []
 
     async def schedule(boundary: Boundary) -> None:
@@ -2718,6 +2732,7 @@ async def test_a_pause_holds_a_member_after_an_earlier_scheduler_releases_it() -
         a = group.agents["a"]
         await started.wait()
         _act(a.pause, dry_run=False)
+        release.set()
         await _until(lambda: _activity(group, "a") == "held")
         go.set()
         await _until(lambda: released == [1])
@@ -2727,7 +2742,7 @@ async def test_a_pause_holds_a_member_after_an_earlier_scheduler_releases_it() -
 
     ran = await _run(
         _swarm(
-            [member(_react(script, _slow(started)), name="a")],
+            [member(_react(script, _slow(started, release)), name="a")],
             _starting(callbacks={"a": schedule}),
         ),
         drive,
