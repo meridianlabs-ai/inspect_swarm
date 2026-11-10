@@ -19,7 +19,7 @@ In three rare cases, a bridged member's recorded status and `ended_by` can diffe
 - a bridge filter makes parallel model calls in one request, and a swarm limit hides the sample's limit;
 - a CLI retry, or another request already in flight, follows the member's own limit, and the bridge replaces that limit with a swarm cap, a share or a stop.
 
-In the first two, the sample's limit is caught only at the sample's next model call, or not at all if there is none. In all three, the bridge refuses later requests before any model call, but calls already in flight finish and are charged. With the bridge's native compaction, requests that were already waiting to compact can each still make one compaction call, which is charged. The [limits design](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/design/swarm-limits.md#interactions) gives the outcome of each path.
+In the first two, the sample's limit is caught only at the sample's next model call, or not at all if there is none. In all three, the bridge makes no further model call for the member once it keeps an error, but calls already dispatched finish and are charged. The [limits design](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/design/swarm-limits.md#interactions) gives the outcome of each path.
 
 The CLI's own tool calls do not emit Inspect `ToolEvent`s, so the tool-event evidence described here does not cover them, Inspect Sentinel does not see them, and `longest_identical_tool_run` is `null` for bridged members.
 

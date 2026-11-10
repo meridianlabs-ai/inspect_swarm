@@ -1770,3 +1770,40 @@ async def test_without_derived_caps_a_sample_cost_limit_raises_ahead_of_a_swarm_
     assert ledger.ended_by == ended_by
     line = next(m for m in ledger.members if m.name == "agent")
     assert (line.bridged, line.status) == (bridged, status)
+
+
+@pytest.mark.anyio
+async def test_queued_bridged_requests_make_no_call_after_a_kept_turn_limit() -> None:
+    # three requests pass the bridge's entry check and wait for the model's one
+    # connection; the first generation reaches the member's turn limit, and the bridge
+    # keeps that error before the others reach the provider
+    script = Script()
+    model = get_model(
+        f"mockllm/m-{uuid4().hex}",
+        memoize=False,
+        custom_outputs=script,
+        config=GenerateConfig(max_connections=1),
+    )
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("cli")
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    stop = await run_swarm(
+        swarm(
+            member(
+                cli(model, requests=3),
+                name="cli",
+                bridged=True,
+                limits=[turn_limit(0)],
+            ),
+            controller=_controller(run, "limits_test_bridged_queued_turn"),
+            channels=[],
+        )
+    )
+    assert statuses(stop) == {"cli": "member_limit:turn"}
+    assert script.calls == 1
+    [line] = _written_ledger(stop.transcript).members
+    assert line.meter.usage.total_tokens == TOKENS_PER_CALL

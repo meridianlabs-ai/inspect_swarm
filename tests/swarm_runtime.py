@@ -185,8 +185,12 @@ def cli(
                 GenerateConfig(),
                 requested_model=None,
             )
-            # the bridge's dialects track the agent's state from each generation
-            await bridge._track_state(conversation, output)  # pyright: ignore[reportPrivateUsage]
+            # the bridge's dialects track the agent's state from each generation, with
+            # each choice in the form handed back to the CLI: here, unchanged
+            transported: list[list[ChatMessage]] = [
+                [choice.message] for choice in output.choices
+            ]
+            await bridge._track_state(conversation, output, transported)  # pyright: ignore[reportPrivateUsage]
             return {}
 
         forward = _forward_provider_errors(generate, bridge)
