@@ -72,7 +72,7 @@ def users(
 
     When the swarm starts, before any member does, it creates a non-root user `swarm-<member>` for each member, with a new private home directory (the image's `/etc/skel` is not copied), sets up the read-write shares, checks the read-only ones, and checks that the boundaries hold by running commands as the members. It refuses to start if any check fails. Each member then runs inside a sandbox identity scope, so that the built-in tools that run commands in the sandbox (`bash()`, `python()`, `bash_session()`, `text_editor()`, `grep()`, `list_files()` and the `read_file()` tool) run as its user and start in its home. Custom tools' `exec()`, `read_file()` and `write_file()` calls that name no user also run as the member. Raw `exec()` calls keep the sandbox's working directory unless they pass `cwd`; use absolute paths for raw file calls. Its preamble tells it its user and directories.
 
-    When a member ends, the swarm kills every process still running as its user, and records what it found in the member's result (`MemberResult.reap`). If processes survive, or the sandbox does not answer, the result record's `isolation_incomplete` is `True`. When the swarm ends, it records who owns the files in the read-write shares and in `/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock` and the other world-writable directories, as a `census` evidence event.
+    When a member ends, the swarm kills every process still running as its user, and records what it found in the member's result (`MemberResult.reap`). If processes survive, or the sandbox does not answer, the result record's `isolation_incomplete` is `True`. When the swarm ends, it records who owns the files in the read-write shares and in `/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock` and the other world-writable directories on the root filesystem, as a `census` evidence event.
 
     A member cannot read or change another member's home unless `peers="read"` lets it read, and cannot write a `ro` share. It can still see the other members' processes and command lines, share files through `/tmp`, and connect to their sockets on localhost. Members share one kernel and one sandbox root: this is a default boundary and a record of who made what, not containment.
 
@@ -501,12 +501,18 @@ while [ $# -gt 0 ]; do
 done
 # the world-writable directories on the root filesystem, the topmost of each tree, which
 # the census scans as places every member can write; a path with a newline is left out,
-# since the answer has one path per line
+# since the answer has one path per line. find -xdev still lists a mount point on /, so
+# one on another filesystem (by its device) is left out too: the id scan of / did not
+# reach its files, whose owners could have the ids setup chooses.
 nl='
 '
+rootdev=$(find / -maxdepth 0 -printf '%D') && [ -n "$rootdev" ] \
+  || fail "users isolation could not read the device of /"
 scan "users isolation could not scan / for world-writable directories" \
-  -P / -xdev -ignore_readdir_race -type d -perm -0002 -prune ! -path "*$nl*" -printf '%p\n'
-head -n $((writable_cap + 1)) "$dir/found" | sed 's/^/writable /' >"$dir/writable" \
+  -P / -xdev -ignore_readdir_race -type d -perm -0002 -prune ! -path "*$nl*" -printf '%D %p\n'
+awk -v d="$rootdev" '$1 == d { sub(/^[^ ]* /, ""); print }' "$dir/found" >"$dir/onroot" \
+  || fail "users isolation could not list the world-writable directories"
+head -n $((writable_cap + 1)) "$dir/onroot" | sed 's/^/writable /' >"$dir/writable" \
   || fail "users isolation could not list the world-writable directories"
 # the answer: at most one line per id in the window, and the world-writable directories,
 # between markers, so that output a provider cut short is found out rather than read as

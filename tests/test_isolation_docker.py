@@ -1099,11 +1099,13 @@ def test_leftover_processes_are_stopped_and_the_census_attributes_files(
                     after=f"{_alive('w-1')}; {_alive('w-2')}",
                 )
             ],
-            # an absent root
-            setup="rm -rf /run/lock",
+            # an absent root; a world-writable directory on the root filesystem, and
+            # one on a filesystem of its own (a mount, whose files the id scan does not
+            # reach), with a file a uid in the window owns
+            setup="rm -rf /run/lock && mkdir -m 777 /opt/drop && touch /cache/old && chown 61003 /cache/old",
         )
     }
-    samples = _eval(tmp_path, cases)
+    samples = _eval(tmp_path, cases, compose_extra="      - /cache:mode=1777\n")
     results = cases["reap"].results
     # w-1's processes ran while it did, and were gone when w-2 started
     running = _ok(results["w-1"][3]).split()
@@ -1152,3 +1154,6 @@ def test_leftover_processes_are_stopped_and_the_census_attributes_files(
     assert paths("/dev/shm", "w-2") == []
     assert roots["/run/lock"]["status"] == "absent"
     assert {root["kind"] for root in data["roots"]} >= {"share", "transient"}
+    # only world-writable directories on the root filesystem are census roots
+    assert roots["/opt/drop"]["kind"] == "world_writable"
+    assert "/cache" not in roots
