@@ -5,7 +5,7 @@ llms-description: "How the task's scorers score a swarm: which submission is the
 
 ## Overview
 
-A swarm is scored by the task's own scorers. The swarm is the task's solver, so the scorers run after it, on the swarm's output and on whatever the members left in the sandbox, as they would after a single agent. Inspect Swarm records what the swarm did, so analysis can read it beside the scores. For a task scored on its answer, `member_scores()` also grades each member's output ([Member scores](#member-scores)).
+A swarm is scored by the task's own scorers. The swarm is the task's solver, so the scorers run after it, on the swarm's output and on whatever the members left in the sandbox, as they would after a single agent. Inspect Swarm records what the swarm did, so analysis can read it beside the scores. For a task scored on its answer, `member_scores()` also grades each member's output ([Member scores](#member-scores)), and for a task scored on what the members leave, each member's own artifact when the task can put it in place ([Per-member artifacts](#per-member-artifacts)).
 
 ## The answer and the result record
 
@@ -17,12 +17,13 @@ The controller's `final` chain chooses the swarm's answer from the members' subm
 - `last`: the latest submission, again with ties broken by roster order. `leaderless(stop_on_submission=False, final="last")` gives it, for a team whose members build on each other's work ([Controllers](controllers.qmd#leaderless)).
 - `verify`: the submission that passed the verifier with the highest `value`, then the earliest. A verdict without a value, or with a NaN value, ranks below any number. It needs a verifier in the [result contract](#the-result-contract), and gives nothing when no submission passed.
 - `vote`: the most common answer key, one vote per member; a submission whose key is `None` does not vote. The answer is the earliest submission with that key. A tie goes to the key submitted first. It needs an `answer_key` in the result contract, and gives nothing when no submission has a key.
+- `synthesize`: one model call, when the swarm ends, that combines the submissions into one answer. `synthesize(model=..., prompt=...)` sets the model and the instruction; the plain string `"synthesize"` uses the model role `synthesizer` if the eval defines it, else the eval's model. The model gets the sample's input, then a message that quotes each submission's completion in a `<member_submission>` block naming its member, and asks for one final answer in the format the task asks for. Members' tool calls and messages are not included. The blocks are labels, not a boundary: a member can write text that looks like one. It needs a result contract of kind `answer`, and is never part of the default chain. It gives nothing when there are no submissions, or when the call fails with an error or a refusal, or returns an empty completion or a `content_filter` stop reason; the chain then goes on to its next mode. A limit, an operator's termination or a cancellation during the call ends the swarm with the answer so far. The answer so far, before the swarm ends, is the chain's choice without `synthesize`.
 
 The default chain depends on the result contract: `verify` if it has a verifier, then `vote` if it has an answer key, then `first`. So a task with both gets `["verify", "vote", "first"]`: when nothing passes, the swarm votes, and when no submission has a key, it takes the first. A task without a contract gets `first`. A single mode is strict: with `final="verify"`, no passed submission means no answer. `swarm()` raises `ValueError` for a chain the contract cannot support, such as `verify` without a verifier.
 
 A controller of your own can also choose the answer itself, with `choose_answer()`, in place of the chain ([Controllers](controllers.qmd#choosing-the-answer)). A member that ended any other way than submitting is never chosen ([Members](members.qmd#how-a-member-ends)). When no member submitted, the answer is empty. Each answer of a [persistent member](members.qmd#persistent-members) is a submission for `first` and `last`, whatever the member's status later, and ties between two answers of one member go to the earlier one.
 
-The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the mode and the chosen member. Each member's own conversation is in its lane of the swarm's timeline.
+The swarm's output is the chosen member's `ModelOutput`, unchanged, so the scorer sees what it would have seen had that member run alone. Under `synthesize` it is the synthesizing model's output, which is no member's. The sample's messages are its input followed by the answer's message, whose `metadata["inspect_swarm"]` names the mode and the chosen member. Each member's own conversation is in its lane of the swarm's timeline.
 
 ### The result record
 
@@ -35,7 +36,7 @@ When the swarm ends, it writes a record of what it did to the transcript, as an 
     {"name": "react-1", "role": null, "choose_name": false, "state": "ended", "status": "submitted", "submitted": true, "time": 41.2, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null},
     {"name": "react-2", "role": null, "choose_name": false, "state": "ended", "status": "swarm_cap", "submitted": false, "time": 57.9, "sandbox": null, "gate_checks": 0, "gate_passes": 0, "first_pass_time": null}
   ],
-  "final": {"mode": "first", "member": "react-1", "reason": null, "provisional": false, "chain": ["first"], "tie": false}
+  "final": {"mode": "first", "member": "react-1", "reason": null, "provisional": false, "chain": ["first"], "tie": false, "synthesize_error": null}
 }
 ```
 
@@ -47,7 +48,8 @@ When the swarm ends, it writes a record of what it did to the transcript, as an 
 - `output` is the member's `ModelOutput` when it ended, however it ended (left out above).
 - `answer_key`, `verdict` and `verdict_time` come from the result contract, for a submission ([The result contract](#the-result-contract)). The record's `kind` and `verifier` name the contract's kind and its verifier. Without a contract, all of these are `null`.
 - `left_out` names the member's values that the record leaves out, because it cannot hold them: `output`, `answer_key` or `explanation` (the verdict's). Each such value is `null` in the record. The member's output is still the swarm's answer if it was chosen. Usually `left_out` is empty.
-- `final.chain` is the chain the swarm applied. `final.mode` is the mode that chose the answer (`verify`, `vote`, `first` or `last`) or `controller`, and `final.member` names the chosen member. Under `controller`, `final.reason` is the reason the controller gave. With no answer, `mode` and `member` are `null` and `final.reason` says why: `"no_submissions"`, or, when there were submissions, `"none_verified"` for a chain that ends with `verify` and `"no_answer_keys"` for one that ends with `vote`.
+- `final.chain` is the chain the swarm applied. `final.mode` is the mode that chose the answer (`verify`, `vote`, `first`, `last` or `synthesize`) or `controller`, and `final.member` names the chosen member, or is `null` under `synthesize`. Under `controller`, `final.reason` is the reason the controller gave. With no answer, `mode` and `member` are `null` and `final.reason` says why: `"no_submissions"`, or, when there were submissions, `"none_verified"` for a chain that ends with `verify`, `"no_answer_keys"` for one that ends with `vote`, and `"synthesize_failed"` for one that ends with a `synthesize` call that failed. A provisional answer whose chain ends with `synthesize` has `"not_synthesized"`, since the call runs only when the swarm ends.
+- `final.synthesize_error` says why a `synthesize` call failed when the chain went on past it: the error's type, such as `"the model call raised RateLimitError"`, an empty completion or a `content_filter` stop reason. It is `null` otherwise.
 - `final.tie` is `true` when `vote` chose from tied groups, by the earliest submission. Grouping the submitted members by their `answer_key` counts the keys the record keeps. A left-out key cannot be counted, and a log can turn different keys into the same text, so these counts may differ from the original vote. `mode`, `member` and `tie` describe the original choice.
 - `final_verdict` is the verifier's verdict on the environment after the members have stopped, for an `artifact` task with a verifier ([The result contract](#the-result-contract)). The record's own `left_out` is `["explanation"]` when it cannot hold that verdict's explanation.
 
@@ -103,7 +105,7 @@ The contract holds the task's functions, so the log records it only as `"ResultS
 
 ## Member scores
 
-`member_scores()`, from `inspect_swarm.scorer`, grades each member's output with a scorer of the task's, as if that member had run alone, and gives two values: `best_member`, the best member, and `mean_member`, the mean over the members. It needs the [result contract](#the-result-contract) of an answer task, the same one the swarm is given. The contract holds the task's functions, which a log cannot rebuild, so wrap `member_scores()` in a registered scorer of the task's own with no arguments. Re-scoring rebuilds it by name:
+`member_scores()`, from `inspect_swarm.scorer`, grades each member's output with a scorer of the task's, as if that member had run alone, and gives two values: `best_member`, the best member, and `mean_member`, the mean over the members. It needs the [result contract](#the-result-contract) of an answer task, or of an artifact task with [member artifacts](#per-member-artifacts), the same one the swarm is given. The contract holds the task's functions, which a log cannot rebuild, so wrap `member_scores()` in a registered scorer of the task's own with no arguments. Re-scoring rebuilds it by name:
 
 ```python
 from inspect_ai import Task, task
@@ -140,11 +142,109 @@ def math_swarm() -> Task:
 - Each member's grade sees the sample's input, metadata and target, with the member's output as the sample's output and its message after the input. It runs in a span named after the member, within the scorer's span.
 - A member that never started has no value. A member with no output, or only whitespace, gets `empty_value` (0 by default) and is not graded. A member whose grade is `None`, NaN, or more than one value (a dict, list or tuple), or whose output the record left out, has no value either.
 - The values are over the members that have one. When none has, both are NaN, which Inspect counts as unscored. The score's metadata says, for each member, its outcome, value and reason, with its key and verdict from the record; `complete` is `false` when a member that started has no value.
-- Without the contract, with a contract of another kind, or for an `artifact` task, both values are NaN with the reason `kind_not_declared`, `kind_mismatch` or `artifact_without_member_artifacts`. `member_scores()` does not grade member artifacts yet.
+- Without the contract, with a contract of another kind, or for an `artifact` task without `member_artifacts`, both values are NaN with the reason `kind_not_declared`, `kind_mismatch` or `artifact_without_member_artifacts`.
 - A sample with no swarm is scored as one member named `solver`, with the sample's output.
 - During the solve, while `state.completed` is `False`, it returns `None`, so attempt loops such as `react(attempts=...)` get the same grades as without it.
 - Re-scoring reads each member's output from the record, so it gives the same scores without the sandbox, or applies a new scorer to every member. A scorer that needs the sandbox cannot be re-scored and raises `ProcessLookupError`.
 - A model-graded scorer is called once more for each member, and that usage counts in the sample's.
+
+### Per-member artifacts
+
+In an artifact task the team shares one result, and the task's scorer grades it. To also grade each member's own work, the task gives `artifact_result()` a `member_artifacts` object. Its `materialize(member)` returns an async context manager that puts that member's artifact where the task's scorer looks for the team's, and puts the team's back on exit, including on error. Then `member_scores()` grades each member that started, in roster order:
+
+```python
+for m in record.members:
+    async with result.member_artifacts.materialize(m.name):
+        score = await scorer(state_with_the_members_output, target)
+```
+
+- List `member_scores()` after the task's own scorer, so the team's artifact is graded first, before any member's is put in place.
+- Every member that started is graded, whatever its completion: a member can leave a passing artifact and stop without submitting any text. There is no empty outcome. Unavailable grades and the values follow answer tasks.
+- `materialize` runs inside the member's span, so its sandbox calls appear with the member's grade.
+- `materialize` is given roster names only, never a name a member chose, so paths and branch names come from the task's own layout.
+- Restoring must also remove what the scorer created, so the next member is graded on its own artifact alone.
+- If scoring times out while a member is graded, the sample errors and the checkout may be left unrestored. Scores from earlier scorers, such as the team's, can remain in the log. A retry starts in a fresh sandbox.
+- An error from `materialize` or the scorer fails the sample.
+- A sample with no swarm is graded on the environment as it left it, without `materialize`.
+- In a shared sandbox, any member can write into another member's directory or branch. A member's grade says what was in its place when the scorer ran, not what that member did alone.
+
+#### Example: a branch per member
+
+Take a task shaped like SWE-bench. The repository is in `/testbed`, where the task's scorer runs the tests. Each member works in its own git worktree, `/worktrees/<member>`, on branch `swarm/<member>`, and commits its work there. The members merge their work into `/testbed`, the team's checkout. The task's setup creates the worktrees, one per roster name, with `git worktree add -b swarm/<member> /worktrees/<member>`.
+
+`materialize` copies the team's checkout aside, puts the member's branch in `/testbed`, and moves the copy back on exit:
+
+```python
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
+from inspect_ai.util import sandbox
+
+
+class MemberBranches:
+    """Put each member's branch, `swarm/<member>`, in the team's checkout."""
+
+    def __init__(self, repo: str = "/testbed") -> None:
+        self.repo = repo
+        self.team = f"{repo}.team"
+
+    @asynccontextmanager
+    async def materialize(self, member: str) -> AsyncGenerator[None]:
+        # the team's checkout, ignored files and git index included
+        await self.sh('mkdir "$2" && cp -a "$1/." "$2"', self.repo, self.team)
+        try:
+            # the member's committed files in place of the team's; HEAD stays put
+            await self.sh(
+                'cd "$1" && git add -A && git read-tree -u --reset "swarm/$2"',
+                self.repo,
+                member,
+            )
+            yield
+        finally:
+            # never retried: a second run would delete the restored checkout
+            await self.sh(
+                'rm -rf "$1" && mv "$2" "$1"', self.repo, self.team, retry=False
+            )
+
+    async def sh(self, script: str, *args: str, retry: bool = True) -> None:
+        result = await sandbox().exec(
+            ["sh", "-c", f"set -e; {script}", "sh", *args],
+            cwd="/",
+            timeout_retry=retry,
+        )
+        if not result.success:
+            raise RuntimeError(
+                f"materializing a member in {self.repo} failed: {result.stderr}"
+            )
+```
+
+The task passes it in its contract, and lets every member run to its end:
+
+```python
+def swe_result() -> ResultSpec:
+    return artifact_result(member_artifacts=MemberBranches())
+
+
+@scorer(metrics=MEMBER_METRICS)
+def swe_members() -> Scorer:
+    return member_scores(swe_tests(), swe_result())
+
+
+@task
+def swe_swarm() -> Task:
+    return Task(
+        dataset=INSTANCES,
+        solver=swarm(
+            members=member(react, args={"tools": [bash()]}, count=4),
+            controller=leaderless(stop_on_submission=False),
+            result=swe_result(),
+        ),
+        scorer=[swe_tests(), swe_members()],
+        sandbox="docker",
+    )
+```
+
+`swe_tests()` is the task's own scorer, which runs the tests in `/testbed`. A member is graded on what it committed to its branch; work it left uncommitted in its worktree is not part of its grade. The team's ignored files, such as build outputs, stay in place for every member. After each member, the team's checkout is back exactly as it was, so what the scorer wrote is gone. The copy needs room for a second checkout.
 
 ## Scoring what members leave
 
@@ -233,4 +333,4 @@ def single_agent() -> Task:
 
 `pass_at_k` and `max` choose with knowledge of the target, and the swarm's answer rule does not, so they are upper references, not like-for-like comparisons.
 
-Compare arms on the cost the log records, not on the caps ([Analysis](analysis.qmd#samples-dataframe)). For an answer task, `member_scores()` gives team@k as `best_member` (whether any of the k members solved it) and the mean member as `mean_member`. Compare team@k with `pass_at_k` or best@k over epochs of `baseline()` read from the same member scorer, since both choose with knowledge of the target. best@k on graded scores can be computed from per-epoch values in `samples_df()`.
+Compare arms on the cost the log records, not on the caps ([Analysis](analysis.qmd#samples-dataframe)). For an answer task, `member_scores()` gives team@k as `best_member` (whether any of the k members solved it) and the mean member as `mean_member`. Compare team@k with `pass_at_k` or best@k over epochs of `baseline()` read from the same member scorer, since both choose with knowledge of the target. best@k on graded scores can be computed from per-epoch values in `samples_df()`. Compare the swarm's own score with select@k, the swarm's answer rule applied to k epochs of `baseline()`, since neither uses the target ([Analysis](analysis.qmd#selectk)).
