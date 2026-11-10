@@ -1479,6 +1479,45 @@ async def test_the_provisional_answer_follows_the_chain_after_each_verdict() -> 
 
 
 @pytest.mark.anyio
+async def test_the_provisional_answer_follows_the_vote_after_each_key() -> None:
+    seen: list[tuple[str, str]] = []
+    state = AgentState(messages=[ChatMessageUser(content="task")])
+    interrupt = anyio.CancelScope()
+
+    async def run(control: SwarmControl) -> StopReason:
+        for m in control.members:
+            control.start(m)
+        async for event in control.events():
+            # the event follows the key, which the answer already reflects
+            seen.append((event.member, state.output.completion))
+            if event.member == "c":
+                # interrupted once the majority has formed, before the final step
+                interrupt.cancel()
+                await anyio.sleep_forever()
+        return "all_done"
+
+    agent_swarm = swarm(
+        _team(("a", "x", []), ("b", "y", ["a"]), ("c", "y", ["b"])),
+        controller=_controller(run, "final_test_provisional_vote"),
+        channels=[],
+        result=answer_result(answer_key=_key),
+    )
+    async with sample():
+        with interrupt:
+            await agent_swarm(state)
+        record = _record()
+    assert interrupt.cancelled_caught
+    # a's key while it is alone or tied with b's, then the majority's earliest
+    assert seen == [("a", "x"), ("b", "x"), ("c", "y")]
+    assert (record.final.mode, record.final.member, record.final.provisional) == (
+        "vote",
+        "b",
+        True,
+    )
+    assert state.output.completion == "y"
+
+
+@pytest.mark.anyio
 async def test_the_vote_counts_keys_the_record_leaves_out() -> None:
     # two members answer with a key the record cannot hold
     stop = await run_swarm(

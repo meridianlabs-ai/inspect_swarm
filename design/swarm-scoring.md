@@ -527,7 +527,7 @@ def final_chain(final: FinalSpec | None, result: ResultSpec | None) -> list[Fina
 - then `vote` if there is an answer key;
 - then `first`.
 
-So a task with both gets `["verify", "vote", "first"]`, and one with neither gets `["first"]`, M1's behaviour (decision: Ransom, 2026-10-07, for the order). The chain falls through: when nothing verifies, the swarm votes, and when nothing can vote, it takes the first submission (decision: Ransom, 2026-11-09; [Open question 1](#open-questions)). A single mode, `leaderless(final="verify")`, is strict: no verified submission means no answer.
+So a task with both gets `["verify", "vote", "first"]`, and one with neither gets `["first"]`, M1's behaviour (decision: Ransom, 2026-10-07, for the order). The chain falls through: when nothing verifies, the swarm votes, and when nothing can vote, it takes the first submission (decision: Ransom, 2026-11-09; [Open question 1](#open-questions)). A single mode, `leaderless(stop_on_submission=False, final="verify")`, is strict: no verified submission means no answer.
 
 **Validation.**
 
@@ -968,7 +968,7 @@ best@k is a closed form on values alone, so it would be a reducer (an inspect_ai
 
 **Snapshot only on a normal return, falling back to the sample total** (for the deferred cost boundary). Budget exhaustion is a normal way for an arm to end, and Inspect still grades those samples. The fallback total would then include grading, which differs between arms. A snapshot in the swarm's `finally` gives limit-ended samples a boundary too.
 
-**Strict modes only** (verify yields nothing when nothing verifies). Simpler, and it measures the verifier alone. But it makes the default swarm return nothing where an attempt would otherwise be scored on its answer. Strict behaviour stays available as `leaderless(final="verify")`. See [Open question 1](#open-questions).
+**Strict modes only** (verify yields nothing when nothing verifies). Simpler, and it measures the verifier alone. But it makes the default swarm return nothing where an attempt would otherwise be scored on its answer. Strict behaviour stays available as `leaderless(stop_on_submission=False, final="verify")`. See [Open question 1](#open-questions).
 
 **`final=` on `swarm()`.** One fewer object. But the valid modes and the default depend on the topology, so the chain is the controller's parameter (swarm-api.md); its semantics are the same either way. Rejected.
 
@@ -1018,7 +1018,7 @@ Untrusted input reaching the new code:
 1. **Does the default chain fall through?** Decided: (a), fall through (decision: Ransom, 2026-11-09).
    - With a verifier and an answer key, the default is `["verify", "vote", "first"]`.
    - When a mode yields nothing, the chain moves to the next: nothing verified, so vote; no keys, so first. The swarm returns an answer whenever anyone submitted.
-   - The strict reading, where nothing verified means no answer, stays available as `leaderless(final="verify")`.
+   - The strict reading, where nothing verified means no answer, stays available as `leaderless(stop_on_submission=False, final="verify")`.
    - The alternative, (b) strict, would have measured the verifier alone and returned no answer more often.
 
 ## Not this design

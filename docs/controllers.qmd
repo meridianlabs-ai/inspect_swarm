@@ -9,7 +9,7 @@ llms-description: "The `leaderless` controller, when the swarm stops, which subm
 
 ## leaderless
 
-The only built-in controller is `leaderless`, the default. It starts every member with the sample's input and stops the swarm when the first member submits, since that submission is the answer. The other members finish the calls they have in flight and stop. Those still running after the grace period are cancelled. If no member submits, the swarm ends when all have ended.
+The only built-in controller is `leaderless`, the default. It starts every member with the sample's input and stops the swarm when the first member submits. The other members finish the calls they have in flight and stop. Those still running after the grace period are cancelled. If no member submits, the swarm ends when all have ended.
 
 Pass `leaderless(stop_on_submission=False)` to let every member run to its end:
 
@@ -30,7 +30,7 @@ Use it when:
 - You measure each member's result, as for team@k.
 - Your agent returns normally when it gives up, which would count as a submission and stop the swarm.
 
-The answer is still the first submission. When the members work as a team and the latest submission should be the answer, add `final="last"`:
+Without a result contract, the answer is still the first submission; otherwise the result contract determines the default chain. When the members work as a team and the latest submission should be the answer, add `final="last"`:
 
 ```python
 from inspect_swarm import leaderless
