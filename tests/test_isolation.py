@@ -1,3 +1,4 @@
+import subprocess
 from collections.abc import Callable, Generator
 from contextlib import aclosing, contextmanager
 from pathlib import Path
@@ -51,6 +52,7 @@ from inspect_swarm import (
     users,
 )
 from inspect_swarm._budget import current_member
+from inspect_swarm._isolation import _CENSUS as _CENSUS_SCRIPT
 from inspect_swarm._record import _transcript_result
 
 from .swarm_runtime import (
@@ -103,6 +105,8 @@ class IsolationStub(SandboxEnvironment):
         # set when a reaping starts; a reaping waits for `hold_reaping` when it is set
         self.reaping: anyio.Event | None = None
         self.hold_reaping: anyio.Event | None = None
+        # seconds a reaping takes, by uid
+        self.reap_delay: dict[str, float] = {}
 
     async def exec(
         self,
@@ -131,6 +135,7 @@ class IsolationStub(SandboxEnvironment):
                 self.reaping.set()
             if self.hold_reaping is not None:
                 await self.hold_reaping.wait()
+            await anyio.sleep(self.reap_delay.get(cmd[4], 0))
             if self.fail is not None and self.fail_on == _REAP_MARK:
                 return self.fail
             return ExecResult(True, 0, self.reap, "")
@@ -1369,3 +1374,113 @@ async def test_no_callback_can_be_registered_while_a_member_is_reaped() -> None:
     assert refused == ["on_boundary('w'): the member has ended."]
     assert [m.status for m in outcome.record.members] == ["submitted"]
     assert outcome.record.final.member == "w"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stop_on_submission", [True, False])
+async def test_a_member_stopped_while_it_is_reaped_is_not_counted_cancelled(
+    stop_on_submission: bool,
+) -> None:
+    # both submit; the first's end stops the swarm while the second is still reaped,
+    # which is cleanup, not cancelled work
+    stub = IsolationStub()
+    stub.reap_delay = {"61002": 0.3}
+    team = swarm(
+        member(ends, args={"how": "returns"}, name="w", count=2),
+        controller=leaderless(stop_on_submission=stop_on_submission),
+        channels=[],
+        budget=Budget(grace=0),
+        isolation="users",
+    )
+    with environments(default=stub):
+        outcome = await run_swarm(team)
+    assert [m.status for m in outcome.record.members] == ["submitted", "submitted"]
+    [ledger] = swarm_events(outcome.transcript, "ledger")
+    data = cast(dict[str, Any], ledger.data)
+    assert [m["cancelled"] for m in data["members"]] == [False, False]
+    assert data["total_complete"] is True
+
+
+# The census script, run here by /bin/sh with `find` replaced by a function that writes
+# the given records and exits with the given status, after writing `errors` to stderr.
+def _census_script(
+    root: Path, records: str, status: int, errors: str = "", cap: int = 3
+) -> list[str]:
+    fake = (
+        "find() {\n"
+        f"  printf '{errors}' >&2\n"
+        f"  printf '{records}'\n"
+        f"  return {status}\n"
+        "}\n"
+    )
+    script = _CENSUS_SCRIPT.replace("export LC_ALL=C\n", "export LC_ALL=C\n" + fake, 1)
+    result = subprocess.run(
+        ["/bin/sh", "-c", script, "sh", str(cap), "61001", str(root)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.split("\n")[1:-2]
+
+
+_ROW = r"61001 f 4 /r/a\000"
+
+
+@pytest.mark.parametrize(
+    "records,status,errors,lines",
+    [
+        pytest.param(_ROW, 0, "", ["path 61001 f /r/a", "owner 61001 1 4"], id="ok"),
+        # killed (as by the kernel's out-of-memory killer), before and after a row
+        pytest.param("", 137, "", ["error find exited with status 137"], id="killed"),
+        pytest.param(
+            _ROW,
+            137,
+            "",
+            [
+                "path 61001 f /r/a",
+                "owner 61001 1 4",
+                "error find exited with status 137",
+            ],
+            id="killed-after-a-row",
+        ),
+        pytest.param(
+            _ROW,
+            1,
+            "",
+            ["path 61001 f /r/a", "owner 61001 1 4", "error find exited with status 1"],
+            id="silent-failure",
+        ),
+        # an entry removed while it ran
+        pytest.param(
+            _ROW,
+            1,
+            r"find: /r/gone: No such file or directory\n",
+            ["path 61001 f /r/a", "owner 61001 1 4"],
+            id="removed-entry",
+        ),
+        pytest.param(
+            _ROW,
+            1,
+            r"find: /r/x: Permission denied\n",
+            [
+                "path 61001 f /r/a",
+                "owner 61001 1 4",
+                "error find: /r/x: Permission denied",
+            ],
+            id="reported-error",
+        ),
+        # stopped at the cap, with the status a write to a closed pipe gives
+        pytest.param(_ROW * 5, 141, "", None, id="capped"),
+    ],
+)
+def test_the_census_reports_a_scan_that_failed(
+    tmp_path: Path, records: str, status: int, errors: str, lines: list[str] | None
+) -> None:
+    out = _census_script(tmp_path, records, status, errors)
+    assert out[0] == "root"
+    if lines is None:
+        assert "capped" in out and not any(line.startswith("error") for line in out)
+        assert "owner 61001 3 12" in out
+    else:
+        assert out[1:] == lines

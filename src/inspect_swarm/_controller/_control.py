@@ -1141,7 +1141,7 @@ class SwarmRun:
         with anyio.CancelScope(deadline=deadline):
             while m.started_not_ended:
                 await self._changed.wait()
-        if m.started_not_ended:
+        if m.started_not_ended and not m.gate.finished:
             m.context.scope.cancel()
 
     # the model calls in flight now, for the turn gate's cancelled chains
@@ -1157,9 +1157,11 @@ class SwarmRun:
         # grace: members finish the calls they have in flight and are refused the next
         with anyio.move_on_after(self._effective_grace):
             await self._until_quiet()
-        # hard stop
+        # hard stop; a member whose agent and work have ended has nothing to cancel,
+        # and its cleanup (reaping, under users isolation) must not read as cancelled
+        # work in the ledger
         for m in self._members:
-            if m.started_not_ended:
+            if m.started_not_ended and not m.gate.finished:
                 m.context.scope.cancel()
         await self._until_quiet()
         # ends the time cap's timer

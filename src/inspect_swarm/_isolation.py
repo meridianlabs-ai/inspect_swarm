@@ -1200,8 +1200,9 @@ async def _reap(env: SandboxEnvironment, identity: MemberIdentity) -> MemberReap
 # filesystem (-xdev), never following a symlink: for each owner, its entries and the
 # bytes of its regular files, and for each member uid the first 50 entries' types and
 # paths, any newline in a path as '?'. A root stops being counted at the cap, and says
-# so. A root that is not a directory is absent; one the scan could not read all of says
-# so, with find's first error, besides what it counted.
+# so. A root that is not a directory is absent; one the scan could not read all of, or
+# whose scan failed, says so, with find's first error or its exit status, besides what
+# it counted.
 # $1 the cap, $2 the member uids, space-separated, then the roots.
 _CENSUS = (
     _PRELUDE
@@ -1217,11 +1218,13 @@ for root in "$@"; do
     echo absent
     continue
   fi
-  # find stops once awk has read one entry past the cap
-  find -P "$root" -xdev -ignore_readdir_race -mindepth 1 -printf '%U %y %s %p\0' 2>"$dir/errors" \
+  rm -f "$dir/status" "$dir/capped"
+  # find's status, which a pipeline does not report, is kept in a file; find stops once
+  # awk has read one entry past the cap, which awk marks with a file of its own
+  { find -P "$root" -xdev -ignore_readdir_race -mindepth 1 -printf '%U %y %s %p\0' 2>"$dir/errors"; echo $? >"$dir/status"; } \
     | tr '\n\0' '?\n' \
-    | awk -v cap="$cap" -v members=" $members " '
-        NR > cap { print "capped"; exit }
+    | awk -v cap="$cap" -v members=" $members " -v flag="$dir/capped" '
+        NR > cap { print "capped"; printf "" > flag; exit }
         {
           n[$1]++
           if ($2 == "f") b[$1] += $3
@@ -1233,9 +1236,22 @@ for root in "$@"; do
         }
         END { for (u in n) printf "owner %s %d %.0f\n", u, n[u], b[u] }
       ' || fail "could not count the entries in $root"
-  # an entry removed while the scan runs is not an error, nor is find's write to a
-  # pipe that awk closed at the cap
-  grep -v -e ': No such file or directory$' -e 'Broken pipe$' "$dir/errors" | head -n 1 | sed 's/^/error /'
+  status=$(cat "$dir/status" 2>/dev/null) || status=unknown
+  if [ -e "$dir/capped" ]; then
+    # find was stopped at the cap, by SIGPIPE or a write error; an entry removed while
+    # the scan ran is not an error
+    other=$(grep -v -e ': No such file or directory$' -e 'Broken pipe$' "$dir/errors" | head -n 1)
+    [ -z "$other" ] || printf 'error %s\n' "$other"
+  else
+    other=$(grep -v ': No such file or directory$' "$dir/errors" | head -n 1)
+    if [ -n "$other" ]; then
+      printf 'error %s\n' "$other"
+    elif [ "$status" != 0 ] && { [ "$status" != 1 ] || [ ! -s "$dir/errors" ]; }; then
+      # find exits 1 after errors it reports; a silent failure, another status or a
+      # signal (such as the kernel's out-of-memory kill) could leave out anything
+      echo "error find exited with status $status"
+    fi
+  fi
 done
 echo end
 """

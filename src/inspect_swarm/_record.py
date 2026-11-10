@@ -106,7 +106,7 @@ class MemberResult(BaseModel):
     """Under users isolation, what stopping the processes the member left running found, once the member has ended; `None` before, and without isolation."""
 
     foreign_execs: int | None = None
-    """Under users isolation, how many commands the member ran in the sandbox as another user, once the member has ended; `None` before, and without isolation. These are `exec()` calls in the member's spans that named a user other than the member's, such as a custom tool's `exec(..., user="root")`, other than Inspect's own sandbox operations (tool injection and its launcher, in-loop scoring). It does not see calls a tool makes on the provider object (`sandbox().as_type(...)`) or file reads and writes."""
+    """Under users isolation, how many commands the member ran in the sandbox as another user, once the member has ended; `None` before, and without isolation. These are `exec()` calls in the member's spans that named a user other than the member's, such as a custom tool's `exec(..., user="root")`, other than Inspect's own sandbox operations (tool injection and its launcher, in-loop scoring). It does not see calls a tool makes on the provider object (`sandbox().as_type(...)`) or file reads and writes. The count includes named-user commands across all sandbox environments in the sample, so it does not by itself identify grants in the users-isolated sandbox."""
 
 
 class FinalRecord(BaseModel):
