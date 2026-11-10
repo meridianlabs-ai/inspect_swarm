@@ -154,6 +154,7 @@ for m in record.members:
 - `materialize` runs inside the member's span, so its sandbox calls appear with the member's grade.
 - `materialize` is given roster names only, never a name a member chose, so paths and branch names come from the task's own layout.
 - Restoring must also remove what the scorer created, so the next member is graded on its own artifact alone.
+- Restoring must finish when the scoring time limit cancels the scorer. Shield it from cancellation and give it a timeout of its own.
 - An error from `materialize` or the scorer fails the sample.
 - A sample with no swarm is graded on the environment as it left it, without `materialize`.
 - In a shared sandbox, any member can write into another member's directory or branch. A member's grade says what was in its place when the scorer ran, not what that member did alone.
@@ -162,12 +163,13 @@ for m in record.members:
 
 Take a task shaped like SWE-bench. The repository is in `/testbed`, where the task's scorer runs the tests. Each member works in its own git worktree, `/worktrees/<member>`, on branch `swarm/<member>`, and commits its work there. The members merge their work into `/testbed`, the team's checkout. The task's setup creates the worktrees, one per roster name, with `git worktree add -b swarm/<member> /worktrees/<member>`.
 
-`materialize` saves the team's files, puts the member's branch in `/testbed`, and puts the team's files back on exit:
+`materialize` copies the team's checkout aside, puts the member's branch in `/testbed`, and moves the copy back on exit:
 
 ```python
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import anyio
 from inspect_ai.util import sandbox
 
 
@@ -176,29 +178,35 @@ class MemberBranches:
 
     def __init__(self, repo: str = "/testbed") -> None:
         self.repo = repo
+        self.team = f"{repo}.team"
 
     @asynccontextmanager
     async def materialize(self, member: str) -> AsyncGenerator[None]:
-        # the team's files, untracked ones included, saved as a git tree
-        team = await self.git("git add -A && git write-tree")
-        # the member's committed files in place of the team's; HEAD stays put
-        await self.git('git read-tree -u --reset "swarm/$1"', member)
+        # the team's checkout, ignored files and git index included
+        await self.sh('mkdir "$2" && cp -a "$1/." "$2"', self.repo, self.team)
         try:
+            # the member's committed files in place of the team's; HEAD stays put
+            await self.sh(
+                'cd "$1" && git add -A && git read-tree -u --reset "swarm/$2"',
+                self.repo,
+                member,
+            )
             yield
         finally:
-            # remove the scorer's files, then put the team's back
-            await self.git(
-                'git clean -fdq && git read-tree -u --reset "$1" && git reset -q',
-                team,
-            )
+            # shielded, so a scoring time limit cannot stop it halfway
+            with anyio.CancelScope(shield=True):
+                await self.sh(
+                    'rm -rf "$1" && mv "$2" "$1"', self.repo, self.team, timeout=60
+                )
 
-    async def git(self, script: str, *args: str) -> str:
+    async def sh(self, script: str, *args: str, timeout: int | None = None) -> None:
         result = await sandbox().exec(
-            ["sh", "-c", f"set -e; {script}", "sh", *args], cwd=self.repo
+            ["sh", "-c", f"set -e; {script}", "sh", *args], cwd="/", timeout=timeout
         )
         if not result.success:
-            raise RuntimeError(f"git failed in {self.repo}: {result.stderr}")
-        return result.stdout.strip()
+            raise RuntimeError(
+                f"materializing a member in {self.repo} failed: {result.stderr}"
+            )
 ```
 
 The task passes it in its contract, and lets every member run to its end:
@@ -227,7 +235,7 @@ def swe_swarm() -> Task:
     )
 ```
 
-`swe_tests()` is the task's own scorer, which runs the tests in `/testbed`. A member is graded on what it committed to its branch; work it left uncommitted in its worktree is not part of its grade. Files the repository ignores, such as build outputs, stay in place for every member. After `member_scores()`, the team's files are back as they were, except that staged changes are no longer staged.
+`swe_tests()` is the task's own scorer, which runs the tests in `/testbed`. A member is graded on what it committed to its branch; work it left uncommitted in its worktree is not part of its grade. The team's ignored files, such as build outputs, stay in place for every member. After each member, the team's checkout is back exactly as it was, so what the scorer wrote is gone. The copy needs room for a second checkout.
 
 ## Scoring what members leave
 

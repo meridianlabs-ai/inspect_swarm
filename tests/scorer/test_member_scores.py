@@ -6,11 +6,12 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 from inspect_ai import Task, eval, score  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent
@@ -20,7 +21,9 @@ from inspect_ai.log import EvalLog, EvalSample, read_eval_log
 from inspect_ai.model import ModelOutput
 from inspect_ai.scorer import Score, Scorer, Target, match, scorer
 from inspect_ai.solver import Solver, TaskState
-from inspect_ai.util import sandbox
+from inspect_ai.util import SandboxEnvironment, sandbox
+from inspect_ai.util._concurrency import init_concurrency
+from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 
 from inspect_swarm import (
     ResultSpec,
@@ -607,7 +610,9 @@ def test_member_artifacts_are_materialized_only_for_a_swarm_under_an_artifact_co
 DOCS = Path(__file__).parents[2] / "docs" / "scoring.qmd"
 
 
-def _docs_member_branches() -> Any:
+def _docs_member_branches(
+    sandbox: Callable[[], SandboxEnvironment] | None = None,
+) -> Any:
     [code] = [
         block
         for block in re.findall(r"```python\n(.*?)```", DOCS.read_text(), re.DOTALL)
@@ -615,6 +620,8 @@ def _docs_member_branches() -> Any:
     ]
     namespace: dict[str, Any] = {}
     exec(code, namespace)
+    if sandbox is not None:
+        namespace["sandbox"] = sandbox
     return namespace["MemberBranches"]
 
 
@@ -661,10 +668,8 @@ def repo_members(repo: str, log: list[tuple[str, list[str]]]) -> Scorer:
     )
 
 
-@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
-def test_the_docs_member_branches_grade_each_members_commits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _member_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The team's checkout, with each member's committed work on its branch in its own worktree."""
     for name, value in {
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -682,13 +687,16 @@ def test_the_docs_member_branches_grade_each_members_commits(
     (repo / "keep.txt").write_text("kept")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")
-    # each member's committed work, on its branch in its own worktree
-    for name, answer, extra in (("a", "1", None), ("b", "0.5", "b.txt")):
+    for name, answer in (("a", "1"), ("b", "0.5")):
         worktree = tmp_path / "worktrees" / name
         _git(repo, "worktree", "add", "-q", "-b", f"swarm/{name}", str(worktree))
         (worktree / "answer.txt").write_text(answer)
-        if extra is not None:
-            (worktree / extra).write_text(name)
+        if name == "b":
+            # b stops ignoring build/ and commits a file where the team has an ignored one
+            (worktree / "b.txt").write_text(name)
+            (worktree / ".gitignore").write_text("")
+            (worktree / "build").mkdir()
+            (worktree / "build" / "out").write_text(name)
         _git(worktree, "add", "-A")
         _git(worktree, "commit", "-q", "-m", name)
         # work it left uncommitted is not its artifact
@@ -701,6 +709,14 @@ def test_the_docs_member_branches_grade_each_members_commits(
     (repo / "notes.txt").write_text("notes")
     (repo / "build").mkdir()
     (repo / "build" / "out").write_text("built")
+    return repo
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_the_docs_member_branches_grade_each_members_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _member_repo(tmp_path, monkeypatch)
     before = _team_state(repo)
 
     log: list[tuple[str, list[str]]] = []
@@ -711,7 +727,7 @@ def test_the_docs_member_branches_grade_each_members_commits(
         [repo_tests(str(repo), log), repo_members(str(repo), log)],
     )
     assert sample.error is None, sample.error
-    # each member's checkout has its committed files, and the ignored ones
+    # each member's checkout has its committed files, and the team's ignored ones
     committed = [".gitignore", "answer.txt", "build/out", "keep.txt"]
     assert log == [
         (TEAM, [".gitignore", "answer.txt", "build/out", "notes.txt", "staged.txt"]),
@@ -722,16 +738,40 @@ def test_the_docs_member_branches_grade_each_members_commits(
         "best_member": 1.0,
         "mean_member": 0.75,
     }
-    # the team's files are back as they were, the staged one no longer staged, and the
-    # scorer's own file is gone
+    # the team's checkout is back as the team scorer left it: its ignored file and its
+    # staged one as they were
     after = _team_state(repo)
     assert after["files"] == before["files"] | {"scorer.txt": ""}
     assert after["head"] == before["head"]
-    status = set(before["status"].splitlines()) - {"A  staged.txt"}
-    assert set(after["status"].splitlines()) == status | {
-        "?? staged.txt",
-        "?? scorer.txt",
+    assert set(after["status"].splitlines()) == set(before["status"].splitlines()) | {
+        "?? scorer.txt"
     }
+    assert not (tmp_path / "testbed.team").exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+async def test_the_docs_member_branches_restore_the_team_when_a_grade_is_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _member_repo(tmp_path, monkeypatch)
+    before = _team_state(repo)
+    # the subprocess limiter is bound to the backend that created it
+    init_concurrency()
+    environment = LocalSandboxEnvironment()
+    try:
+        branches = _docs_member_branches(lambda: environment)(repo=str(repo))
+        # as when the scoring time limit expires while a member is graded
+        with anyio.CancelScope() as scope:
+            async with branches.materialize("a"):
+                assert (repo / "answer.txt").read_text() == "1"
+                scope.cancel()
+                await anyio.sleep_forever()
+        assert scope.cancelled_caught
+    finally:
+        environment.directory.cleanup()
+    assert _team_state(repo) == before
+    assert not (tmp_path / "testbed.team").exists()
 
 
 @pytest.mark.parametrize(
