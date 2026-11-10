@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import anyio
+import anyio.lowlevel
 from anyio.abc import TaskGroup
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai.agent import Agent, AgentState
@@ -1242,6 +1243,9 @@ class SwarmRun:
         ]
         for m in sorted(left, key=lambda m: m.time or 0.0):
             await self._take_verdict(m, verifier)
+            # a verifier that caught a cancellation returned, and its verdict was
+            # discarded: the cancellation ends the final step here
+            await anyio.lowlevel.checkpoint_if_cancelled()
 
     # In the final step, for an artifact task with a verifier: the verdict on the
     # environment the task's scorer will grade, called with the final answer's
@@ -1259,8 +1263,9 @@ class SwarmRun:
         active = sample_state()
         metadata = active.metadata if active is not None else {}
         verdict = await verifier(completion, metadata)
-        if _cancelled():
-            return
+        # a verifier that caught a cancellation returned: its verdict is discarded, and
+        # the cancellation ends the final step here
+        await anyio.lowlevel.checkpoint_if_cancelled()
         self._final_verdict = _checked_verdict(verdict, "the final environment")
 
     def _verified(self, m: MemberRun) -> None:

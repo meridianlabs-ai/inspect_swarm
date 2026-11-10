@@ -188,14 +188,14 @@ def verify(members: Sequence[MemberResult]) -> Candidate | None:
         if (verdict := verdicts.get(c.name)) is not None and verdict.passed
     ]
 
-    def rank(c: Candidate) -> tuple[float, float]:
+    # a number ranks above no number (None or NaN), whatever the number, -inf included
+    def rank(c: Candidate) -> tuple[bool, float, float]:
         verdict = verdicts[c.name]
         assert verdict is not None
         value = verdict.value
-        return (
-            math.inf if value is None or math.isnan(value) else -value,
-            c.time,
-        )
+        if value is None or math.isnan(value):
+            return (True, 0.0, c.time)
+        return (False, -value, c.time)
 
     # min() keeps the first of equal keys, which is roster order
     return min(passed, key=rank, default=None)

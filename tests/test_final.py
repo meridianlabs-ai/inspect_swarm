@@ -1100,6 +1100,16 @@ _PENDING = MemberResult(
         ),
         pytest.param(
             ["verify"],
+            [
+                _submission("a", 1.0, passed=True),
+                _submission("b", 2.0, passed=True, value=math.nan),
+                _submission("c", 3.0, passed=True, value=-math.inf),
+            ],
+            ("verify", "c", None, None, False),
+            id="verify-no-value-ranks-below-minus-infinity",
+        ),
+        pytest.param(
+            ["verify"],
             [_submission("a", 1.0, passed=False), _submission("b", 2.0)],
             (None, None, "none_verified", None, False),
             id="verify-strict-none-passed",
@@ -1509,16 +1519,13 @@ async def test_votes_count_the_keys_the_record_holds() -> None:
 class _Environment:
     """A verifier of an environment that members change: it passes while `state` is `good`, and records the answers it is called with."""
 
-    def __init__(self, explanation: str = "checked", hold: bool = False) -> None:
+    def __init__(self, explanation: str = "checked") -> None:
         self.state = "good"
         self.calls: list[str] = []
         self.explanation = explanation
-        self.hold = hold
 
     async def __call__(self, answer: str, metadata: dict[str, Any]) -> Verdict:
         self.calls.append(answer)
-        if self.hold and len(self.calls) > 1:
-            await anyio.sleep_forever()
         return Verdict(passed=self.state == "good", explanation=self.explanation)
 
 
@@ -1579,26 +1586,66 @@ async def test_the_final_verdict_without_an_answer_and_with_a_lost_explanation()
     assert stop.record.left_out == ["explanation"]
 
 
+class _Holds:
+    """A verifier that passes at once until its call `hold_from` (from 1), and from it waits until cancelled; it then lets the cancellation propagate, or catches it and returns a passing verdict all the same."""
+
+    def __init__(self, hold_from: int, catches: bool) -> None:
+        self.hold_from = hold_from
+        self.catches = catches
+        self.calls: list[str] = []
+
+    async def __call__(self, answer: str, metadata: dict[str, Any]) -> Verdict:
+        self.calls.append(answer)
+        if len(self.calls) >= self.hold_from:
+            try:
+                await anyio.sleep_forever()
+            except anyio.get_cancelled_exc_class():
+                if not self.catches:
+                    raise
+        return Verdict(passed=True)
+
+
 @pytest.mark.anyio
-async def test_a_cancellation_during_the_final_step_is_recorded() -> None:
-    environment = _Environment(hold=True)
+@pytest.mark.parametrize("catches", [False, True], ids=["propagates", "catches"])
+@pytest.mark.parametrize("kind", ["artifact", "answer"])
+async def test_a_cancellation_during_the_final_step_ends_it(
+    kind: str, catches: bool
+) -> None:
+    if kind == "artifact":
+        # the submission is verified in the run, and the final verdict holds
+        verifier = _Holds(hold_from=2, catches=catches)
+        result = artifact_result(verifier=verifier)
+        budget = Budget()
+    else:
+        # the run's check holds until the swarm's time cap ends it, so the final step
+        # verifies the submission again, and holds
+        verifier = _Holds(hold_from=1, catches=catches)
+        result = answer_result(verifier=verifier)
+        budget = Budget(time=0.2, grace=0.05)
     async with sample():
-        with anyio.move_on_after(0.5) as scope:
+        with anyio.move_on_after(1.0) as scope:
             await run_agent(
                 swarm(
                     _team(("a", "done", [])),
                     controller=leaderless(stop_on_submission=False),
                     channels=[],
-                    result=artifact_result(verifier=environment),
+                    budget=budget,
+                    result=result,
                 ),
                 "task",
             )
         record = _record()
         ledger = SwarmLedger.model_validate(store().get(LEDGER_KEY))
+    # the cancellation propagates, and the answer stays provisional, even when the
+    # verifier caught it and returned a verdict
     assert scope.cancelled_caught
-    assert environment.calls == ["done", "done"]
+    assert verifier.calls == ["done", "done"]
     assert (record.final.member, record.final.provisional) == ("a", True)
-    assert record.final_verdict is None
+    if kind == "artifact":
+        assert record.final_verdict is None
+        assert record.members[0].verdict == Verdict(passed=True)
+    else:
+        assert record.members[0].verdict is None
     assert (ledger.final_cancelled, ledger.interrupted) == (True, True)
 
 
