@@ -644,7 +644,11 @@ def leaderless(
                 # a persistent member's answer carries its verdict on MemberIdle
                 if stop_on_verified and isinstance(event, (MemberEnded, MemberIdle)) and event.verdict and event.verdict.passed:
                     return "verified"
-                if stop_on_submission and event.submitted:
+                # a persistent member's answer is a submission
+                if stop_on_submission and (
+                    isinstance(event, MemberIdle)
+                    or (isinstance(event, MemberEnded) and event.submitted)
+                ):
                     return "submitted"
         return "all_done"
 
