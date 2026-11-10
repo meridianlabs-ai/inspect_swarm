@@ -644,12 +644,15 @@ for m in members:                                   # roster order
 - **`materialize` is task code**, because only the task knows its layout. Take a SWE-bench-shaped task where each member works in its own git worktree on branch `swarm/<member>` ([Sandbox topology](swarm.md#sandbox-topology)). Its `materialize` would:
   - commit or stash the team's working tree;
   - check out the member's branch in the scored location;
-  - on exit, restore the team's state, untracked and scorer-created files included.
+  - on exit, restore the team's state, untracked, ignored and scorer-created files included.
 - **It is given only roster names**, never names a member chose, so paths and branch names come from the eval author's layout.
 - **It runs after the team score** and restores the team state on exit, so the team score never depends on per-member scoring. A `materialize` that raises propagates and fails the sample, as any scorer error does.
 - **Attribution in a shared sandbox is by convention.** Any member can write into another member's worktree or branch. Per-member artifact scores say "what was on that member's branch", not "what that member did alone". Tool-call evidence can show cross-writes, but only as far as the observation limit in [Security](swarm.md#security) allows.
+- **It runs inside the member's span**, with the inner scoring, so its sandbox calls are attributed to that member's grade.
+- **A member whose output the record left out** is graded with an empty output, since its artifact, not its text, is what is graded.
+- **A plain agent** has no roster name to give `materialize`, and its artifact is the environment it left, so it is graded on the environment as it is, without `materialize`.
 
-`member_artifacts` is its own step in [the plan below](#implementation-plan-after-m2), after `member_scores`. Until it is built, `member_scores()` refuses a contract with `member_artifacts` (`ValueError`), rather than reporting its members unavailable.
+The docs' worked example ([Per-member artifacts](../docs/scoring.qmd#per-member-artifacts)) copies the team's checkout aside (`cp -a`), puts the member's branch in the scored checkout with `git add -A` and `git read-tree -u --reset`, leaving `HEAD` on the team's branch, and on exit moves the copy back. The copy keeps the team's ignored files and index, which the member's branch could otherwise overwrite or its `.gitignore` expose to cleanup. The move back is never retried, since a second run would delete the restored checkout. If scoring times out, the sample errors and the checkout may be left unrestored: Inspect turns a timeout during scoring into an ordinary sample error. Scores from earlier scorers, such as the team's, can remain in the log, since they were taken before any member's branch was put in place. A retry starts in a fresh sandbox.
 
 ### Comparison quantities
 
@@ -901,7 +904,7 @@ All runtime tests use mockllm with scripted outputs, need no network or Docker, 
   - each member is graded with its artifact in place;
   - the team state is restored on exit and on a scorer error.
 
-  A git-worktree layout test needs Docker and is marked slow, following inspect_ai's conventions.
+  A git-worktree layout test runs the docs' worked example as written, with the local sandbox and a repository on the host, so it needs git but not Docker. A member's branch there changes `.gitignore` and commits a file the team ignores, and a sandbox that runs a retryable command twice, as one does when a response is lost, does not run the move back twice.
 - **The cost boundary**, if built:
   - `solve_usage` excludes a model-graded scorer's usage and a scorer's native compaction (mockllm compaction usage);
   - it includes the swarm's own compaction and `synthesize`, and counts cache replays as Inspect does;
