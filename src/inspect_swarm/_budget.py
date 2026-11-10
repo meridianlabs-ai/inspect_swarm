@@ -345,6 +345,10 @@ class MemberContext:
     # whether the member's boundary callbacks are running, for the bus's all-waiting
     # check and the background owner
     held: bool = False
+    # the origin of the boundary callback the gate is awaiting while the member is held,
+    # None between callbacks and in a persistent member's idle wait: the bus counts a
+    # member held by the operator's pause as active
+    holder: str | None = None
     # set when the member first uses a tool from swarm_bridged_tools(), which a member
     # whose loop swarm_tools() binds cannot also use
     bridge_used: bool = False
@@ -353,6 +357,9 @@ class MemberContext:
     # the member's background tasks not yet finished, kept by its owner, for the bus's
     # all-waiting check
     background_running: int = 0
+    # called, set by the member's gate, as the member starts background work: it
+    # withdraws the operator's pause, and says whether a held member may start it
+    background_starting: Callable[[], bool] = lambda: False
     # the error for bridge use found after the member started background work
     refusal: RuntimeError | None = None
     # called, set by the runtime, as soon as an error that ends the member and the swarm
