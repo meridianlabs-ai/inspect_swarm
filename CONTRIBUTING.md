@@ -28,7 +28,6 @@ For this repository:
 
 - inspect_swarm needs unreleased inspect_ai changes. `[tool.uv.sources]` in `pyproject.toml` points `inspect-ai` at inspect_ai `main`.
 - The 6-hour packages are in `[tool.uv.exclude-newer-package]` in `pyproject.toml`.
-- When uv builds the project itself, for example for the editable install in `uv sync`, it resolves the build backend, still within the cooldown.
 
 ## Checks and tests
 
