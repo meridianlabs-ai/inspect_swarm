@@ -244,7 +244,7 @@ The fields are documented for users in [Analysis, Persistent members](../docs/an
 - **A built-in `coordinator` controller** and the `lead_done` topology reason ([swarm-api.md Controllers](swarm-api.md#controllers) sketches it). Controllers that wake members are the eval author's code.
 - **Idle members in `swarm_wait` results**: telling a waiting lead that a worker went idle, as its result names ends. Today the lead hears of it only through the worker's writes or the all-waiting release.
 - **A `quiescent()` channel hook**, for a channel whose state can keep the swarm going without a delivery.
-- **Per-activation limits**, and scores per answer: `member_scores` grades a member's output, which for a persistent member that ends `submitted` is its last answer (swarm-scoring.md Part 2).
+- **Per-activation limits**, and scores per answer: `member_scores` grades a member's output, which for a persistent member that ends `submitted` is its last answer ([swarm-scoring.md Member scores](swarm-scoring.md#member-scores)).
 - **A public `after_answer()` hook** for custom member loops, if one turns up.
 - **Persistent members whose board is read only by subagents**, in a swarm with a waiting channel, which needs news defined for the member across its loops (a member-level seen state in the shared memory) rather than for one loop.
 - **Persistent wrapped agents**: a member whose agent calls a loop and then checks or changes its result (`checked_solver()`, `prover()`) would need the wrapper's completion logic to run at each answer, before it is recorded.
