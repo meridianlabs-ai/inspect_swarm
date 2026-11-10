@@ -1,6 +1,6 @@
 """Scorers that grade each member of a swarm.
 
-`member_scores()` grades each member's output with the task's own scorer, for a task scored on its answer, and gives the best and the mean member. The task's own scorer stays the headline score: list the member scorer after it, wrapped in a registered factory of the task's own so that re-scoring can rebuild it:
+`member_scores()` grades each member's output with the task's own scorer, for a task scored on its answer, or each member's artifact, for a task scored on what the members leave whose contract has `member_artifacts`. It gives the best and the mean member. The task's own scorer stays the headline score: list the member scorer after it, wrapped in a registered factory of the task's own so that re-scoring can rebuild it:
 
 ```python
 from inspect_ai.scorer import Scorer, match, scorer
