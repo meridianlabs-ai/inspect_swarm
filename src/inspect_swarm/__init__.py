@@ -57,7 +57,7 @@ from ._result import (
     artifact_result,
 )
 from ._seam import Boundary, BoundaryCallback
-from ._swarm import swarm
+from ._swarm import baseline, swarm
 from ._tools import swarm_resources
 
 try:
@@ -110,6 +110,7 @@ __all__ = [
     "__version__",
     "answer_result",
     "artifact_result",
+    "baseline",
     "calling_member",
     "filesystem",
     "leaderless",

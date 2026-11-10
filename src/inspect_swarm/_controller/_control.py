@@ -64,7 +64,7 @@ from .._record import (
     write_record,
     write_start,
 )
-from .._result import ResultSpec, Verdict, Verifier, verifier_label
+from .._result import ResultSpec, Verdict, Verifier, key_answer, verifier_label
 from .._seam import BoundaryCallback, MemberGate, check_origin
 
 if TYPE_CHECKING:
@@ -1109,14 +1109,7 @@ class SwarmRun:
             # task code, after the member's end is recorded and its output settled, so
             # that an error, which fails the sample, leaves the answer and the record
             # agreeing
-            # task code, so checked as returned rather than as annotated, by its actual
-            # class rather than the one it reports
-            answer_key = cast(object, key(m.agent_state.output.completion))
-            if answer_key is not None and not issubclass(type(answer_key), str):
-                raise TypeError(
-                    f"The result contract's answer_key must return a str or None, got a {type(answer_key).__name__} for member {m.name!r}."
-                )
-            m.answer_key = cast(str | None, answer_key)
+            m.answer_key = key_answer(key, m.agent_state.output.completion, m.name)
         if (
             m.submitted
             and self._verifier() is not None
