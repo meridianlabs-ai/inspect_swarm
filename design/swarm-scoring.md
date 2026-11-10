@@ -813,7 +813,8 @@ def select_at_k(rows: Sequence[AttemptRow], k: int, chain: str | Sequence[str], 
 ```
 
 - **`AttemptRow`**: one per (log, sample id, epoch), from the sample's record (`swarm_result(sample)`) and scores, a frozen dataclass. It holds:
-  - `log` (the log's location), `id`, `epoch`, the arm labels `task_args` (`eval.task_args`), `members_total` (the member count) and `result_kind` (the record's `kind`);
+  - `log` (the log's location as a local path) and `id` (the sample id as text), the keys `samples_df()` gives, and `epoch`;
+  - the arm labels `task_args` (`eval.task_args`), `members_total` (the member count) and `result_kind` (the record's `kind`);
   - `final_value`, the task scorer's value under Inspect's default `value_to_float()`;
   - `final_verdict` (the record's verifier result on the drained environment) and `final` (the record's `FinalRecord`: mode, member, reason);
   - `best_member`, `mean_member` and `complete`, from the member scorer;

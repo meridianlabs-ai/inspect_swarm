@@ -171,7 +171,7 @@ The metrics have no reader of their own; read them from `sample.store["inspect_s
 
 ## Attempts
 
-`attempt_rows()` reads one `AttemptRow` per sample and epoch from logs, for comparing arms beside the [samples dataframe](#samples-dataframe). It joins with it on `log`, `id` and `epoch`. Name the task's own scorer and its member scorer ([Member scores](scoring.qmd#member-scores)):
+`attempt_rows()` reads one `AttemptRow` per sample and epoch from logs, for comparing arms beside the [samples dataframe](#samples-dataframe). It joins with it on `log`, `id` and `epoch`, which it gives as `samples_df()` does: the log as a local path, and the sample id as text. Name the task's own scorer and its member scorer ([Member scores](scoring.qmd#member-scores)):
 
 ```python
 from inspect_swarm.analysis import attempt_rows
@@ -181,7 +181,8 @@ rows = attempt_rows(["logs/baseline.eval"], scorer="match", member_scorer="math_
 
 Each row has:
 
-- `log`, `id`, `epoch`, and `task_args`, the task's arguments, which label the arm.
+- `log`, `id`, `epoch`: the log's local path, the sample id as text, and the epoch.
+- `task_args`: the task's arguments, which label the arm.
 - `result_kind`: the result contract's kind, `answer` or `artifact`.
 - `final_value`: the task scorer's value, converted with Inspect's default `value_to_float()`.
 - `final` and `final_verdict`: the record's final answer, and for an artifact task the verifier's verdict on the environment after the members stopped.

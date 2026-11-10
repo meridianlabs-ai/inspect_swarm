@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Any, cast, get_args
 
+from inspect_ai.analysis._dataframe.evals.extract import eval_log_location
 from inspect_ai.event import ScoreEvent
 from inspect_ai.log import EvalLog, EvalSample, read_eval_log
 from inspect_ai.model import ModelUsage
@@ -24,10 +25,10 @@ class AttemptRow:
     """One sample of one log, as `attempt_rows()` reads it: the swarm's result record and the sample's scores."""
 
     log: str
-    """The log's location, as `samples_df()` gives it."""
+    """The log's location as a local path, as `samples_df()` gives it in its `log` column."""
 
-    id: int | str
-    """The sample's id."""
+    id: str
+    """The sample's id as text, as `samples_df()` gives it in its `id` column, so an integer id `1` is `"1"`."""
 
     epoch: int
     """The sample's epoch."""
@@ -196,8 +197,9 @@ def _row(
         scores.get(member_scorer), member_scorer, sample
     )
     return AttemptRow(
-        log=log.location,
-        id=sample.id,
+        # the keys samples_df() gives, so that rows join with its rows
+        log=eval_log_location(log),
+        id=str(sample.id),
         epoch=sample.epoch,
         task_args=dict(log.eval.task_args),
         result_kind=record.kind if record is not None else None,

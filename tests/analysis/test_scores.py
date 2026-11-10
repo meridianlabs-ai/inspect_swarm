@@ -1,6 +1,7 @@
 import math
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -10,6 +11,7 @@ from inspect_ai import (
     eval,  # pyright: ignore[reportUnknownVariableType]
 )
 from inspect_ai.agent import Agent, AgentState, agent, as_solver, react
+from inspect_ai.analysis import SampleSummary, samples_df
 from inspect_ai.dataset import Sample
 from inspect_ai.log import EvalLog, read_eval_log
 from inspect_ai.log._samples import sample_active
@@ -36,7 +38,7 @@ from inspect_swarm import (
     member,
 )
 from inspect_swarm._record import FinalRecord, MemberResult
-from inspect_swarm.analysis import AttemptRow, attempt_rows, select_at_k
+from inspect_swarm.analysis import AttemptRow, SwarmColumns, attempt_rows, select_at_k
 from inspect_swarm.scorer import MEMBER_METRICS, member_scores
 from tests.scorer.rescore_task import rescore_members, says
 from tests.swarm_runtime import Script, scripted_model
@@ -559,6 +561,34 @@ def test_attempt_rows_flag_an_agent_that_consulted_the_task_scorer(
     )
     [row] = attempt_rows([log], scorer="match", member_scorer="rescore_members")
     assert row.target_assisted
+
+
+def test_attempt_rows_join_the_samples_dataframe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a dataset without ids, so Inspect numbers the samples, and a log named by a path
+    # relative to the working directory
+    log = _run(
+        Task(
+            dataset=[Sample(input="What is six times seven?", target="42")],
+            solver=baseline(says("42"), result=answer_result()),
+            scorer=[match(), rescore_members()],
+            epochs=2,
+        ),
+        tmp_path / "logs",
+    )
+    monkeypatch.chdir(tmp_path)
+    relative = os.path.relpath(log.location)
+    df = samples_df("logs", columns=SampleSummary + SwarmColumns)
+    records = cast(
+        list[dict[str, Any]],
+        df.to_dict("records"),  # pyright: ignore[reportUnknownMemberType]
+    )
+    keys = {(r["log"], r["id"], r["epoch"]) for r in records}
+    for source in [relative, read_eval_log(relative)]:
+        rows = attempt_rows([source], scorer="match", member_scorer="rescore_members")
+        assert {(r.log, r.id, r.epoch) for r in rows} == keys
+        assert [r.id for r in rows] == ["1", "1"]
 
 
 def test_attempt_rows_read_a_plain_agent_without_a_record(tmp_path: Path) -> None:
