@@ -345,6 +345,11 @@ class MemberContext:
     # whether the member's boundary callbacks are running, for the bus's all-waiting
     # check and the background owner
     held: bool = False
+    # whether the boundary callback the gate is awaiting while the member is held is the
+    # operator's pause, the runtime's own registration rather than a caller's callback
+    # labelled `operator`; False between callbacks and in a persistent member's idle
+    # wait: the bus counts a member held by the operator's pause as active
+    operator_hold: bool = False
     # set when the member first uses a tool from swarm_bridged_tools(), which a member
     # whose loop swarm_tools() binds cannot also use
     bridge_used: bool = False
@@ -353,6 +358,12 @@ class MemberContext:
     # the member's background tasks not yet finished, kept by its owner, for the bus's
     # all-waiting check
     background_running: int = 0
+    # called, set by the member's gate, as the member starts background work: it
+    # withdraws the operator's pause, and says whether a held member may start it
+    background_starting: Callable[[], bool] = lambda: False
+    # called, set by the member's gate, when the member is first found bridged: it
+    # withdraws the operator's pause
+    bridge_found: Callable[[], None] = lambda: None
     # the error for bridge use found after the member started background work
     refusal: RuntimeError | None = None
     # called, set by the runtime, as soon as an error that ends the member and the swarm
@@ -390,6 +401,7 @@ class SwarmNode(Limit):
         member = current_member.get()
         if member is not None and not member.bridged and in_bridge_model_generate():
             member.bridged = True
+            member.bridge_found()
             if member.background:
                 # its nodes would now cancel the member, background work and all, with
                 # no error to say why; a raise here would end the sample, so the member
@@ -676,8 +688,11 @@ class SwarmTimeNode(_TimeLimit):
         self._held_since: float | None = None
 
     def overdue(self) -> bool:
-        # its deadline has passed, or its scope already has a cancellation requested
-        scope = self._cancel_scope
+        # its deadline has passed, or its scope already has a cancellation requested;
+        # never before it is entered, when it has no scope
+        scope = getattr(self, "_cancel_scope", None)
+        if scope is None:
+            return False
         return scope.cancel_called or scope.deadline <= anyio.current_time()
 
     async def expire(self) -> None:

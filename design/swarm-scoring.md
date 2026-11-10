@@ -471,7 +471,7 @@ class SwarmResultRecord(BaseModel):   # adds
     left_out: list[LeftOut]           # the record's own values left out: "explanation", final_verdict's; [] by default
 ```
 
-- **The chain's reasons.** With no answer, `reason` is `no_submissions` when nothing was submitted; otherwise the chain's last mode gave nothing, and it is `none_verified` for `verify` and `no_answer_keys` for `vote`.
+- **The chain's reasons.** With no answer, `reason` is `no_submissions` when nothing was submitted; otherwise the chain's last mode gave nothing, and it is `none_verified` for `verify`, `no_answer_keys` for `vote` and `synthesize_failed` for a `synthesize` call that failed recoverably. A provisional answer whose chain ends with `synthesize`, which has not run, has `not_synthesized`.
 - **No vote counts.** The final record keeps no count of votes by answer key: the keys are model text, and a log's processing rewrites values but not dict keys, so with `log_images=False` an image data URI would survive in a key while it is removed from the member. Grouping the submitted members by their `answer_key` counts the keys the record keeps. A left-out key cannot be counted, and a log can turn different keys into the same text (two image URIs both become the removal placeholder), so these counts may differ from the original vote. `mode`, `member` and `tie` describe the original choice (decision: Ransom, 2026-11-10).
 - **Model text in the final record.** The final verdict's explanation comes from model output, like the members' values below. It is kept or left out (`None`, named in the record's own `left_out`) by the same round trip as a member's.
 - **Why `output` comes here.** `member_scores` scores each member's output, in final scoring and in re-scoring, and reads the outputs from the record with `swarm_result(state)`. M1 needs neither ([No outputs in M1](#what-the-swarm-records)). Its tests: an output is kept after the member's own limit, and after a hard stop for an agent that updates its state in place.
@@ -531,7 +531,7 @@ So a task with both gets `["verify", "vote", "first"]`, and one with neither get
 
 **Validation.**
 
-- `swarm()` applies these rules to its controller's chain at construction, as swarm-api.md's validation list says. It raises `ValueError` when a mode's need is missing (`verify` without a verifier, `vote` without an answer key, `synthesize` on an artifact task), naming the missing piece.
+- `swarm()` applies these rules to its controller's chain at construction, as swarm-api.md's validation list says. It raises `ValueError` when a mode's need is missing (`verify` without a verifier, `vote` without an answer key, `synthesize` on an artifact task or without a contract), naming the missing piece, and for a chain that has `synthesize` more than once, since the record has one `synthesize_error`.
 - A `reporter` mode is the controller's to accept. `leaderless()` raises `ValueError` for one when it is called. A controller that accepts one checks its member against the roster in its `check`, as swarm-api.md's `coordinator` does.
 
 **When verdicts are taken.** When the task supplies a verifier, the runtime verifies every submission as it arrives, whether or not `verify` is in the chain, so the analysis always has verdicts.
@@ -575,14 +575,14 @@ A cancellation ends these steps, even when a verifier catches it and returns: an
   - **Classification is group-aware.** Inspect re-raises a provider's exception without unwrapping it (`src/inspect_ai/model/_model.py:1651-1656`), so a model API that uses a task group can raise an `ExceptionGroup` holding a `LimitExceededError`.
     - An exception is *stopping* if it is, or is a `BaseExceptionGroup` that contains at any depth, a `LimitExceededError`, a `TerminateSampleError` or the backend's cancellation exception (`anyio.get_cancelled_exc_class()`).
     - The check uses `BaseExceptionGroup.subgroup()` (Python 3.11).
-  - **Recoverable** failures move the chain to its next mode, and `synthesize_error` records why. A chain of `["synthesize"]` alone keeps the provisional answer. They are:
+  - **Recoverable** failures move the chain to its next mode, and `synthesize_error` records why: the error's type (`"the model call raised RateLimitError"`), an empty completion or `content_filter`. Not the error's message, which can hold model text (a `ModelRefusalError`'s quotes the refusal), while the final record's own text is the eval author's and refused when a log would change it; the model event holds the message. A chain of `["synthesize"]` alone keeps the provisional answer. They are:
     - an `Exception` from the call that is not stopping: a provider error after Inspect's retries, a `ModelRefusalError`, a group of such errors;
     - a returned output with an empty completion or `stop_reason="content_filter"`.
   - **Not recoverable:** a stopping exception propagates unchanged, as raised.
     - A group is never split. A group that mixes a limit with an ordinary error propagates whole, which is what swarm.md's exhaustion policy expects of mixed groups.
     - A limit error reaches the runtime's [exhaustion policy](swarm.md#observer-evidence-accounting-and-metrics), which recovers only the swarm's own cap. Every other limit reaches the runner, so Inspect records `EvalSample.limit`.
     - Either way the provisional answer is the sample's output.
-- **Scoring.** The synthesized answer is no member's output. The task's scorer scores it; per-member scores are unaffected.
+- **Scoring.** The synthesized answer is no member's output: the final record has `mode="synthesize"` and `member=None`, and the answer's message in the sample's conversation is marked with that mode and member. The task's scorer scores it; per-member scores are unaffected.
 
 ### Answer-scored tasks: per-member scores
 
@@ -812,28 +812,33 @@ Inspect applies every epoch reducer to every scorer and key. An epochs arm with 
 
 ```python
 def attempt_rows(logs: Sequence[str | EvalLog], *, scorer: str, member_scorer: str) -> list[AttemptRow]: ...
-def select_at_k(rows: Sequence[AttemptRow], k: int, chain: Sequence[str], *, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> float: ...
+def select_at_k(rows: Sequence[AttemptRow], k: int, chain: str | Sequence[str], *, empty_value: float = 0.0, max_subsets: int = 10_000, seed: int = 0) -> float: ...
 ```
 
-- **`AttemptRow`**: one per (log, sample id, epoch), from the sample's record (`swarm_result(sample)`) and scores. It holds:
-  - the log path, the arm labels (`eval.task_args`), the member count and `result_kind` (the record's `kind`);
-  - the task scorer's value;
-  - `final_verdict` (the record's verifier result on the drained environment) and `final` (mode, member, reason);
-  - `best_member`, `mean_member` and `complete`;
-  - the per-member states, statuses, keys, verdicts, times and submission flags, and `members_started`;
+- **`AttemptRow`**: one per (log, sample id, epoch), from the sample's record (`swarm_result(sample)`) and scores, a frozen dataclass. It holds:
+  - `log` (the log's location as a local path) and `id` (the sample id as text), the keys `samples_df()` gives, and `epoch`;
+  - the arm labels `task_args` (`eval.task_args`), `members_total` (the member count) and `result_kind` (the record's `kind`);
+  - `final_value`, the task scorer's value under Inspect's default `value_to_float()`;
+  - `final_verdict` (the record's verifier result on the drained environment) and `final` (the record's `FinalRecord`: mode, member, reason);
+  - `best_member`, `mean_member` and `complete`, from the member scorer;
+  - `members`, the record's `MemberResult`s with their states, statuses, keys, verdicts, times and submission flags, and `members_started`;
   - `sample_total_usage`;
-  - the flag `target_assisted`.
+  - the flags `target_assisted` and `no_solve_usage`.
 
-  With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons. `samples_df()` with M1's `SwarmColumns`, which has the ledger's realized cost, joins on the same (log, sample id, epoch).
+  A missing or NaN score is `None`. A sample with no record (a plain agent) has `final=None` and no members. A log read without its samples, a scorer name no scored sample in a log has, a task scorer whose value is not a single value, and a member scorer whose value is not `member_scores()`'s raise `ValueError`, so a misspelled name never gives a column of `None`.
+
+  With the cost boundary, a row also has `solve_usage`, `solve_exit` and scoring usage. A row without them is flagged `no_solve_usage` and left out of solve-cost comparisons; until the boundary is built, every row is. `samples_df()` with M1's `SwarmColumns`, which has the ledger's realized cost, joins on the same (log, sample id, epoch).
 - **From rows to attempts.** `select_at_k` takes one sample's rows from a baseline arm (its epochs), builds one `Attempt` per row, and returns that sample's select@k:
   - `epoch`;
   - `submitted`, `time`, `answer_key` and `verdict` from the row's single member: its status `submitted`, its end time, its key, its run-time verdict;
   - `final_value` from the task scorer's value;
   - `final_verdict` from the row's `final_verdict`.
 
-  The rows' `result_kind` is the `kind` select@k follows.
+  The rows' `result_kind` is the `kind` select@k follows; a record without a contract is read as an answer task, as the swarm reads it.
   - The run-time verdict and `final_verdict` are kept apart, because the environment can change between a member's submission check and the drain. Artifact `verify` reads only `final_verdict`. Nothing derives a verdict from `final_value`, which would select with the target.
   - Rows that disagree on `result_kind` are an error naming the logs.
+  - The chain is applied by the runtime's own selector (`_final.answer()`), each attempt a `MemberResult` named after its epoch, in epoch order, so the modes, tie-breaks and fall-through are the swarm's by construction. For an artifact task each attempt counts as a submission, its verdict is its `final_verdict`, and one cut off before it ended (no end time) orders after every attempt that ended.
+  - `chain` takes one mode name or a sequence of `verify`, `vote`, `first` and `last`. `synthesize` (no epoch analogue), an empty chain, `k` or `max_subsets` below 1, rows of more than one sample, a repeated epoch, and a row whose record has more than one member or a persistent one (not a `baseline()` attempt) raise `ValueError`.
 - **Target-assisted samples.** `target_assisted` is set when the solve phase contains `ScoreEvent(intermediate=True)`: an agent consulted the task's scorer with the target in the loop (for example `react(attempts=...)`). In a swarm that feedback can be shared with peers, so the rows flag those samples for the user's analysis to report separately.
 
 ### Testing after M2

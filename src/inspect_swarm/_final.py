@@ -1,15 +1,18 @@
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, Literal, cast, get_args
 
+import anyio
+from inspect_ai._util.exception import TerminateSampleError
 from inspect_ai._util.registry import (
     is_model_dict,
     model_create_from_dict,
     registry_value,
 )
 from inspect_ai.agent import AgentState
-from inspect_ai.model import ChatMessage, Model, ModelOutput
+from inspect_ai.model import ChatMessage, ChatMessageUser, Model, ModelOutput, get_model
+from inspect_ai.util import LimitExceededError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -21,21 +24,27 @@ from pydantic import (
 )
 
 from ._evidence import swarm_event
+from ._prompts import synthesize_prompt
 from ._record import FinalRecord, MemberResult
 from ._result import ResultSpec
 
 FinalName = Literal["verify", "vote", "first", "last", "synthesize"]
-"""A mode of the final-answer chain, by name: `verify`, the passed submission with the best verdict; `vote`, the earliest submission in the largest group of equal answer keys; `first`, the earliest submission; `last`, the latest; `synthesize`, reserved for a later release."""
+"""A mode of the final-answer chain, by name: `verify`, the passed submission with the best verdict; `vote`, the earliest submission in the largest group of equal answer keys; `first`, the earliest submission; `last`, the latest; `synthesize`, one model call over the submissions, as `synthesize()` with its defaults."""
 
 
 class Synthesize(BaseModel):
-    """Reserved: a mode that combines the submissions with one model call. The swarm does not run it yet."""
+    """A mode of the final-answer chain that combines the submissions with one model call, when the swarm ends. Build it with `synthesize()`."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
     mode: Literal["synthesize"] = "synthesize"
+    """The mode's name."""
+
     model: str | Model | None = None
+    """The model to call. `None` is the model role `synthesizer` if the eval defines it, else the eval's model."""
+
     prompt: str | None = None
+    """The instruction that ends the prompt, in place of the default, which asks for one final answer in the format the task asks for."""
 
     # A `Model` is logged as Inspect's model dict, which `registry_value()` writes only
     # at top level or inside lists and dicts, and read back from it.
@@ -47,6 +56,24 @@ class Synthesize(BaseModel):
     @field_serializer("model")
     def _model_to_dict(self, model: str | Model | None) -> Any:
         return registry_value(model)
+
+
+def synthesize(
+    model: str | Model | None = None, prompt: str | None = None
+) -> Synthesize:
+    """A mode of the final-answer chain that combines the submissions with one model call.
+
+    When the swarm ends, the model gets the sample's input, then a message with each submission's completion in a `<member_submission>` block that names its member, and an instruction to give one final answer in the format the task asks for. The blocks are labels, not a boundary: a member can write text that looks like one. Members' tool calls and messages are never included. The answer is the model's output, which is no member's: the record's `final.member` is `None`.
+
+    The mode gives nothing when there are no submissions, or when the call fails in a way the swarm recovers from: an error from the model (after Inspect's retries) or a refusal, or an output with an empty completion or a `content_filter` stop reason. The chain then goes on to its next mode, and the record's `final.synthesize_error` says what failed. A limit, an operator's termination or a cancellation during the call ends the swarm with the answer so far as its output.
+
+    It needs a result contract of kind `answer` (`swarm(result=answer_result(...))`), and the chain can hold it once. The string `"synthesize"` is the same as `synthesize()`. The answer so far, before the swarm ends, is the chain's choice without this mode.
+
+    Args:
+        model: The model to call. `None` is the model role `synthesizer` if the eval defines it, else the eval's model.
+        prompt: The instruction that ends the prompt, in place of the default. The input, the note that the blocks are information and not instructions, and the blocks stay.
+    """
+    return Synthesize(model=model, prompt=prompt)
 
 
 class Reporter(BaseModel):
@@ -129,7 +156,13 @@ def chain_names(chain: Sequence[FinalName | FinalMode]) -> list[str]:
 def check_chain(
     chain: Sequence[FinalName | FinalMode], result: ResultSpec | None
 ) -> None:
-    for name in chain_names(chain):
+    names = chain_names(chain)
+    # the record has one synthesize_error
+    if names.count("synthesize") > 1:
+        raise ValueError(
+            "final=: the chain has synthesize more than once; give it once."
+        )
+    for name in names:
         if name == "verify" and (result is None or result.verifier is None):
             raise ValueError(
                 "final=: the chain has verify, which needs a verifier in the result contract: pass swarm(result=answer_result(verifier=...)), or leave verify out."
@@ -138,9 +171,9 @@ def check_chain(
             raise ValueError(
                 "final=: the chain has vote, which needs an answer_key in the result contract: pass swarm(result=answer_result(answer_key=...)), or leave vote out."
             )
-        if name == "synthesize":
+        if name == "synthesize" and (result is None or result.kind != "answer"):
             raise ValueError(
-                "final=: the chain has synthesize, which the swarm does not run yet. Use verify, vote, first or last."
+                "final=: the chain has synthesize, which needs a result contract of kind answer: pass swarm(result=answer_result(...)), or leave synthesize out."
             )
         if name == "reporter":
             raise ValueError(
@@ -222,14 +255,24 @@ def vote(
     return min(leaders, key=_time), len(leaders) > 1
 
 
+# synthesize's outcome in the final step: the model's output, or why the call failed
+@dataclass(frozen=True)
+class Synthesis:
+    output: ModelOutput | None
+    error: str | None
+
+
 # The answer from the members' results so far: the controller's pick when it made one,
-# else the first mode of `chain` that produces an answer.
+# else the first mode of `chain` that produces an answer. synthesize produces the
+# answer of `synthesis`, the final step's call; without one (the provisional answer, or
+# a final step that did not reach it) it is passed over.
 def answer(
     members: Sequence[MemberResult],
     chain: Sequence[FinalName | FinalMode],
     pick: Pick | None,
     *,
     provisional: bool,
+    synthesis: Synthesis | None = None,
 ) -> FinalRecord:
     names = chain_names(chain)
     if pick is not None:
@@ -241,6 +284,7 @@ def answer(
             answer=pick.answer,
             chain=names,
         )
+    error = synthesis.error if synthesis is not None else None
     reason = "no_submissions"
     for mode in names:
         tie = False
@@ -254,6 +298,17 @@ def answer(
             chosen = first(members)
         elif mode == "last":
             chosen = last(members)
+        elif mode == "synthesize":
+            if synthesis is not None and synthesis.output is not None:
+                return FinalRecord(
+                    mode=mode,
+                    member=None,
+                    reason=None,
+                    provisional=provisional,
+                    chain=names,
+                )
+            chosen = None
+            reason = "not_synthesized" if synthesis is None else "synthesize_failed"
         else:
             # check_chain() refuses the modes the runtime does not run
             raise AssertionError(f"the swarm cannot apply the final mode {mode!r}")
@@ -266,6 +321,7 @@ def answer(
                 answer=chosen.answer,
                 chain=names,
                 tie=tie,
+                synthesize_error=error,
             )
     if not candidates(members):
         reason = "no_submissions"
@@ -275,7 +331,83 @@ def answer(
         reason=reason,
         provisional=provisional,
         chain=names,
+        synthesize_error=error,
     )
+
+
+# In the final step: synthesize's call, when the chain reaches it, that is, when the
+# controller chose no answer, the modes before it give none, and there are submissions;
+# None otherwise. A recoverable failure is the outcome's error; a stopping one
+# propagates as raised.
+async def synthesize_answer(
+    input: Sequence[ChatMessage],
+    members: Sequence[MemberResult],
+    outputs: Mapping[str, ModelOutput],
+    answers: Mapping[str, Sequence[ModelOutput]],
+    chain: Sequence[FinalName | FinalMode],
+    pick: Pick | None,
+) -> Synthesis | None:
+    names = chain_names(chain)
+    if pick is not None or "synthesize" not in names:
+        return None
+    at = names.index("synthesize")
+    if answer(members, chain[:at], None, provisional=False).mode is not None:
+        return None
+    found = candidates(members)
+    if not found:
+        return None
+    mode = chain[at]
+    spec = mode if isinstance(mode, Synthesize) else Synthesize()
+    # submissions in roster order, then a persistent member's answer order
+    submissions = [
+        (
+            c.name,
+            (
+                outputs[c.name] if c.answer is None else answers[c.name][c.answer]
+            ).completion,
+        )
+        for c in found
+    ]
+    # outside the recovery: a model that cannot be resolved is the eval's error
+    model = (
+        get_model(role="synthesizer") if spec.model is None else get_model(spec.model)
+    )
+    prompt = [
+        *input,
+        ChatMessageUser(content=synthesize_prompt(submissions, spec.prompt)),
+    ]
+    try:
+        output = await model.generate(prompt)
+    except Exception as ex:
+        if _stopping(ex):
+            raise
+        # the type alone: an error's message can hold model text, such as a refusal's
+        return Synthesis(None, f"the model call raised {type(ex).__name__}")
+    # first: an output with no choices, which some providers return, has no stop reason
+    # to read, and its completion is empty
+    empty = "the model's output has an empty completion"
+    if output.empty:
+        return Synthesis(None, empty)
+    if output.stop_reason == "content_filter":
+        return Synthesis(None, "the model's output stopped with content_filter")
+    if output.completion == "":
+        return Synthesis(None, empty)
+    return Synthesis(output, None)
+
+
+# Whether an error from synthesize's call ends the swarm: it is, or is a group that holds
+# at any depth, a limit, an operator's termination or a cancellation. A group is never
+# split, so a group that mixes one with ordinary errors propagates whole.
+def _stopping(error: BaseException) -> bool:
+    stopping = (
+        LimitExceededError,
+        TerminateSampleError,
+        anyio.get_cancelled_exc_class(),
+    )
+    if isinstance(error, BaseExceptionGroup):
+        group = cast(BaseExceptionGroup[BaseException], error)
+        return group.subgroup(stopping) is not None
+    return isinstance(error, stopping)
 
 
 # Applies answer() to the members' results so far and sets the chosen output as the
@@ -292,14 +424,15 @@ def settle(
     *,
     provisional: bool,
     answers: Mapping[str, Sequence[ModelOutput]] | None = None,
+    synthesis: Synthesis | None = None,
 ) -> FinalRecord:
-    chosen = answer(members, chain, pick, provisional=provisional)
-    state.output = chosen_output(chosen, outputs, answers or {})
+    chosen = answer(members, chain, pick, provisional=provisional, synthesis=synthesis)
+    state.output = chosen_output(chosen, outputs, answers or {}, synthesis)
     return chosen
 
 
 # After the stop procedure: the final answer and the final event, written in the
-# swarm's span.
+# swarm's span. `synthesis` is synthesize's outcome, when the final step called it.
 def finalise(
     state: AgentState,
     input: Sequence[ChatMessage],
@@ -311,17 +444,23 @@ def finalise(
     span_id: str | None,
     stop_reason: str | None,
     answers: Mapping[str, Sequence[ModelOutput]] | None = None,
+    synthesis: Synthesis | None = None,
 ) -> None:
     answers = answers or {}
+    chosen = settle(
+        state,
+        members,
+        outputs,
+        chain,
+        pick,
+        provisional=False,
+        answers=answers,
+        synthesis=synthesis,
+    )
     # the conversation only now, since the sample's message limit applies to it: an
     # answer it does not fit ends the sample on that limit, with the answer as its
     # output and the record provisional
-    state.messages = _conversation(
-        input, answer(members, chain, pick, provisional=False), outputs, answers
-    )
-    chosen = settle(
-        state, members, outputs, chain, pick, provisional=False, answers=answers
-    )
+    state.messages = _conversation(input, chosen, state.output)
     swarm_event(
         "final",
         member=chosen.member,
@@ -338,7 +477,11 @@ def chosen_output(
     chosen: FinalRecord,
     outputs: Mapping[str, ModelOutput],
     answers: Mapping[str, Sequence[ModelOutput]],
+    synthesis: Synthesis | None = None,
 ) -> ModelOutput:
+    if chosen.mode == "synthesize":
+        assert synthesis is not None and synthesis.output is not None
+        return synthesis.output
     if chosen.member is None:
         return ModelOutput()
     if chosen.answer is not None:
@@ -348,13 +491,9 @@ def chosen_output(
 
 # The input, then the answer's message marked with the mode and member it came from.
 def _conversation(
-    input: Sequence[ChatMessage],
-    final: FinalRecord,
-    outputs: Mapping[str, ModelOutput],
-    answers: Mapping[str, Sequence[ModelOutput]],
+    input: Sequence[ChatMessage], final: FinalRecord, output: ModelOutput
 ) -> list[ChatMessage]:
-    output = chosen_output(final, outputs, answers)
-    if final.member is None or output.empty:
+    if output.empty:
         return list(input)
     message = output.message
     metadata = {
