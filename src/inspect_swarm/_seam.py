@@ -273,12 +273,6 @@ class MemberGate:
     def overdue(self) -> bool:
         return any(node.overdue() for node in self.time_nodes)
 
-    # From the member's nodes when they first find it bridged, as when it runs a
-    # bridged subagent: the withdrawable callbacks are withdrawn, one holding the member
-    # included.
-    def bridge_found(self) -> None:
-        self.withdraw(BRIDGED)
-
     def request_end(self, origin: str) -> None:
         # the first request wins; it closes the lever, so the member's next model call
         # is refused, cancels the chain if the member is held, and starts the grace that

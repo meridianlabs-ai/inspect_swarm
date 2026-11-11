@@ -9,7 +9,6 @@ import anyio
 import pytest
 from inspect_ai import Task, eval_async  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent, deepagent, general, run
-from inspect_ai.agent._bridge.util import bridge_model_generate
 from inspect_ai.dataset import Sample
 from inspect_ai.event import (
     ModelEvent,
@@ -58,6 +57,7 @@ from .swarm_runtime import (
     TOKENS_PER_CALL,
     Outcome,
     Script,
+    bridged_generate,
     comm_events,
     controller,
     generator,
@@ -631,37 +631,40 @@ async def test_background_work_started_by_a_factory_is_refused() -> None:
 
 async def _bridged_call(model: Model) -> None:
     # a generation the agent bridge serves, as for a bridged subagent
-    with bridge_model_generate():
-        await model.generate([ChatMessageUser(content="bridged")])
+    await bridged_generate(model, [ChatMessageUser(content="bridged")])
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("declared", [True, False], ids=["declared", "detected"])
-async def test_bridge_use_and_background_work_are_refused(declared: bool) -> None:
+async def test_a_bridged_member_drains_its_background_work() -> None:
     log: list[str] = []
     model = scripted_model()
-    agent = spawner(
-        model,
-        [_Child("child", [_sleep(3600)])],
-        log,
-        # bridge use found after the child was started
-        steps=[] if declared else [lambda: _bridged_call(model)],
+    outcome = await run_swarm(
+        swarm(
+            member(
+                spawner(
+                    model,
+                    [
+                        _Child("quick", [_sleep(0.05)]),
+                        # refused its call after the agent returns
+                        _Child("caller", [_sleep(0.2), "call"]),
+                        _Child("stuck", [_sleep(3600)]),
+                    ],
+                    log,
+                    # a bridged call after the children started
+                    steps=[lambda: _bridged_call(model)],
+                ),
+                name="x",
+                bridged=True,
+            ),
+            channels=[],
+            budget=Budget(grace=0.5),
+        )
     )
-    async with sample() as transcript:
-        with pytest.raises(RuntimeError, match="uses the agent bridge and background"):
-            await swarm(
-                member(agent, name="x", bridged=declared),
-                channels=[],
-                budget=Budget(grace=0.1),
-            )(AgentState(messages=[ChatMessageUser(content="task")]))
-        [line] = _written_ledger(transcript).members
-    assert line.status == "errored"
-    # a declared member starts none; a detected one has its child cancelled, not
-    # stopped by a limit
-    assert log == ([] if declared else ["child cancelled"])
-    assert (line.background_started, line.background_cancelled) == (
-        (0, 0) if declared else (1, 1)
-    )
+    assert statuses(outcome) == {"x": "submitted"}
+    assert sorted(log) == ["caller stopped", "quick finished", "stuck cancelled"]
+    [line] = _ledger(outcome).members
+    assert line.bridged
+    assert (line.background_started, line.background_cancelled) == (3, 1)
 
 
 @agent
