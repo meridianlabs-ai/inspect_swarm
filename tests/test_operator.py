@@ -2710,68 +2710,48 @@ async def test_background_work_started_while_paused_withdraws_the_pause(
         assert _boundaries(ran)[-1] == ("a", 1, origins)
 
 
-# A member found bridged after its pause was accepted, as when it runs a bridged
-# subagent, is not held: the pause is withdrawn as the bridge is found, during its turn
-# or while the pause holds it, and it runs on.
+# A native member that runs a bridged subagent in a tool call is not bridged: only a
+# declaration or an inspect_swe agent makes a member bridged, so a pause holds it at
+# the boundary after the tool returns.
 @pytest.mark.anyio
-@pytest.mark.parametrize("target", ["agent", "group"])
-@pytest.mark.parametrize("when", ["in_turn", "held"])
-async def test_a_member_found_bridged_after_its_pause_is_not_held(
-    target: str, when: str
-) -> None:
-    started, paused, bridged, release, running, finish = (
-        anyio.Event() for _ in range(6)
-    )
-    script = _Recording([_call("helper"), _call("slow", seconds=0), _submit()])
+async def test_a_native_member_that_runs_a_bridged_subagent_is_held_by_a_pause() -> (
+    None
+):
+    started, release = anyio.Event(), anyio.Event()
+    script = _Recording([_call("bridged_subagent"), _submit()])
 
-    async def helper_task() -> None:
-        await release.wait()
-        await _bridged_call(scripted_model())
-        bridged.set()
+    @tool
+    def bridged_subagent() -> Tool:
+        async def execute() -> str:
+            """Run a bridged subagent."""
+            started.set()
+            await release.wait()
+            await _bridged_call(scripted_model())
+            return "done"
+
+        return execute
 
     async def drive(group: OperatorGroup) -> None:
         a = group.agents["a"]
         await started.wait()
-        assert _act((a if target == "agent" else group).pause, dry_run=False).changed
-        if when == "in_turn":
-            release.set()
-            await bridged.wait()
-        paused.set()
-        if when == "held":
+        assert _act(a.pause, dry_run=False).changed
+        release.set()
+        with anyio.fail_after(10):
             await _until(lambda: _activity(group, "a") == "held")
-            release.set()
-        # past the boundary, running
-        await running.wait()
         info = _act(a.info)
         assert (info.paused, info.actions["pause"], info.actions["resume"]) == (
-            False,
-            _BRIDGED,
-            _BRIDGED,
+            True,
+            None,
+            None,
         )
-        if target == "group":
-            assert _act(group.resume, dry_run=False).detail == "The swarm is resumed."
-        finish.set()
+        assert _act(a.resume, dry_run=False).changed
 
     ran = await _run(
-        _swarm(
-            [
-                member(
-                    _owns_a_task_group(
-                        script,
-                        started,
-                        bridged if when == "in_turn" else paused,
-                        helper_task,
-                        _slow(running, finish),
-                    ),
-                    name="a",
-                )
-            ]
-        ),
-        drive,
+        _swarm([member(_react(script, bridged_subagent()), name="a")]), drive
     )
 
     assert ran.status("a") == "submitted"
-    assert _boundaries(ran) == ([] if when == "in_turn" else [("a", 1, ["operator"])])
+    assert _boundaries(ran) == [("a", 1, ["operator"])]
 
 
 @agent

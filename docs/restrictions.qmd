@@ -5,7 +5,6 @@ llms-description: "What the swarm does not support, the limits of bridged member
 
 ## What the swarm does not support
 
-- No Inspect background work in bridged members. A member cannot combine Inspect's `background()` with the agent bridge. `background()` raises in a bridged member, and a member that uses the bridge after starting background work ends `errored`. The CLI's own background work is a separate gap ([The CLI's own concurrent work](#the-clis-own-concurrent-work)).
 - No checkpointing. Inspect's sample checkpointing does not restore the swarm's shared state or its caps, so a swarm raises an error before any member starts in a sample with checkpointing on. Turn checkpointing off for tasks that run a swarm: set `checkpoint=False` on `Task()` or `eval()`, or remove every checkpoint setting, including `--checkpoint` and `INSPECT_EVAL_CHECKPOINT`.
 - No swarm in a span other than an agent's. A swarm runs in the agent span it is called from: as the task's solver, or with `run(swarm(...), input)`. Direct swarm calls from custom solvers, scorers, tools, or plain spans are refused. Use `run(swarm(...), input)` to open the required agent span; an `@agent` helper called directly does not open one. A swarm also raises an error in an agent span named `init`, `solvers` or `scorers`, or in the span of another swarm that is still running.
 - No ACP agents. ACP agents wait for their caller to drive them, so they are refused.
@@ -13,7 +12,15 @@ llms-description: "What the swarm does not support, the limits of bridged member
 
 ## Bridged members
 
-A bridged member runs a CLI agent in the sandbox through Inspect's agent bridge. `inspect_swe` agents count as bridged by default; pass `member(..., bridged=True)` for other agents that use the bridge. The swarm stops a bridged member by cancelling it.
+A bridged member runs a CLI agent in the sandbox through Inspect's agent bridge. `inspect_swe` agents count as bridged by default; pass `member(..., bridged=True)` for other agents that use the bridge. Bridged members are stopped by the same limits as native members, and usually end with the same statuses. A generation limit reaches the member wrapper after the CLI exits, so retries and CLI background work can delay its end. A swarm stop applies grace and a hard stop; a share or member limit alone does not start that timer.
+
+In three rare cases, a bridged member's recorded status and `ended_by` can differ from a native member's:
+
+- the bridged agent is cancelled before its CLI exits, after one of its generations reached the sample's limit;
+- a bridge filter makes parallel model calls in one request, and a swarm limit hides the sample's limit;
+- a CLI retry, or another request already in flight, follows the member's own limit, and the bridge replaces that limit with a swarm cap, a share or a stop.
+
+In the first two, the sample's limit is caught only at the sample's next model call, or not at all if there is none. In all three, the member's generations and compactions make no further model call once the bridge keeps an error, but calls already dispatched finish and are charged. Two exceptions: an approval or review of a tool call that is already pending still calls its model, subject to cost limits; and after a turn or message limit, a bridged host tool that itself calls a model still makes that call, so those two limits can be overshot until the CLI exits. A sample limit that a host tool's model call reaches after the bridge keeps a limit for that member can also be lost. The [limits design](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/design/swarm-limits.md#interactions) gives the outcome of each path.
 
 The CLI's own tool calls do not emit Inspect `ToolEvent`s, so the tool-event evidence described here does not cover them, Inspect Sentinel does not see them, and `longest_identical_tool_run` is `null` for bridged members.
 
