@@ -25,9 +25,14 @@ from inspect_ai.util._concurrency import init_concurrency
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 
 from inspect_swarm import (
+    AnswerResult,
+    FinalRecord,
+    MemberResult,
     ResultSpec,
     StopReason,
     SwarmControl,
+    SwarmResultRecord,
+    Verdict,
     answer_result,
     artifact_result,
     baseline,
@@ -999,3 +1004,100 @@ def test_an_output_with_only_a_completion_is_graded(
     [state] = calls
     assert state.output.completion == "0.5"
     assert [m.role for m in state.messages] == ["user"]
+
+
+def _persistent(
+    name: str, status: str, completion: str, *, kept: bool = True
+) -> dict[str, Any]:
+    # answered 42, then 7, each keyed and verified; the last key left out unless kept
+    last = (
+        AnswerResult(answer_key="7", verdict=Verdict(False, 0.0), verdict_time=2.5)
+        if kept
+        else AnswerResult(
+            verdict=Verdict(False, 0.0), verdict_time=2.5, left_out=["answer_key"]
+        )
+    )
+    return MemberResult(
+        name=name,
+        role=None,
+        state="ended",
+        status=status,
+        submitted=status == "submitted",
+        time=3.0,
+        persistent=True,
+        answer_times=[1.0, 2.0],
+        answer_results=[
+            AnswerResult(answer_key="42", verdict=Verdict(True, 1.0), verdict_time=1.5),
+            last,
+        ],
+        output=ModelOutput.from_content("mockllm", completion),
+    ).model_dump(mode="json")
+
+
+@scorer(metrics=MEMBER_METRICS)
+def contracted_members(calls: list[TaskState], checked: list[str]) -> Scorer:
+    def key(text: str) -> str | None:
+        checked.append(f"key:{text}")
+        return text
+
+    async def verifier(answer: str, metadata: dict[str, Any]) -> Verdict:
+        checked.append(f"verifier:{answer}")
+        return Verdict(True)
+
+    return member_scores(
+        graded(calls), answer_result(answer_key=key, verifier=verifier)
+    )
+
+
+def test_a_persistent_members_key_and_verdict_are_its_last_answers_when_it_submitted(
+    tmp_path: Path,
+) -> None:
+    old = _persistent("old", "submitted", "7")
+    # a record written before answers kept their keys and verdicts
+    del old["answer_results"]
+    record = SwarmResultRecord(
+        members=[],
+        final=FinalRecord(
+            mode="first", member="submitted", reason=None, provisional=False, answer=0
+        ),
+        kind="answer",
+    ).model_dump(mode="json")
+    record["members"] = [
+        _persistent("submitted", "submitted", "7"),
+        _persistent("stopped", "stopped", "8"),
+        _persistent("left_out", "submitted", "7", kept=False),
+        old,
+    ]
+    calls: list[TaskState] = []
+    checked: list[str] = []
+    log = _eval(
+        tmp_path,
+        [Sample(id="s1", input="task")],
+        forge(record),
+        [contracted_members(calls, checked)],
+    )
+    metadata = _score(_samples(log)["s1"], "contracted_members").metadata
+    assert metadata is not None
+    assert [
+        (m["name"], m["outcome"], m["value"], m["answer_key"], m["verdict"])
+        for m in metadata["members"]
+    ] == [
+        (
+            "submitted",
+            "graded",
+            7.0,
+            "7",
+            {"passed": False, "value": 0.0, "explanation": None},
+        ),
+        ("stopped", "graded", 8.0, None, None),
+        (
+            "left_out",
+            "graded",
+            7.0,
+            None,
+            {"passed": False, "value": 0.0, "explanation": None},
+        ),
+        ("old", "graded", 7.0, None, None),
+    ]
+    # the record's values are read, never computed again
+    assert checked == []
