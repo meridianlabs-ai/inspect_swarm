@@ -67,7 +67,7 @@ inspect_ai splits a turn's tool calls into stages: consecutive calls to tools wi
 
 ### Time
 
-[swarm-limits.md](swarm-limits.md#interactions) already decides, for the messages channel's wait, that waiting is wall-clock time inside a tool call: it counts towards the member's time limit, the swarm's time cap, the sample's time limit and the sample's working time, and a stop releases every wait. Plan decision 12 keeps idle time as "the time members spend in the bus's read waits" and drops per-member waiting time from M1 because a member's subagents and parallel calls make a plain sum of waits misleading ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 12).
+[swarm-limits.md](swarm-limits.md#interactions) already decides, for the messages channel's wait, that waiting is wall-clock time inside a tool call: it counts towards the member's time limit, the swarm's time cap, the sample's time limit and the sample's working time, and a stop releases every wait. Plan decision 12 leaves idle time to M2's wait, the time a member as a whole does nothing but wait for its peers, and drops per-member waiting time from M1 because a member's subagents and parallel calls make a plain sum of waits misleading ([swarm-implementation-plan.md Decisions](swarm-implementation-plan.md#decisions), item 12).
 
 ### Who waits today
 
@@ -404,7 +404,7 @@ One pull request, M2-13 in [swarm-implementation-plan.md](swarm-implementation-p
    - `src/inspect_swarm/_ledger.py`: the event log skips `waited` events, which name no one channel.
    - Tests: `tests/test_wait.py`, and the cases above in `tests/test_shared_memory_channel.py`, `tests/test_bus.py` and `tests/test_comm_evidence.py`.
    - `MemberContext.background_running` (`src/inspect_swarm/_budget.py`), kept by the owner with `Bus.recheck()` at zero (`src/inspect_swarm/_background.py`), and `Bus.member_ending()` in `_drain()` (`src/inspect_swarm/_member.py`), with the background-member cases.
-   - Not the wait metrics: they land in their own pull request after M2-13, with the idle clock, the `idle` field and the event log's `WaitRecord`s ([Metrics](#metrics)).
+   - Not the wait metrics: they are M2-15, their own pull request after M2-13, with the idle clock, the `idle` field and the event log's `WaitRecord`s ([Metrics](#metrics)).
    - Depends on: M2-8 (the shared-memory channel) and M2-5 (background members).
 2. **M2-11** documents `swarm_wait` with the shared memory ([Shared Memory](https://meridianlabs-ai.github.io/inspect_swarm/shared-memory.html#waiting-for-other-members), [Analysis](https://meridianlabs-ai.github.io/inspect_swarm/analysis.html#waits)).
 

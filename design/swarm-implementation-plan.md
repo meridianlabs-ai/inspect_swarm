@@ -126,6 +126,7 @@ flowchart LR
   M1_5 --> M1_7[M1-7 exhaustion and final step]
   M1_6 --> M1_7
   M1_5 --> M1_9[M1-9 unsubmitted status]
+  M1_9 --> M1_15[M1-15 stop at the first submission]
   M1_5 --> M1_10[M1-10 evidence and metrics]
   M1_6 --> M1_10
   M1_6 --> M1_12[M1-12 analysis columns]
@@ -149,7 +150,7 @@ What can be built in parallel, in waves (each wave starts when its dependencies 
 4. M1-4 (needs AI-2).
 5. M1-5, M1-6 and M1-8, in parallel; M1-14 once AI-7 is merged on inspect_ai `main`.
 6. M1-7, M1-9, M1-10 and M1-12, in parallel.
-7. M1-11 and M1-13.
+7. M1-11, M1-13 and M1-15.
 
 The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13, with AI-2 needed by M1-4 and AI-7 by M1-14, which M1-13 waits for. Starting AI-2 and AI-7 in wave 1 keeps them off the critical path, as long as AI-7 merges on inspect_ai `main` in time for M1-14 to merge before M1-7 does.
 
@@ -273,6 +274,12 @@ The critical path is AI-1 → M1-1 → M1-3 → M1-4 → M1-5 → M1-7 → M1-13
 - Depends on: M1-4, AI-7 merged on inspect_ai `main`.
 - Implements: [swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics) (decision: Ransom, 2026-10-19).
 
+**M1-15. `leaderless()` stops at the first submission** (decision: Ransom, 2026-10-21). Under `first`, nothing a member does after the first submission can change the answer, so its further spend is waste. `leaderless(stop_on_submission: bool = True)` starts every member and returns `submitted` at the first `MemberEnded` with a submission; the runtime's stop procedure then soft-stops the members still running and finalises with `first`. A member that ends `unsubmitted`, on a member limit or with any other status does not stop the swarm. With `stop_on_submission=False` every member runs to its end and it returns `all_done`, for tasks whose scorer reads a shared artifact after the members end, arms that measure each member's result (team@k), and agents for which any normal return counts as a submission. `submitted` is a topology stop reason, recorded as `submitted` rather than `controller:submitted`. The README says when to pass `stop_on_submission=False`.
+- Files: `src/inspect_swarm/_controller/leaderless.py`, `src/inspect_swarm/_controller/_control.py` (`_TOPOLOGY_REASONS`), `README.md`.
+- Tests: `tests/test_controller.py`: with the default, an `unsubmitted` member and a member limit end first without stopping the swarm, the first submission stops it with reason `submitted`, a member still generating ends `stopped`, and the answer is the first submission; with `stop_on_submission=False` every member runs to its end and the reason is `all_done`. Tests that need every member to run pass `leaderless(stop_on_submission=False)`.
+- Depends on: M1-5 (`first` and the record's stop reason), M1-9 (`unsubmitted`, which does not stop the swarm).
+- Implements: [swarm-api.md Examples](swarm-api.md#examples) (`leaderless` and `stop_on_submission`); [swarm.md Controller](swarm.md#controller-topology-termination-final-answer) (leaderless swarms end at the first submission).
+
 ## M2 pull requests
 
 `D-n` are design pull requests in this repository's `design/`. A design pull request precedes code where no design decides what the code must do.
@@ -297,8 +304,9 @@ flowchart LR
   M2_8 --> M2_10[M2-10 comm metrics]
   D3[D-3 wait design] --> M2_13
   M2_8 --> M2_13[M2-13 waiting for members]
+  M2_13 --> M2_15[M2-15 wait metrics]
   M1 --> M2_14[M2-14 last and the controller's choice]
-  M2_1 & M2_2 & M2_3 & M2_4 & M2_5 & M2_9 & M2_10 & M2_13 & M2_14 --> M2_11[M2-11 docs and examples]
+  M2_1 & M2_2 & M2_3 & M2_4 & M2_5 & M2_9 & M2_10 & M2_13 & M2_14 & M2_15 --> M2_11[M2-11 docs and examples]
   M2_11 --> M2_12[M2-12 API statement, packaging, first release]
 ```
 
@@ -306,7 +314,7 @@ flowchart LR
 
 - **Isolation and limits:** M2-1, M2-2, M2-3 and M2-4, each alone. M2-14, the answer rule, is alone too.
 - **Background members:** D-2 → AI-5 → M2-5. D-2 starts during M1 (decision: Ransom, 2026-10-14; [swarm-background-members.md](swarm-background-members.md)).
-- **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10, M2-13}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8, and D-3 before M2-13. D-1 starts during M1 (decision: Ransom, 2026-10-14; [swarm-memory-channel.md](swarm-memory-channel.md)). D-3 is [swarm-wait.md](swarm-wait.md).
+- **Bus and memory channel:** M2-6 → M2-7 → M2-8 → {M2-9, M2-10, M2-13 → M2-15}, with D-1 before M2-7 (it decides how the binding treats a member's descendants) and M2-8, and D-3 before M2-13. D-1 starts during M1 (decision: Ransom, 2026-10-14; [swarm-memory-channel.md](swarm-memory-channel.md)). D-3 is [swarm-wait.md](swarm-wait.md).
 - **Release:** M2-11 and M2-12, after the three strands above.
 
 ### Designs
@@ -402,28 +410,34 @@ None in M2, and none in M1.
 - Depends on: M2-8.
 - Implements: swarm-communication.md step 4; [Tools reach members through a tool source](swarm-communication.md#tools-reach-members-through-a-tool-source).
 
-**M2-10. Communication metrics.** Per member and per channel with records: record counts and payload bytes, rejections by control (the shared-memory channel's file and board limit failures use `admit`), and reads and listings, from the live evidence (`sent`, `delivered`, `read`); the swarm writes no exposure or proposal events ([swarm-communication.md Alternatives considered](swarm-communication.md#alternatives-considered)). Read counts per record can be rebuilt from the `read` events. Wait time is not in M2-10, since nothing waits before M2-13: the wait metrics (`waits`, `waits_by_outcome`, `wait_time`, `idle_time`, from `waited` events; [swarm-wait.md Metrics](swarm-wait.md#metrics)) land in their own pull request after M2-13 (decision: Ransom, 2026-10-21).
+**M2-10. Communication metrics.** Per member and per channel with records: record counts and payload bytes, rejections by control (the shared-memory channel's file and board limit failures use `admit`), and reads and listings, from the live evidence (`sent`, `delivered`, `read`); the swarm writes no exposure or proposal events ([swarm-communication.md Alternatives considered](swarm-communication.md#alternatives-considered)). Read counts per record can be rebuilt from the `read` events. Wait time is not in M2-10, since nothing waits before M2-13: the wait metrics (`waits`, `waits_by_outcome`, `wait_time`, `idle_time`, from `waited` events; [swarm-wait.md Metrics](swarm-wait.md#metrics)) are M2-15, their own pull request after M2-13 (decision: Ransom, 2026-10-21).
 - Files: `src/inspect_swarm/_metrics.py`.
 - Tests: `tests/test_comm_evidence.py`, the counting cases.
 - Depends on: M2-8, M1-10.
 - Implements: swarm-communication.md step 5; [Evidence and provenance](swarm-communication.md#evidence-and-provenance); [swarm-memory-channel.md Evidence](swarm-memory-channel.md#evidence).
 
 **M2-13. Waiting for other members.** As D-3 specifies ([swarm-wait.md Implementation plan](swarm-wait.md#implementation-plan)): the bus's waiter registry and the `swarm_wait` tool (`parallel=False`, offered by `swarm_tools()` with a channel that wakes waits), the releases (news, ends, no member active, `bus.close()`, the drain, timeout, cancellation), `Channel.max_wait` and `WaitingState`, `Draft.wake`; the shared-memory channel's `max_wait`, `wake=True` writes and wait methods (`wakes()`, `news()`, reading `seen`); `SwarmRun._end()` telling the bus; `waited` evidence with `woken_by`.
-- Files: `src/inspect_swarm/_bus/_wait.py` (new), `_bus/_bus.py`, `_bus/_record.py`, `_bus/_tools.py`, `src/inspect_swarm/_channel/_channel.py`, `_channel/shared_memory.py`, `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_evidence.py`. Also, for background members (M2-5): `MemberContext.background_running` (`_budget.py`), the owner's `Bus.recheck()` (`_background.py`) and `Bus.member_ending()` in the drain (`_member.py`). Not the wait metrics (`_metrics.py`), which land in their own pull request after M2-13 (decision: Ransom, 2026-10-21).
+- Files: `src/inspect_swarm/_bus/_wait.py` (new), `_bus/_bus.py`, `_bus/_record.py`, `_bus/_tools.py`, `src/inspect_swarm/_channel/_channel.py`, `_channel/shared_memory.py`, `src/inspect_swarm/_controller/_control.py`, `src/inspect_swarm/_evidence.py`. Also, for background members (M2-5): `MemberContext.background_running` (`_budget.py`), the owner's `Bus.recheck()` (`_background.py`) and `Bus.member_ending()` in the drain (`_member.py`). Not the wait metrics (`_metrics.py`), which are M2-15, their own pull request after M2-13 (decision: Ransom, 2026-10-21).
 - Tests: `tests/test_wait.py`, with cases in `tests/test_shared_memory_channel.py`, `tests/test_bus.py`, `tests/test_comm_evidence.py`, and `tests/test_background_members.py`; mockllm on both backends, no Docker ([swarm-wait.md Testing](swarm-wait.md#testing)).
 - Depends on: M2-8, M2-5, D-3.
 - Implements: [swarm-wait.md](swarm-wait.md).
 
+**M2-15. Wait metrics.** As D-3 specifies ([swarm-wait.md Metrics](swarm-wait.md#metrics)), split out of M2-13 (decision: Ransom, 2026-10-21): the idle clock on each waiter, which runs exactly while the wait makes its member waiting, and the refusal of a second wait from a member's own loop while one is in progress, so one clock runs per member; the `waited` event's `idle` field; the ledger's event log keeps `waited` events as `WaitRecord`s; and per member `waits`, `waits_by_outcome`, `wait_time` and `idle_time`, `None` in a swarm that offers no wait.
+- Files: `src/inspect_swarm/_bus/_wait.py` (the idle clock and the refusal), `src/inspect_swarm/_evidence.py` (`idle`), `src/inspect_swarm/_ledger.py` (`WaitRecord`), `src/inspect_swarm/_metrics.py`, `src/inspect_swarm/_background.py` (the owner calls `Bus.recheck()` when its running count rises from zero, too), `src/inspect_swarm/_controller/_control.py` (whether the swarm offers a wait), `README.md`.
+- Tests: as [swarm-wait.md Testing](swarm-wait.md#testing) lists: `tests/test_metrics.py` (the four metrics from a scripted run, including a member whose subagent waits while its own loop works, and `None` with no wait), `tests/test_comm_evidence.py` (one row per clause of the idle clock) and `tests/test_wait.py` (the refusal of a second own-loop wait).
+- Depends on: M2-13, M1-10.
+- Implements: [swarm-wait.md Metrics](swarm-wait.md#metrics).
+
 **M2-14. The answer: `first`, `last` or the controller's choice.** As [swarm-scoring.md The final answer](swarm-scoring.md#the-final-answer) specifies (decision: Ransom, 2026-10-22): `final: FinalName | None` on `leaderless()` and `Controller`, with M2's `FinalName = Literal["first", "last"]`; `leaderless(final="last")` refused unless `stop_on_submission=False`; `SwarmControl.choose_answer(member, reason=None)`, once, from a member that submitted, ahead of the `final` rule; the record and the `final` event carry the mode (`first`, `last`, `controller`), member and reason; the answer message's metadata carries the mode and member; the selection applies provisionally and at finalisation. The chain ([swarm-scoring.md The final-answer chain](swarm-scoring.md#the-final-answer-chain)) widens `FinalName` and keeps the choice ahead of the chain.
 - Files: `src/inspect_swarm/_final.py`, `src/inspect_swarm/_record.py`, `src/inspect_swarm/_controller/_control.py`, `_controller/_controller.py`, `_controller/leaderless.py`, `src/inspect_swarm/_swarm.py`, `src/inspect_swarm/__init__.py`, `README.md`.
 - Tests: `tests/test_final.py`: `last` over member results, a team swarm (`stop_on_submission=False`) answered with its last submission, the provisional answer under `last` after an outer limit, a controller that chooses a member (at once, and through an outer limit), and the refusals; `tests/test_metrics.py`: `steps_to_answer` under `last` and under a controller's choice.
-- Depends on: M1, and `leaderless()`'s `stop_on_submission`.
+- Depends on: M1, including M1-15 (`leaderless()`'s `stop_on_submission`).
 - Implements: [swarm-scoring.md The final answer](swarm-scoring.md#the-final-answer).
 
 **M2-11. User docs and examples.** A Quarto site in `docs/`, as inspect_sentinel and inspect_flow keep, and runnable `examples/`: getting started; members, controllers and channels; budgets, splits and the ledger; sandbox topologies (shared, per member) with sizing guidance; the shared-memory channel and waiting for other members with `swarm_wait` (what wakes it, that waiting counts as time, the idle-time metric, and that filesystem-only swarms have no wait), monitoring it with sentinel, and the filesystem observation limit (swarm-communication.md step 7's content for what M2 builds), and that bridged members cannot use it yet; scoring: the task's own scorers, the result record, and with per-member sandboxes a scorer that names each member's sandbox; the result record is the runtime's, written to the transcript when the swarm ends and read with `swarm_result()` ([swarm-result-record.md](swarm-result-record.md#the-docs)); comparisons with epochs through Inspect's own reducers ([swarm-scoring.md Comparison quantities](swarm-scoring.md#comparison-quantities)); writing a controller, including `until_proved` with its precondition ([Lean Rec. 6](swarm-lean-open-problems.md#6-m1-tighten-submitted-m2-document-stopping-on-the-first-proof), second part); and an example shaped like Epoch's port, which uses the shared-memory channel ([Lean, A port, sketch](swarm-lean-open-problems.md#a-port-sketch)). The shared-memory pages cover migration from `memory(instance=...)`, the seen rule and descendants ([swarm-memory-channel.md Relation to `memory(instance="...")`](swarm-memory-channel.md#relation-to-memoryinstance)).
 - Files: `docs/`, `examples/`, `README.md`.
 - Tests: examples run on mockllm in CI where they need no sandbox; the rest are marked slow.
-- Depends on: the functional M2 pull requests it documents (M2-1 to M2-10, M2-13 and M2-14).
+- Depends on: the functional M2 pull requests it documents (M2-1 to M2-10 and M2-13 to M2-15).
 - Implements: the documentation parts of every M2 item; swarm-communication.md step 7 for the memory channel.
 
 **M2-12. API statement, packaging and the first release.** The README, the package docstring and the docs site's landing page state that everything in inspect_swarm is experimental and may change in any release, with no support guaranteed ([Decisions](#decisions), item 6), and the designs and docs that promised a supported API now say the same; classifiers move from "Development Status :: 1 - Planning" to "Development Status :: 3 - Alpha"; `requires-python` stays at M1-0's 3.11; the `push` trigger is restored in `release.yaml`, so Release Please opens the first release pull request.
@@ -522,7 +536,7 @@ Ransom's answers to this plan's questions, on 2026-10-14 and 2026-10-15 (his wor
 
 11. **No `StoreEvent`s inside a swarm** (2026-10-19). The swarm enters an inspect_ai switch that turns span store tracking off, always, a swarm of one included; the swarm's span still logs the net change. Per-member stores were considered and not adopted for now, and meridianlabs-ai/inspect_ai#589's general fix is wanted upstream but is not a swarm dependency ([swarm.md Store events](swarm.md#observer-evidence-accounting-and-metrics)). This adds AI-7 and M1-14.
 
-12. **M1-10 measures no per-member idle or waiting time** (2026-10-20). Per-member timing metrics must match Inspect's working-time accounting (`src/inspect_ai/_util/working.py`): a sample's working time is its elapsed time minus the merged intervals of every wait Inspect knows about (connection slot acquisition, retried attempts, retry backoff, the provider SDK's own failed requests and retry sleeps, the pause gate, human approval and review, and `suspend_working_limit()`). That is hard to do per member. A member can run subagents and parallel tool calls, so one of its tasks can be waiting while another works, and a total of the member's waits is misleading on its own. The meaningful figure is per-member working time, which needs Inspect's interval accounting attributed to each member, likely through private API or an inspect_ai change. It comes back when an experiment needs it. Until then M1 records the swarm's wall clock and each member's running time, and Inspect's sample working and waiting time cover the swarm as a whole. Idle time keeps its designed meaning, the time members spend in the bus's read waits ([swarm-communication.md](swarm-communication.md)), which M2 adds. Ransom chose to drop idle time from M1 rather than give it an M1 meaning, and said of connection waits: "Since a member can have multiple subagents / do work in parallel, the calculation will need to match the working time accounting in Inspect - just computing waiting time does not give an accurate picture."
+12. **M1-10 measures no per-member idle or waiting time** (2026-10-20). Per-member timing metrics must match Inspect's working-time accounting (`src/inspect_ai/_util/working.py`): a sample's working time is its elapsed time minus the merged intervals of every wait Inspect knows about (connection slot acquisition, retried attempts, retry backoff, the provider SDK's own failed requests and retry sleeps, the pause gate, human approval and review, and `suspend_working_limit()`). That is hard to do per member. A member can run subagents and parallel tool calls, so one of its tasks can be waiting while another works, and a total of the member's waits is misleading on its own. The meaningful figure is per-member working time, which needs Inspect's interval accounting attributed to each member, likely through private API or an inspect_ai change. It comes back when an experiment needs it. Until then M1 records the swarm's wall clock and each member's running time, and Inspect's sample working and waiting time cover the swarm as a whole. Idle time keeps its designed meaning, the time a member as a whole does nothing but wait for its peers, which M2 adds with the bus's wait: the time its own loop spends in `swarm_wait`, not released, with none of its background work running, measured by each wait's idle clock rather than summed over waits ([swarm-wait.md Metrics](swarm-wait.md#metrics); M2-15). Ransom chose to drop idle time from M1 rather than give it an M1 meaning, and said of connection waits: "Since a member can have multiple subagents / do work in parallel, the calculation will need to match the working time accounting in Inspect - just computing waiting time does not give an accurate picture."
 
 13. **Waiting for other members is in M2** (2026-10-21). The first internal user's members, done with their own part, polled the board with `sleep 60; cat /shared/notes.md`, a tool turn per check. Ransom: "I think it will be common for members to wait on other members if they are working together." So waiting is a first-class M2 case, not deferred to the messages channel or persistent members. This adds D-3 and M2-13 ([swarm-wait.md](swarm-wait.md)).
 
@@ -539,4 +553,4 @@ None.
 
 Noticed while planning and left out, for Ransom to file if wanted:
 
-- **A docs-publishing workflow.** Neither inspect_sentinel nor inspect_flow has one in `.github/workflows`; how the Quarto site is published is decided with M2-11.
+- **A docs-publishing workflow.** No workflow builds or publishes the Quarto site; it is published to GitHub Pages by hand, as [CONTRIBUTING.md Documentation](../CONTRIBUTING.md#documentation) says.
