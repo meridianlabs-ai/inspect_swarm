@@ -1,5 +1,6 @@
 import functools
 import tempfile
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from typing import Any, cast
@@ -20,6 +21,7 @@ from inspect_ai.agent import (
 )
 from inspect_ai.dataset import Sample
 from inspect_ai.event import CommunicationEvent, CompactionEvent
+from inspect_ai.log import EvalSample
 from inspect_ai.model import (
     ChatMessage,
     ChatMessageSystem,
@@ -32,7 +34,7 @@ from inspect_ai.model import (
 from inspect_ai.model._trim import partition_messages
 from inspect_ai.scorer import includes
 from inspect_ai.tool import Tool, ToolCall, ToolError, tool
-from inspect_ai.util import time_limit
+from inspect_ai.util import LimitExceededError, suspend_working_limit, time_limit
 
 from inspect_swarm import (
     Boundary,
@@ -46,6 +48,9 @@ from inspect_swarm import (
     StopReason,
     SwarmControl,
     Topic,
+    Verdict,
+    VerdictSummary,
+    answer_result,
     leaderless,
     member,
     messages,
@@ -68,6 +73,7 @@ from .test_turn_seam import (
     _changes,  # pyright: ignore[reportPrivateUsage]
     _controller,  # pyright: ignore[reportPrivateUsage]
     _eval,  # pyright: ignore[reportPrivateUsage]
+    _ledger,  # pyright: ignore[reportPrivateUsage]
     _metrics,  # pyright: ignore[reportPrivateUsage]
     _raised,  # pyright: ignore[reportPrivateUsage]
     _Ran,  # pyright: ignore[reportPrivateUsage]
@@ -680,14 +686,22 @@ async def test_a_cut_off_ends_the_member_unsubmitted_and_the_swarm_goes_on(
     assert len(refused) == 1 and "not answered" in refused[0]
 
 
-async def swarm_run(members: list[Any], run: Run, *, final: Any = None) -> _Ran:
+async def swarm_run(
+    members: list[Any], run: Run, *, final: Any = None, result: Any = None
+) -> _Ran:
+    sample = await _swarm_sample(members, run, final=final, result=result)
+    assert sample.error is None, sample.error.traceback
+    return _Ran(sample)
+
+
+async def _swarm_sample(
+    members: list[Any], run: Run, *, final: Any = None, result: Any = None
+) -> EvalSample:
     @swarm_controller(name=f"persistent_test_{uuid4().hex}")
     def factory() -> Controller:
         return Controller(run, final=final)
 
-    sample = await _eval(swarm(members, controller=factory(), channels=[]))
-    assert sample.error is None, sample.error.traceback
-    return _Ran(sample)
+    return await _eval(swarm(members, controller=factory(), channels=[], result=result))
 
 
 @pytest.mark.anyio
@@ -1720,3 +1734,483 @@ async def test_a_view_clears_news_only_for_the_loop_that_viewed(reader: str) -> 
         MemberIdle("worker", 1, still),
         MemberIdle("worker", 2, still),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Keys and verdicts
+
+
+class _Checker:
+    """A verifier that passes the answer `42` and records its calls. Held, its first call waits for `release`; with a model, each call makes a model call after any wait; `work` runs on each call in place of the wait."""
+
+    def __init__(
+        self,
+        *,
+        held: bool = False,
+        model: Model | None = None,
+        work: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self.held = held
+        self.model = model
+        self.work = work
+        self.calls: list[str] = []
+        self.started = anyio.Event()
+        self.release = anyio.Event()
+
+    async def __call__(self, answer: str, metadata: dict[str, Any]) -> Verdict:
+        answer = _answer_of(answer)
+        self.calls.append(answer)
+        self.started.set()
+        if self.held and len(self.calls) == 1:
+            await self.release.wait()
+        if self.work is not None:
+            await self.work()
+        if self.model is not None:
+            await self.model.generate("check")
+        passed = answer == "42"
+        return Verdict(passed, 1.0 if passed else 0.0, f"EXPLANATION-{answer}")
+
+
+# a submit call's answer, the last line of its completion
+def _answer_of(completion: str) -> str:
+    return completion.rsplit("\n", 1)[-1]
+
+
+_PASSED = VerdictSummary(True, 1.0)
+_FAILED = VerdictSummary(False, 0.0)
+
+
+def _recording_key(keyed: list[str]) -> Callable[[str], str | None]:
+    def key(text: str) -> str | None:
+        keyed.append(_answer_of(text))
+        return _answer_of(text)
+
+    return key
+
+
+async def _until_held(control: SwarmControl, name: str = "a") -> None:
+    while not control.member(name).held:
+        await anyio.sleep(0.01)
+
+
+async def _no_event_for(control: SwarmControl, seconds: float) -> None:
+    with anyio.move_on_after(seconds):
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                raise AssertionError(f"{event} came before its verdict")
+
+
+@pytest.mark.anyio
+async def test_each_answer_is_keyed_and_verified_once_as_it_is_given() -> None:
+    keyed: list[str] = []
+    checker = _Checker()
+    seen: list[tuple[Any, VerdictSummary | None]] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("a")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                seen.append((event, control.member("a").verdict))
+                if isinstance(event, MemberIdle) and event.answer == 0:
+                    control.wake("a", "next")
+        return "quiescence"
+
+    ran = await swarm_run(
+        [
+            member(
+                _react(_Recording([_submit("42"), _submit("7")])),
+                name="a",
+                persistent=True,
+            )
+        ],
+        run,
+        final="first",
+        result=answer_result(answer_key=_recording_key(keyed), verifier=checker),
+    )
+    # once each, in order, and never again when the stop ends the idle member
+    assert keyed == checker.calls == ["42", "7"]
+    assert seen == [
+        (MemberIdle("a", 0, False, _PASSED), _PASSED),
+        (MemberIdle("a", 1, False, _FAILED), _FAILED),
+    ]
+    [m] = ran.record.members
+    assert (m.status, m.answer_key, m.verdict, m.verdict_time) == (
+        "submitted",
+        None,
+        None,
+        None,
+    )
+    assert [(r.answer_key, r.verdict) for r in m.answer_results] == [
+        ("42", Verdict(True, 1.0, "EXPLANATION-42")),
+        ("7", Verdict(False, 0.0, "EXPLANATION-7")),
+    ]
+    for answered, r in zip(m.answer_times, m.answer_results, strict=True):
+        assert r.verdict_time is not None and r.verdict_time >= answered
+    assert (ran.record.final.mode, ran.record.final.answer) == ("first", 0)
+    verdicts = _swarm_events(ran, "verdict")
+    assert [(e.data["answer"], e.data["passed"]) for e in verdicts] == [
+        (0, True),
+        (1, False),
+    ]
+    # in the swarm's span
+    [final] = _swarm_events(ran, "final")
+    assert {e.span_id for e in verdicts} == {final.span_id}
+
+
+@pytest.mark.anyio
+async def test_a_member_whose_answer_is_checking_is_published_idle_with_its_verdict() -> (
+    None
+):
+    checker = _Checker(held=True)
+    wait = 0.3
+    checking: list[Any] = []
+    idle: list[Any] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("a")
+        await checker.started.wait()
+        await _until_held(control)
+        handle = control.member("a")
+        checking.append((handle.state, handle.held, handle.verdict))
+        with pytest.raises(RuntimeError, match="still being verified"):
+            control.wake("a", "next")
+        await _no_event_for(control, wait)
+        checker.release.set()
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                idle.append((event, handle.state, handle.verdict))
+        return "quiescence"
+
+    ran = await swarm_run(
+        [member(_react(_Recording([_submit("42")])), name="a", persistent=True)],
+        run,
+        result=answer_result(verifier=checker),
+    )
+    assert checking == [("running", True, None)]
+    assert idle == [(MemberIdle("a", 0, False, _PASSED), "idle", _PASSED)]
+    [m] = ran.record.members
+    [answer] = m.answer_results
+    [answered] = m.answer_times
+    assert answer.verdict_time is not None and answer.verdict_time - answered >= wait
+    # the hold includes the wait for the verdict, and awaiting work does not
+    [metrics] = _metrics(ran).members
+    assert metrics.held_time - metrics.awaiting_work_time >= wait
+
+
+@pytest.mark.anyio
+async def test_a_key_only_contract_keys_each_answer_and_publishes_idle_at_once() -> (
+    None
+):
+    keyed: list[str] = []
+    seen: list[ControlEvent] = []
+
+    async def recording(control: SwarmControl) -> StopReason:
+        control.start("a")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                seen.append(event)
+                if isinstance(event, MemberIdle) and event.answer == 0:
+                    control.wake("a", "next")
+        return "quiescence"
+
+    ran = await swarm_run(
+        [
+            member(
+                _react(_Recording([_submit("42"), _submit("7")])),
+                name="a",
+                persistent=True,
+            )
+        ],
+        recording,
+        result=answer_result(answer_key=_recording_key(keyed)),
+    )
+    assert keyed == ["42", "7"]
+    assert seen == [MemberIdle("a", 0, False), MemberIdle("a", 1, False)]
+    [m] = ran.record.members
+    assert [(r.answer_key, r.verdict) for r in m.answer_results] == [
+        ("42", None),
+        ("7", None),
+    ]
+    assert _swarm_events(ran, "verdict") == []
+
+
+@pytest.mark.anyio
+async def test_an_end_while_an_answer_is_checking_waits_for_its_verdict() -> None:
+    checker = _Checker(held=True)
+    ended: list[Any] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("a")
+        await checker.started.wait()
+        await _until_held(control)
+        handle = control.member("a")
+        handle.end(origin="test")
+        while handle.state != "ended":
+            await anyio.sleep(0.01)
+        ended.append((handle.status, handle.verdict))
+        await _no_event_for(control, 0.1)
+        checker.release.set()
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                ended.append(event)
+        return "all_done"
+
+    ran = await swarm_run(
+        [member(_react(_Recording([_submit("42")])), name="a", persistent=True)],
+        run,
+        result=answer_result(verifier=checker),
+    )
+    # the end leaves the member submitted, and its event comes with the verdict
+    assert ended == [("submitted", None), MemberEnded("a", "submitted", True, _PASSED)]
+    assert checker.calls == ["42"]
+    assert _statuses(ran) == {"a": "submitted"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("model_call", [False, True], ids=["verified", "refused"])
+async def test_a_stop_while_an_answer_is_checking_never_verifies_it_again(
+    model_call: bool,
+) -> None:
+    checker = _Checker(held=True, model=scripted_model() if model_call else None)
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("a")
+        await checker.started.wait()
+        await _until_held(control)
+        # nothing awaits between here and the stop, so the verifier resumes after it,
+        # with the runtime lever closed
+        checker.release.set()
+        return "enough"
+
+    ran = await swarm_run(
+        [member(_react(_Recording([_submit("42")])), name="a", persistent=True)],
+        run,
+        result=answer_result(verifier=checker),
+    )
+    assert _statuses(ran) == {"a": "submitted"}
+    # once in the whole run, finalisation included
+    assert checker.calls == ["42"]
+    [answer] = ran.record.members[0].answer_results
+    if model_call:
+        # the closed lever refused the verifier's model call
+        assert (answer.verdict, answer.verdict_time) == (None, None)
+        assert _swarm_events(ran, "verdict") == []
+    else:
+        assert answer.verdict == Verdict(True, 1.0, "EXPLANATION-42")
+
+
+@pytest.mark.anyio
+async def test_the_hard_stop_leaves_a_checking_answer_unverified() -> None:
+    checker = _Checker(held=True)
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("a")
+        await checker.started.wait()
+        await _until_held(control)
+        return "enough"
+
+    @swarm_controller(name=f"persistent_test_{uuid4().hex}")
+    def factory() -> Controller:
+        return Controller(run)
+
+    sample = await _eval(
+        swarm(
+            [member(_react(_Recording([_submit("42")])), name="a", persistent=True)],
+            controller=factory(),
+            channels=[],
+            budget=Budget(grace=0.05),
+            result=answer_result(verifier=checker),
+        )
+    )
+    assert sample.error is None, sample.error.traceback
+    ran = _Ran(sample)
+    assert _statuses(ran) == {"a": "submitted"}
+    assert checker.calls == ["42"]
+    [answer] = ran.record.members[0].answer_results
+    assert (answer.verdict, answer.verdict_time) == (None, None)
+    assert _swarm_events(ran, "verdict") == []
+
+
+@pytest.mark.anyio
+async def test_a_model_backed_verifier_checks_each_answer_on_the_runtime_meter() -> (
+    None
+):
+    checker = _Checker(model=scripted_model(cost=1.0))
+    ran = await swarm_run(
+        [
+            member(
+                _react(_Recording([_submit("42"), _submit("7")])),
+                name="a",
+                persistent=True,
+            )
+        ],
+        _waking("next"),
+        result=answer_result(verifier=checker),
+    )
+    assert checker.calls == ["42", "7"]
+    [m] = ran.record.members
+    assert [r.verdict is not None for r in m.answer_results] == [True, True]
+    ledger = _ledger(ran)
+    assert ledger.runtime.cost == 2.0
+    assert [m.meter.cost for m in ledger.members] == [0.0]
+
+
+async def _busy() -> None:
+    time.sleep(_WORK)
+
+
+async def _in_a_thread() -> None:
+    await anyio.to_thread.run_sync(time.sleep, _WORK)
+
+
+async def _marked_wait() -> None:
+    with suspend_working_limit():
+        await anyio.sleep(_WORK)
+
+
+_WORK = 0.4
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "work,counted",
+    [
+        pytest.param(_busy, True, id="python"),
+        pytest.param(_in_a_thread, True, id="thread"),
+        pytest.param(_marked_wait, False, id="marked-wait"),
+    ],
+)
+async def test_a_verifiers_time_during_a_checking_hold_is_working_time(
+    work: Callable[[], Awaitable[None]], counted: bool
+) -> None:
+    checker = _Checker(work=work)
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("a")
+        async with aclosing(control.events()) as events:
+            async for _ in events:
+                pass
+        return "quiescence"
+
+    ran = await swarm_run(
+        [member(_react(_Recording([_submit("42")])), name="a", persistent=True)],
+        run,
+        result=answer_result(verifier=checker),
+    )
+    assert checker.calls == ["42"]
+    total, working = ran.sample.total_time, ran.sample.working_time
+    assert total is not None and working is not None
+    if counted:
+        assert total - working < _WORK / 2
+    else:
+        assert total - working >= _WORK * 0.9
+
+
+@pytest.mark.anyio
+async def test_an_end_after_a_wake_reports_the_verdict_on_the_answer_before_it() -> (
+    None
+):
+    started = anyio.Event()
+
+    def respond(input: list[ChatMessage]) -> ModelOutput:
+        if input[-1].text == "next":
+            started.set()
+            return _call("work", seconds=0.3)
+        return _submit("42")
+
+    seen: list[Any] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("a")
+        async with aclosing(control.events()) as events:
+            async for event in events:
+                seen.append((event, control.member("a").verdict))
+                if isinstance(event, MemberIdle):
+                    control.wake("a", "next")
+                    await started.wait()
+                    control.member("a").end(origin="test")
+        return "all_done"
+
+    ran = await swarm_run(
+        [member(_react(Script(respond=respond)), name="a", persistent=True)],
+        run,
+        result=answer_result(verifier=_Checker()),
+    )
+    assert seen == [
+        (MemberIdle("a", 0, False, _PASSED), _PASSED),
+        (MemberEnded("a", "stopped", False, _PASSED), _PASSED),
+    ]
+    assert ran.record.final.answer == 0
+
+
+async def _stop_myself(state: AgentState) -> bool:
+    # the member's own loop stopping itself, as an agent does with a custom limit
+    raise LimitExceededError("custom", value=1, limit=1)
+
+
+def _key_failure(failure: str) -> Callable[[str], str | None]:
+    def key(text: str) -> str | None:
+        if _answer_of(text) != "7":
+            return _answer_of(text)
+        match failure:
+            case "raises":
+                raise ValueError("no key")
+            case "not-a-string":
+                return cast(str, 7)
+            case "custom-limit":
+                raise LimitExceededError("custom", value=1, limit=1)
+            case _:
+                raise ExceptionGroup(
+                    "grouped", [LimitExceededError("custom", value=1, limit=1)]
+                )
+
+    return key
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "failure,cause",
+    [
+        ("raises", "ValueError"),
+        ("not-a-string", "TypeError"),
+        ("custom-limit", "LimitExceededError"),
+        ("custom-limit-group", "ExceptionGroup"),
+    ],
+)
+async def test_an_answer_key_failing_on_an_answer_fails_the_sample(
+    failure: str, cause: str
+) -> None:
+    sample = await _swarm_sample(
+        [
+            member(
+                _react(_Recording([_submit("42"), _submit("7")])),
+                name="a",
+                persistent=True,
+            )
+        ],
+        _waking("next"),
+        result=answer_result(answer_key=_key_failure(failure)),
+    )
+    assert sample.error is not None
+    traceback = sample.error.traceback
+    assert "AnswerKeyError" in traceback and cause in traceback, traceback
+    assert "direct cause" in traceback
+    assert "answer 1 of member 'a'" in sample.error.message
+    ran = _Ran(sample)
+    assert _statuses(ran) == {"a": "errored"}
+    [m] = ran.record.members
+    assert len(m.answer_times) == 2
+    assert [r.answer_key for r in m.answer_results] == ["42", None]
+
+
+@pytest.mark.anyio
+async def test_a_persistent_member_that_stops_itself_keeps_its_keyed_answers() -> None:
+    script = _Recording([_submit("42"), _call("work")])
+    ran = await swarm_run(
+        [member(_react(script, on_continue=_stop_myself), name="a", persistent=True)],
+        _waking("next"),
+        result=answer_result(answer_key=_answer_of),
+    )
+    assert _statuses(ran) == {"a": "member_limit:custom"}
+    [m] = ran.record.members
+    assert [r.answer_key for r in m.answer_results] == ["42"]
