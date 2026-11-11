@@ -1,9 +1,13 @@
 import itertools
 import json
 import math
+import os
+import re
+import shutil
 import subprocess
 import sys
-from contextlib import AbstractAsyncContextManager, aclosing, nullcontext
+from collections.abc import AsyncGenerator, Callable
+from contextlib import aclosing, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -11,12 +15,14 @@ import pytest
 from inspect_ai import Task, eval, score  # pyright: ignore[reportUnknownVariableType]
 from inspect_ai.agent import Agent, AgentState, agent
 from inspect_ai.dataset import Sample
-from inspect_ai.event import SpanBeginEvent
+from inspect_ai.event import SandboxEvent, SpanBeginEvent
 from inspect_ai.log import EvalLog, EvalSample, read_eval_log
 from inspect_ai.model import ModelOutput
 from inspect_ai.scorer import Score, Scorer, Target, match, scorer
 from inspect_ai.solver import Solver, TaskState
-from inspect_ai.util import sandbox
+from inspect_ai.util import ExecResult, SandboxEnvironment, sandbox
+from inspect_ai.util._concurrency import init_concurrency
+from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 
 from inspect_swarm import (
     ResultSpec,
@@ -231,7 +237,7 @@ def test_each_member_is_graded_and_aggregated_over_the_members_with_a_value(
         assert (metadata["complete"], metadata["members_valued"]) == (complete, valued)
         assert (metadata["members_total"], metadata["members_started"]) == (4, 4)
         assert metadata["kind"] == "answer"
-        assert metadata["final"]["mode"] == "first"
+        assert metadata["final"]["mode"] == "vote"
         # the copies' scores are not the sample's
         assert set(samples[id].scores or {}) == {"match", "members"}
     for id, (_, outcomes) in GRADES.items():
@@ -383,14 +389,407 @@ def test_members_are_graded_only_under_a_matching_answer_contract(
         ) == ("solver", "graded", "1", None, None)
 
 
-class _Artifacts:
-    def materialize(self, member: str) -> AbstractAsyncContextManager[None]:
-        return nullcontext()
+# Files standing in for branches: the scorer grades `artifact.txt`, the team's
+# artifact, and each member's is `branches/<member>`.
+TEAM = "0.25"
 
 
-def test_member_artifacts_are_refused() -> None:
-    with pytest.raises(ValueError, match="member artifacts"):
-        member_scores(match(), artifact_result(member_artifacts=_Artifacts()))
+class _FileArtifacts:
+    def __init__(self, log: list[tuple[Any, ...]]) -> None:
+        self.log = log
+
+    @asynccontextmanager
+    async def materialize(self, member: str) -> AsyncGenerator[None]:
+        team = await sandbox().read_file("artifact.txt")
+        branch = await sandbox().read_file(f"branches/{member}")
+        await sandbox().write_file("artifact.txt", branch)
+        self.log.append(("enter", member))
+        try:
+            yield
+        except Exception:
+            self.log.append(("error", member))
+            raise
+        finally:
+            await sandbox().write_file("artifact.txt", team)
+            self.log.append(("exit", member))
+
+
+@scorer(metrics=[])
+def artifact_tests(log: list[tuple[Any, ...]]) -> Scorer:
+    """Grade `artifact.txt`, which holds a number or `raise`."""
+
+    async def score(state: TaskState, target: Target) -> Score:
+        artifact = await sandbox().read_file("artifact.txt")
+        log.append(("score", artifact, state.output.completion, state.messages))
+        if artifact == "raise":
+            raise RuntimeError("the tests crashed")
+        return Score(value=float(artifact))
+
+    return score
+
+
+@scorer(metrics=MEMBER_METRICS)
+def branch_members(log: list[tuple[Any, ...]]) -> Scorer:
+    return member_scores(
+        artifact_tests(log), artifact_result(member_artifacts=_FileArtifacts(log))
+    )
+
+
+def _artifact_sample(answers: dict[str, str], branches: dict[str, str]) -> Sample:
+    return Sample(
+        id="s1",
+        input=_input(answers),
+        files={"artifact.txt": TEAM}
+        | {f"branches/{name}": text for name, text in branches.items()},
+    )
+
+
+def _artifact_eval(
+    tmp_path: Path, sample: Sample, solver: Agent, scorers: list[Scorer]
+) -> EvalSample:
+    [run] = eval(
+        Task(dataset=[sample], solver=solver, scorer=scorers, sandbox="local"),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    return _samples(read_eval_log(run.location))["s1"]
+
+
+def _all_but_d() -> Agent:
+    async def run(control: SwarmControl) -> StopReason:
+        for name in ("a", "b", "c"):
+            control.start(name)
+        async with aclosing(control.events()) as events:
+            async for _ in events:
+                pass
+        return "d_left_pending"
+
+    return _swarm(
+        controller=controller(run, "member_scores_test_all_but_d"),
+        result=artifact_result(member_artifacts=_FileArtifacts([])),
+    )
+
+
+def test_each_member_is_graded_with_its_artifact_in_place_after_the_team(
+    tmp_path: Path,
+) -> None:
+    log: list[tuple[Any, ...]] = []
+    # a submits no text, and the record leaves c's output out; d never starts
+    sample = _artifact_eval(
+        tmp_path,
+        _artifact_sample(
+            {"a": "", "b": "done", "c": "attachment://x", "d": "done"},
+            {"a": "1", "b": "0", "c": "0.5", "d": "1"},
+        ),
+        _all_but_d(),
+        [artifact_tests(log), branch_members(log)],
+    )
+    assert sample.error is None, sample.error
+    # the team is graded first; then each member that started, in roster order, with
+    # its own artifact and output, and the team's artifact put back after each
+    assert [entry[:3] for entry in log] == [
+        ("score", TEAM, ""),
+        ("enter", "a"),
+        ("score", "1", ""),
+        ("exit", "a"),
+        ("enter", "b"),
+        ("score", "0", "done"),
+        ("exit", "b"),
+        ("enter", "c"),
+        ("score", "0.5", ""),
+        ("exit", "c"),
+    ]
+    messages = [[m.role for m in entry[3]] for entry in log[1:] if entry[0] == "score"]
+    # a's empty completion still has its message; c's left-out output has none
+    assert messages == [["user", "assistant"], ["user", "assistant"], ["user"]]
+    result = _score(sample, "branch_members")
+    assert result.value == {"best_member": 1.0, "mean_member": 0.5}
+    metadata = result.metadata
+    assert metadata is not None
+    assert [(m["name"], m["outcome"], m["value"]) for m in metadata["members"]] == [
+        ("a", "graded", 1.0),
+        ("b", "graded", 0.0),
+        ("c", "graded", 0.5),
+        ("d", "not_started", None),
+    ]
+    assert (metadata["kind"], metadata["members_started"], metadata["complete"]) == (
+        "artifact",
+        3,
+        True,
+    )
+    # each member's artifact is put in place and back within its span
+    spans = {
+        e.id: e.name
+        for e in sample.events
+        if isinstance(e, SpanBeginEvent) and e.name in NAMES
+    }
+    writes = [
+        spans[e.span_id]
+        for e in sample.events
+        if isinstance(e, SandboxEvent)
+        and e.action == "write_file"
+        and e.span_id in spans
+    ]
+    assert writes == ["a", "a", "b", "b", "c", "c"]
+
+
+@pytest.mark.parametrize(
+    "failing,error",
+    [
+        pytest.param("scorer", "the tests crashed", id="scorer"),
+        pytest.param("materialize", "FileNotFoundError", id="materialize"),
+    ],
+)
+def test_an_error_while_a_member_is_graded_fails_the_sample(
+    tmp_path: Path, failing: str, error: str
+) -> None:
+    log: list[tuple[Any, ...]] = []
+    # b's artifact crashes the tests, or b has no branch for `materialize` to read
+    branches = {"a": "1"} | ({"b": "raise"} if failing == "scorer" else {}) | {"c": "1"}
+    sample = _artifact_eval(
+        tmp_path,
+        _artifact_sample({"a": "", "b": "", "c": ""}, branches),
+        _swarm(
+            ("a", "b", "c"), result=artifact_result(member_artifacts=_FileArtifacts([]))
+        ),
+        [branch_members(log)],
+    )
+    assert sample.error is not None and error in sample.error.message
+    steps = [entry[:2] for entry in log if entry[0] != "score"]
+    if failing == "scorer":
+        # the team's artifact is put back for the error, and c is never graded
+        assert steps == [
+            ("enter", "a"),
+            ("exit", "a"),
+            ("enter", "b"),
+            ("error", "b"),
+            ("exit", "b"),
+        ]
+    else:
+        assert steps == [("enter", "a"), ("exit", "a")]
+
+
+@pytest.mark.parametrize(
+    "solver,reason",
+    [
+        pytest.param("no_contract", "kind_not_declared"),
+        pytest.param("answer", "kind_mismatch"),
+        pytest.param("plain", None),
+    ],
+)
+def test_member_artifacts_are_materialized_only_for_a_swarm_under_an_artifact_contract(
+    tmp_path: Path, solver: str, reason: str | None
+) -> None:
+    built: Agent = {
+        "no_contract": lambda: _swarm(("a", "b")),
+        "answer": lambda: _swarm(("a", "b"), result=_result("answer")),
+        "plain": lambda: from_input("a"),
+    }[solver]()
+    log: list[tuple[Any, ...]] = []
+    sample = _artifact_eval(
+        tmp_path,
+        _artifact_sample({"a": "", "b": ""}, {"a": "1", "b": "1"}),
+        built,
+        [branch_members(log)],
+    )
+    result = _score(sample, "branch_members")
+    assert result.reason == reason
+    assert isinstance(result.value, dict)
+    if reason is not None:
+        assert all(_same(v, NAN) for v in result.value.values())
+        assert log == []
+    else:
+        # a plain agent is graded on the environment as it left it
+        assert result.value == {"best_member": 0.25, "mean_member": 0.25}
+        assert [entry[:2] for entry in log] == [("score", TEAM)]
+
+
+# The worked example in the docs, run as written against a git repository on the host.
+DOCS = Path(__file__).parents[2] / "docs" / "scoring.qmd"
+
+
+def _docs_member_branches(
+    sandbox: Callable[[], SandboxEnvironment] | None = None,
+) -> Any:
+    [code] = [
+        block
+        for block in re.findall(r"```python\n(.*?)```", DOCS.read_text(), re.DOTALL)
+        if "class MemberBranches" in block
+    ]
+    namespace: dict[str, Any] = {}
+    exec(code, namespace)
+    if sandbox is not None:
+        namespace["sandbox"] = sandbox
+    return namespace["MemberBranches"]
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout
+
+
+def _team_state(repo: Path) -> dict[str, Any]:
+    return {
+        "head": _git(repo, "symbolic-ref", "HEAD"),
+        "status": _git(repo, "status", "--porcelain", "--ignored"),
+        "files": {
+            str(path.relative_to(repo)): path.read_text()
+            for path in sorted(repo.rglob("*"))
+            if path.is_file() and ".git" not in path.parts
+        },
+    }
+
+
+@scorer(metrics=[])
+def repo_tests(repo: str, log: list[tuple[str, list[str]]]) -> Scorer:
+    """Grade the number in `answer.txt`, noting which files the checkout has and leaving one of its own."""
+
+    async def score(state: TaskState, target: Target) -> Score:
+        listing = await sandbox().exec(
+            ["find", ".", "-name", ".git", "-prune", "-o", "-type", "f", "-print"],
+            cwd=repo,
+        )
+        answer = await sandbox().read_file(f"{repo}/answer.txt")
+        log.append((answer, sorted(f[2:] for f in listing.stdout.split())))
+        await sandbox().write_file(f"{repo}/scorer.txt", "")
+        return Score(value=float(answer))
+
+    return score
+
+
+@scorer(metrics=MEMBER_METRICS)
+def repo_members(repo: str, log: list[tuple[str, list[str]]]) -> Scorer:
+    branches = _docs_member_branches()(repo=repo)
+    return member_scores(
+        repo_tests(repo, log), artifact_result(member_artifacts=branches)
+    )
+
+
+def _member_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The team's checkout, with each member's committed work on its branch in its own worktree."""
+    for name, value in {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@localhost",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@localhost",
+    }.items():
+        monkeypatch.setenv(name, value)
+    repo = tmp_path / "testbed"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / ".gitignore").write_text("build/\n")
+    (repo / "answer.txt").write_text("0")
+    (repo / "keep.txt").write_text("kept")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    for name, answer in (("a", "1"), ("b", "0.5")):
+        worktree = tmp_path / "worktrees" / name
+        _git(repo, "worktree", "add", "-q", "-b", f"swarm/{name}", str(worktree))
+        (worktree / "answer.txt").write_text(answer)
+        if name == "b":
+            # b stops ignoring build/ and commits a file where the team has an ignored one
+            (worktree / "b.txt").write_text(name)
+            (worktree / ".gitignore").write_text("")
+            (worktree / "build").mkdir()
+            (worktree / "build" / "out").write_text(name)
+        _git(worktree, "add", "-A")
+        _git(worktree, "commit", "-q", "-m", name)
+        # work it left uncommitted is not its artifact
+        (worktree / "answer.txt").write_text("0")
+    # the team's checkout: changed, deleted, staged, untracked and ignored files
+    (repo / "answer.txt").write_text(TEAM)
+    (repo / "keep.txt").unlink()
+    (repo / "staged.txt").write_text("staged")
+    _git(repo, "add", "staged.txt")
+    (repo / "notes.txt").write_text("notes")
+    (repo / "build").mkdir()
+    (repo / "build" / "out").write_text("built")
+    return repo
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_the_docs_member_branches_grade_each_members_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _member_repo(tmp_path, monkeypatch)
+    before = _team_state(repo)
+
+    log: list[tuple[str, list[str]]] = []
+    sample = _artifact_eval(
+        tmp_path / "logs",
+        Sample(id="s1", input=_input({"a": "", "b": ""})),
+        _swarm(("a", "b"), result=artifact_result()),
+        [repo_tests(str(repo), log), repo_members(str(repo), log)],
+    )
+    assert sample.error is None, sample.error
+    # each member's checkout has its committed files, and the team's ignored ones
+    committed = [".gitignore", "answer.txt", "build/out", "keep.txt"]
+    assert log == [
+        (TEAM, [".gitignore", "answer.txt", "build/out", "notes.txt", "staged.txt"]),
+        ("1", committed),
+        ("0.5", sorted([*committed, "b.txt"])),
+    ]
+    assert _score(sample, "repo_members").value == {
+        "best_member": 1.0,
+        "mean_member": 0.75,
+    }
+    # the team's checkout is back as the team scorer left it: its ignored file and its
+    # staged one as they were
+    after = _team_state(repo)
+    assert after["files"] == before["files"] | {"scorer.txt": ""}
+    assert after["head"] == before["head"]
+    assert set(after["status"].splitlines()) == set(before["status"].splitlines()) | {
+        "?? scorer.txt"
+    }
+    assert not (tmp_path / "testbed.team").exists()
+
+
+class _ReplayingSandbox(LocalSandboxEnvironment):
+    """Once `replay` is set, runs each command it may retry a second time, as a sandbox does when it loses a command's response."""
+
+    replay = False
+
+    async def exec(
+        self,
+        cmd: list[str],
+        input: str | bytes | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | None = None,
+        timeout: int | None = None,
+        timeout_retry: bool = True,
+        concurrency: bool = True,
+    ) -> ExecResult[str]:
+        args = (cmd, input, cwd, env, user, timeout, timeout_retry, concurrency)
+        result = await super().exec(*args)
+        if self.replay and timeout_retry:
+            result = await super().exec(*args)
+        return result
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+async def test_the_docs_member_branches_never_run_a_restore_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _member_repo(tmp_path, monkeypatch)
+    before = _team_state(repo)
+    # the subprocess limiter is bound to the backend that created it
+    init_concurrency()
+    environment = _ReplayingSandbox()
+    try:
+        branches = _docs_member_branches(lambda: environment)(repo=str(repo))
+        async with branches.materialize("a"):
+            assert (repo / "answer.txt").read_text() == "1"
+            environment.replay = True
+    finally:
+        environment.directory.cleanup()
+    assert _team_state(repo) == before
+    assert not (tmp_path / "testbed.team").exists()
 
 
 @pytest.mark.parametrize(

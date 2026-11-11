@@ -44,6 +44,31 @@ START_TYPE = "swarm_start"
 _LEGACY_RECORD_KEY = "inspect_swarm:result"
 
 
+class MemberReap(BaseModel):
+    """What stopping a member's leftover processes found, under users isolation.
+
+    When a member ends, the swarm kills every process in the sandbox that runs as the member's user, in up to five rounds, since a process can start another between rounds. Processes that have fully exited and wait for their parent to collect them (zombies) are not counted.
+    """
+
+    status: Literal["ok", "survivors", "timeout", "error"]
+    """`ok`: no process of the member's user is left. `survivors`: processes were still running after five rounds. `timeout`: the swarm stopped waiting for the sandbox. `error`: the sandbox could not run the command. Any status but `ok` makes the record's `isolation_incomplete` `True`."""
+
+    killed: int = 0
+    """How many processes were killed: work the member left running after its tool calls returned."""
+
+    killed_names: list[str] = []
+    """The names of the first 50 processes killed (`/proc/<pid>/comm`, at most 15 characters), with every character other than printable ASCII, and every `:`, as `?`."""
+
+    survivors: int = 0
+    """How many processes were still running after five rounds."""
+
+    survivor_names: list[str] = []
+    """The names of the first 50 of them, as for `killed_names`."""
+
+    message: str | None = None
+    """For `timeout` and `error`, what went wrong."""
+
+
 class MemberResult(BaseModel):
     """One member in the swarm's result record."""
 
@@ -123,24 +148,48 @@ class MemberResult(BaseModel):
     end_origin: str | None = None
     """Who asked the member to end, when an end request decided how it ended: `operator` for `inspect ctl sample agent stop`, or the origin a caller gave `MemberHandle.end()`. `None` when no end request did, as for a submission, a member limit or the swarm's own stop."""
 
+    user: str | None = None
+    """Under users isolation, the member's Linux user; `None` otherwise."""
+
+    uid: int | None = None
+    """Under users isolation, the member's user id; `None` otherwise."""
+
+    home: str | None = None
+    """Under users isolation, the member's private directory; `None` otherwise."""
+
+    reap: MemberReap | None = None
+    """Under users isolation, what stopping the processes the member left running found, once the member has ended; `None` before, and without isolation."""
+
+    foreign_execs: int | None = None
+    """Under users isolation, how many commands the member ran in the sandbox as another user, once the member has ended; `None` before, and without isolation. These are `exec()` calls in the member's spans that named a user other than the member's, such as a custom tool's `exec(..., user="root")`, other than Inspect's own sandbox operations (tool injection and its launcher, in-loop scoring). It does not see calls a tool makes on the provider object (`sandbox().as_type(...)`) or file reads and writes. The count includes named-user commands across all sandbox environments in the sample, so it does not by itself identify grants in the users-isolated sandbox."""
+
 
 class FinalRecord(BaseModel):
     """The swarm's final answer in its result record."""
 
     mode: str | None
-    """The mode that chose the answer: `first` or `last` (the controller's `final` rule), or `controller` (the controller's `SwarmControl.choose_answer()`). `None` when there is no answer."""
+    """The mode that chose the answer: a mode of the controller's `final` chain (`verify`, `vote`, `first`, `last` or `synthesize`), or `controller` (the controller's `SwarmControl.choose_answer()`). `None` when there is no answer."""
 
     member: str | None
-    """The member whose output is the answer. `None` when there is no answer."""
+    """The member whose output is the answer. `None` when there is no answer, and under `synthesize`, whose answer is no member's output."""
 
     reason: str | None
-    """Why there is no answer: `no_submissions`. Under the mode `controller`, the reason the controller gave for its choice. Otherwise `None`."""
+    """Why there is no answer: `no_submissions`, or, when there were submissions, what the chain's last mode found: `none_verified` for `verify`, `no_answer_keys` for `vote`, `synthesize_failed` for a `synthesize` call that failed, and `not_synthesized` for a `synthesize` that has not run, in a provisional answer. Under the mode `controller`, the reason the controller gave for its choice. Otherwise `None`."""
 
     provisional: bool
     """`True` when the swarm ended without finalising its answer: a limit, error or cancellation ended it first, or the answer did not fit the sample's message limit."""
 
     answer: int | None = None
     """Which of a persistent member's answers is the swarm's answer, from 0. `None` for other members, and when there is no answer."""
+
+    chain: list[str] | None = None
+    """The final-answer chain's modes, by name, such as `["verify", "vote", "first"]`. `None` in records written before the chain existed."""
+
+    tie: bool = False
+    """`vote` chose the answer from a tied plurality, by the earliest submission."""
+
+    synthesize_error: str | None = None
+    """What failed when `synthesize` was called and the chain went on to its next mode: an error from the model, named by its type, or an output with an empty completion or a `content_filter` stop reason. `None` otherwise."""
 
 
 class SwarmResultRecord(BaseModel):
@@ -155,11 +204,20 @@ class SwarmResultRecord(BaseModel):
     final: FinalRecord
     """The final answer."""
 
+    isolation_incomplete: bool | None = None
+    """Under users isolation, `True` when some member that started may have left processes running: its reaping found survivors, timed out or failed, or did not run. Analyses of what members left in the sandbox exclude or report such samples. `None` without isolation."""
+
     kind: ResultKind | None = None
     """The result contract's kind, from `swarm(result=...)`; `None` without a contract."""
 
     verifier: str | None = None
     """A label for the result contract's verifier, for audit: its `name`, else its qualified name; `None` without one."""
+
+    final_verdict: Verdict | None = None
+    """For an `artifact` task with a verifier: the verifier's verdict on the environment after the members have stopped, called with the final answer's completion, or `""` without one. `None` otherwise."""
+
+    left_out: list[LeftOut] = []
+    """The record's own values left out, as for a member's `left_out`: `explanation`, the final verdict's explanation. Empty when nothing was left out."""
 
     # serialized as Inspect serializes a sample (`EvalSample`), which keeps NaN and
     # infinities, the members' outputs included
@@ -173,9 +231,8 @@ def write_record(record: SwarmResultRecord) -> None:
     # such as one nested in a member
     forget_record()
     id = uuid4().hex
-    record = record.model_copy(
-        update={"members": [_logged_member(record, m) for m in record.members]}
-    )
+    members = [_logged_member(record, m) for m in record.members]
+    record = _logged_final(record.model_copy(update={"members": members}))
     data: dict[str, JsonValue] = {"id": id, **record.model_dump(mode="json")}
     logged = _as_logged(data)
     # the members' model text is held as a log gives it back; the rest is the task
@@ -198,7 +255,7 @@ def write_record(record: SwarmResultRecord) -> None:
 _MODEL_TEXT = ("output", "answer_key", "verdict")
 
 
-# The record's data without the members' model text.
+# The record's data without the model text: the members' and the final verdict.
 def _authored(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
     members = cast(list[dict[str, JsonValue]], data.get("members", []))
     return {
@@ -206,7 +263,48 @@ def _authored(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
         "members": [
             {k: v for k, v in m.items() if k not in _MODEL_TEXT} for m in members
         ],
+        "final_verdict": None,
     }
+
+
+# The record, its members already as a log gives them back, with its own model text as
+# a log gives it back: the final verdict, whose explanation is left out, and named in
+# the record's left_out, when the record could not hold it.
+def _logged_final(record: SwarmResultRecord) -> SwarmResultRecord:
+    update: dict[str, Any] = {}
+    verdict = record.final_verdict
+    if verdict is not None:
+        # the verdict's declared fields alone, as for a member's verdict
+        logged = Verdict(verdict.passed, verdict.value)
+        if verdict.explanation is not None:
+            explained = _logged_verdict(
+                record, Verdict(verdict.passed, verdict.value, verdict.explanation)
+            )
+            if explained is None:
+                update["left_out"] = [*record.left_out, "explanation"]
+            else:
+                logged = explained
+        update["final_verdict"] = logged
+    return record.model_copy(update=update)
+
+
+# The final verdict as the record gives it back from a log, or None when the log
+# cannot write or read it, or its explanation reads as an attachment reference. It is
+# written alone in a copy of the record, at its place in the record.
+def _logged_verdict(record: SwarmResultRecord, verdict: Verdict) -> Verdict | None:
+    try:
+        alone = record.model_copy(update={"members": [], "final_verdict": verdict})
+        data = alone.model_dump(mode="json")
+        if _unresolved(data["final_verdict"]):
+            return None
+        logged = _as_logged(data)
+        if _unresolved(logged["final_verdict"]):
+            return None
+        return SwarmResultRecord.model_validate(
+            logged, context=get_deserializing_context()
+        ).final_verdict
+    except ValueError:
+        return None
 
 
 # A member with its output, answer key and verdict explanation as a log gives them

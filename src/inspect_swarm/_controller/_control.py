@@ -1,3 +1,4 @@
+import asyncio
 import contextvars
 import functools
 import math
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import anyio
+import anyio.lowlevel
 from anyio import TaskInfo
 from anyio.abc import TaskGroup
 from inspect_ai._control.operator import operator_group
@@ -21,6 +23,7 @@ from inspect_ai.util._checkpoint.checkpointer_noop import (
     _NoopCheckpointer,  # pyright: ignore[reportPrivateUsage]
 )
 from inspect_ai.util._store import suspend_store_events
+from pydantic import JsonValue
 from shortuuid import uuid
 
 from .._background import cancellation
@@ -36,9 +39,27 @@ from .._budget import (
     current_member,
     is_bridged,
 )
-from .._evidence import MemberTimelines, swarm_event, write_ledger, write_metrics
-from .._final import FinalName, Pick, answer, finalise, settle
-from .._ledger import LedgerInterval, MemberAccount
+from .._evidence import (
+    SwarmTimeline,
+    claim_member_names,
+    isolation_event,
+    swarm_event,
+    write_ledger,
+    write_metrics,
+)
+from .._final import (
+    FinalMode,
+    FinalName,
+    Pick,
+    Synthesis,
+    answer,
+    chosen_output,
+    finalise,
+    settle,
+    synthesize_answer,
+)
+from .._isolation import IsolationSetup, MemberIdentity, reap_member, take_census
+from .._ledger import LedgerInterval, MemberAccount, SpanPlaces
 from .._member import (
     Member,
     MemberOutcome,
@@ -54,12 +75,14 @@ from .._metrics import (
     MemberTimes,
     MemberWiring,
     first_scorer,
+    foreign_execs,
     gate_checks,
     swarm_metrics,
 )
 from .._operator import OPERATOR, SwarmOperator
 from .._record import (
     FinalRecord,
+    MemberReap,
     MemberResult,
     MemberState,
     SwarmResultRecord,
@@ -76,7 +99,6 @@ if TYPE_CHECKING:
     from .._bus._bus import SwarmBus
     from .._bus._record import Record
     from .._channel._channel import Channel
-    from .._isolation import MemberIdentity
 
 
 @dataclass(frozen=True)
@@ -161,7 +183,7 @@ class MemberHandle(Protocol):
 
         Raises:
             ValueError: If `origin` is invalid, or the member cannot be held: a bridged member, or `deepagent()` with background dispatch.
-            RuntimeError: If the member has ended, or the swarm is stopping.
+            RuntimeError: If the member has ended, or its agent and work have ended and only its end is still to be recorded (under users isolation, while its leftover processes are stopped), or the swarm is stopping.
         """
         ...
 
@@ -356,7 +378,13 @@ class _Answer:
 # enters. Its lever and limits are created here, once per run, so that a stop can close
 # the lever of a member that has started but whose task has not yet entered it.
 class MemberRun:
-    def __init__(self, record: Member, name: str, share: Sequence[Limit]) -> None:
+    def __init__(
+        self,
+        record: Member,
+        name: str,
+        share: Sequence[Limit],
+        identity: MemberIdentity | None = None,
+    ) -> None:
         self.record = record
         self.name = name
         self.role = record.role
@@ -377,6 +405,11 @@ class MemberRun:
         self.answer_list: list[_Answer] = []
         # counted when it ends
         self.gates = GateChecks()
+        # under users isolation: its Linux user, and, once it has ended, what stopping
+        # its leftover processes found and its commands run as another user
+        self.identity = identity
+        self.reap: MemberReap | None = None
+        self.foreign_execs: int | None = None
         # its submission's key, and the verdict on it with the swarm time it was taken
         self.answer_key: str | None = None
         self.verified: Verdict | None = None
@@ -400,6 +433,8 @@ class MemberRun:
             time_nodes=[n for n in self.nodes if isinstance(n, SwarmTimeNode)],
             persistent=record.persistent,
         )
+        self.context.background_starting = self.gate.background_starting
+        self.context.bridge_found = self.gate.bridge_found
 
     @property
     def submitted(self) -> bool:
@@ -434,7 +469,8 @@ class MemberRun:
             raise ValueError(
                 f"{call}: the member cannot be held at a turn boundary: {refusal}."
             )
-        if self.state == "ended":
+        if self.state == "ended" or self.gate.finished:
+            # finished: its agent has ended, and only its end is still to be recorded
             raise RuntimeError(f"{call}: the member has ended.")
         stopping = self.gate.stopping()
         if stopping is not None:
@@ -499,6 +535,11 @@ class MemberRun:
             verdict_time=self.verified_time,
             persistent=self.persistent,
             answer_times=[a.time for a in self.answer_list],
+            user=None if self.identity is None else self.identity.user,
+            uid=None if self.identity is None else self.identity.uid,
+            home=None if self.identity is None else self.identity.home,
+            reap=self.reap,
+            foreign_execs=self.foreign_execs,
             end_origin=self.end_origin,
         )
 
@@ -519,16 +560,20 @@ class SwarmRun:
         budget: Budget,
         shares: Mapping[str, Sequence[Limit]] | None = None,
         channels: Sequence["Channel"] = (),
-        final: FinalName | None = None,
+        chain: Sequence[FinalName | FinalMode] = ("first",),
         result: ResultSpec | None = None,
-        identities: Mapping[str, "MemberIdentity"] | None = None,
+        isolation: IsolationSetup | None = None,
     ) -> None:
         # deferred: the bus imports the channels, which import this module's package
         from .._bus._bus import SwarmBus
 
         self._shares = shares or {}
+        # the sandbox, its members' Linux users and the census roots, under users
+        # isolation
+        self._isolation = isolation
+        identities = {} if isolation is None else isolation.identities
         self._members = [
-            MemberRun(record, name, self._shares.get(name, ()))
+            MemberRun(record, name, self._shares.get(name, ()), identities.get(name))
             for record, name in records
         ]
         # the channel states open here, before any member starts
@@ -564,13 +609,18 @@ class SwarmRun:
             m.context.fatal = self._fail
         self._state = state
         self._input = list(input)
-        self._final: FinalName | None = final
+        # the final-answer chain, which check_chain() has checked against the result
+        self._chain = list(chain)
         self._result = result
+        # an artifact task's verdict on the environment after the stop, and whether the
+        # final step, which awaits it and the submissions left unverified, began
+        self._final_verdict: Verdict | None = None
+        self._finalising = False
+        # synthesize's outcome, once the final step has called it
+        self._synthesis: Synthesis | None = None
         # the controller's choice of the answer, once it has made one
         self._pick: Pick | None = None
         self._preambles = preambles
-        # each member's Linux user, under users isolation
-        self._identities = identities or {}
         self._caps = caps
         self._time = time
         self._grace = grace
@@ -744,7 +794,8 @@ class SwarmRun:
         registration.enter_context(operator_group(self.operator.name, self.operator))
         # until the try below, whose finally unregisters the group, any error does
         try:
-            timelines = MemberTimelines([m.name for m in self._members])
+            timeline = SwarmTimeline(current_span_id())
+            claim_member_names([m.name for m in self._members])
             interval = self._interval = LedgerInterval(
                 roster=[m.name for m in self._members]
             )
@@ -754,6 +805,7 @@ class SwarmRun:
             # the swarm's span
             self._span_id = current_span_id()
             self._settle()
+            timeline.open()
         except BaseException:
             registration.close()
             raise
@@ -769,6 +821,8 @@ class SwarmRun:
             # in the swarm's span, before any member can start
             write_start()
             started = True
+            if self._isolation is not None:
+                isolation_event("isolation", _isolation_data(self._isolation))
             bus_token = current_bus.set(self.bus)
             # for swarm_budget(), in every member's context and the controller's
             budget_token = current_budget.set(
@@ -835,21 +889,40 @@ class SwarmRun:
                     # and skips the final step. Only the swarm's own leaves would leave
                     # nothing to raise.
                     _, _, error = classify_errors(ex, self._nodes(), [])
+                if error is None and self._isolation is not None:
+                    await self._census(self._isolation)
                 if error is None:
                     # the final step, outside the caps: only the sample's limits apply
                     with ExitStack() as final:
                         for node in self._final_meter.nodes:
                             final.enter_context(node)
+                        self._finalising = True
+                        await self._verify_left()
+                        await self._take_final_verdict()
+                        synthesis = await synthesize_answer(
+                            self._input,
+                            self._results(),
+                            self._outputs(),
+                            self._answers(),
+                            self._chain,
+                            self._pick,
+                        )
+                        # a model call that caught a cancellation returned: its
+                        # answer is discarded, and the cancellation ends the final
+                        # step here
+                        await _end_if_cancelled()
+                        self._synthesis = synthesis
                         finalise(
                             self._state,
                             self._input,
                             self._results(),
                             self._outputs(),
-                            self._final,
+                            self._chain,
                             self._pick,
                             span_id=self._span_id,
                             stop_reason=self.stop_reason,
                             answers=self._answers(),
+                            synthesis=self._synthesis,
                         )
                     ended = True
         except Exception as ex:
@@ -870,7 +943,11 @@ class SwarmRun:
                     try:
                         results = self._results()
                         chosen = answer(
-                            results, self._final, self._pick, provisional=not ended
+                            results,
+                            self._chain,
+                            self._pick,
+                            provisional=not ended,
+                            synthesis=self._synthesis,
                         )
                         write_record(
                             SwarmResultRecord(
@@ -883,16 +960,23 @@ class SwarmRun:
                                 if self._result is not None
                                 and self._result.verifier is not None
                                 else None,
+                                final_verdict=self._final_verdict,
+                                isolation_incomplete=self._isolation_incomplete(),
                             )
                         )
                     except Exception as ex:
                         failures.append(ex)
                     failures += self._account(
                         interval,
-                        timelines,
+                        timeline,
                         chosen,
                         ended=ended,
                         error=error,
+                        # the final step awaits the verifier and synthesize's model
+                        # call, so a cancellation can end it
+                        final_cancelled=self._finalising
+                        and not ended
+                        and isinstance(escaping, anyio.get_cancelled_exc_class()),
                         failed=not ended or bool(failures),
                     )
                     # the error or cancellation that ended the swarm stays the one
@@ -925,6 +1009,7 @@ class SwarmRun:
                     current_bus.reset(bus_token)
                 if running is not None:
                     _swarm_ended(running)
+                timeline.close()
         if error is not None:
             raise error
 
@@ -936,11 +1021,12 @@ class SwarmRun:
     def _account(
         self,
         interval: LedgerInterval,
-        timelines: MemberTimelines,
+        timeline: SwarmTimeline,
         chosen: FinalRecord | None,
         *,
         ended: bool,
         error: BaseException | None,
+        final_cancelled: bool,
         failed: bool,
     ) -> list[Exception]:
         wall_clock = anyio.current_time() - self._start
@@ -971,12 +1057,13 @@ class SwarmRun:
                 stop_reason=self.stop_reason,
                 ended_by=None if ended else _exhaustion(error),
                 interrupted=not ended,
-                # M1's final step does not await, so nothing can cancel it
-                final_cancelled=False,
+                final_cancelled=final_cancelled,
             )
         except Exception as ex:
             return [ex]
         failures: list[Exception] = []
+        spans: dict[str, str] = {}
+        places: SpanPlaces | None = None
         # the metrics first, so that a failure to write them is known before the ledger
         # records how the run ended
         try:
@@ -1016,9 +1103,11 @@ class SwarmRun:
                     wall_clock,
                     chosen.member if chosen is not None else None,
                     chosen.answer if chosen is not None else None,
+                    reap_complete=None
+                    if (incomplete := self._isolation_incomplete()) is None
+                    else not incomplete,
                 )
             )
-            timelines.fill(places)
         except Exception as ex:
             failures.append(ex)
         if (failed or failures) and ledger.stop_reason == OPERATOR:
@@ -1031,6 +1120,12 @@ class SwarmRun:
             write_ledger(ledger)
         except Exception as ex:
             failures.append(ex)
+        # last, so that the swarm's timeline holds its ledger and metrics
+        if places is not None:
+            try:
+                timeline.fill(places, spans.values())
+            except Exception as ex:
+                failures.append(ex)
         return failures
 
     def stop(self, reason: str) -> None:
@@ -1130,7 +1225,29 @@ class SwarmRun:
             m.outcome,
             m.gate,
             end,
-            self._identities.get(m.name),
+            m.identity,
+            None if m.identity is None else functools.partial(self._reap, m),
+        )
+
+    # Stops the processes a member left running, under users isolation; never raises.
+    async def _reap(self, m: MemberRun) -> None:
+        assert self._isolation is not None and m.identity is not None
+        m.reap = await reap_member(self._isolation.environment, m.identity)
+
+    # Users isolation's census, once every member has ended and been reaped: who owns
+    # the files in the shares and the directories every member can write.
+    async def _census(self, isolation: IsolationSetup) -> None:
+        isolation_event("census", await take_census(isolation))
+
+    # Under users isolation, whether a member that started may have left processes
+    # running: its reaping did not end `ok`, or did not run because its task was
+    # cancelled before it began; None without isolation.
+    def _isolation_incomplete(self) -> bool | None:
+        if self._isolation is None:
+            return None
+        return any(
+            m.state != "pending" and (m.reap is None or m.reap.status != "ok")
+            for m in self._members
         )
 
     # A persistent member's answer, from its gate: recorded with its swarm time, as
@@ -1192,6 +1309,18 @@ class SwarmRun:
             m.gates = gate_checks(
                 self._interval.events, m.context.span_id, self._scorer, self._start
             )
+        if m.identity is not None:
+            assert self._interval is not None
+            m.foreign_execs = (
+                0
+                if m.context.span_id is None
+                else foreign_execs(
+                    self._interval.events,
+                    self._interval.places({m.name: m.context.span_id}),
+                    m.name,
+                    m.identity.user,
+                )
+            )
         # in the member's span, unless it ended before entering it: the operator's
         # messages it never drained, then its result
         self.operator.members[m.name].ended()
@@ -1214,6 +1343,8 @@ class SwarmRun:
             # that an error, which fails the sample, leaves the answer and the record
             # agreeing
             m.answer_key = key_answer(key, m.agent_state.output.completion, m.name)
+            # the key may change the answer under vote
+            self._settle()
         if (
             m.submitted
             and self._verifier() is not None
@@ -1282,26 +1413,7 @@ class SwarmRun:
             # cancelled while the verifier ran, which caught the cancellation and
             # returned: the submission stays unverified
             return
-        # by actual classes rather than the ones the values report
-        if not issubclass(type(verdict), Verdict):
-            raise TypeError(
-                f"The result contract's verifier must return a Verdict, got a {type(verdict).__name__} for member {m.name!r}."
-            )
-        verdict = cast(Verdict, verdict)
-        # task code, so checked as returned rather than as annotated
-        passed = cast(object, verdict.passed)
-        value = cast(object, verdict.value)
-        explanation = cast(object, verdict.explanation)
-        # the values themselves are not printed: an int too long to print, or a repr()
-        # that raises, would replace this error
-        if not (
-            type(passed) is bool
-            and (value is None or _exact_float(value))
-            and (explanation is None or issubclass(type(explanation), str))
-        ):
-            raise TypeError(
-                f"The result contract's verifier must return a Verdict whose passed is a bool, value a float (or an int a float holds exactly) or None and explanation a str or None, got passed of type {type(passed).__name__}, value of type {type(value).__name__} and explanation of type {type(explanation).__name__} for member {m.name!r}."
-            )
+        verdict = _checked_verdict(verdict, f"member {m.name!r}")
         m.verified = verdict
         m.verified_time = anyio.current_time() - self._start
         # in the swarm's span; the explanation stays in the record
@@ -1313,6 +1425,48 @@ class SwarmRun:
             value=verdict.value,
             time=m.verified_time,
         )
+        # the verdict may change the answer under verify
+        self._settle()
+
+    # In the final step: the submissions the run left unverified, which ended during
+    # grace or whose verification the stop refused or ended, in the order they ended.
+    # Their `MemberEnded` events were queued without a verdict, so only the record and
+    # the answer see these.
+    async def _verify_left(self) -> None:
+        verifier = self._verifier()
+        if verifier is None:
+            return
+        left = [
+            m
+            for m in self._members
+            if m.submitted and not m.persistent and m.verified is None
+        ]
+        for m in sorted(left, key=lambda m: m.time or 0.0):
+            await self._take_verdict(m, verifier)
+            # a verifier that caught a cancellation returned, and its verdict was
+            # discarded: the cancellation ends the final step here
+            await _end_if_cancelled()
+
+    # In the final step, for an artifact task with a verifier: the verdict on the
+    # environment the task's scorer will grade, called with the final answer's
+    # completion, or "" without one. An error from it fails the sample.
+    async def _take_final_verdict(self) -> None:
+        verifier = self._verifier()
+        if verifier is None or self._result is None or self._result.kind != "artifact":
+            return
+        chosen = answer(self._results(), self._chain, self._pick, provisional=True)
+        completion = (
+            ""
+            if chosen.member is None
+            else chosen_output(chosen, self._outputs(), self._answers()).completion
+        )
+        active = sample_state()
+        metadata = active.metadata if active is not None else {}
+        verdict = await verifier(completion, metadata)
+        # a verifier that caught a cancellation returned: its verdict is discarded, and
+        # the cancellation ends the final step here
+        await _end_if_cancelled()
+        self._final_verdict = _checked_verdict(verdict, "the final environment")
 
     def _verified(self, m: MemberRun) -> None:
         assert m.status is not None
@@ -1326,7 +1480,7 @@ class SwarmRun:
             self._state,
             self._results(),
             self._outputs(),
-            self._final,
+            self._chain,
             self._pick,
             provisional=True,
             answers=self._answers(),
@@ -1392,7 +1546,7 @@ class SwarmRun:
         with anyio.CancelScope(deadline=deadline):
             while m.started_not_ended:
                 await self._changed.wait()
-        if m.started_not_ended:
+        if m.started_not_ended and not m.gate.finished:
             if not m.context.scope.cancel_called:
                 # the request's grace, not another cancellation, ends the member
                 m.gate.honoured = True
@@ -1413,9 +1567,11 @@ class SwarmRun:
             # next
             with anyio.move_on_after(self._effective_grace):
                 await self._until_quiet()
-            # hard stop, which also ends verification
+            # hard stop, which also ends verification; a member whose agent and work
+            # have ended has nothing to cancel, and its cleanup (reaping, under users
+            # isolation) must not read as cancelled work in the ledger
             for m in self._members:
-                if m.started_not_ended:
+                if m.started_not_ended and not m.gate.finished:
                     m.context.scope.cancel()
             self._verifying.cancel()
             await self._until_quiet()
@@ -1466,6 +1622,22 @@ class SwarmRun:
     def _notify(self) -> None:
         self._changed.set()
         self._changed = anyio.Event()
+
+
+# The isolation event's data: the sandbox, each member's user, uid and home, and the
+# census roots.
+def _isolation_data(isolation: IsolationSetup) -> dict[str, JsonValue]:
+    return {
+        "sandbox": isolation.sandbox,
+        "members": [
+            {"name": name, "user": i.user, "uid": i.uid, "home": i.home}
+            for name, i in isolation.identities.items()
+        ],
+        "census_roots": [
+            {"path": root.path, "kind": root.kind} for root in isolation.census_roots
+        ],
+        "census_roots_capped": isolation.census_roots_capped,
+    }
 
 
 def _check_preamble(preamble: object, call: str) -> None:
@@ -1572,9 +1744,52 @@ def _sample_cause() -> str | None:
     return None
 
 
-# Whether the current task is cancelled, by its own scope or an enclosing one.
+# Whether the current task is cancelled: by its own scope or an enclosing one, or, on
+# asyncio, by the task's own `cancel()` (as `asyncio.timeout()` and `wait_for()` do),
+# which no AnyIO scope knows of and which stays requested after a callee caught it.
 def _cancelled() -> bool:
-    return anyio.current_effective_deadline() == -math.inf
+    if anyio.current_effective_deadline() == -math.inf:
+        return True
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        # not on asyncio
+        return False
+    return task is not None and task.cancelling() > 0
+
+
+# Raises the current task's cancellation, when `_cancelled()`, after a callee that
+# caught it returned.
+async def _end_if_cancelled() -> None:
+    await anyio.lowlevel.checkpoint_if_cancelled()
+    if _cancelled():
+        # asyncio's own cancellation, which the checkpoint does not deliver
+        raise asyncio.CancelledError()
+
+
+# A verifier's result, checked as returned rather than as annotated (task code), by
+# its actual classes rather than the ones its values report; `subject` names what it
+# judged, for the error.
+def _checked_verdict(verdict: object, subject: str) -> Verdict:
+    if not issubclass(type(verdict), Verdict):
+        raise TypeError(
+            f"The result contract's verifier must return a Verdict, got a {type(verdict).__name__} for {subject}."
+        )
+    verdict = cast(Verdict, verdict)
+    passed = cast(object, verdict.passed)
+    value = cast(object, verdict.value)
+    explanation = cast(object, verdict.explanation)
+    # the values themselves are not printed: an int too long to print, or a repr() that
+    # raises, would replace this error
+    if not (
+        type(passed) is bool
+        and (value is None or _exact_float(value))
+        and (explanation is None or issubclass(type(explanation), str))
+    ):
+        raise TypeError(
+            f"The result contract's verifier must return a Verdict whose passed is a bool, value a float (or an int a float holds exactly) or None and explanation a str or None, got passed of type {type(passed).__name__}, value of type {type(value).__name__} and explanation of type {type(explanation).__name__} for {subject}."
+        )
+    return verdict
 
 
 # A number the record's float field holds exactly: a float, or an int a float equals.

@@ -28,6 +28,9 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### MemberState
 ### StopReason
 ### FinalName
+### FinalSpec
+### synthesize
+### Synthesize
 
 ## Channels
 
@@ -58,6 +61,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### swarm_result
 ### SwarmResultRecord
 ### MemberResult
+### MemberReap
 ### LeftOut
 ### FinalRecord
 ### answer_result

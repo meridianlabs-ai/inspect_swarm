@@ -1,6 +1,6 @@
 ---
 title: Operators
-llms-description: "Reaching a running swarm's members from `inspect ctl sample agent`: listing them, sending one a message, stopping one, and stopping the whole swarm; read it to steer or stop a member while an eval runs."
+llms-description: "Reaching a running swarm's members from `inspect ctl sample agent`: listing them, sending one a message, pausing and resuming one or the whole swarm, stopping one, and stopping the whole swarm; read it to steer, hold or stop a member while an eval runs."
 ---
 
 ## Overview
@@ -10,15 +10,17 @@ While an eval runs, you can reach any member of a swarm by name with `inspect ct
 ```bash
 inspect ctl sample agent list    TASK SAMPLE_ID [EPOCH]
 inspect ctl sample agent message TASK SAMPLE_ID [EPOCH] --agent NAME --text TEXT [--interrupt]
+inspect ctl sample agent pause   TASK SAMPLE_ID [EPOCH] --agent NAME
+inspect ctl sample agent resume  TASK SAMPLE_ID [EPOCH] --agent NAME
+inspect ctl sample agent pause   TASK SAMPLE_ID [EPOCH] --group swarm
+inspect ctl sample agent resume  TASK SAMPLE_ID [EPOCH] --group swarm
 inspect ctl sample agent stop    TASK SAMPLE_ID [EPOCH] --agent NAME
 inspect ctl sample agent stop    TASK SAMPLE_ID [EPOCH] --group swarm
 ```
 
-`list` shows each member with its state, its status once it has ended, what it is doing, and which actions it takes now. `message` gives one member a message from you. `stop` ends one member, or with `--group` stops the whole swarm.
+`list` shows each member with its state, its status once it has ended, what it is doing, whether it is paused, and which actions it takes now. `message` gives one member a message from you. `pause` holds one member, or with `--group` every member, until `resume`. `stop` ends one member, or with `--group` stops the whole swarm.
 
 These commands use Inspect's control channel, which every eval runs on asyncio by default. On trio the control channel does not start, so they are not available.
-
-Pausing members is not supported yet: `pause` and `resume` are refused.
 
 ## Names
 
@@ -35,11 +37,49 @@ Each swarm is a group. A swarm run directly in the sample is the group `swarm`. 
 - A member between turns, or held at a turn boundary by a controller, takes it at its next turn.
 - A member that is still setting up, before its agent loop starts, takes it at its first turn. A member whose agent never starts an agent loop never takes it.
 
-`message` is refused for a member that has not started, has ended, or whose agent loop has ended, and for a bridged member: its CLI does not read the messages, so it takes only `stop`. It is also refused once the member is ending (after `stop`, or a controller's `end()`), once the swarm is stopping, and while the swarm is ending after an error or a cancellation: the member takes no more turns, so it would never read the message. These checks are best effort, as for `stop` (decision: Ransom, 2026-11-09). A message sent while a member ends some other way, such as when its own time limit has run out and a tool is still cleaning up, is accepted but never delivered: the swarm records it as not drained when the member ends.
+`message` is refused for a member that has not started, has ended, or whose agent loop or agent has ended (under users isolation, a member whose agent has ended waits for its leftover processes to be stopped before it ends), and for a bridged member: its CLI does not read the messages, so it takes only `stop`. It is also refused once the member is ending (after `stop`, or a controller's `end()`), once the swarm is stopping, and while the swarm is ending after an error or a cancellation: the member takes no more turns, so it would never read the message. These checks are best effort, as for `stop` (decision: Ransom, 2026-11-09). A message sent while a member ends some other way, such as when its own time limit has run out and a tool is still cleaning up, is accepted but never delivered: the swarm records it as not drained when the member ends.
 
 Several messages that reach a member together are merged into one user message.
 
 An interrupt loses what the turn was doing. The cancelled tool calls return no result, though a command they started in the sandbox may keep running. A cancelled model call's usage is not known. A cancelled subagent returns nothing. If the member's tool was running a swarm, that swarm is cancelled, and since its member names are already taken in the sample, the same roster cannot be run again there. The member's background work is not part of its turn and goes on.
+
+## Pausing
+
+`pause --agent NAME` holds a member at its next turn boundary, between its turns, until `resume --agent NAME`. A member in the middle of a turn finishes the turn first, its tool calls included. To cut a long tool call short, send `message --interrupt` or use `inspect ctl sample cancel-tool-call`, then pause.
+
+- A member that has not started, or is still setting up before its agent loop starts, is held at its first turn boundary, before its first model call.
+- Messages sent to a paused member reach it when it is resumed.
+- A member held by a controller's [boundary callback](controllers.qmd#boundary-callbacks) is held by the pause after that callback lets it go.
+
+`pause --group swarm` pauses every member of the swarm, members the controller starts later included. `resume --group swarm` resumes them, except members you paused one by one: those stay paused until resumed one by one, and the reply names them. `resume --agent NAME` while the swarm is paused clears only that member's own pause; the swarm's pause still holds it. The controller keeps running while the swarm is paused.
+
+Some members cannot be paused. They keep running, and `list` shows why in their `pause` action:
+
+- Bridged members, which take only `stop`. A member found bridged as it runs, such as one that runs a bridged agent as a subagent, keeps running from then on, even if it was paused before.
+- Members with background work: `deepagent()` with background dispatch, and any member that has started work with `background()`. Their background work would go on while the member was held. A member whose background dispatch the swarm cannot see in advance, such as a `deepagent(background=True)` built by an `@agent` function of its own, can be paused until it first starts background work; its pause then ends and it runs on. To freeze such a member, use `inspect ctl task pause --now`, which holds every sample in the task at its next model call.
+- A member whose agent loop does not pass its state to `before_turn()`, or whose agent loop has ended.
+- A member whose agent has ended while its end waits for its leftover processes to be stopped, under users isolation.
+
+A member whose agent runs no agent loop, such as a member that runs a swarm itself (`member(swarm(...))`), has no turn boundary. Its pause is accepted and never holds it.
+
+A pause reaches only the swarm it is sent to. Pausing a member whose tool runs a swarm holds the member at its next boundary, once that tool returns, but not the members of the swarm it runs: pause them through their own group, `swarm:<member>` ([Names](#names)).
+
+`pause` is refused for a member that has ended or is ending, and once the swarm is stopping. A second `pause` and a `resume` of a member that is not paused change nothing.
+
+### Time while paused
+
+| | While a member is held |
+|---|---|
+| The member's time limit | does not run |
+| The member's token, cost, turn and message limits | unaffected: it makes no model call |
+| The swarm's time cap (`Budget.time`) | runs |
+| The sample's time limit | runs |
+| The sample's working time | does not count the hold, unless other work runs |
+| `swarm_wait` | counts the member as active, so other members' waits do not return `all_waiting` because of it |
+
+The swarm's time cap and the sample's time limit keep running, so a long pause of the whole swarm can use them up. You can raise the sample's time limit with `inspect ctl config`.
+
+Each boundary at which a pause held a member is a `boundary` event with `operator` in its `origins` and the time held in `held_for`.
 
 ## Stopping a member
 
@@ -51,7 +91,7 @@ An interrupt loses what the turn was doing. The cancelled tool calls return no r
 - A member whose agent has returned and whose background work is still finishing ends once that work is done, with the status its return gave. Only a return without a submission (`unsubmitted`) becomes `stopped`; a submission, a member limit or the member's own stop is kept.
 - An idle [persistent member](members.qmd#persistent-members) ends `submitted`, with its last answer as its output.
 
-`stop` ends work only. Answers a member has already given stay: a persistent member's earlier answers and a submission returned before the stop can still be the swarm's answer, under the controller's `final` rule or its choice, as when a controller ends the member. A member stopped before it answered has no answer. A second `stop`, a stop of a member that has ended, a stop of a member that has not started once the swarm is stopping, and a stop sent while the swarm is ending after an error or a cancellation change nothing. That last check is best effort: a stop sent while the swarm is ending may still be accepted, but a swarm that fails or is cancelled is recorded that way. This holds for the swarm's own ending only: a member that such a stop ends keeps that ending in its own record. `stop` works for every member, bridged ones included.
+`stop` ends work only. Answers a member has already given stay: a persistent member's earlier answers and a submission returned before the stop can still be the swarm's answer, under the controller's `final` rule or its choice, as when a controller ends the member. A member stopped before it answered has no answer. A second `stop`, a stop of a member that has ended or whose agent has ended while its leftover processes are stopped (under users isolation), a stop of a member that has not started once the swarm is stopping, and a stop sent while the swarm is ending after an error or a cancellation change nothing. That last check is best effort: a stop sent while the swarm is ending may still be accepted, but a swarm that fails or is cancelled is recorded that way. This holds for the swarm's own ending only: a member that such a stop ends keeps that ending in its own record. `stop` works for every member, bridged ones included.
 
 ## Stopping the swarm
 

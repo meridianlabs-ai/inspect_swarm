@@ -1,6 +1,6 @@
 ---
 title: Analysis
-llms-description: "The `inspect_swarm:metrics` and `inspect_swarm:ledger` store entries and the swarm columns for Inspect's `samples_df()`; read it to analyse a swarm's usage, cost, communication and waits after a run."
+llms-description: "The `inspect_swarm:metrics` and `inspect_swarm:ledger` store entries the swarm columns for Inspect's `samples_df()`, and `attempt_rows()` with `select_at_k()`; read it to analyse a swarm's usage, cost, communication and waits after a run, or to compare its answer with independent attempts."
 ---
 
 ## Overview
@@ -10,7 +10,7 @@ When the swarm ends it writes two entries to the sample store, each also logged 
 - `inspect_swarm:metrics`: tokens, cost and time for the swarm and each member, and counts of how each member acted, checked its work, communicated and waited ([Metrics](#metrics)).
 - `inspect_swarm:ledger`: the swarm's accounting. Its budget, caps, the usage of each member, model calls that errored or reported no usage, unpriced models, and what stopped the swarm ([The ledger](#the-ledger)).
 
-The result record is an event in the transcript, which `swarm_result(sample)` reads from a sample. It is described in [Scoring](scoring.qmd#the-result-record).
+The result record is an event in the transcript, which `swarm_result(sample)` reads from a sample. It is described in [Scoring](scoring.qmd#the-result-record). `attempt_rows()` reads it with the sample's scores, and `select_at_k()` applies a swarm's answer rule to independent attempts ([Attempts](#attempts)).
 
 ## Metrics
 
@@ -19,6 +19,7 @@ For the swarm:
 - `tokens`, `cost`: everything in the swarm: members, controller and final step.
 - `wall_clock`: seconds from the swarm's start to its end.
 - `never_acted`: members with no completed model call.
+- `reap_complete`: under users isolation, `false` when some member may have left processes running in the sandbox ([The result record](scoring.qmd#the-result-record)); `null` without isolation.
 - `steps_to_answer`: completed model calls of the member whose output is the answer, `null` with no answer. For a persistent member's answer, its calls before that answer.
 - `longest_member_steps`: the largest number of completed model calls of any member.
 - `critical_steps_to_answer`: the number of completed model calls on the longest chain of calls the answer depended on, across members ([The critical path](#the-critical-path)).
@@ -169,6 +170,53 @@ for sample in log.samples or []:
 
 The metrics have no reader of their own; read them from `sample.store["inspect_swarm:metrics"]`.
 
+## Attempts
+
+`attempt_rows()` reads one `AttemptRow` per sample and epoch from logs, for comparing arms beside the [samples dataframe](#samples-dataframe). It joins with it on `log`, `id` and `epoch`, which it gives as `samples_df()` does: the log as a local path, and the sample id as text. Name the task's own scorer and its member scorer ([Member scores](scoring.qmd#member-scores)):
+
+```python
+from inspect_swarm.analysis import attempt_rows
+
+rows = attempt_rows(["logs/baseline.eval"], scorer="match", member_scorer="math_members")
+```
+
+Each row has:
+
+- `log`, `id`, `epoch`: the log's local path, the sample id as text, and the epoch.
+- `task_args`: the task's arguments, which label the arm.
+- `result_kind`: the result contract's kind, `answer` or `artifact`.
+- `final_value`: the task scorer's value, converted with Inspect's default `value_to_float()`.
+- `final` and `final_verdict`: the record's final answer, and for an artifact task the verifier's verdict on the environment after the members stopped.
+- `best_member`, `mean_member` and `complete`, from the member scorer.
+- `members`, `members_total` and `members_started`: the record's members, with their statuses, answer keys, verdicts and end times.
+- `sample_total_usage`: the sample's usage by model, scorer calls included.
+- `target_assisted`: an agent consulted the task's scorers during the solve, as `react(attempts=...)` does, so it had feedback that uses the target. In a swarm, that feedback can reach other members. Report these samples separately.
+- `no_solve_usage`: the row has no usage for the solve alone. The swarm does not record it yet, so every row is flagged, and `sample_total_usage` includes grading.
+
+A value the sample has no score for, or a NaN, is `None`. A sample with no swarm, such as a plain agent, has no record: `final` is `None` and `members` is empty.
+
+### select@k
+
+`select_at_k()` applies a swarm's final-answer chain to k independent attempts. Give it one sample's rows from a `baseline()` arm, one per epoch. It returns the mean task score of the attempt the chain chooses, over every subset of k epochs, or over 10,000 subsets sampled with a seed when there are more. Compare it with the swarm's own score: neither uses the target to choose.
+
+```python
+from collections import defaultdict
+
+from inspect_swarm.analysis import select_at_k
+
+by_sample = defaultdict(list)
+for row in rows:
+    by_sample[row.id].append(row)
+values = {sample_id: select_at_k(sample, 4, ["verify", "vote", "first"]) for sample_id, sample in by_sample.items()}
+```
+
+The chain chooses as the swarm does, with each attempt's end time and then its epoch in place of roster order:
+
+- For an answer task, only attempts that submitted are chosen. A subset where the chain chooses nothing scores `empty_value` (0 by default), as the swarm returns an empty answer.
+- For an artifact task, every attempt left an environment, so any attempt can be chosen. `verify` reads the verifier's verdict on that environment after the attempt stopped (`final_verdict`), not the verdict taken when it submitted. `first` is added to the end of the chain if it is not there, so every subset chooses an environment.
+
+The pool is the rows with a record and a task score. With fewer than k, the result is NaN. `synthesize` makes a new model call, so it has no analogue over attempts and is refused. Rows of a swarm with more than one member, of more than one sample, or that disagree on `result_kind` are refused too.
+
 ## The ledger
 
 The ledger of a two-member swarm with a cost cap of $1 and a time cap of 600 seconds:
@@ -225,7 +273,7 @@ The ledger of a two-member swarm with a cost cap of $1 and a time cap of 600 sec
 - `members` has one entry per member, in roster order. `status` is as in [How a member ends](members.qmd#how-a-member-ends), `null` for a member never started. `cancelled` means the swarm or the sample cancelled the member, so calls it had in flight are unknown. A hard stop during a background drain also sets `cancelled`; the agent's returned status is kept. So does a stop or `end()` that cancels a boundary callback while one of its model calls is in flight. `background_started` counts the tasks the member started with `background()`, and `background_cancelled` those cancelled before they finished, whose calls in flight are unknown too. `end_origin` is who asked the member to end ([Operator actions](#operator-actions)), and is left out of ledgers written before it existed.
 - `meter` is the usage and cost of what a member did. `suspended_cost` is the part spent while token counting was suspended, such as approval calls.
 - `calls` counts model calls: `calls` completed ones other than cache replays, `cache_replays` replayed from cache at no charge, `errored` attempts that errored or were cancelled (retries included), `no_usage` completed with no usage, and `unpriced` completed with usage but no cost.
-- `runtime` meters the controller's own calls, `final` the final step's (the default first-submission answer makes none), and `swarm` everything in the swarm: members, runtime and final step. The top-level `calls` counts every call in the swarm. `unpriced_calls_recorded` counts the unpriced calls the swarm's meter recorded.
+- `runtime` meters the controller's calls and in-run verification, `final` the final step's calls, including verification, and `swarm` everything in the swarm: members, runtime and final step. The top-level `calls` counts every call in the swarm. `unpriced_calls_recorded` counts the unpriced calls the swarm's meter recorded.
 - `sample_delta` is the sample's usage while the swarm ran. `unattributed` is `sample_delta` minus `swarm`: usage no meter holds, such as the tokens of approval calls.
 - `unpriced_models` are models with tokens but no cost. `native_compaction_classes` are loaded model classes that can compact a conversation natively, which logs nothing, so their usage may be missing.
 - `overshoot` is how far usage went past each cap, for caps it passed. Calls in flight at a stop can carry usage past a cap.

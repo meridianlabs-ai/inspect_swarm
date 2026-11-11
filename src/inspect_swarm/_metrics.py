@@ -119,6 +119,11 @@ class SwarmMetrics(BaseModel):
     steps_to_answer: int | None
     # the largest step count of any member
     longest_member_steps: int
+    # harness validity, under users isolation: whether every member that started had its
+    # leftover processes stopped (its reaping found none left, and did not time out or
+    # fail). None without isolation; the default loads metrics written before this
+    # field.
+    reap_complete: bool | None = None
     # critical path, the dependency-linked definition: the longest chain of steps
     # (completed model calls, cache replays included) ending at the answering member's
     # end (for a persistent member's answer, that answer's `answer` event), linked
@@ -212,6 +217,7 @@ def swarm_metrics(
     wall_clock: float,
     answer: str | None,
     answer_index: int | None = None,
+    reap_complete: bool | None = None,
 ) -> SwarmMetrics:
     tool_calls: dict[str, list[tuple[str, str]]] = {m.name: [] for m in ledger.members}
     for tool in events.tools.values():
@@ -268,6 +274,7 @@ def swarm_metrics(
         ],
         steps_to_answer=_steps_to_answer(ledger, events, places, answer, answer_index),
         longest_member_steps=max(_steps(m) for m in ledger.members),
+        reap_complete=reap_complete,
         # a resumed sample records no path
         critical_steps_to_answer=None
         if events.path is None
@@ -278,6 +285,17 @@ def swarm_metrics(
             answer,
             answer_index,
         ),
+    )
+
+
+# Under users isolation, how many sandbox commands in the member's spans named a user
+# other than the member's: grants made in code, such as a custom tool's
+# exec(user="root"). Inspect's own sandbox operations are not recorded (`EventLog`).
+def foreign_execs(events: EventLog, places: SpanPlaces, member: str, user: str) -> int:
+    return sum(
+        1
+        for record in events.execs
+        if record.user != user and places(record.span_id)[1] == member
     )
 
 
@@ -306,8 +324,8 @@ def _steps_to_answer(
 
 
 # Each member's communication over each of the channels, from the evidence events that
-# name one of the members. Member names are unique in a sample, since each names a
-# timeline, so another swarm's events never name these members.
+# name one of the members. Member names are unique across the swarms in a sample, so
+# another swarm's events never name these members.
 def _comm_metrics(
     events: EventLog, members: Sequence[str], channels: Sequence[str]
 ) -> dict[str, dict[str, CommMetrics]]:

@@ -3,6 +3,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ParamSpec, TypeVar
 
+import anyio
 from inspect_ai._control.operator import (
     OperatorAction,
     OperatorAgent,
@@ -15,8 +16,11 @@ from inspect_ai.agent._channel import Cancel, UserMessage
 from inspect_ai.agent._channel.channel import TurnState
 from inspect_ai.agent._channel.items import ChannelItem
 from inspect_ai.model import ChatMessageUser
+from inspect_ai.util import suspend_working_limit
 
 from ._evidence import swarm_event
+from ._member import seam_refusal
+from ._seam import LOOP_ENDED, NO_STATE, STARTS_BACKGROUND, Boundary
 
 if TYPE_CHECKING:
     from ._controller._control import MemberRun
@@ -28,10 +32,18 @@ _T = TypeVar("_T")
 OPERATOR = "operator"
 
 # a stop once an error or a cancellation has begun to end the swarm's runtime
+# why a member whose agent and work have ended, whose end is still to be recorded,
+# cannot be paused
+_AGENT_ENDED = "its agent has ended"
+
+# what a stop of such a member does: nothing
+_CLEANING_UP = "The member's agent and its work have ended: it ends once its leftover processes are stopped."
+
 _ENDED = "The swarm is ending after an error or a cancellation, and its members still running are being cancelled."
 
-# pause and resume come with the operator's turn-seam callback
-_NO_PAUSE = "Pausing is not supported yet."
+_BRIDGED = (
+    "The member is bridged: its CLI reads no agent channel, so it takes only stop."
+)
 
 # the stop reasons the list shows as they are; any other is a controller's own
 _STOP_CATEGORIES = frozenset(
@@ -79,6 +91,8 @@ class SwarmOperator:
         # set by the run when it registers the group
         self.name = "swarm"
         self.context: contextvars.Context | None = None
+        # the swarm's pause, over every member, those started while it is set included
+        self.latched = False
         # messages accepted in this run, for their `op-<n>` ids
         self._messages = 0
         self.members = {m.name: MemberOperator(self, m) for m in members}
@@ -105,13 +119,21 @@ class SwarmOperator:
         return self.run(self._info)
 
     def pause(self, *, dry_run: bool) -> OperatorOutcome:
-        return _refused(_NO_PAUSE)
+        return self.run(self._pause, dry_run)
 
     def resume(self, *, dry_run: bool) -> OperatorOutcome:
-        return _refused(_NO_PAUSE)
+        return self.run(self._resume, dry_run)
 
     def stop(self, *, dry_run: bool) -> OperatorOutcome:
         return self.run(self._stop_swarm, dry_run)
+
+    # Why the swarm's runtime takes no more pauses, or None.
+    def ending(self) -> str | None:
+        if self.stop_reason is not None:
+            return "The swarm is stopping: its members take no more turns."
+        if not self.active():
+            return _ENDED
+        return None
 
     def _info(self) -> OperatorGroupInfo:
         reason = self.stop_reason
@@ -123,9 +145,48 @@ class SwarmOperator:
             else reason
             if reason in _STOP_CATEGORIES
             else "controller",
-            paused=False,
+            paused=self.latched,
             agents=[m.info_now() for m in self.members.values()],
         )
+
+    # The latch: not a fan-out of member pauses, since it also pauses members started
+    # later, and its resume leaves members paused on their own paused.
+    def _pause(self, dry_run: bool) -> OperatorOutcome:
+        refusal = self.ending()
+        if refusal is not None:
+            return _refused(refusal)
+        if self.latched:
+            detail = "The swarm is already paused."
+        else:
+            detail = "The swarm is paused: its members are held at their next turn boundary, and members started from now on at their first."
+        changed = not self.latched
+        if changed and not dry_run:
+            self.latched = True
+            for m in self.members.values():
+                m.sync()
+        unpausable = [
+            f"{name} ({reason})"
+            for name, m in self.members.items()
+            if m.running and (reason := m.unpausable()) is not None
+        ]
+        if unpausable:
+            detail += f" These members cannot be paused and keep running: {'; '.join(unpausable)}."
+        return OperatorOutcome(changed=changed, detail=_dry(dry_run, detail))
+
+    def _resume(self, dry_run: bool) -> OperatorOutcome:
+        if not self.latched:
+            return OperatorOutcome(
+                changed=False, detail=_dry(dry_run, "The swarm is not paused.")
+            )
+        if not dry_run:
+            self.latched = False
+            for m in self.members.values():
+                m.sync()
+        detail = "The swarm is resumed."
+        own = [name for name, m in self.members.items() if m.paused and m.holdable()]
+        if own:
+            detail += f" These members stay paused on their own until resumed one by one: {', '.join(own)}."
+        return OperatorOutcome(changed=True, detail=_dry(dry_run, detail))
 
     def _stop_swarm(self, dry_run: bool) -> OperatorOutcome:
         if self.stop_reason is not None:
@@ -161,6 +222,16 @@ class MemberOperator:
         # the boundary whose turn has started, as the turn-state observer saw it
         self._turn_started: int | None = None
         self._unsubscribe: list[Callable[[], None]] = []
+        # the operator's own pause of the member, which the swarm's latch adds to
+        self.paused = False
+        # why the member can never be held by the operator in this run, once a
+        # withdrawal found it
+        self._marked: str | None = None
+        # its own loop passed no state when it bound
+        self._stateless = False
+        # the pause's boundary callback while registered, and the event its wait awaits
+        self._unregister: Callable[[], None] | None = None
+        self._changed: anyio.Event | None = None
 
     # OperatorAgent
 
@@ -171,10 +242,10 @@ class MemberOperator:
         return self._swarm.run(self._message, text, interrupt, dry_run)
 
     def pause(self, *, dry_run: bool) -> OperatorOutcome:
-        return _refused(_NO_PAUSE)
+        return self._swarm.run(self._pause, dry_run)
 
     def resume(self, *, dry_run: bool) -> OperatorOutcome:
-        return _refused(_NO_PAUSE)
+        return self._swarm.run(self._resume, dry_run)
 
     def stop(self, *, dry_run: bool) -> OperatorOutcome:
         return self._swarm.run(self._stop, dry_run)
@@ -185,8 +256,8 @@ class MemberOperator:
         m = self._member
         actions: dict[OperatorAction, str | None] = {
             "message": self._message_refusal(),
-            "pause": _NO_PAUSE,
-            "resume": _NO_PAUSE,
+            "pause": self._pause_refusal(),
+            "resume": _BRIDGED if m.context.bridged else None,
             "stop": None,
         }
         return OperatorAgentInfo(
@@ -194,9 +265,13 @@ class MemberOperator:
             state=m.state,
             status=m.status,
             activity=self._activity(),
-            paused=False,
+            paused=self._wanted() and self.holdable(),
             actions=actions,
         )
+
+    @property
+    def running(self) -> bool:
+        return self._member.state != "ended"
 
     def _activity(self) -> str:
         m = self._member
@@ -225,14 +300,18 @@ class MemberOperator:
             return "The member has not started."
         if m.gate.turn_closed:
             return "The member's agent loop has ended."
+        if m.gate.finished:
+            # its end waits only for its cleanup (reaping, under users isolation)
+            return "The member's agent has ended."
         # the gate ends an ending member at its next boundary, before it drains a message
-        if m.gate.end_origin is not None:
+        return self._ending()
+
+    # Why the member takes no more turns, or None: its end was requested, or the swarm
+    # is stopping or ending.
+    def _ending(self) -> str | None:
+        if self._member.gate.end_origin is not None:
             return "The member is ending: it takes no more turns."
-        if self._swarm.stop_reason is not None:
-            return "The swarm is stopping: its members take no more turns."
-        if not self._swarm.active():
-            return _ENDED
-        return None
+        return self._swarm.ending()
 
     def _message(self, text: str, interrupt: bool, dry_run: bool) -> OperatorOutcome:
         refusal = self._message_refusal()
@@ -289,9 +368,10 @@ class MemberOperator:
     # after its stop and end check, so never once the swarm is stopping or an end was
     # requested, and before its callbacks run, so kept messages are drained at this
     # first boundary.
-    def loop_bound(self, channel: AgentChannel) -> None:
+    def loop_bound(self, channel: AgentChannel, passes_state: bool) -> None:
         if self._swarm.stop_reason is not None:
             return
+        self._stateless = not passes_state
         self._unsubscribe = [
             channel.subscribe_drained(self._drained),
             channel.subscribe_turn_state(self._turn_state),
@@ -300,6 +380,8 @@ class MemberOperator:
         for message in self._kept:
             ref.post(UserMessage(message))
         self._kept.clear()
+        # a pending pause, held at this boundary
+        self.sync()
 
     # observers on the own loop, synchronous in the loop's task, so in the member's span
 
@@ -354,6 +436,141 @@ class MemberOperator:
             recovery=recovery,
         )
 
+    # pause
+
+    # A member is paused while its own flag or its swarm's latch is set. While it is
+    # and its own loop has bound, one boundary callback with origin `operator` is
+    # registered on it, through the seam's withdrawable registration; it is registered
+    # only once the loop has reached the gate, so a pause never makes the member
+    # `errored` for callbacks that never ran.
+    def _wanted(self) -> bool:
+        return self.paused or self._swarm.latched
+
+    # Why the operator can never hold the member, or None: the guard's checks, each
+    # synchronous and raising nothing, then a withdrawal's mark.
+    def unpausable(self) -> str | None:
+        if self._marked is not None:
+            return self._marked
+        m = self._member
+        if m.gate.finished:
+            # its end waits only for its cleanup (reaping, under users isolation)
+            return _AGENT_ENDED
+        refusal = seam_refusal(m.record, m.context)
+        if refusal is not None:
+            return refusal
+        if m.context.background:
+            return STARTS_BACKGROUND
+        if m.context.turn_loop is not None:
+            if self._stateless:
+                return NO_STATE
+            if m.gate.turn_closed:
+                return LOOP_ENDED
+        return None
+
+    # Whether a pause can hold the member, for what the list and the resume replies
+    # report: it is running, not ending, its time limit has not run out, and it is
+    # pausable. The flags stay as set.
+    def holdable(self) -> bool:
+        return (
+            self.running
+            and self._ending() is None
+            and not self._member.gate.overdue()
+            and self.unpausable() is None
+        )
+
+    def _pause_refusal(self) -> str | None:
+        m = self._member
+        if m.state == "ended":
+            return "The member has ended."
+        if m.context.bridged:
+            return _BRIDGED
+        ending = self._ending()
+        if ending is not None:
+            return ending
+        reason = self.unpausable()
+        if reason is not None:
+            return f"The member cannot be paused: {reason}."
+        return None
+
+    # Brings the registration in line with the pause: registered while the member is
+    # paused, pausable and its own loop has bound, and otherwise not; then wakes a
+    # waiting callback to look again.
+    def sync(self) -> None:
+        m = self._member
+        if not self._wanted():
+            if self._unregister is not None:
+                self._unregister()
+                self._unregister = None
+        elif (
+            self._unregister is None
+            and m.context.turn_loop is not None
+            and m.state != "ended"
+            and self._ending() is None
+            and self.unpausable() is None
+        ):
+            try:
+                self._unregister = m.gate.register(
+                    self._hold, OPERATOR, withdraw=self._withdrawn
+                )
+            except Exception as ex:
+                self._marked = (
+                    f"its pause could not be registered ({type(ex).__name__})"
+                )
+        if self._changed is not None:
+            self._changed.set()
+
+    # From the seam, which has unregistered the callback: the member is never held by
+    # the operator again in this run. Its flag stays as the operator set it.
+    def _withdrawn(self, reason: str) -> None:
+        self._marked = reason
+        self._unregister = None
+        if self._changed is not None:
+            self._changed.set()
+
+    # The boundary callback: waits while the member is paused and pausable, as waiting
+    # time, until a resume, a new pause or a withdrawal changes that.
+    async def _hold(self, boundary: Boundary) -> None:
+        while self._wanted() and self.unpausable() is None:
+            self._changed = anyio.Event()
+            with suspend_working_limit():
+                await self._changed.wait()
+        return None
+
+    def _pause(self, dry_run: bool) -> OperatorOutcome:
+        refusal = self._pause_refusal()
+        if refusal is not None:
+            return _refused(refusal)
+        if self.paused:
+            return OperatorOutcome(
+                changed=False, detail=_dry(dry_run, "The member is already paused.")
+            )
+        if self._member.context.turn_loop is None:
+            detail = "Deferred: the member is held at its first turn boundary, once its agent loop starts."
+        else:
+            detail = "The member is held at its next turn boundary."
+        if not dry_run:
+            self.paused = True
+            self.sync()
+            if self._marked is not None:
+                self.paused = False
+                return _refused(f"The member cannot be paused: {self._marked}.")
+        return OperatorOutcome(changed=True, detail=_dry(dry_run, detail))
+
+    # `changed` reports the member's own flag, not whether the member is released.
+    def _resume(self, dry_run: bool) -> OperatorOutcome:
+        if self._member.context.bridged:
+            return _refused(_BRIDGED)
+        changed = self.paused
+        if changed and not dry_run:
+            self.paused = False
+            self.sync()
+        detail = "Resumed." if changed else "The member is not paused on its own."
+        if self._swarm.latched and self.holdable():
+            detail += (
+                " The swarm's pause still holds it: resume the group to release it."
+            )
+        return OperatorOutcome(changed=changed, detail=_dry(dry_run, detail))
+
     # stop
 
     def _stop(self, dry_run: bool) -> OperatorOutcome:
@@ -362,6 +579,9 @@ class MemberOperator:
             return OperatorOutcome(
                 changed=False, detail=_dry(dry_run, "The member has ended.")
             )
+        if m.gate.finished:
+            # its end waits only for its cleanup, which a stop neither speeds nor stops
+            return OperatorOutcome(changed=False, detail=_dry(dry_run, _CLEANING_UP))
         if m.gate.end_origin is not None:
             return OperatorOutcome(
                 changed=False, detail=_dry(dry_run, "The member is already ending.")
