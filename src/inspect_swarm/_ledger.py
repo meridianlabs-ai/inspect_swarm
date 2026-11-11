@@ -11,6 +11,7 @@ from inspect_ai.event import (
     CommunicationWait,
     Event,
     ModelEvent,
+    SandboxEvent,
     ScoreEvent,
     SpanBeginEvent,
     ToolEvent,
@@ -21,6 +22,9 @@ from inspect_ai.model import ModelAPI, ModelUsage
 from inspect_ai.model._model import sample_model_usage
 from inspect_ai.scorer import Value
 from inspect_ai.util import Limit, current_span_id, sample_limits
+from inspect_ai.util._sandbox._framework_operation import (
+    in_framework_sandbox_operation,
+)
 from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import BaseModel, ConfigDict
 
@@ -117,6 +121,9 @@ class MemberLedger(BaseModel):
     background_cancelled: int = 0
     """Of `background_started`, the tasks that were cancelled: still running when the member's drain ended, or cancelled by an error from the member's work or by the hard stop."""
 
+    end_origin: str | None = None
+    """Who asked the member to end, when an end request decided how it ended, as `MemberResult.end_origin`. `None` when no end request did."""
+
 
 class SwarmLedger(BaseModel):
     """Realized usage and cost of one run of the swarm, and how complete they are.
@@ -174,7 +181,7 @@ class SwarmLedger(BaseModel):
     """How far usage at the end went past each cap, keyed by `cost`, `tokens` and `time`. Only kinds over their cap appear."""
 
     stop_reason: str | None
-    """The reason the swarm stopped its members, from the first stop begun. `None` when no stop began."""
+    """The reason the swarm stopped its members, from the first stop begun. `None` when no stop began, and in place of `operator` when the swarm failed or was cancelled."""
 
     ended_by: str | None
     """The sample limit (`sample_limit:<type>`) or operator interrupt (`operator`) that ended the swarm, even during its own stop. `unknown` when an outside cause may have ended it but cannot be named. `None` when nothing from outside ended it."""
@@ -210,6 +217,8 @@ class MemberAccount:
     # the model calls in flight when a stop or an end cancelled one of the member's
     # boundary callback chains, by event id
     cancelled_calls: Sequence[str] = ()
+    # the origin of the end request that decided how the member ended
+    end_origin: str | None = None
 
 
 # A model event as it last stood, with its live usage object.
@@ -269,8 +278,17 @@ class WaitRecord:
     idle: float
 
 
-# The spans, model events, tool events, intermediate score events and communication
-# evidence the transcript reports during the swarm's interval, kept as they happen
+# A sandbox command that named the user it ran as, and was not one of Inspect's own
+# sandbox operations.
+@dataclass(frozen=True)
+class ExecRecord:
+    span_id: str | None
+    user: str
+
+
+# The spans, model events, tool events, intermediate score events, communication
+# evidence and sandbox commands that named their user, other than Inspect's own sandbox
+# operations, the transcript reports during the swarm's interval, kept as they happen
 # rather than read back from the history: a bounded transcript serializes an event at
 # its last update, which can come before Inspect prices its usage, and can evict it.
 # Tool, score and communication events are kept in the order they began; waits, which
@@ -288,6 +306,7 @@ class EventLog:
         self.scores: list[ScoreRecord] = []
         self.comms: list[CommRecord] = []
         self.waits: list[WaitRecord] = []
+        self.execs: list[ExecRecord] = []
 
     def __call__(self, event: Event) -> None:
         if self.path is not None:
@@ -332,6 +351,17 @@ class EventLog:
                 self.waits.append(_wait_record(event, event.wait))
             else:
                 self.comms.append(_comm_record(event))
+        elif (
+            isinstance(event, SandboxEvent)
+            and event.action == "exec"
+            # reported synchronously, in the context of the call that made it, which
+            # carries Inspect's mark on its own operations (the injected tools' launcher,
+            # tool injection, in-loop scoring and the swarm's own commands)
+            and not in_framework_sandbox_operation()
+        ):
+            user = (event.options or {}).get("user")
+            if isinstance(user, str):
+                self.execs.append(ExecRecord(span_id=event.span_id, user=user))
 
 
 def _wait_record(event: CommunicationEvent, wait: CommunicationWait) -> WaitRecord:
@@ -458,6 +488,7 @@ class LedgerInterval:
                 cancelled=m.cancelled or self._in_flight(m, places),
                 background_started=m.background_started,
                 background_cancelled=m.background_cancelled,
+                end_origin=m.end_origin,
             )
             for m in members
         ]

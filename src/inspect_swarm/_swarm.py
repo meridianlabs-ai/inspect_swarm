@@ -1,6 +1,6 @@
 import inspect
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Literal, cast
 
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import (
@@ -24,6 +24,7 @@ from ._budget import (
     check_cost_data,
     derive_caps,
     is_bridged,
+    rederive_time_cap,
     share_nodes,
     split_sentence,
 )
@@ -33,6 +34,16 @@ from ._channel.messages import is_builtin_messages
 from ._channel.shared_memory import is_builtin_board
 from ._controller._control import SwarmRun
 from ._controller._controller import Controller, MemberInfo
+from ._controller.leaderless import leaderless
+from ._evidence import PHASE_NAMES
+from ._final import check_chain, final_chain
+from ._isolation import (
+    UserIsolation,
+    check_isolated_roster,
+    isolation_preamble,
+    resolve_isolation,
+    setup_isolation,
+)
 from ._member import (
     Member,
     is_factory,
@@ -43,6 +54,7 @@ from ._member import (
 )
 from ._record import forget_record
 from ._registry import resolve
+from ._result import ResultSpec
 
 
 @agent
@@ -52,29 +64,35 @@ def swarm(
     controller: str | Controller = "leaderless",
     channels: str | Channel | Sequence[str | Channel] = ("filesystem",),
     budget: Budget = Budget(),  # noqa: B008
+    result: ResultSpec | None = None,
+    isolation: UserIsolation | Literal["users"] | None = None,
 ) -> Agent:
     """A swarm of agents working on one sample.
 
-    Each member gets a timeline in the sample named after it, so member names must be unique across the swarm runs and other timelines in a sample. To run swarms more than once in one sample, build them with distinct member names. A member may not be named `init`, `solvers` or `scorers`: Inspect's timelines read spans with those names as the sample's phases.
+    The swarm adds one timeline to the sample, rooted at the agent span it runs in, with each member as a child, so the log viewer shows the swarm as one agent with its members as lanes. The timeline is named after that span (`swarm` when the swarm runs as a solver or with `run()`); a later swarm in the same sample gets `swarm-2`, `swarm-3`, and so on. The span must be an agent span not named `init`, `solvers` or `scorers`, and two swarms running at the same time each need their own: `run(swarm(...), input)` gives a swarm its own span. Member names must be unique across the swarms in a sample. To run swarms more than once in one sample, build them with distinct member names. A member may not be named `init`, `solvers` or `scorers`: Inspect's timelines read spans with those names as the sample's phases.
 
     Args:
         members: The roster: built agents or `member()` records. A bare agent is `member(agent)`. A factory-form `member()` may stand for several members (`count`).
         controller: How the swarm runs: who starts, when and with what input, and when the swarm is done. A name resolves to a registered controller with its default parameters.
         channels: How members share information. A name resolves to a registered channel with its default parameters. `[]` means none: members get no channel instructions, though a shared sandbox is still shared.
         budget: The swarm-wide cap.
+        result: The task's result contract, from `answer_result()` or `artifact_result()`. With it, the swarm records each submission's answer key and the verifier's verdict on it, and the controller's default `final` chain uses them to choose the answer. It holds the task's callables, so the log records only its type name: rebuild the swarm through its task, or a registered builder, rather than from the log.
+        isolation: How members are kept apart in the sandbox they share. `None`: members share it with no enforcement. `users()`, or `"users"` for its defaults: each member runs as its own Linux user, with a private home and the shared directories it lists (see `users()`). Not with members that have their own sandboxes.
 
     Returns:
         The swarm, as an agent.
 
     Raises:
-        TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, or an argument has the wrong type.
+        TypeError: If `members` holds a bare `@agent` factory, an ACP agent, or anything other than agents and `member()` records, `result` is the type name a log records for it, or an argument has the wrong type.
         PrerequisiteError: If the returned agent runs in a sample with checkpointing on: checkpoint and resume are not supported for swarms yet.
-        ValueError: If member names collide, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; or, when the returned agent runs, if the sample already has a timeline named after one of its members or does not have a sandbox a member names.
+        ValueError: If member names collide, two member names differ only in case, a member is named `init`, `solvers` or `scorers`, the same agent object is in two members, a channel is given twice, two channels share a record name or prefix, a name does not resolve, the controller or a channel refuses the roster, a bridged member is in a swarm with a channel that has records other than `messages` and `shared_memory` (`swarm_bridged_tools()` serves only those two), a member chooses its own name (`choose_name=True`) beside a channel other than `filesystem`, some members have their own sandbox and others do not, two members have the same sandbox, a member lists another member's sandbox in `visible_sandboxes`, a member is persistent while `result` has an `answer_key` or a `verifier`, the controller's `final` chain has `verify` without a verifier in `result`, `vote` without an answer key, `synthesize` without a result contract of kind `answer` or more than once, or a reporter, which the swarm does not run yet, the `filesystem` channel is given without `shared_volume=True` while members have their own sandboxes, or with it while members share the sample's sandbox; under users isolation, if a member name is not a valid user-name suffix, a member chooses its own name or has its own sandbox, or the `filesystem` channel's `scratch` is not `home`, its `shared` is not a `rw` share or its notes file is in none; or, when the returned agent runs, if it runs in a span that is not an agent span, in an agent span named `init`, `solvers` or `scorers`, or in the span of another swarm still running, if the sample already has a swarm member named after one of its members, or does not have a sandbox a member names.
+        RuntimeError: Under users isolation, when the returned agent runs, if it runs inside a sandbox identity scope (such as a member of a swarm with users isolation), another swarm with users isolation in the sample has set up the same sandbox, the sandbox cannot run commands as other users, the image lacks a tool setup needs, a path is unsafe, or the self-test finds a boundary that does not hold.
     """
     records = _members(members)
     names = member_names(records)
     _check_distinct_agents(records, names)
     _check_phase_names(names)
+    _check_case_names(names)
     _check_persistent(records, names)
     roster = [
         MemberInfo(name=name, role=record.role, choose_name=record.choose_name)
@@ -96,13 +114,33 @@ def swarm(
         for name in record_names
     ]
     own_sandboxes = _check_member_sandboxes(runs, resolved_channels)
+    resolved_result = _result(result)
+    _check_result_members(resolved_result, records, names)
+    chain = final_chain(resolved_controller.final, resolved_result)
+    check_chain(chain, resolved_result)
+    resolved_isolation = resolve_isolation(isolation)
+    if resolved_isolation is not None:
+        filesystems = [c for c in resolved_channels if isinstance(c, FilesystemChannel)]
+        check_isolated_roster(
+            resolved_isolation,
+            roster,
+            own_sandboxes,
+            (
+                (filesystems[0].shared, filesystems[0].notes, filesystems[0].scratch)
+                if filesystems
+                else None
+            ),
+        )
 
     async def execute(state: AgentState) -> AgentState:
         # first, before anything this run can fail at, so that it never leaves an
         # earlier swarm's record as its own
         forget_record()
         _check_sandbox_names(runs)
-        caps = derive_caps(resolved_budget, len(roster))
+        # under users isolation the time cap is checked after setup, which takes time
+        caps = derive_caps(
+            resolved_budget, len(roster), check_time=resolved_isolation is None
+        )
         # under derive=False the sample's cost limit can apply with no swarm cap, and an
         # unpriced member's calls would never advance it
         if caps.cost is not None or sample_limits().cost.limit is not None:
@@ -128,9 +166,16 @@ def swarm(
                 own_sandboxes,
                 choosers,
                 split_sentence(resolved_budget, caps, i, len(roster)),
+                resolved_isolation,
             )
             for i, info in enumerate(roster)
         }
+        isolation = None
+        if resolved_isolation is not None:
+            isolation = await setup_isolation(
+                resolved_isolation, [info.name for info in roster]
+            )
+            caps = rederive_time_cap(resolved_budget, caps)
         await SwarmRun(
             runs,
             state=state,
@@ -142,11 +187,42 @@ def swarm(
             budget=resolved_budget,
             shares=shares,
             channels=resolved_channels,
-            final=resolved_controller.final,
+            chain=chain,
+            result=resolved_result,
+            isolation=isolation,
         ).run(resolved_controller.run)
         return state
 
     return execute
+
+
+def baseline(member: Member | Agent, result: ResultSpec | None = None) -> Agent:
+    """A single agent run as a swarm of one, the baseline arm to compare a swarm with.
+
+    It is `swarm(members=member, controller=leaderless(final="first"), channels=[], result=result)`. It writes the same result record as a swarm, with the same clock and the same answer key and verdict for the submission, so `member_scores()` and the analysis read every arm the same way. Unlike a plain agent, it returns an empty output when its member does not submit.
+
+    Args:
+        member: The agent, or a `member()` record of one member.
+        result: The task's result contract, as the swarm arm passes it.
+
+    Returns:
+        The swarm of one, as an agent.
+
+    Raises:
+        ValueError: If `member` stands for more than one member (`count`), or for any reason `swarm()` refuses it.
+        TypeError: For any reason `swarm()` refuses its arguments.
+    """
+    count = sum(len(names) for names in member_names(_members(member)))
+    if count != 1:
+        raise ValueError(
+            f"baseline() runs one member, and member= stands for {count}. Use swarm() for more than one."
+        )
+    return swarm(
+        members=member,
+        controller=leaderless(final="first"),
+        channels=[],
+        result=result,
+    )
 
 
 def _preamble(
@@ -156,6 +232,7 @@ def _preamble(
     own_sandboxes: bool,
     choosers: bool,
     split: str | None,
+    isolation: UserIsolation | None,
 ) -> str:
     if member.choose_name:
         intro = (
@@ -192,6 +269,8 @@ def _preamble(
             text = channel.instructions(member)
         if text:
             parts.append(text)
+    if isolation is not None:
+        parts.append(isolation_preamble(isolation, member.name))
     return "\n\n".join(parts)
 
 
@@ -264,15 +343,23 @@ def _member(item: object) -> Member:
     )
 
 
-# span names Inspect's timeline_build() reads as the sample's phases, wherever they are
-_PHASE_NAMES = ("init", "solvers", "scorers")
-
-
 def _check_phase_names(names: Sequence[list[str]]) -> None:
     for name in (name for record_names in names for name in record_names):
-        if name in _PHASE_NAMES:
+        if name in PHASE_NAMES:
             raise ValueError(
-                f"members=: a member is named {name!r}, which Inspect's timelines read as a phase of the sample, so the member's timeline would lose its agents. Give the member another name with member(..., name=...)."
+                f"members=: a member is named {name!r}, which Inspect's timelines read as a phase of the sample. Give the member another name with member(..., name=...)."
+            )
+
+
+# Inspect's timelines lowercase span names, so members whose names differ only in case
+# would share one lane name in the swarm's timeline.
+def _check_case_names(names: Sequence[list[str]]) -> None:
+    seen: dict[str, str] = {}
+    for name in (name for record_names in names for name in record_names):
+        other = seen.setdefault(name.lower(), name)
+        if other != name:
+            raise ValueError(
+                f"members=: members {other!r} and {name!r} differ only in case, and Inspect's timelines lowercase member names, so the log viewer would show them as one. Give the members names that differ in more than case with member(..., name=...)."
             )
 
 
@@ -290,6 +377,21 @@ def _check_persistent(records: Sequence[Member], names: Sequence[list[str]]) -> 
         if record.bridged:
             raise ValueError(
                 f"Member {record_names[0]!r} is persistent and declared bridged. A bridged member's CLI runs its own turns, so it cannot be held after an answer; a persistent member's agent must be a react() or a deepagent() loop without background dispatch, or a builder that returns one."
+            )
+
+
+# A persistent member gives several submissions, one per answer, and the runtime keys
+# and verifies a member's submission when it ends; until each answer is keyed and
+# verified as it arrives, a contract that keys or verifies refuses persistent members.
+def _check_result_members(
+    result: ResultSpec | None, records: Sequence[Member], names: Sequence[list[str]]
+) -> None:
+    if result is None or (result.answer_key is None and result.verifier is None):
+        return
+    for record, record_names in zip(records, names, strict=True):
+        if record.persistent:
+            raise ValueError(
+                f"Member {record_names[0]!r} is persistent, and the result contract has an answer_key or a verifier. The swarm does not yet key or verify each answer of a persistent member, so it refuses the two together: make the member not persistent, or leave answer_key and verifier out of the contract."
             )
 
 
@@ -443,4 +545,17 @@ def _budget(budget: object) -> Budget:
         return Budget.model_validate(dict(cast(Mapping[str, object], budget)))
     raise TypeError(
         f"budget= must be a Budget or a dict of its fields, got a {type(budget).__name__}."
+    )
+
+
+def _result(result: object) -> ResultSpec | None:
+    # a log records the contract as its type name, which cannot rebuild its callables
+    if result is None or isinstance(result, ResultSpec):
+        return result
+    if isinstance(result, str):
+        raise TypeError(
+            f"result= is {result!r}, the type name a log records for a result contract, which cannot be rebuilt from a log. Rebuild the swarm through its task, or through a registered @agent builder that passes result=."
+        )
+    raise TypeError(
+        f"result= must be a ResultSpec from answer_result() or artifact_result(), got a {type(result).__name__}."
     )

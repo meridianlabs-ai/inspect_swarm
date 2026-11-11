@@ -1,6 +1,6 @@
 ---
 reference: inspect_swarm.analysis
-description: Columns for samples_df() and the models of the swarm ledger.
+description: Columns for samples_df(), the models of the swarm ledger, and attempt rows with select@k.
 ---
 
 ## Columns
@@ -14,3 +14,9 @@ description: Columns for samples_df() and the models of the swarm ledger.
 ### MemberLedger
 ### Meter
 ### Calls
+
+## Attempts
+
+### attempt_rows
+### AttemptRow
+### select_at_k

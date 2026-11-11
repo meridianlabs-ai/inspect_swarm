@@ -1,6 +1,6 @@
 import inspect
 from collections import Counter
-from collections.abc import Callable, Generator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from contextlib import AsyncExitStack, ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import Any, TypeVar, assert_never, cast, overload
@@ -67,7 +67,8 @@ from ._budget import (
     SwarmTurnNode,
     current_member,
 )
-from ._seam import MemberGate
+from ._isolation import MemberIdentity, member_identity
+from ._seam import BRIDGED, MemberGate, ended_reason
 
 AgentFactory = Callable[..., Agent]
 """A registered `@agent` factory, such as `deepagent`."""
@@ -438,7 +439,7 @@ def member_nodes(
 # while its top-level loop was held.
 def seam_refusal(record: Member, context: MemberContext) -> str | None:
     if context.bridged:
-        return "it is bridged: its CLI runs its own turns, and opens no agent channel"
+        return BRIDGED
     if record.agent is not None:
         if registry_info(record.agent).name == _DEEPAGENT:
             background = registry_params(record.agent).get("background", False)
@@ -484,20 +485,25 @@ class MemberOutcome:
 
 
 # The member wrapper. Runs the member on `state` with `input` as its conversation, in
-# its tool-state scope, cancel scope and agent span, under its nodes and the swarm's
-# caps, with its background work owned by the member and its turn gate installed;
-# drains that work once the agent has returned; then calls `end` with its status and
-# the state the agent returned, inside the member's span when the span was entered. The
-# caller keeps `state`, as as_solver() does, for the output of a member that does not
-# return; when its own loop reached the gate, the loop's state at its last boundary is
-# used instead. An end requested through the gate makes a normal return `stopped`, and
-# a member whose callbacks never ran because its loop never reached the gate ends
-# `errored` when it produced its ending itself. No error whose
-# source is a swarm node leaves it: a cap becomes a stop of the swarm, and the member's
-# own nodes a status, as does a sourceless custom limit error, which the agent raised
-# to stop itself. Anything else (a foreign error) is raised, without the swarm's
+# its tool-state scope, its sandbox identity scope under users isolation, cancel scope
+# and agent span, under its nodes and the swarm's caps, with its background work owned
+# by the member and its turn gate installed; drains that work once the agent has
+# returned; then calls `end` with its status and the state the agent returned, inside
+# the member's span when the span was entered. The caller keeps `state`, as as_solver()
+# does, for the output of a member that does not return; when its own loop reached the
+# gate, the loop's state at its last boundary is used instead. An end requested through
+# the gate makes a normal return `stopped`, and so does one requested while its
+# background work drains unless the agent returned a submission, which is kept; a
+# member ended while pending ends `stopped` as soon as it is started, before any setup.
+# A member whose callbacks never ran because its loop never reached the gate ends
+# `errored` when it produced its ending itself. No error whose source is a swarm node
+# leaves it: a cap becomes a stop of the swarm, and the member's own nodes a status, as
+# does a sourceless custom limit error, which the agent raised to stop itself. Anything
+# else (a foreign error) is raised, without the swarm's
 # leaves, after `end` with `errored`; a cancellation from outside ends the member as
-# `cancelled`.
+# `cancelled`. Under users isolation, `reap` stops the processes the member left
+# running, before `end`: it never raises and is shielded from cancellation, so the
+# member's status and error stand.
 async def run_member(
     record: Member,
     name: str,
@@ -511,6 +517,8 @@ async def run_member(
     outcome: MemberOutcome,
     gate: MemberGate,
     end: Callable[[str, AgentState], None],
+    identity: MemberIdentity | None = None,
+    reap: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     status = "cancelled"
     # holds the member's span open after its limits and cancel scope have exited, so
@@ -530,21 +538,41 @@ async def run_member(
                 outcome,
                 gate,
                 member_span,
+                identity,
             )
         except Exception:
             status = "errored"
             raise
         finally:
-            # the state the agent returned, kept through a drain that raised; else the
-            # loop's state at its last boundary
-            end(
-                status,
-                outcome.state
-                if outcome.state is not None
-                else gate.state
-                if gate.state is not None
-                else state,
-            )
+            if (
+                gate.end_origin is not None
+                and status in ("stopped", "submitted")
+                and (gate.end_raised or lever.reason == ended_reason(gate.end_origin))
+            ):
+                # the member ended through the request: the gate ended it at a
+                # boundary or before a turn, or the request closed the member's lever
+                # first and the member ended through it, on a refused call or held
+                # idle after an answer. Decided here,
+                # before reaping awaits, so a request made while the member is reaped
+                # does not decide how it ended.
+                gate.honoured = True
+            # synchronously, before reaping awaits: a callback registered after the
+            # wrapper's last supervision check would never run, nor be found
+            gate.finished = True
+            try:
+                if reap is not None:
+                    await reap()
+            finally:
+                # the state the agent returned, kept through a drain that raised; else
+                # the loop's state at its last boundary
+                end(
+                    status,
+                    outcome.state
+                    if outcome.state is not None
+                    else gate.state
+                    if gate.state is not None
+                    else state,
+                )
 
 
 async def _run_member(
@@ -560,12 +588,19 @@ async def _run_member(
     outcome: MemberOutcome,
     gate: MemberGate,
     member_span: AsyncExitStack,
+    identity: MemberIdentity | None,
 ) -> str:
+    if gate.end_origin is not None:
+        # ended while pending: no sandboxes, background owner, agent or model call
+        gate.honoured = True
+        return "stopped"
     token = current_member.set(context)
     status: str | None = None
     # the member produced its ending itself: a normal return, or its own limit or
     # error (the error)
     returned = False
+    # an end request turned the agent's return into `stopped`
+    requested = False
     own: BaseException | None = None
     # the agent was called: an error before that (building or refusing the agent) is
     # not a run that missed its gate, and propagates as raised
@@ -574,6 +609,7 @@ async def _run_member(
         with (
             tool_state_scope(name),
             _member_sandboxes(member_sandbox(record, name), record.visible_sandboxes),
+            member_identity(identity),
             context.scope,
         ):
             # inside the member's scopes, so the hard stop cancels its background work
@@ -622,6 +658,7 @@ async def _run_member(
                             outcome.state = result
                         returned = True
                         status = _returned(gate, result, stopped)
+                        requested = status == "stopped"
                     except Exception as ex:
                         cap, owned, foreign = classify_errors(ex, caps, nodes)
                         if foreign is None and cap:
@@ -645,8 +682,11 @@ async def _run_member(
                         foreign = gate.unsupervised_error()
                         foreign.__cause__ = own
                     if foreign is not None:
-                        # no drain: leaving the owner cancels the background work
+                        # no drain: leaving the owner cancels the background work, which
+                        # may await its cleanup, so the runtime learns of the error first
+                        context.fatal()
                         raise foreign
+                    gate.draining = True
                     await _drain(name, owner, lever, grace)
             finally:
                 # after the owner has ended its work, so its cancellations are counted
@@ -661,10 +701,23 @@ async def _run_member(
     finally:
         current_member.reset(token)
 
-    if status is not None:
+    if status is None:
+        # the agent was cancelled: the hard stop, or a cancellation from outside the
+        # swarm
+        return "cancelled"
+    if requested:
+        # honoured once the drain kept that ending, even when another stop closed the
+        # lever first: a cancellation from outside the member during the drain does not
+        # reach here
+        gate.honoured = True
         return status
-    # the agent was cancelled: the hard stop, or a cancellation from outside the swarm
-    return "cancelled"
+    if returned and gate.end_origin is not None and status == "unsubmitted":
+        # an end requested while its background work drained, checked after the drain
+        # and the member's cleanup, with nothing awaited before its end; a submission
+        # the agent returned is kept (decision: Ransom, 2026-11-04)
+        gate.honoured = True
+        return "stopped"
+    return status
 
 
 # The member's background work, once its agent has returned: refused new model calls,

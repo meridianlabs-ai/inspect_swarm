@@ -12,6 +12,7 @@ from ._channel._channel import (
     Channel,
     ChannelRun,
     ChannelState,
+    ResolvingState,
     WaitingState,
     WaitNews,
     WaitSpec,
@@ -20,6 +21,7 @@ from ._channel._channel import (
 from ._channel.filesystem import filesystem
 from ._channel.messages import messages
 from ._channel.shared_memory import shared_memory
+from ._channel.topics import Topic, topics
 from ._controller._control import (
     ControlEvent,
     MemberEnded,
@@ -28,6 +30,7 @@ from ._controller._control import (
     MemberNews,
     MemberState,
     SwarmControl,
+    VerdictSummary,
 )
 from ._controller._controller import (
     Controller,
@@ -36,11 +39,28 @@ from ._controller._controller import (
     swarm_controller,
 )
 from ._controller.leaderless import leaderless
-from ._final import FinalName
+from ._final import FinalName, FinalSpec, Synthesize, synthesize
+from ._isolation import Share, UserIsolation, users
 from ._member import Member, member
-from ._record import FinalRecord, MemberResult, SwarmResultRecord, swarm_result
+from ._record import (
+    FinalRecord,
+    LeftOut,
+    MemberReap,
+    MemberResult,
+    SwarmResultRecord,
+    swarm_result,
+)
+from ._result import (
+    MemberArtifacts,
+    ResultKind,
+    ResultSpec,
+    Verdict,
+    Verifier,
+    answer_result,
+    artifact_result,
+)
 from ._seam import Boundary, BoundaryCallback
-from ._swarm import swarm
+from ._swarm import baseline, swarm
 from ._tools import swarm_resources
 
 try:
@@ -65,23 +85,40 @@ __all__ = [
     "Draft",
     "FinalName",
     "FinalRecord",
+    "FinalSpec",
+    "LeftOut",
     "Member",
+    "MemberArtifacts",
     "MemberEnded",
     "MemberHandle",
     "MemberIdle",
     "MemberInfo",
     "MemberNews",
+    "MemberReap",
     "MemberResult",
     "MemberState",
     "Record",
+    "ResolvingState",
+    "ResultKind",
+    "ResultSpec",
+    "Share",
     "StopReason",
     "SwarmBudget",
     "SwarmControl",
     "SwarmResultRecord",
+    "Synthesize",
+    "Topic",
+    "UserIsolation",
+    "Verdict",
+    "VerdictSummary",
+    "Verifier",
     "WaitNews",
     "WaitSpec",
     "WaitingState",
     "__version__",
+    "answer_result",
+    "artifact_result",
+    "baseline",
     "calling_member",
     "filesystem",
     "leaderless",
@@ -96,4 +133,7 @@ __all__ = [
     "swarm_resources",
     "swarm_result",
     "swarm_tools",
+    "synthesize",
+    "topics",
+    "users",
 ]

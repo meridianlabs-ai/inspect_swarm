@@ -6,7 +6,9 @@ description: Swarms, members, controllers, channels, results and the budget view
 ## Swarms and members
 
 ### swarm
+### baseline
 ### member
+### users
 
 ## Controllers
 
@@ -18,6 +20,7 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### Boundary
 ### BoundaryCallback
 ### MemberEnded
+### VerdictSummary
 ### MemberIdle
 ### MemberNews
 ### ControlEvent
@@ -25,18 +28,24 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### MemberState
 ### StopReason
 ### FinalName
+### FinalSpec
+### synthesize
+### Synthesize
 
 ## Channels
 
 ### filesystem
 ### shared_memory
 ### messages
+### topics
+### Topic
 ### swarm_tools
 ### swarm_bridged_tools
 ### swarm_channel
 ### Channel
 ### ChannelRun
 ### ChannelState
+### ResolvingState
 ### WaitingState
 ### WaitSpec
 ### WaitNews
@@ -52,7 +61,16 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### swarm_result
 ### SwarmResultRecord
 ### MemberResult
+### MemberReap
+### LeftOut
 ### FinalRecord
+### answer_result
+### artifact_result
+### ResultSpec
+### ResultKind
+### Verdict
+### Verifier
+### MemberArtifacts
 
 ## Budget view
 

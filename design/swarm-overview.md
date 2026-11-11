@@ -30,7 +30,7 @@ swarm(
 )
 ```
 
-After M2, a strict, verifier-only answer is a controller parameter and needs the task's verifier: `controller=leaderless(final="verify")` with `result=answer_result(verifier=...)`.
+After M2, a strict, verifier-only answer is a controller parameter and needs the task's verifier: `controller=leaderless(stop_on_submission=False, final="verify")` with `result=answer_result(verifier=...)`.
 
 The observer has no argument: what it records is a fixed, versioned contract that scorers and analysis read, the same in a swarm and in its baselines. Monitors are configured through inspect_sentinel, scores through the task's own scorers, and labels through Scout ([API](swarm-api.md#observer)). The API's own arguments are logged faithfully, so names, task parameters and Python sweeps all work; members configured with hooks and the task's result contract are rebuilt through registered builders or the task ([API](swarm-api.md#logging-and-replay)). A swarm is the task's solver, so its arguments are part of Inspect's task identity, and two *arms* (two tasks in an eval set, each a `Task` with its arguments, solver, model and limits) that differ in any of them are distinct ([API](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
 
@@ -88,7 +88,7 @@ A swarm of one member with no channels is a single agent with the same accountin
 - Reuse its vocabulary: rosters and roles, channels with readers and writers, evidence kinds.
 - Its scheduled-activation model and its forked `react()` do not fit continuously active members that wake each other.
 - The only other Inspect peer swarm found, the code for the paper *Architecture Matters for Multi-Agent Security*, is a scheduled study harness, not a reusable runtime.
-- Within Inspect, follow inspect_petri's conventions for concurrent agents in one sample: model roles, a named timeline per member, and harness-validity scores. Accept ControlArena-shaped monitors through inspect_sentinel.
+- Within Inspect, follow inspect_petri's conventions for concurrent agents in one sample: model roles, named timelines (one per swarm, with a lane per member), and harness-validity scores. Accept ControlArena-shaped monitors through inspect_sentinel.
 - Outside Inspect, SCHEME is the closest published design: a shared sandbox, peer messages as tool output, and monitors that see actions.
 ([Relationship to ORBIT](swarm.md#relationship-to-orbit), [Related projects](swarm.md#related-projects-and-what-they-teach), [Alternatives](swarm.md#alternatives-considered))
 
