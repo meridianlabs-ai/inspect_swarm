@@ -591,7 +591,7 @@ Inspect scorers take a `TaskState` and a target, and many inspect or modify the 
 - Per-member correctness can be claimed only if the task gives each member a stable artifact of its own (its own worktree, branch or output directory) and a way to score it.
 - The comparison with epochs is then team result against best@k or pass@k at equal realized cost. Test-Time Communication draws the same distinction: it compares best-of-member results with a single shared container's result on Terminal-Bench ([Appendix A.6](https://arxiv.org/html/2609.21032v1)).
 
-**What M1 does.** M1 adds no scorer. The task's own scorers score the swarm's final answer, or the environment it leaves, as they would after a single agent. M1 records whether and when each member submits; Part 2 adds member outputs. The contract above, per-member scores, team@k and voting are optional work after M2 (decision: Ransom, 2026-10-08). When built, they support per-member claims for answer-scored tasks only, and report the team environment score for shared-artifact tasks. [swarm-scoring.md](swarm-scoring.md) details both: M1's part first, then the contract, the record, the scorers and the comparisons. Recording member strings (Part 2) does not make every coding benchmark comparable to epochs.
+**What M1 does.** M1 adds no scorer. The task's own scorers score the swarm's final answer, or the environment it leaves, as they would after a single agent. M1 records whether and when each member submits; the record's member outputs come after M2. The contract above, per-member scores, team@k and voting are optional work after M2 (decision: Ransom, 2026-10-08). When built, they support per-member claims for answer-scored tasks only, and report the team environment score for shared-artifact tasks. [swarm-scoring.md](swarm-scoring.md) details both: the task's own scorers, the contract, the record, the member scorer and the comparisons. Recording member strings does not make every coding benchmark comparable to epochs.
 
 ### Controller: topology, termination, final answer
 
@@ -887,7 +887,7 @@ Untrusted input reaches this code from several directions.
   - in M1, `deepagent` members with `background=True` or `background=64` in their `args` are rejected while background ownership is unsupported; M2-5 replaces this test with the acceptance cases of [swarm-background-members.md Testing](swarm-background-members.md#inspect_swarm-m2-5);
   - the task's own scorer scores the swarm's final answer, or for a shared-artifact task the drained environment, unchanged (per-member scores, team@k and voting are tested with that work, after M2);
   - `first` selects the earliest submission (after M2, each further final-answer mode selects as specified);
-  - each member's submission status and time are recorded (recording member outputs is tested with Part 2);
+  - each member's submission status and time are recorded (recording member outputs is tested with the record's later fields, [swarm-scoring.md What the swarm records](swarm-scoring.md#what-the-swarm-records));
   - evidence events are written with the right ids, including causation ids;
   - storm controls behave as specified, and so, once the bus hook exists, do its verdicts (`proceed`, `modify`, `reject`); a full inbox reaches the sender as a tool error;
   - peer content reaches a recipient only in a read tool's result:
