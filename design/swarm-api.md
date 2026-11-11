@@ -29,7 +29,7 @@ def swarm(
 
 # Controllers: how the swarm runs. A @swarm_controller factory returns a Controller.
 @swarm_controller
-def leaderless(stop_on_submission: bool = True, *, final: FinalSpec | None = None, stop_on_verified: bool = False) -> Controller: ...   # M1: stop_on_submission only; M2 adds final, "first" or "last"
+def leaderless(stop_on_submission: bool | None = None, *, final: FinalSpec | None = None, stop_on_verified: bool | None = None) -> Controller: ...   # None: the stop the final chain needs
 
 class Controller:
     def __init__(
@@ -47,6 +47,8 @@ class SwarmControl(Protocol):                    # what `run` works through
     def start(self, member: str | MemberHandle, input: str | list[ChatMessage] | None = None, *, preamble: str | Literal[False] | None = None) -> None: ...
     def events(self) -> AsyncGenerator[ControlEvent, None]: ...  # MemberEnded in M1
     def choose_answer(self, member: str | MemberHandle, reason: str | None = None) -> None: ...  # M2: the controller's choice of the answer
+    @property
+    def final_chain(self) -> Sequence[str]: ...   # the chain the swarm applies, by mode name (swarm-leaderless-stop.md)
 
 # Channels: how members share information. A @swarm_channel factory returns a Channel.
 @swarm_channel
@@ -390,6 +392,8 @@ class SwarmControl(Protocol):
         member: str | MemberHandle,
         reason: str | None = None,                              # recorded as the final record's reason
     ) -> None: ...                                              # M2; once, from a member that submitted
+    @property
+    def final_chain(self) -> Sequence[str]: ...                 # the chain the swarm applies, by mode name, final=None resolved
 
 @dataclass(frozen=True)
 class MemberEnded:
@@ -608,51 +612,53 @@ def research_math(k: int = 4, cost: float = 40.0, controller: str = "leaderless"
     )
 ```
 
-`inspect eval research_math.py -T k=8 -T cost=80` runs eight members, `solver-1` to `solver-8`, each with its own deepagent, in the sample's sandbox, with the filesystem channel, under a cost cap of 80 (dollars), each started with the sample's input and its preamble; it stops when the first member submits, and that submission is the final answer. After M2, with the scoring deep dive's `result=answer_result(answer_key=boxed_number, verifier=check_answer)`, the default answer is scoring's default chain. The explicit form of the same arm after M2, with a strict verifier-only answer and the swarm stopping at the first verified answer:
+`inspect eval research_math.py -T k=8 -T cost=80` runs eight members, `solver-1` to `solver-8`, each with its own deepagent, in the sample's sandbox, with the filesystem channel, under a cost cap of 80 (dollars), each started with the sample's input and its preamble; it stops when the first member submits, and that submission is the final answer. After M2, with the scoring deep dive's `result=answer_result(answer_key=boxed_number, verifier=check_answer)`, the default answer is scoring's default chain, and the swarm stops at the first submission that passes the verifier ([swarm-leaderless-stop.md](swarm-leaderless-stop.md)). The same arm with a strict verifier-only answer, which also stops at the first verified answer:
 
 ```python
 swarm(
     members=member(deepagent, args={"tools": [bash(), python()]}, name="solver", count=4),
-    controller=leaderless(final="verify", stop_on_verified=True, stop_on_submission=False),
+    controller=leaderless(final="verify"),   # stops at the first passing submission
     channels=[filesystem(notes="notes.md")],
     budget=Budget(cost=40.0),
     result=answer_result(answer_key=boxed_number, verifier=check_answer),   # verify needs a verifier
 )
 ```
 
-The built-in it uses, as it is after M2. In M1 its only parameter is `stop_on_submission`, and M2 adds `final`, `first` or `last`: it starts every member and returns `submitted` at the first submission, or `all_done` when every member has ended. The sketch below shows its shape; the controller as built, including how it treats a persistent member's `MemberIdle`, is [`leaderless.py`](../src/inspect_swarm/_controller/leaderless.py):
+The built-in it uses. It starts every member and returns `submitted` at the first submission, `verified` at the first passing one, or `all_done` when every member has ended; which stops are armed follows the final chain unless the task says otherwise. The sketch below shows its shape; the controller as built, including how it treats a persistent member's `MemberIdle`, is [`leaderless.py`](../src/inspect_swarm/_controller/leaderless.py):
 
 ```python
 import contextlib
 
 @swarm_controller
 def leaderless(
-    stop_on_submission: bool = True,
+    stop_on_submission: bool | None = None,
     *,
     final: FinalSpec | None = None,
-    stop_on_verified: bool = False,
+    stop_on_verified: bool | None = None,
 ) -> Controller:
-    """Start every member with the swarm's input; stop at the first submission, or when all have ended."""
+    """Start every member with the swarm's input; stop when the answer chain has its answer, or when all have ended."""
     if final is not None and has_reporter(final):   # any `reporter` mode in the chain
         raise ValueError("leaderless: a leaderless swarm has no reporter")
-    if stop_on_submission and (final not in (None, "first", ["first"]) or stop_on_verified):
+    if stop_on_submission is True and (final not in (None, "first", ["first"]) or stop_on_verified is True):
         raise ValueError("leaderless: the chain and stop_on_verified need stop_on_submission=False")
 
     async def run(swarm: SwarmControl) -> StopReason:
+        # None: the default for the chain the swarm applies, which final=None resolves only in swarm()
+        on_submission, on_verified = _stops(swarm.final_chain, stop_on_submission, stop_on_verified)
         for m in swarm.members:
             swarm.start(m)
         async with contextlib.aclosing(swarm.events()) as events:   # released on the early return
             async for event in events:
-                if stop_on_verified and isinstance(event, MemberEnded) and event.verdict and event.verdict.passed:
+                if on_verified and isinstance(event, MemberEnded) and event.verdict and event.verdict.passed:
                     return "verified"
-                if stop_on_submission and event.submitted:
+                if on_submission and event.submitted:
                     return "submitted"
         return "all_done"
 
     return Controller(run, final=final)
 ```
 
-`stop_on_submission` (M1, on by default; decision: Ransom, 2026-10-21) is meaningful only with the `first` chain: the first submission is then the answer, so nothing the other members do after it can change it. With `verify` or `vote` in the chain a later member can still change the answer. So `leaderless()` raises `ValueError` for an explicit `final` other than `first`, and for `stop_on_verified=True`, unless `stop_on_submission=False`, as M2 refuses `last`. The default stays on: `leaderless()` does not know the task's result, so `final=None` is accepted with it, and the default chain then chooses from the submissions made before the members stopped ([swarm-scoring.md](swarm-scoring.md#the-final-answer-chain)). `stop_on_submission=False` keeps every member running to its end, for tasks whose scorer reads a shared artifact after the drain, arms that measure each member's result (team@k), and agents for which any normal return counts as a submission.
+A stop at the first submission (decision: Ransom, 2026-10-21) is meaningful only with the `first` chain: the first submission is then the answer, so nothing the other members do after it can change it. With `verify`, `vote`, `last` or `synthesize` a later member can still change the answer. So `stop_on_submission` defaults on only when the chain is `first`, and `stop_on_verified` defaults on when the chain starts with `verify` (decision: Ransom, 2026-11-10). `final=None` is resolved against the task's result only in `swarm()`, so `run` reads the resolved chain from `SwarmControl.final_chain`; `_stops()` and its table are [swarm-leaderless-stop.md](swarm-leaderless-stop.md#leaderless). An explicit `stop_on_submission=True` with an explicit `final` other than `first`, or with `stop_on_verified=True`, raises `ValueError`. An explicit `stop_on_submission=False` keeps every member running to its end, for tasks whose scorer reads a shared artifact after the drain, arms that measure each member's result (team@k), and agents for which any normal return counts as a submission.
 
 **A coordinator swarm (later: coordinator topologies, on the later messages channel).** A lead and three workers. All start together; workers wait for the lead's instructions with `swarm_wait` ([swarm-wait.md](swarm-wait.md)), and the lead's submission is the answer. Members with tool sources are registered builders, passed uncalled, so the log can name them and each member gets its own tool source ([Members](#tool-state-and-member-builders)).
 
