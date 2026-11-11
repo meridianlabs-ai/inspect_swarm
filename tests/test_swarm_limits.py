@@ -64,7 +64,7 @@ from inspect_swarm import (
     swarm_controller,
     swarm_result,
 )
-from inspect_swarm._budget import CostPair, SwarmNode
+from inspect_swarm._budget import SwarmCostNode, SwarmNode
 from inspect_swarm._controller._control import SwarmRun
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import SwarmLedger
@@ -372,23 +372,23 @@ async def test_the_runtime_lever_and_member_levers_are_siblings(staged: bool) ->
         return "all_done"
 
     record = member(generator, args={"model": model}, count=2)
-    cap = CostPair(100.0, owner=None, role="cap")
+    cap = SwarmCostNode(100.0, owner=None, role="cap")
     async with sample():
         swarm_run = SwarmRun(
             [(record, "a"), (record, "b")],
             state=AgentState(messages=[]),
             input=[ChatMessageUser(content="task")],
             preambles={"a": "", "b": ""},
-            caps=cap.nodes,
+            caps=[cap],
             time=None,
             grace=1.0,
             budget=Budget(),
         )
         await swarm_run.run(run)
     # each member's call is charged to its own lever and the cap, never the runtime's
-    assert [m.lever.cost for m in swarm_run._members] == [10.0, 10.0]
-    assert swarm_run._runtime_lever.cost == 10.0
-    assert cap.cost == 30.0
+    assert [m.lever.cost_node.usage for m in swarm_run._members] == [10.0, 10.0]
+    assert swarm_run._runtime_lever.cost_node.usage == 10.0
+    assert cap.usage == 30.0
 
 
 # ---------------------------------------------------------------------------

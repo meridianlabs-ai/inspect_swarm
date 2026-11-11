@@ -225,7 +225,7 @@ def share_nodes(
     for i, name in enumerate(names):
         nodes: list[Limit] = []
         if costs is not None:
-            nodes.extend(CostPair(costs[i], owner=name, role="share").nodes)
+            nodes.append(SwarmCostNode(costs[i], owner=name, role="share"))
         if tokens is not None:
             nodes.append(
                 SwarmTokenNode(tokens[i], caps.token_type, owner=name, role="share")
@@ -381,8 +381,10 @@ class SwarmNode(Limit):
     role: NodeRole
     # set by the runtime on the swarm's caps
     stop_swarm: Callable[[str], None] | None = None
-    # set by the runtime on every node of a swarm whose budget has derive=False
-    charge_sample: bool = False
+    # set by the runtime on every node of a swarm whose budget has derive=False, which
+    # the sample's limits end: such a cost node, once reached, leaves the check to
+    # Inspect's order, root first
+    sample_first: bool = False
 
     def exceeded(
         self,
@@ -437,12 +439,10 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
         *,
         owner: str | None,
         role: NodeRole,
-        pair: "CostPair | None" = None,
     ) -> None:
         super().__init__(limit, type)
         self.owner = owner
         self.role = role
-        self.pair = pair
         self.unpriced_calls = 0
 
     @property
@@ -450,122 +450,90 @@ class SwarmTokenNode(SwarmNode, _TokenLimit):
         return self._usage
 
     def record(self, usage: ModelUsage) -> None:
-        # runs for every call recorded in this context, before any token check
         super().record(usage)
         if usage.total_cost is None:
             self.unpriced_calls += 1
-        elif self.pair is not None:
-            self.pair.cost += usage.total_cost
 
     def _check_self(self, raise_for_equal: bool = False) -> None:
         limit = self.limit
         total = self._metering.value(self._usage)
-        token_reached = limit is not None and (
+        if limit is not None and (
             total > limit or (raise_for_equal and total == limit)
-        )
-        if token_reached or (
-            self.pair is not None and _pair_cost_reached(self.pair, raise_for_equal)
         ):
-            self._sample_first(raise_for_equal)
-        if token_reached:
-            assert limit is not None
             kind = "token" if self.type == "all" else f"token ({self.type})"
             self.exceeded(
-                "custom" if self.role == "lever" else "token",
-                kind,
-                total,
-                limit,
-                f"value: {total:,}; limit: {limit:,}",
-                self.pair.reason if self.pair is not None else None,
+                "token", kind, total, limit, f"value: {total:,}; limit: {limit:,}"
             )
-            return
-        if self.pair is not None:
-            _check_pair_cost(self.pair, self, raise_for_equal)
-
-    def _sample_first(self, raise_for_equal: bool) -> None:
-        # The one gate every raise of a pair's token-tree node goes through, run when
-        # the node is about to raise. Under Budget(derive=False) the sample's own limits
-        # end the swarm, but this node raises in the token check, where Inspect has
-        # already charged the call just recorded to the cost tree (inspect_ai#6349) but
-        # not yet checked that tree. So check the pair's cost-tree ancestors root first,
-        # as Inspect's cost check would with the same `raise_for_equal`: the sample's
-        # cost limit raises ahead of this node. With derived caps nothing changes. The
-        # swarm that owns this node decides, not a nested swarm the call runs in.
-        if self.pair is None or not self.charge_sample:
-            return
-        if self.stop_swarm is not None:
-            # a reached cap stops the swarm even when a tool consumes the sample's error
-            self.stop_swarm("swarm_cap")
-        parent = self.pair.cost_node.parent
-        if parent is not None:
-            parent.check(raise_for_equal)
 
 
 class SwarmCostNode(SwarmNode, _CostLimit):
     def __init__(
-        self,
-        limit: float | None,
-        *,
-        owner: str | None,
-        role: NodeRole,
-        pair: "CostPair",
+        self, limit: float | None = None, *, owner: str | None, role: NodeRole
     ) -> None:
         super().__init__(limit)
         self.owner = owner
         self.role = role
-        self.pair = pair
-
-    @property
-    def usage(self) -> float:
-        return self.pair.cost
+        # the part of the cost recorded while token metering was suspended (approval
+        # and review calls)
+        self.suspended_cost = 0.0
+        # a lever's stop gate: once closed, the node refuses every call, suspended ones
+        # included
+        self.reason: str | None = None
 
     def record(self, cost: float) -> None:
-        # outside a token suspension the pair's token-tree node has already counted the call
-        if self.parent is not None:
-            self.parent.record(cost)
+        super().record(cost)
         if token_limit_tree.is_suspended():
-            self.pair.cost += cost
-            self.pair.suspended_cost += cost
+            self.suspended_cost += cost
+
+    def check(self, raise_for_equal: bool = False) -> None:
+        # Inspect checks root first. A swarm with derived caps stops on its own nodes
+        # before the sample's limits end it, so the swarm's nodes in the chain are
+        # checked first, root first, up to the first one reached. A reached node of a
+        # swarm under derive=False leaves the check to Inspect's order, which raises
+        # the sample's cost limit ahead of it; a reached cap stops the swarm first,
+        # even if a tool consumes the sample's error.
+        chain: list[_CostLimit] = []
+        node: _CostLimit | None = self
+        while node is not None:
+            chain.append(node)
+            node = node.parent
+        chain.reverse()
+        for node in chain:
+            if isinstance(node, SwarmCostNode) and node.reached(raise_for_equal):
+                if not node.sample_first:
+                    node._check_self(raise_for_equal)
+                if node.stop_swarm is not None:
+                    node.stop_swarm("swarm_cap")
+                break
+        for node in chain:
+            node._check_self(raise_for_equal)  # pyright: ignore[reportPrivateUsage]
+
+    def reached(self, raise_for_equal: bool) -> bool:
+        limit = self.limit
+        cost = self.usage
+        return self.reason is not None or (
+            limit is not None and (cost > limit or (raise_for_equal and cost == limit))
+        )
 
     def _check_self(self, raise_for_equal: bool = False) -> None:
-        if self.pair.reason is not None:
-            # the stop gate: refuses every call, including suspended ones
-            cost = self.pair.cost
-            self.exceeded("custom", "cost", cost, cost, "", self.pair.reason)
+        if not self.reached(raise_for_equal):
             return
-        _check_pair_cost(self.pair, self, raise_for_equal)
-
-
-def _pair_cost_reached(pair: "CostPair", raise_for_equal: bool) -> bool:
-    cost = pair.cost
-    limit = pair.cost_node.limit
-    return limit is not None and (cost > limit or (raise_for_equal and cost == limit))
-
-
-def _check_pair_cost(pair: "CostPair", node: SwarmNode, raise_for_equal: bool) -> None:
-    # the pair's cost check, run by whichever of its two nodes is being checked
-    if _pair_cost_reached(pair, raise_for_equal):
-        cost = pair.cost
-        limit = pair.cost_node.limit
+        cost = self.usage
+        if self.reason is not None:
+            self.exceeded("custom", "cost", cost, cost, "", self.reason)
+            return
+        limit = self.limit
         assert limit is not None
-        node.exceeded(
+        self.exceeded(
             "cost", "cost", cost, limit, f"value: ${cost:,.4f}; limit: ${limit:,.4f}"
         )
 
 
-# A token-tree node and a cost-tree node sharing one cost accumulator. The token-tree
-# node counts every call recorded outside a token suspension, so an Inspect token node
-# below it cannot hide a call's cost; the cost-tree node counts the calls made while
-# token metering is suspended (approval and review).
-class CostPair:
-    def __init__(
-        self, limit: float | None = None, *, owner: str | None, role: NodeRole
-    ) -> None:
-        self.cost = 0.0
-        self.suspended_cost = 0.0
-        self.reason: str | None = None
-        self.token_node = SwarmTokenNode(None, owner=owner, role=role, pair=self)
-        self.cost_node = SwarmCostNode(limit, owner=owner, role=role, pair=self)
+# A meter for the ledger: a token-tree node and a cost-tree node, with no limits.
+class MeterNodes:
+    def __init__(self, *, owner: str | None, role: NodeRole = "meter") -> None:
+        self.token_node = SwarmTokenNode(None, owner=owner, role=role)
+        self.cost_node = SwarmCostNode(owner=owner, role=role)
 
     @property
     def nodes(self) -> list[Limit]:
@@ -573,27 +541,32 @@ class CostPair:
 
 
 # A member's (or the runtime's) meter, with no limit until the runtime stops it.
-class Lever(CostPair):
+class Lever(MeterNodes):
     def __init__(self, *, owner: str | None) -> None:
         super().__init__(owner=owner, role="lever")
 
+    @property
+    def reason(self) -> str | None:
+        return self.cost_node.reason
+
     def close(self, reason: str) -> None:
-        # refuses ordinary calls at their next check, and suspended ones through the gate
-        if self.reason is None:
-            self.reason = reason
-            self.token_node.limit = int(self.token_node.usage)
+        # closes the stop gate, which refuses the next call before dispatch, suspended
+        # ones included; the first reason stays
+        if self.cost_node.reason is None:
+            self.cost_node.reason = reason
 
     def stop_error(self, reason: str) -> LimitExceededError:
         # closes the lever and returns the error its next check would raise, for the
-        # turn gate to end the member at a boundary; the first reason stays
+        # turn gate to end the member at a boundary
         self.close(reason)
-        cost = self.cost
+        node = self.cost_node
+        cost = node.usage
         return LimitExceededError(
             "custom",
             value=cost,
             limit=cost,
-            message=self.cost_node._message("cost", "", self.reason),  # pyright: ignore[reportPrivateUsage]
-            source=self.cost_node,
+            message=node._message("cost", "", node.reason),  # pyright: ignore[reportPrivateUsage]
+            source=node,
         )
 
 
@@ -678,21 +651,14 @@ class SwarmTimeNode(_TimeLimit):
 
 
 def cost_node(nodes: Sequence[Limit], role: NodeRole) -> SwarmCostNode | None:
-    # the cost-tree half of the pair with this role, whose usage is the pair's cost
     return next(
         (n for n in nodes if isinstance(n, SwarmCostNode) and n.role == role), None
     )
 
 
 def token_node(nodes: Sequence[Limit], role: NodeRole) -> SwarmTokenNode | None:
-    # a lone token node with this role; a cost pair's token node is not it
     return next(
-        (
-            n
-            for n in nodes
-            if isinstance(n, SwarmTokenNode) and n.role == role and n.pair is None
-        ),
-        None,
+        (n for n in nodes if isinstance(n, SwarmTokenNode) and n.role == role), None
     )
 
 
