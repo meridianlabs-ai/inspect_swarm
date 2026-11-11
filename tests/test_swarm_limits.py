@@ -1626,6 +1626,114 @@ async def test_overlapping_bridged_calls_keep_a_sample_limit_after_a_cap() -> No
     assert line.bridged and line.status == "errored"
 
 
+@agent
+def swarm_inside(inner: Agent) -> Agent:
+    # an outer member that runs a swarm of its own
+    async def execute(state: AgentState) -> AgentState:
+        await inner(AgentState(messages=[ChatMessageUser(content="inner task")]))
+        return state
+
+    return execute
+
+
+# one 50-token call, priced at $0.001, against a $0.0005 swarm cost node
+OVERLAP_COST = 0.001
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "inner_role,outer_role,expected",
+    [
+        ("limit", "limit", "member_limit:token"),
+        ("share", "limit", "member_limit:token"),
+        ("cap", "limit", "member_limit:token"),
+        ("lever", "limit", "member_limit:token"),
+        ("limit", "share", "share"),
+        ("limit", "cap", "swarm_cap"),
+    ],
+)
+async def test_a_bridged_cost_error_keeps_an_enclosing_token_error_from_a_later_call(
+    inner_role: str, outer_role: str, expected: str
+) -> None:
+    # Two overlapping calls of a bridged member in a nested swarm. The first reply
+    # reaches an inner swarm cost node, which the bridge keeps; the second exceeds a
+    # 75-token node of the outer swarm, which Inspect's bridge does not compare
+    # with a cost-tree node. The outer node's error still ends the outer member.
+    gate = anyio.Event()
+    script = Script(gate=gate)
+    model = scripted_model(script, cost=OVERLAP_COST)
+
+    async def run(control: SwarmControl) -> StopReason:
+        control.start("cli")
+        while script.started < 2:
+            await anyio.sleep(0)
+        gate.set()
+        if inner_role == "lever":
+            # the stop closes the lever before either reply returns
+            return "enough"
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    inner_budget = {
+        "share": Budget(cost=2 * OVERLAP_COST / 2, split="equal"),
+        "cap": Budget(cost=OVERLAP_COST / 2),
+    }.get(inner_role, Budget())
+    # a split needs a second member, which is never started
+    inner_sibling = (
+        [member(generator(scripted_model(cost=OVERLAP_COST)), name="sibling")]
+        if inner_role == "share"
+        else []
+    )
+    inner = swarm(
+        [
+            member(
+                cli(model, requests=2),
+                name="cli",
+                bridged=True,
+                limits=[cost_limit(OVERLAP_COST / 2)] if inner_role == "limit" else [],
+            ),
+            *inner_sibling,
+        ],
+        controller=_controller(run, f"limits_test_nested_overlap_{uuid4().hex}"),
+        channels=[],
+        budget=inner_budget,
+    )
+    outer_tokens = TOKENS_PER_CALL * 3 // 2
+    outer_budget = {
+        "share": Budget(tokens=2 * outer_tokens, split="equal"),
+        "cap": Budget(tokens=outer_tokens),
+    }.get(outer_role, Budget())
+    # a split needs a second member, which is never started
+    outer_sibling = [member(sleeper(0), name="idle")] if outer_role == "share" else []
+
+    async def run_outer(control: SwarmControl) -> StopReason:
+        control.start("outer")
+        async for _ in control.events():
+            pass
+        return "all_done"
+
+    async with sample():
+        await swarm(
+            [
+                member(
+                    swarm_inside(inner),
+                    name="outer",
+                    limits=[token_limit(outer_tokens)] if outer_role == "limit" else [],
+                ),
+                *outer_sibling,
+            ],
+            controller=_controller(run_outer, f"limits_test_outer_{uuid4().hex}"),
+            channels=[],
+            budget=outer_budget,
+        )(AgentState(messages=[ChatMessageUser(content="task")]))
+        # the outer swarm's ledger, written last
+        ledger = _ledger()
+    assert script.calls == 2
+    line = next(m for m in ledger.members if m.name == "outer")
+    assert line.status == expected
+
+
 # what one native compaction of the cli's conversation uses
 COMPACTION_TOKENS = 30
 

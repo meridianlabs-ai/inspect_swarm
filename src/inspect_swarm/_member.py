@@ -41,6 +41,7 @@ from inspect_ai.util._limit import (
     _TokenLimit,  # pyright: ignore[reportPrivateUsage]
     _TurnLimit,  # pyright: ignore[reportPrivateUsage]
     _WorkingLimit,  # pyright: ignore[reportPrivateUsage]
+    check_token_limit,
 )
 from inspect_ai.util._sandbox.context import (
     sandbox_environments_context_var,  # pyright: ignore[reportPrivateUsage]
@@ -575,6 +576,25 @@ async def run_member(
                 )
 
 
+def _enclosing_token_error(error: Exception) -> Exception:
+    # A bridged member's generations end it with the first limit they reach, which the
+    # bridge replaces only with a limit that encloses it in the same limit tree. A
+    # swarm cost node is in the cost tree, so a token limit above the member that a
+    # later, overlapping call exceeded is lost behind its error. Check the token
+    # limits above the member again, as the later call checked them: one exceeded
+    # ends the member in its place.
+    if not (
+        isinstance(error, LimitExceededError)
+        and isinstance(error.source, SwarmCostNode)
+    ):
+        return error
+    try:
+        check_token_limit()
+    except LimitExceededError as enclosing:
+        return enclosing
+    return error
+
+
 async def _run_member(
     record: Member,
     name: str,
@@ -660,6 +680,8 @@ async def _run_member(
                         status = _returned(gate, result, stopped)
                         requested = status == "stopped"
                     except Exception as ex:
+                        if context.bridged:
+                            ex = _enclosing_token_error(ex)
                         cap, owned, foreign = classify_errors(ex, caps, nodes)
                         if foreign is None and cap:
                             # the cap began the swarm's stop when it was reached
