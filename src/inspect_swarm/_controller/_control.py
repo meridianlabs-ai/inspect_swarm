@@ -662,12 +662,6 @@ class SwarmRun:
         # final meter around its final step
         self._swarm_meter = MeterNodes(owner=None)
         self._final_meter = MeterNodes(owner=None)
-        if not budget.derive:
-            # the sample's limits end this swarm: its cost nodes leave a reached limit
-            # to the sample's cost limit first
-            for node in self._nodes():
-                if isinstance(node, SwarmNode):
-                    node.sample_first = True
         self._controller_scope = anyio.CancelScope()
         self._members_tg: TaskGroup | None = None
         self._runtime_tg: TaskGroup | None = None

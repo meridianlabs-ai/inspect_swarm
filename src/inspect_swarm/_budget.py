@@ -381,10 +381,6 @@ class SwarmNode(Limit):
     role: NodeRole
     # set by the runtime on the swarm's caps
     stop_swarm: Callable[[str], None] | None = None
-    # set by the runtime on every node of a swarm whose budget has derive=False, which
-    # the sample's limits end: such a cost node, once reached, leaves the check to
-    # Inspect's order, root first
-    sample_first: bool = False
 
     def exceeded(
         self,
@@ -485,48 +481,20 @@ class SwarmCostNode(SwarmNode, _CostLimit):
         if token_limit_tree.is_suspended():
             self.suspended_cost += cost
 
-    def check(self, raise_for_equal: bool = False) -> None:
-        # Inspect checks root first. A swarm with derived caps stops on its own nodes
-        # before the sample's limits end it, so the swarm's nodes in the chain are
-        # checked first, root first, up to the first one reached. A reached node of a
-        # swarm under derive=False leaves the check to Inspect's order, which raises
-        # the sample's cost limit ahead of it; a reached cap stops the swarm first,
-        # even if a tool consumes the sample's error.
-        chain: list[_CostLimit] = []
-        node: _CostLimit | None = self
-        while node is not None:
-            chain.append(node)
-            node = node.parent
-        chain.reverse()
-        for node in chain:
-            if isinstance(node, SwarmCostNode) and node.reached(raise_for_equal):
-                if not node.sample_first:
-                    node._check_self(raise_for_equal)
-                if node.stop_swarm is not None:
-                    node.stop_swarm("swarm_cap")
-                break
-        for node in chain:
-            node._check_self(raise_for_equal)  # pyright: ignore[reportPrivateUsage]
-
-    def reached(self, raise_for_equal: bool) -> bool:
-        limit = self.limit
-        cost = self.usage
-        return self.reason is not None or (
-            limit is not None and (cost > limit or (raise_for_equal and cost == limit))
-        )
-
     def _check_self(self, raise_for_equal: bool = False) -> None:
-        if not self.reached(raise_for_equal):
-            return
         cost = self.usage
         if self.reason is not None:
             self.exceeded("custom", "cost", cost, cost, "", self.reason)
             return
         limit = self.limit
-        assert limit is not None
-        self.exceeded(
-            "cost", "cost", cost, limit, f"value: ${cost:,.4f}; limit: ${limit:,.4f}"
-        )
+        if limit is not None and (cost > limit or (raise_for_equal and cost == limit)):
+            self.exceeded(
+                "cost",
+                "cost",
+                cost,
+                limit,
+                f"value: ${cost:,.4f}; limit: ${limit:,.4f}",
+            )
 
 
 # A meter for the ledger: a token-tree node and a cost-tree node, with no limits.
