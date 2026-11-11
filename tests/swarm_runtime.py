@@ -8,6 +8,12 @@ from uuid import uuid4
 
 import anyio
 from inspect_ai.agent import Agent, AgentState, agent, run
+from inspect_ai.agent._bridge._errors import PROVIDER_ERROR_KEY
+from inspect_ai.agent._bridge.sandbox.bridge import _error_after_unwind
+from inspect_ai.agent._bridge.sandbox.service import _forward_provider_errors
+from inspect_ai.agent._bridge.sandbox.types import SandboxAgentBridge
+from inspect_ai.agent._bridge.types import AgentBridge
+from inspect_ai.agent._bridge.util import bridge_generate
 from inspect_ai.event import (
     CommunicationDelivery,
     CommunicationEvent,
@@ -21,6 +27,7 @@ from inspect_ai.log._transcript import Transcript, _transcript
 from inspect_ai.model import (
     ChatMessage,
     ChatMessageUser,
+    CompactionStrategy,
     GenerateConfig,
     Model,
     ModelCost,
@@ -42,6 +49,7 @@ from inspect_ai.util import (
 )
 from inspect_ai.util._concurrency import init_concurrency
 from inspect_ai.util._store import Store, init_subtask_store, store
+from pydantic import JsonValue
 
 from inspect_swarm import Controller, swarm_controller
 from inspect_swarm._record import SwarmResultRecord, _transcript_result
@@ -123,6 +131,88 @@ def generator(model: Model, calls: int | None = 1, answer: str = "") -> Agent:
             n += 1
         if answer:
             state.output = ModelOutput.from_content("mockllm", answer)
+        return state
+
+    return execute
+
+
+async def bridged_generate(model: Model, messages: list[ChatMessage]) -> ModelOutput:
+    """A generation the agent bridge serves, through inspect_ai's `bridge_generate()`."""
+    output, _ = await bridge_generate(
+        AgentBridge(AgentState(messages=[])),
+        model,
+        messages,
+        [],
+        None,
+        GenerateConfig(),
+        requested_model=None,
+    )
+    return output
+
+
+@agent
+def cli(
+    model: Model,
+    calls: int | None = 1,
+    requests: int = 1,
+    compaction: CompactionStrategy | None = None,
+    retries: int = 0,
+) -> Agent:
+    """A CLI agent run as inspect_ai's sandbox bridge runs one: `calls` turns (`None`: until stopped) of `requests` overlapping generations, each served through the bridge service's error forwarding, compacted with `compaction` and tracked into the agent's state as the bridge's dialects track it. A limit a generation reaches is answered with an error reply, after which the CLI makes `retries` more requests, one at a time, and exits; the bridge then raises the limit it kept."""
+
+    async def execute(state: AgentState) -> AgentState:
+        bridge = SandboxAgentBridge(
+            state=state,
+            filter=None,
+            retry_refusals=None,
+            compaction=compaction,
+            port=13131,
+            model=None,
+        )
+
+        # the CLI's own conversation, which it sends with each request
+        conversation = list(state.messages)
+
+        async def generate(
+            json_data: dict[str, JsonValue], headers: dict[str, str] | None = None
+        ) -> dict[str, JsonValue]:
+            output, _ = await bridge_generate(
+                bridge,
+                model,
+                conversation,
+                [],
+                None,
+                GenerateConfig(),
+                requested_model=None,
+            )
+            # the bridge's dialects track the agent's state from each generation, with
+            # each choice in the form handed back to the CLI: here, unchanged
+            transported: list[list[ChatMessage]] = [
+                [choice.message] for choice in output.choices
+            ]
+            await bridge._track_state(conversation, output, transported)  # pyright: ignore[reportPrivateUsage]
+            return {}
+
+        forward = _forward_provider_errors(generate, bridge)
+        replies: list[dict[str, JsonValue]] = []
+
+        async def request() -> None:
+            replies.append(await forward({}))
+
+        n = 0
+        while calls is None or n < calls:
+            async with anyio.create_task_group() as tg:
+                for _ in range(requests):
+                    tg.start_soon(request)
+            if any(PROVIDER_ERROR_KEY in reply for reply in replies):
+                for _ in range(retries):
+                    await request()
+                break
+            conversation.append(state.output.message)
+            n += 1
+        error = await _error_after_unwind(bridge, None)
+        if error is not None:
+            raise error
         return state
 
     return execute

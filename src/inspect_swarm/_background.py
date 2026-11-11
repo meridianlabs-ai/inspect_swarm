@@ -9,7 +9,7 @@ from inspect_ai._util._async import unwrap_exception_group
 from inspect_ai.util import Limit, LimitExceededError
 from inspect_ai.util._background import BackgroundTarget, background_target
 
-from ._budget import MemberContext, bridged_background_error
+from ._budget import MemberContext
 
 PosArgsT = TypeVarTuple("PosArgsT")
 
@@ -39,8 +39,7 @@ def cancellation(error: BaseException) -> bool:
 # `contain` (the member's nodes and the swarm's caps), or a sourceless custom limit
 # error, which the task raised to stop itself, ends alone; any other error from
 # a task cancels the block and the other tasks and is raised from it, as from the
-# sample's task group. A bridged member's nodes cancel the whole member rather than
-# raise, so the owner refuses background work in a member found bridged.
+# sample's task group.
 class MemberBackground:
     def __init__(self, member: MemberContext, contain: Sequence[Limit]) -> None:
         # deferred: the bus imports the runtime, which imports this module
@@ -99,8 +98,6 @@ class MemberBackground:
             raise RuntimeError(
                 "background(): the member's background work has ended, so no new background work can start."
             )
-        if self._member.bridged:
-            raise bridged_background_error(self._member.name)
         # tells the operator, whose pause is withdrawn; a member the operator's pause
         # holds is released and may start it
         admitted = self._member.background_starting()
@@ -109,7 +106,7 @@ class MemberBackground:
             raise RuntimeError(
                 f"background(): member {self._member.name!r} is held at a turn boundary, so no background work can start for it."
             )
-        # bridge use found from now on is refused
+        # the operator's pause guard refuses the member from now on
         self._member.background = True
         self._tg.start_soon(self._run, func, args)
         self.started += 1
