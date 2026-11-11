@@ -42,6 +42,7 @@ from inspect_ai.util import (
 )
 
 from inspect_swarm import (
+    AnswerResult,
     Budget,
     Controller,
     FinalName,
@@ -69,6 +70,8 @@ from inspect_swarm._final import (
     final_chain,
     first,
     last,
+    verify,
+    vote,
 )
 from inspect_swarm._ledger import SwarmLedger
 from inspect_swarm._prompts import SYNTHESIZE_HEADER, SYNTHESIZE_INSTRUCTION
@@ -95,6 +98,13 @@ from .swarm_runtime import (
     sleeper,
     statuses,
     swarm_events,
+)
+from .test_turn_seam import (
+    _eval,  # pyright: ignore[reportPrivateUsage]
+    _Ran,  # pyright: ignore[reportPrivateUsage]
+    _react,  # pyright: ignore[reportPrivateUsage]
+    _statuses,  # pyright: ignore[reportPrivateUsage]
+    _swarm_events,  # pyright: ignore[reportPrivateUsage]
 )
 
 
@@ -544,6 +554,13 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "left_out",
         "persistent",
         "answer_times",
+        "answer_results",
+        # users isolation's, null without it
+        "user",
+        "uid",
+        "home",
+        "reap",
+        "foreign_execs",
         "end_origin",
     }
     started, never = record.members
@@ -1206,6 +1223,97 @@ def test_the_chain_takes_the_first_mode_that_gives_an_answer(
     assert chosen.chain == chain
 
 
+# A persistent member's answers: each its swarm time, its verdict's passed and value
+# (no verdict for passed None) and its key.
+def _persistent(
+    name: str, *answers: tuple[float, bool | None, float | None, str | None]
+) -> MemberResult:
+    return MemberResult(
+        name=name,
+        role=None,
+        state="ended",
+        status="submitted",
+        submitted=True,
+        time=10.0,
+        persistent=True,
+        answer_times=[time for time, _, _, _ in answers],
+        answer_results=[
+            AnswerResult(
+                answer_key=key,
+                verdict=None if passed is None else Verdict(passed, value),
+            )
+            for _, passed, value, key in answers
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "mode,members,expected",
+    [
+        pytest.param(
+            "verify",
+            [
+                _persistent("p", (1.0, False, 1.0, None), (3.0, True, 1.0, None)),
+                _submission("a", 2.0, passed=True, value=0.5),
+            ],
+            ("p", 1, False),
+            id="verify-each-answer-by-its-own-verdict",
+        ),
+        pytest.param(
+            "verify",
+            [
+                _persistent("r", (0.5, False, 1.0, None)),
+                _persistent("p", (1.0, True, 1.0, None), (1.0, True, 1.0, None)),
+                _submission("a", 1.0, passed=True, value=1.0),
+            ],
+            ("p", 0, False),
+            id="verify-ties-by-time-roster-then-answer",
+        ),
+        pytest.param(
+            "vote",
+            [
+                _persistent("p", (1.0, None, None, "x"), (2.0, None, None, "y")),
+                _submission("a", 3.0, key="y"),
+                _submission("b", 4.0, key="x"),
+            ],
+            ("p", 1, False),
+            id="vote-by-the-latest-answer-only",
+        ),
+        pytest.param(
+            "vote",
+            [
+                _persistent("p", (1.0, None, None, "42"), (2.0, None, None, None)),
+                _submission("a", 3.0, key="7"),
+            ],
+            ("a", None, False),
+            id="vote-latest-answer-without-a-key-abstains",
+        ),
+        pytest.param(
+            "vote",
+            [
+                _persistent(
+                    "p", (1.0, None, None, "x"), (2.0, None, None, "x")
+                ).model_copy(update={"answer_results": []}),
+                _submission("a", 3.0, key="x"),
+            ],
+            ("a", None, False),
+            id="vote-a-record-without-answer-results",
+        ),
+    ],
+)
+def test_verify_and_vote_over_persistent_answers(
+    mode: str,
+    members: list[MemberResult],
+    expected: tuple[str, int | None, bool],
+) -> None:
+    if mode == "verify":
+        chosen, tie = verify(members), False
+    else:
+        chosen, tie = vote(members)
+    assert chosen is not None
+    assert (chosen.name, chosen.answer, tie) == expected
+
+
 def _verifier() -> Any:
     async def check(answer: str, metadata: dict[str, Any]) -> Verdict:
         return Verdict(passed=answer == "42")
@@ -1834,6 +1942,42 @@ async def test_leaderless_stops_at_the_first_verified_submission() -> None:
     assert stop.reason == "verified"
     assert statuses(stop) == {"a": "submitted", "b": "submitted", "slow": "cancelled"}
     assert (stop.record.final.mode, stop.record.final.member) == ("verify", "b")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "text,reason,slow",
+    [("42", "verified", "cancelled"), ("7", "quiescence", "submitted")],
+    ids=["passed", "failed"],
+)
+async def test_leaderless_stops_at_a_persistent_members_verified_answer(
+    text: str, reason: str, slow: str
+) -> None:
+    sample = await _eval(
+        swarm(
+            [
+                member(
+                    _react(Script([output(text)]), submit=False),
+                    name="p",
+                    persistent=True,
+                ),
+                member(
+                    generator(scripted_model(Script(delay=0.5)), calls=1), name="slow"
+                ),
+            ],
+            controller=leaderless(stop_on_submission=False, stop_on_verified=True),
+            channels=[],
+            budget=Budget(grace=0.05),
+            result=answer_result(verifier=_verifier()),
+        )
+    )
+    assert sample.error is None, sample.error.traceback
+    ran = _Ran(sample)
+    [final_event] = _swarm_events(ran, "final")
+    assert final_event.data["stop_reason"] == reason
+    assert _statuses(ran) == {"p": "submitted", "slow": slow}
+    # a failing answer does not stop the swarm, and the first answer is still chosen
+    assert (ran.record.final.member, ran.record.final.answer) == ("p", 0)
 
 
 @pytest.mark.anyio

@@ -44,6 +44,47 @@ START_TYPE = "swarm_start"
 _LEGACY_RECORD_KEY = "inspect_swarm:result"
 
 
+class MemberReap(BaseModel):
+    """What stopping a member's leftover processes found, under users isolation.
+
+    When a member ends, the swarm kills every process in the sandbox that runs as the member's user, in up to five rounds, since a process can start another between rounds. Processes that have fully exited and wait for their parent to collect them (zombies) are not counted.
+    """
+
+    status: Literal["ok", "survivors", "timeout", "error"]
+    """`ok`: no process of the member's user is left. `survivors`: processes were still running after five rounds. `timeout`: the swarm stopped waiting for the sandbox. `error`: the sandbox could not run the command. Any status but `ok` makes the record's `isolation_incomplete` `True`."""
+
+    killed: int = 0
+    """How many processes were killed: work the member left running after its tool calls returned."""
+
+    killed_names: list[str] = []
+    """The names of the first 50 processes killed (`/proc/<pid>/comm`, at most 15 characters), with every character other than printable ASCII, and every `:`, as `?`."""
+
+    survivors: int = 0
+    """How many processes were still running after five rounds."""
+
+    survivor_names: list[str] = []
+    """The names of the first 50 of them, as for `killed_names`."""
+
+    message: str | None = None
+    """For `timeout` and `error`, what went wrong."""
+
+
+class AnswerResult(BaseModel):
+    """One answer of a persistent member in the swarm's result record: its answer key and the verifier's verdict on it."""
+
+    answer_key: str | None = None
+    """The answer's key, from the result contract's `answer_key`; `None` without a key function or a comparable answer."""
+
+    verdict: Verdict | None = None
+    """The verifier's verdict on the answer; `None` without a verifier, or when the swarm's stop left the answer unverified."""
+
+    verdict_time: float | None = None
+    """Swarm time when the verdict was taken; `None` without one."""
+
+    left_out: list[LeftOut] = []
+    """The answer's values left out of the record, which are `None` here: `answer_key`, or `explanation` for the verdict's explanation, for the reasons a member's `left_out` gives. Empty when nothing was left out."""
+
+
 class MemberResult(BaseModel):
     """One member in the swarm's result record."""
 
@@ -86,14 +127,17 @@ class MemberResult(BaseModel):
     answer_times: list[float] = []
     """The swarm times of a persistent member's answers, in order. Empty for other members, whose answer is their submission at `time`."""
 
+    answer_results: list[AnswerResult] = []
+    """A persistent member's answers' keys and verdicts, in the order of `answer_times`. Empty for other members, and in records written before it existed."""
+
     output: ModelOutput | None = None
     """The member's output when it ended, however it ended, as Inspect's log keeps a sample's output; `None` until then."""
 
     answer_key: str | None = None
-    """The answer key of the member's submission, from the result contract's `answer_key`; `None` without a submission, a key function or a comparable answer."""
+    """The answer key of the member's submission, from the result contract's `answer_key`; `None` without a submission, a key function or a comparable answer. A persistent member's answers have theirs in `answer_results`."""
 
     verdict: Verdict | None = None
-    """The verifier's verdict on the member's submission; `None` without a submission or a verifier, before the verdict is taken, or when the swarm's stop left it unverified."""
+    """The verifier's verdict on the member's submission; `None` without a submission or a verifier, before the verdict is taken, or when the swarm's stop left it unverified. A persistent member's answers have theirs in `answer_results`."""
 
     verdict_time: float | None = None
     """Swarm time when the verdict was taken; `None` without one."""
@@ -122,6 +166,21 @@ class MemberResult(BaseModel):
 
     end_origin: str | None = None
     """Who asked the member to end, when an end request decided how it ended: `operator` for `inspect ctl sample agent stop`, or the origin a caller gave `MemberHandle.end()`. `None` when no end request did, as for a submission, a member limit or the swarm's own stop."""
+
+    user: str | None = None
+    """Under users isolation, the member's Linux user; `None` otherwise."""
+
+    uid: int | None = None
+    """Under users isolation, the member's user id; `None` otherwise."""
+
+    home: str | None = None
+    """Under users isolation, the member's private directory; `None` otherwise."""
+
+    reap: MemberReap | None = None
+    """Under users isolation, what stopping the processes the member left running found, once the member has ended; `None` before, and without isolation."""
+
+    foreign_execs: int | None = None
+    """Under users isolation, how many commands the member ran in the sandbox as another user, once the member has ended; `None` before, and without isolation. These are `exec()` calls in the member's spans that named a user other than the member's, such as a custom tool's `exec(..., user="root")`, other than Inspect's own sandbox operations (tool injection and its launcher, in-loop scoring). It does not see calls a tool makes on the provider object (`sandbox().as_type(...)`) or file reads and writes. The count includes named-user commands across all sandbox environments in the sample, so it does not by itself identify grants in the users-isolated sandbox."""
 
 
 class FinalRecord(BaseModel):
@@ -163,6 +222,9 @@ class SwarmResultRecord(BaseModel):
 
     final: FinalRecord
     """The final answer."""
+
+    isolation_incomplete: bool | None = None
+    """Under users isolation, `True` when some member that started may have left processes running: its reaping found survivors, timed out or failed, or did not run. Analyses of what members left in the sandbox exclude or report such samples. `None` without isolation."""
 
     kind: ResultKind | None = None
     """The result contract's kind, from `swarm(result=...)`; `None` without a contract."""
@@ -208,8 +270,9 @@ def write_record(record: SwarmResultRecord) -> None:
 
 
 # A member's values that come from its model: its output, its answer key, and its
-# verdict's explanation (the verdict as a whole, since its other values are the task's).
-_MODEL_TEXT = ("output", "answer_key", "verdict")
+# verdict's explanation (the verdict as a whole, since its other values are the task's),
+# and the same of each of its answers.
+_MODEL_TEXT = ("output", "answer_key", "verdict", "answer_results")
 
 
 # The record's data without the model text: the members' and the final verdict.
@@ -264,29 +327,33 @@ def _logged_verdict(record: SwarmResultRecord, verdict: Verdict) -> Verdict | No
         return None
 
 
-# A member with its output, answer key and verdict explanation as a log gives them
-# back. A value the record cannot hold is left out of its member and named in its
-# left_out, so that one member's model output never costs the sample its record: one a
+# A member with its output, answer key and verdict explanation, and each of its
+# answers' key and explanation, as a log gives them back. A value the record cannot
+# hold is left out of its member or answer and named in that one's left_out, so that one member's model output never costs the sample its record: one a
 # log cannot write or read, one with text that reads as an attachment reference, and
 # an output whose serialization is not bounded (`_bounded()`). An object the task's
 # code put in an output fails the sample first (`_refuse_author_objects()`).
 def _logged_member(record: SwarmResultRecord, m: MemberResult) -> MemberResult:
     if m.output is not None:
         _refuse_author_objects(m.output, m.name)
-    verdict = m.verdict
-    # the verdict's declared fields alone, built as a plain `Verdict`, so that a
-    # subclass's own constructor never runs on the copy
-    base = None if verdict is None else Verdict(verdict.passed, verdict.value)
+    # each answer with its key and explanation removed, as the member's own are below
+    stripped = [
+        a.model_copy(update={"answer_key": None, "verdict": _without_explanation(a)})
+        for a in m.answer_results
+    ]
     # the member with each value alone, so that each is kept or left out by itself
-    alone = m.model_copy(update={"output": None, "answer_key": None, "verdict": base})
+    alone = m.model_copy(
+        update={
+            "output": None,
+            "answer_key": None,
+            "verdict": _without_explanation(m),
+            "answer_results": stripped,
+        }
+    )
     values: list[tuple[LeftOut, dict[str, Any]]] = []
     if m.output is not None:
         values.append(("output", {"output": m.output}))
-    if m.answer_key is not None:
-        values.append(("answer_key", {"answer_key": m.answer_key}))
-    if verdict is not None and verdict.explanation is not None:
-        explained = Verdict(verdict.passed, verdict.value, verdict.explanation)
-        values.append(("explanation", {"verdict": explained}))
+    values += _model_values(m)
     logged = alone
     left_out = list(m.left_out)
     for name, value in values:
@@ -296,7 +363,47 @@ def _logged_member(record: SwarmResultRecord, m: MemberResult) -> MemberResult:
         else:
             field = "verdict" if name == "explanation" else name
             logged = logged.model_copy(update={field: getattr(kept, field)})
-    return logged.model_copy(update={"left_out": left_out})
+    # each answer's key and explanation, each alone in the member, at its place
+    answers = list(stripped)
+    for i, answer in enumerate(m.answer_results):
+        answer_left_out = list(answer.left_out)
+        for name, value in _model_values(answer):
+            alone_answers = list(stripped)
+            alone_answers[i] = stripped[i].model_copy(update=value)
+            kept = _logged_value(
+                record, alone.model_copy(update={"answer_results": alone_answers})
+            )
+            if kept is None:
+                answer_left_out.append(name)
+            else:
+                field = "verdict" if name == "explanation" else name
+                answers[i] = answers[i].model_copy(
+                    update={field: getattr(kept.answer_results[i], field)}
+                )
+        answers[i] = answers[i].model_copy(update={"left_out": answer_left_out})
+    return logged.model_copy(update={"left_out": left_out, "answer_results": answers})
+
+
+# The verdict's declared fields alone, without its explanation, built as a plain
+# `Verdict`, so that a subclass's own constructor never runs on the copy.
+def _without_explanation(holder: MemberResult | AnswerResult) -> Verdict | None:
+    verdict = holder.verdict
+    return None if verdict is None else Verdict(verdict.passed, verdict.value)
+
+
+# A member's or an answer's model text, each value as an update that holds it alone:
+# its answer key, and its verdict with its explanation.
+def _model_values(
+    holder: MemberResult | AnswerResult,
+) -> list[tuple[LeftOut, dict[str, Any]]]:
+    values: list[tuple[LeftOut, dict[str, Any]]] = []
+    if holder.answer_key is not None:
+        values.append(("answer_key", {"answer_key": holder.answer_key}))
+    verdict = holder.verdict
+    if verdict is not None and verdict.explanation is not None:
+        explained = Verdict(verdict.passed, verdict.value, verdict.explanation)
+        values.append(("explanation", {"verdict": explained}))
+    return values
 
 
 # `m` as the record gives it back from a log, or None when the log cannot write or read

@@ -253,6 +253,13 @@ def _input_messages(input: str | list[ChatMessage]) -> list[ChatMessage]:
 
 
 def _member(m: MemberResult, grade: _Grade) -> dict[str, Any]:
+    answer_key, verdict = m.answer_key, m.verdict
+    if m.persistent:
+        # graded on its output, which is its last answer only when it ended submitted;
+        # a record written before answers kept their keys and verdicts has none
+        last = m.answer_results[-1] if m.submitted and m.answer_results else None
+        answer_key = last.answer_key if last is not None else None
+        verdict = last.verdict if last is not None else None
     return {
         "name": m.name,
         "outcome": grade.outcome,
@@ -263,7 +270,7 @@ def _member(m: MemberResult, grade: _Grade) -> dict[str, Any]:
         "state": m.state,
         "status": m.status,
         "submitted": m.submitted,
-        "answer_key": m.answer_key,
-        "verdict": asdict(m.verdict) if m.verdict is not None else None,
+        "answer_key": answer_key,
+        "verdict": asdict(verdict) if verdict is not None else None,
         "time": m.time,
     }

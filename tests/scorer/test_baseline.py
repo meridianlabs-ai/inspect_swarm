@@ -88,3 +88,8 @@ def test_a_baseline_of_more_than_one_member_is_refused(
 ) -> None:
     with pytest.raises(ValueError, match=f"stands for {count}"):
         baseline(members())
+
+
+def test_a_baseline_of_a_persistent_member_is_refused() -> None:
+    with pytest.raises(ValueError, match="member 'kept' is persistent"):
+        baseline(member(says("42"), name="kept", persistent=True))
