@@ -147,6 +147,9 @@ class MemberGate:
     # activations begun after the first, and the seconds it was idle
     activation: int = 0
     awaiting_work_time: float = 0.0
+    # when the runtime set it `idle`, during its idle hold; None before, and when the
+    # hold ended without its being published
+    idle_at: float | None = None
     # the member's own task, set by the member wrapper
     task: int | None = None
     # a callback was registered for this run, unregistered since or not
@@ -663,16 +666,18 @@ class MemberGate:
             self.recheck()
 
     # The idle wait, in the chain's cancel scope, so that a stop or an end cancels it;
-    # counted as waiting for the sample's working limit. Returns the staged
-    # conversation with the wake's input appended.
+    # counted as waiting for the sample's working limit, and as awaiting work from when
+    # the runtime set the member `idle`, which waits for its answer's verdict. Returns
+    # the staged conversation with the wake's input appended.
     async def _await_wake(self, staged: list[ChatMessage]) -> list[ChatMessage]:
         assert self._woken is not None
-        since = anyio.current_time()
         try:
             with suspend_working_limit():
                 await self._woken.wait()
         finally:
-            self.awaiting_work_time += anyio.current_time() - since
+            if self.idle_at is not None:
+                self.awaiting_work_time += anyio.current_time() - self.idle_at
+                self.idle_at = None
         woken, self._wake_input = self._wake_input, []
         return [*staged, *woken]
 

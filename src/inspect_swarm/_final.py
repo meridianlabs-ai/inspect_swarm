@@ -25,11 +25,11 @@ from pydantic import (
 
 from ._evidence import swarm_event
 from ._prompts import synthesize_prompt
-from ._record import FinalRecord, MemberResult
-from ._result import ResultSpec
+from ._record import AnswerResult, FinalRecord, MemberResult
+from ._result import ResultSpec, Verdict
 
 FinalName = Literal["verify", "vote", "first", "last", "synthesize"]
-"""A mode of the final-answer chain, by name: `verify`, the passed submission with the best verdict; `vote`, the earliest submission in the largest group of equal answer keys; `first`, the earliest submission; `last`, the latest; `synthesize`, one model call over the submissions, as `synthesize()` with its defaults."""
+"""A mode of the final-answer chain, by name: `verify`, the passed submission with the best verdict; `vote`, the earliest submission in the largest group of equal answer keys; `first`, the earliest submission; `last`, the latest; `synthesize`, one model call over the submissions, as `synthesize()` with its defaults. Each answer of a persistent member is a submission, with its own verdict, but it votes once, with its latest answer."""
 
 
 class Synthesize(BaseModel):
@@ -211,40 +211,54 @@ def last(members: Sequence[MemberResult]) -> Candidate | None:
     return max(candidates(members), key=_time, default=None)
 
 
-# The passed submission with the highest verdict value (no value, or NaN, ranks below
-# any number), then the earliest swarm time, then roster order; None without one.
+# The passed candidate, each a submission or an answer of a persistent member with its
+# own verdict, with the highest verdict value (no value, or NaN, ranks below any
+# number), then the earliest swarm time, then roster and answer order; None without
+# one.
 def verify(members: Sequence[MemberResult]) -> Candidate | None:
-    verdicts = {m.name: m.verdict for m in members if not m.persistent}
+    by_name = {m.name: m for m in members}
+
+    def verdict_of(c: Candidate) -> Verdict | None:
+        m = by_name[c.name]
+        return m.verdict if c.answer is None else _answer_of(m, c).verdict
+
+    verdicts = {c: verdict_of(c) for c in candidates(members)}
     passed = [
-        c
-        for c in candidates(members)
-        if (verdict := verdicts.get(c.name)) is not None and verdict.passed
+        c for c, verdict in verdicts.items() if verdict is not None and verdict.passed
     ]
 
     # a number ranks above no number (None or NaN), whatever the number, -inf included
     def rank(c: Candidate) -> tuple[bool, float, float]:
-        verdict = verdicts[c.name]
+        verdict = verdicts[c]
         assert verdict is not None
         value = verdict.value
         if value is None or math.isnan(value):
             return (True, 0.0, c.time)
         return (False, -value, c.time)
 
-    # min() keeps the first of equal keys, which is roster order
+    # min() keeps the first of equal keys, which is roster and answer order
     return min(passed, key=rank, default=None)
 
 
-# The vote over the submissions' answer keys, one per member, where a submission
-# without a key does not vote: the earliest submission in the plurality group, and
-# whether the plurality was tied, in which case the group whose first submission is
-# earliest wins. The chosen candidate is None when no submission has a key.
+# The vote over the members' answer keys, one per member, where a candidate without a
+# key does not vote: a submission's key, and a persistent member's latest answer's,
+# which is its one candidate, so that its earlier answers never vote. Gives the
+# earliest candidate in the plurality group, and whether the plurality was tied, in
+# which case the group whose first candidate is earliest wins. The chosen candidate is
+# None when no member votes.
 def vote(
     members: Sequence[MemberResult],
 ) -> tuple[Candidate | None, bool]:
-    keys = {m.name: m.answer_key for m in members if not m.persistent}
+    by_name = {m.name: m for m in members}
     groups: dict[str, list[Candidate]] = {}
     for c in candidates(members):
-        key = keys.get(c.name)
+        m = by_name[c.name]
+        if c.answer is None:
+            key = m.answer_key
+        elif c.answer == len(m.answer_times) - 1:
+            key = _answer_of(m, c).answer_key
+        else:
+            continue
         if key is not None:
             groups.setdefault(key, []).append(c)
     if not groups:
@@ -253,6 +267,15 @@ def vote(
     # each group's earliest submission, by swarm time then roster order
     leaders = [min(group, key=_time) for group in groups.values() if len(group) == most]
     return min(leaders, key=_time), len(leaders) > 1
+
+
+# A persistent member's answer's key and verdict, all None in a record written before
+# they were kept.
+def _answer_of(m: MemberResult, c: Candidate) -> AnswerResult:
+    assert c.answer is not None
+    if c.answer < len(m.answer_results):
+        return m.answer_results[c.answer]
+    return AnswerResult()
 
 
 # synthesize's outcome in the final step: the model's output, or why the call failed

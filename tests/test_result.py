@@ -41,8 +41,11 @@ from inspect_ai.tool import ToolCall, ToolInfo, ToolParam, ToolParams
 from inspect_ai.util import LimitExceededError, store, token_limit
 
 from inspect_swarm import (
+    AnswerResult,
     Budget,
+    FinalRecord,
     MemberEnded,
+    MemberResult,
     ResultSpec,
     StopReason,
     SwarmControl,
@@ -56,7 +59,12 @@ from inspect_swarm import (
 )
 from inspect_swarm._evidence import LEDGER_KEY, METRICS_KEY
 from inspect_swarm._ledger import SwarmLedger
-from inspect_swarm._record import RECORD_TYPE, SwarmResultRecord, _transcript_result
+from inspect_swarm._record import (
+    RECORD_TYPE,
+    SwarmResultRecord,
+    _transcript_result,
+    write_record,
+)
 from inspect_swarm._result import verifier_label
 
 from .swarm_runtime import (
@@ -149,17 +157,15 @@ def test_a_contract_the_swarm_cannot_use_is_refused(build: Any, error: str) -> N
         pytest.param(answer_result(verifier=Checker()), id="verifier"),
     ],
 )
-def test_a_contract_that_keys_or_verifies_refuses_a_persistent_member(
+def test_a_contract_that_keys_or_verifies_accepts_a_persistent_member(
     result: ResultSpec,
 ) -> None:
+    # each answer is keyed and verified as it is given
     members = [
         member(answers("42"), name="plain"),
         member(react(), name="kept", persistent=True),
     ]
-    with pytest.raises(ValueError, match="Member 'kept' is persistent"):
-        swarm(members, channels=[], result=result)
-    # a contract that only names the kind applies no per-submission work
-    swarm(members, channels=[], result=answer_result())
+    swarm(members, channels=[], result=result)
 
 
 def test_the_builders_set_the_kind() -> None:
@@ -238,12 +244,66 @@ def test_a_record_without_the_contracts_fields_reads_with_them_absent() -> None:
     )
     [m] = record.members
     assert (record.kind, record.verifier) == (None, None)
-    assert (m.output, m.answer_key, m.verdict, m.verdict_time) == (
+    assert (m.output, m.answer_key, m.verdict, m.verdict_time, m.answer_results) == (
         None,
         None,
         None,
         None,
+        [],
     )
+
+
+@pytest.mark.anyio
+async def test_each_answers_model_text_is_kept_or_left_out_by_itself() -> None:
+    reference = "attachment://0123"
+    kept = AnswerResult(
+        answer_key="42",
+        verdict=Verdict(True, 1.0, "EXPLANATION-42"),
+        verdict_time=1.5,
+    )
+    persistent = MemberResult(
+        name="a",
+        role=None,
+        state="ended",
+        status="submitted",
+        submitted=True,
+        time=4.0,
+        persistent=True,
+        answer_times=[1.0, 2.0, 3.0],
+        answer_results=[
+            kept,
+            AnswerResult(
+                answer_key=reference,
+                verdict=Verdict(False, 0.0, reference),
+                verdict_time=2.5,
+            ),
+            AnswerResult(answer_key="bad \ud800 key"),
+        ],
+    )
+    async with sample():
+        write_record(
+            SwarmResultRecord(
+                members=[persistent],
+                final=FinalRecord(
+                    mode="first", member="a", reason=None, provisional=False, answer=0
+                ),
+            )
+        )
+        record = _transcript_result(store())
+    assert record is not None
+    [m] = record.members
+    # only the answer whose text reads as a reference loses it, and names it
+    assert m.left_out == []
+    assert m.answer_results == [
+        kept,
+        AnswerResult(
+            verdict=Verdict(False, 0.0),
+            verdict_time=2.5,
+            left_out=["answer_key", "explanation"],
+        ),
+        # escaped, as a log escapes text that is not valid UTF-8
+        AnswerResult(answer_key="bad \\ud800 key"),
+    ]
 
 
 # ---------------------------------------------------------------------------
