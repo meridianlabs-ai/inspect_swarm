@@ -440,7 +440,7 @@ class MemberRun:
         self.checking = False
         self.admitted = False
         # its output held an object from task code, so it is never read again, and the
-        # record leaves it out
+        # record holds no output for it
         self.refused = False
         # read from the record, before any agent is built
         agent = record.agent if record.agent is not None else record.factory
@@ -555,7 +555,6 @@ class MemberRun:
             output=self.agent_state.output.model_copy()
             if self.state == "ended" and not self.refused
             else None,
-            left_out=["output"] if self.refused else [],
             answer_key=self.answer_key,
             verdict=self.verified,
             verdict_time=self.verified_time,

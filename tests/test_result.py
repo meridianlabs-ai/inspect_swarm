@@ -63,6 +63,7 @@ from inspect_swarm._ledger import SwarmLedger
 from inspect_swarm._record import (
     _LITERAL,
     RECORD_TYPE,
+    RESULT_ID_KEY,
     SwarmResultRecord,
     _transcript_result,
     write_record,
@@ -298,7 +299,6 @@ async def test_each_answers_model_text_and_the_final_explanation_are_kept() -> N
     assert record is not None
     [m] = record.members
     # text that reads as a reference, or begins with the marker, is kept as written
-    assert (m.left_out, record.left_out) == ([], [])
     assert m.answer_results == [
         kept,
         AnswerResult(
@@ -741,9 +741,7 @@ def test_model_text_is_recorded_as_a_log_gives_it_back(
     record = swarm_result(sample)
     assert record is not None
     plain, odd = record.members
-    assert plain.left_out == []
     assert plain.output is not None and plain.answer_key == "42"
-    assert odd.left_out == []
     assert odd.output is not None and odd.output.completion == logged
     assert odd.answer_key == logged
     assert odd.verdict is not None
@@ -793,7 +791,7 @@ def test_model_text_that_reads_as_a_reference_reads_back_as_written(
     for read in reads:
         assert isinstance(read, SwarmResultRecord), read
         _, odd = read.members
-        assert (odd.role, odd.left_out) == (role, [])
+        assert odd.role == role
         assert odd.output is not None
         assert odd.output.completion == odd.output.message.text == text
         assert odd.answer_key == text
@@ -1012,21 +1010,81 @@ def _aliased(depth: int) -> list[Any]:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "odd",
+    "odd,problem",
     [
-        pytest.param(lambda: _with_metadata(_cycle()), id="cycle"),
-        # within the depth limit, refused before it is serialized
-        pytest.param(lambda: _with_metadata({"value": _aliased(60)}), id="aliased"),
         pytest.param(
-            lambda: _tool_call({"loop": _list_cycle()}), id="tool-arguments-cycle"
+            lambda: _tool_call({"loop": _list_cycle()}),
+            r"it holds a cycle at output\.choices\[0\]\.message\.tool_calls\[0\]\.arguments\['loop'\]\[0\]\.",
+            id="cycle",
+        ),
+        pytest.param(
+            lambda: _with_metadata({"value": _nested(194)}),
+            r"it is nested more than 120 levels deep at output\.metadata\['value'\]\[0\]",
+            id="too-deep",
+        ),
+        # within the depth limit, refused before it is serialized
+        pytest.param(
+            lambda: _with_metadata({"value": _aliased(60)}),
+            "it reuses the same lists or dicts so often that writing it would add more than 10,000 copies of them",
+            id="aliased",
         ),
         # a key the log cannot write
-        pytest.param(lambda: _parsed_tool_call(_HUGE_KEY), id="huge-yaml-key"),
+        pytest.param(
+            lambda: _parsed_tool_call(_HUGE_KEY),
+            "a log cannot write it or read it back: ",
+            id="huge-yaml-key",
+        ),
     ],
 )
-async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> None:
-    stop = await run_swarm(_plain_then(odd, "result_test_left_out"))
-    _assert_left_out(stop.record)
+async def test_an_output_the_record_cannot_hold_fails_the_sample(
+    odd: Callable[[], ModelOutput], problem: str
+) -> None:
+    async with sample():
+        with pytest.raises(
+            ValueError,
+            match=f"The swarm's result record cannot hold the output of member 'odd': {problem}",
+        ):
+            await run_agent(_plain_then(odd, "result_test_cannot_hold"), "task")
+        # no record is written; the ledger and metrics are
+        assert RESULT_ID_KEY not in store()
+        assert None not in (store().get(LEDGER_KEY), store().get(METRICS_KEY))
+
+
+# A persistent member that ended submitted has its last answer as its output, which
+# the error names. A model call logs its output, and Inspect's own log cannot hold one
+# with a cycle, so the record is written directly here.
+@pytest.mark.anyio
+async def test_a_persistent_answer_the_record_cannot_hold_is_named() -> None:
+    persistent = MemberResult(
+        name="odd",
+        role=None,
+        state="ended",
+        status="submitted",
+        submitted=True,
+        time=3.0,
+        persistent=True,
+        answer_times=[1.0, 2.0],
+        answer_results=[AnswerResult(), AnswerResult()],
+        output=_with_metadata(_cycle()),
+    )
+    async with sample():
+        with pytest.raises(
+            ValueError,
+            match=r"cannot hold the output of member 'odd', its answer 1 \(from 0\): it holds a cycle at output\.metadata\['self'\]\.",
+        ):
+            write_record(
+                SwarmResultRecord(
+                    members=[persistent],
+                    final=FinalRecord(
+                        mode="first",
+                        member="odd",
+                        reason=None,
+                        provisional=False,
+                        answer=1,
+                    ),
+                )
+            )
+        assert RESULT_ID_KEY not in store()
 
 
 @pytest.mark.anyio
@@ -1038,13 +1096,13 @@ async def test_an_output_the_record_cannot_keep_whole_is_left_out(odd: Any) -> N
             r"type object at output\.metadata\['diagnostic'\]",
             id="object",
         ),
-        # refused whatever else the output holds: here data the record would leave out
+        # refused whatever else the output holds: here data the record cannot hold
         pytest.param(
             lambda: _with_metadata(
                 {"deep": _nested(194), "loop": _cycle(), "diagnostic": object()}
             ),
             r"type object at output\.metadata\['diagnostic'\]",
-            id="after-data-left-out",
+            id="beside-data-the-record-cannot-hold",
         ),
         # one of Inspect's models, outside the places Inspect puts it
         pytest.param(
@@ -1239,7 +1297,7 @@ async def test_an_output_is_checked_before_anything_copies_it(
     assert _hook_calls == []
     assert record is not None and None not in accounting
     [m] = record.members
-    assert (m.status, m.output, m.left_out) == ("errored", None, ["output"])
+    assert (m.status, m.output) == ("errored", None)
 
 
 class _Uncopyable:
@@ -1284,12 +1342,7 @@ async def test_a_persistent_answer_is_checked_before_it_is_kept(
     assert record is not None
     assert LEDGER_KEY in ran.store and METRICS_KEY in ran.store
     [m] = record.members
-    assert (m.status, m.output, m.left_out, m.answer_times) == (
-        "errored",
-        None,
-        ["output"],
-        [],
-    )
+    assert (m.status, m.output, m.answer_times) == ("errored", None, [])
 
 
 @agent
@@ -1360,7 +1413,8 @@ async def test_a_refused_output_ends_its_member_errored_however_it_ends(
     status = "errored" if refused else native
     assert record is not None
     [m] = record.members
-    assert (m.status, m.left_out) == (status, ["output"] if refused else [])
+    assert m.status == status
+    assert (m.output is None) == refused
     [ended] = swarm_events(transcript, "member_result")
     assert ended.data["status"] == status
     assert [entry.status for entry in ledger.members] == [status]
@@ -1378,7 +1432,7 @@ async def test_a_subclass_of_an_inspect_model_fails_the_sample_before_it_is_read
 
     def build() -> ModelOutput:
         base = ModelOutput.from_content("mockllm", "41")
-        # data that would be left out, and data that would be refused, inside it
+        # data the record cannot hold, and data that would be refused, inside it
         return _TaskOutput(
             model=base.model,
             choices=base.choices,
@@ -1392,35 +1446,6 @@ async def test_a_subclass_of_an_inspect_model_fails_the_sample_before_it_is_read
         ):
             await run_agent(_plain_then(build, "result_test_subclass"), "task")
     assert next(rows) == 1
-
-
-@pytest.mark.parametrize(
-    "deep",
-    [
-        pytest.param(lambda: _with_metadata({"value": _nested(194)}), id="metadata"),
-        pytest.param(lambda: _tool_call({"value": _nested(194)}), id="tool-arguments"),
-    ],
-)
-def test_an_output_too_deep_for_a_json_log_is_left_out(
-    tmp_path: Path, deep: Callable[[], ModelOutput]
-) -> None:
-    task = Task(
-        dataset=[Sample(input="task")],
-        solver=_plain_then(deep, "result_test_too_deep"),
-    )
-    [log] = eval(
-        task,
-        model="mockllm/model",
-        log_dir=str(tmp_path),
-        log_format="json",
-        display="none",
-    )
-    assert log.status == "success"
-    samples = read_eval_log(log.location).samples
-    assert samples is not None
-    record = swarm_result(samples[0])
-    assert record is not None
-    _assert_left_out(record)
 
 
 def _cited_range() -> ModelOutput:
@@ -1501,7 +1526,7 @@ async def test_an_output_is_recorded_as_a_log_keeps_a_samples_output(
 ) -> None:
     stop = await run_swarm(_plain_then(built, "result_test_kept"))
     _, odd = stop.record.members
-    assert odd.left_out == [] and odd.output == kept()
+    assert odd.output == kept()
 
 
 def _argument(output: ModelOutput) -> Any:
@@ -1562,7 +1587,7 @@ def test_the_live_record_is_the_record_its_logged_sample_gives_back(
     # compared as JSON, in which a NaN is equal to itself
     assert logged.model_dump_json() == record.model_dump_json()
     _, member = record.members
-    assert member.left_out == [] and member.output is not None
+    assert member.output is not None
     assert repr(value(member.output)) == kept
 
 
@@ -1601,14 +1626,6 @@ def _plain_then(odd: Callable[[], ModelOutput], name: str) -> Agent:
         controller=controller(run, name),
         channels=[],
     )
-
-
-def _assert_left_out(record: SwarmResultRecord) -> None:
-    plain, left = record.members
-    assert record.final.member == "plain"
-    assert plain.left_out == [] and plain.output is not None
-    assert plain.output.completion == "42"
-    assert (left.status, left.output, left.left_out) == ("submitted", None, ["output"])
 
 
 @pytest.mark.anyio
@@ -1721,11 +1738,7 @@ async def test_a_verdict_of_nan_is_recorded_whole() -> None:
     )
     [m] = stop.record.members
     assert m.verdict is not None and math.isnan(m.verdict.value or 0.0)
-    assert (m.verdict.passed, m.verdict.explanation, m.left_out) == (
-        True,
-        "graded",
-        [],
-    )
+    assert (m.verdict.passed, m.verdict.explanation) == (True, "graded")
 
 
 class _Passed(Verdict):
@@ -1749,33 +1762,31 @@ class _Explained(Verdict):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "verdict,recorded,left_out",
+    "verdict,recorded",
     [
         pytest.param(
-            Verdict(True, 1.0, "fine"), Verdict(True, 1.0, "fine"), [], id="plain"
+            Verdict(True, 1.0, "fine"), Verdict(True, 1.0, "fine"), id="plain"
         ),
         # text that reads as an attachment reference, kept as written
         pytest.param(
             Verdict(True, 1.0, "attachment://0123"),
             Verdict(True, 1.0, "attachment://0123"),
-            [],
             id="plain-explanation-reference",
         ),
         # a subclass's own constructor never runs on the record's copy
-        pytest.param(_Passed(), Verdict(True), [], id="constructor-without-fields"),
+        pytest.param(_Passed(), Verdict(True), id="constructor-without-fields"),
         pytest.param(
-            _Passed("fine"), Verdict(True, None, "fine"), [], id="constructor-explained"
+            _Passed("fine"), Verdict(True, None, "fine"), id="constructor-explained"
         ),
         pytest.param(
             _Explained(value=1.0, explanation="attachment://0123"),
             Verdict(True, 1.0, "attachment://0123"),
-            [],
             id="constructor-recomputes-passed",
         ),
     ],
 )
 async def test_a_verdict_is_recorded_by_its_fields(
-    verdict: Verdict, recorded: Verdict, left_out: list[str]
+    verdict: Verdict, recorded: Verdict
 ) -> None:
     stop = await run_swarm(
         swarm(
@@ -1785,7 +1796,7 @@ async def test_a_verdict_is_recorded_by_its_fields(
         )
     )
     [m] = stop.record.members
-    assert (m.verdict, m.left_out) == (recorded, left_out)
+    assert m.verdict == recorded
     [event] = swarm_events(stop.transcript, "verdict")
     assert (event.data["passed"], event.data["value"]) == (
         recorded.passed,
