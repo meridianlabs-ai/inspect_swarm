@@ -91,7 +91,7 @@ def stop_on_proof(
             members=member(checked_solver, args={"attempts": attempts}, count=k),
             controller=until_proved()
             if stop == "first_proof"
-            else leaderless(stop_on_submission=False),
+            else leaderless(stop="end"),
             channels=[],
         ),
         scorer=match(),

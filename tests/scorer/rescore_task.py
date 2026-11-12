@@ -42,7 +42,7 @@ def rescore_task() -> Task:
                 member(says("41"), name="wrong"),
                 member(says(""), name="blank"),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
             result=rescore_result(),
         ),

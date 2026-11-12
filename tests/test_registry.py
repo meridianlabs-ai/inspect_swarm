@@ -12,6 +12,7 @@ from inspect_ai._util.registry import (
     registry_value,
 )
 
+from inspect_swarm import leaderless
 from inspect_swarm._channel._channel import Channel, swarm_channel
 from inspect_swarm._controller._control import SwarmControl
 from inspect_swarm._controller._controller import (
@@ -123,6 +124,21 @@ def test_logs_and_rebuilds_with_params(kind: Kind) -> None:
     rebuilt = registry_arg(logged)
     assert isinstance(rebuilt, kind.cls)
     assert registry_params(rebuilt) == {"size": 3, "label": "b"}
+
+
+@pytest.mark.parametrize(
+    "build,params",
+    [
+        pytest.param(lambda: leaderless(), {}, id="default"),
+        pytest.param(lambda: leaderless(stop="end"), {"stop": "end"}, id="end"),
+    ],
+)
+def test_leaderless_logs_and_rebuilds_its_stop(
+    build: Callable[[], Controller], params: dict[str, Any]
+) -> None:
+    logged = registry_value(build())
+    assert logged["params"] == params
+    assert registry_params(registry_arg(logged)) == params
 
 
 @pytest.fixture

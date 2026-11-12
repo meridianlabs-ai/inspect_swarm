@@ -3,7 +3,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import anyio
@@ -1282,8 +1282,10 @@ async def test_the_iterator_waits_for_an_ending_member_and_ends_at_quiescence() 
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stop_on_submission", [True, False])
-async def test_leaderless_with_persistent_members(stop_on_submission: bool) -> None:
+@pytest.mark.parametrize("stop", ["answer", "end"])
+async def test_leaderless_with_persistent_members(
+    stop: Literal["answer", "end"],
+) -> None:
     scripts = [
         _Recording([_submit("a's")]),
         Script([_call("work", seconds=0.3), _submit("b's")]),
@@ -1294,13 +1296,13 @@ async def test_leaderless_with_persistent_members(stop_on_submission: bool) -> N
                 member(_react(script), name=name, persistent=True)
                 for name, script in zip("ab", scripts, strict=True)
             ],
-            controller=leaderless(stop_on_submission=stop_on_submission),
+            controller=leaderless(stop=stop),
             channels=[],
         )
     )
     ran = _Ran(sample)
     [final] = _swarm_events(ran, "final")
-    if stop_on_submission:
+    if stop == "answer":
         assert final.data["stop_reason"] == "submitted"
         assert _statuses(ran) == {"a": "submitted", "b": "stopped"}
     else:

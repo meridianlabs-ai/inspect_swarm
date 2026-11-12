@@ -107,7 +107,7 @@ async def test_records_rejections_and_reads_are_counted_per_member_and_channel(
                 _member("w", {"command": "view", "path": "/shared_memory"}),
                 _member("q"),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[shared_memory(max_file_bytes=20, rate=(2, 3600.0))],
         ),
         tmp_path,
@@ -170,7 +170,7 @@ async def test_a_subagents_records_are_counted_for_its_member(tmp_path: Path) ->
                 _member("q"),
             ],
             channels=[shared_memory()],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
         ),
         tmp_path,
     )

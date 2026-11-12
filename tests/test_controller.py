@@ -1,7 +1,7 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import anyio
 import pytest
@@ -39,10 +39,14 @@ from inspect_swarm import (
     Budget,
     ControlEvent,
     Controller,
+    FinalSpec,
     MemberEnded,
     MemberHandle,
+    ResultSpec,
     StopReason,
     SwarmControl,
+    Verdict,
+    answer_result,
     leaderless,
     member,
     swarm,
@@ -74,6 +78,10 @@ def _controller(run: Any, name: str) -> Controller:
     return factory()
 
 
+async def _passes(answer: str, metadata: dict[str, Any]) -> Verdict:
+    return Verdict(passed=True)
+
+
 async def _start_all(control: SwarmControl) -> StopReason:
     for m in control.members:
         control.start(m)
@@ -84,21 +92,59 @@ async def _start_all(control: SwarmControl) -> StopReason:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "stop_on_submission,reason,slow_status",
-    [(True, "submitted", "stopped"), (False, "all_done", "submitted")],
+    "final,result,expected",
+    [
+        pytest.param(None, None, ("first",), id="no-contract"),
+        pytest.param(
+            None,
+            answer_result(answer_key=lambda text: text, verifier=_passes),
+            ("verify", "vote", "first"),
+            id="contract-default",
+        ),
+        pytest.param(["last", "first"], None, ("last", "first"), id="explicit"),
+    ],
+)
+async def test_a_controller_reads_the_chain_the_swarm_applies(
+    final: FinalSpec | None, result: ResultSpec | None, expected: tuple[str, ...]
+) -> None:
+    seen: list[Sequence[str]] = []
+
+    async def run(control: SwarmControl) -> StopReason:
+        seen.append(control.final_chain)
+        return await _start_all(control)
+
+    @swarm_controller(name="controller_test_reads_the_chain")
+    def reads_the_chain() -> Controller:
+        return Controller(run, final=final)
+
+    await run_swarm(
+        swarm(
+            generator(scripted_model(), calls=0, answer="x"),
+            controller=reads_the_chain(),
+            channels=[],
+            result=result,
+        )
+    )
+    assert seen == [expected]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "stop,reason,slow_status",
+    [("answer", "submitted", "stopped"), ("end", "all_done", "submitted")],
 )
 async def test_leaderless_stops_at_the_first_submission_unless_told_not_to(
-    stop_on_submission: bool, reason: str, slow_status: str
+    stop: Literal["answer", "end"], reason: str, slow_status: str
 ) -> None:
     refusal = ModelOutput.from_content("mockllm", "no", stop_reason="content_filter")
     first = generator(scripted_model(), calls=0, answer="first")
     # still generating when the first member submits, or answering after it
     slow = (
         generator(scripted_model(Script(delay=0.01)), calls=None)
-        if stop_on_submission
+        if stop == "answer"
         else after(["quick"], generator(scripted_model(), answer="second"))
     )
-    stop = await run_swarm(
+    outcome = await run_swarm(
         swarm(
             [
                 # end first, without a submission: neither stops the swarm
@@ -111,21 +157,21 @@ async def test_leaderless_stops_at_the_first_submission_unless_told_not_to(
                 member(after(["refuser", "limited"], first), name="quick"),
                 member(slow, name="slow"),
             ],
-            controller=leaderless(stop_on_submission=stop_on_submission),
+            controller=leaderless(stop=stop),
             channels=[],
             # ends the slow member if no submission stops it
             budget=Budget(time=30),
         )
     )
-    assert stop.reason == reason
-    assert statuses(stop) == {
+    assert outcome.reason == reason
+    assert statuses(outcome) == {
         "refuser": "unsubmitted",
         "limited": "member_limit:token",
         "quick": "submitted",
         "slow": slow_status,
     }
-    assert stop.record.final.member == "quick"
-    assert stop.state.output.completion == "first"
+    assert outcome.record.final.member == "quick"
+    assert outcome.state.output.completion == "first"
 
 
 @agent
@@ -596,7 +642,7 @@ async def test_a_member_limit_ends_only_that_member() -> None:
                 ),
                 member(generator(scripted_model(), calls=3), name="free"),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
         )
     )
@@ -1031,7 +1077,7 @@ def test_no_span_inside_the_swarm_logs_store_events(
             solver=swarm(
                 members,
                 # every member writes, and the sample limit is reached
-                controller=leaderless(stop_on_submission=False),
+                controller=leaderless(stop="end"),
                 channels=[],
             ),
             message_limit=message_limit,
