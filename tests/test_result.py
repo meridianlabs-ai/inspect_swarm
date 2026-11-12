@@ -809,7 +809,7 @@ def test_model_text_that_reads_as_a_reference_reads_back_as_written(
     # a reference the sample was read without is still refused
     without = read_eval_log(log.location, exclude_fields={"attachments"})
     assert without.samples is not None
-    with pytest.raises(ValueError, match="reads as an attachment reference"):
+    with pytest.raises(ValueError, match="holds an unresolved attachment reference"):
         swarm_result(without.samples[0])
 
 
