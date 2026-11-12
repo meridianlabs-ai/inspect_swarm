@@ -12,6 +12,7 @@ from inspect_ai import (
     Task,
     eval,  # pyright: ignore[reportUnknownVariableType]
     eval_async,  # pyright: ignore[reportUnknownVariableType]
+    score,  # pyright: ignore[reportUnknownVariableType]
 )
 from inspect_ai._util.hash import mm3_hash
 from inspect_ai._util.registry import (
@@ -60,6 +61,7 @@ from inspect_swarm import (
 from inspect_swarm._evidence import LEDGER_KEY, METRICS_KEY
 from inspect_swarm._ledger import SwarmLedger
 from inspect_swarm._record import (
+    _LITERAL,
     RECORD_TYPE,
     SwarmResultRecord,
     _transcript_result,
@@ -79,6 +81,7 @@ from .swarm_runtime import (
     statuses,
     swarm_events,
 )
+from .test_record import Read, probe
 
 
 @agent
@@ -254,8 +257,9 @@ def test_a_record_without_the_contracts_fields_reads_with_them_absent() -> None:
 
 
 @pytest.mark.anyio
-async def test_each_answers_model_text_is_kept_or_left_out_by_itself() -> None:
+async def test_each_answers_model_text_and_the_final_explanation_are_kept() -> None:
     reference = "attachment://0123"
+    marked = f"{_LITERAL}tc://0123"
     kept = AnswerResult(
         answer_key="42",
         verdict=Verdict(True, 1.0, "EXPLANATION-42"),
@@ -287,23 +291,25 @@ async def test_each_answers_model_text_is_kept_or_left_out_by_itself() -> None:
                 final=FinalRecord(
                     mode="first", member="a", reason=None, provisional=False, answer=0
                 ),
+                final_verdict=Verdict(False, None, marked),
             )
         )
         record = _transcript_result(store())
     assert record is not None
     [m] = record.members
-    # only the answer whose text reads as a reference loses it, and names it
-    assert m.left_out == []
+    # text that reads as a reference, or begins with the marker, is kept as written
+    assert (m.left_out, record.left_out) == ([], [])
     assert m.answer_results == [
         kept,
         AnswerResult(
-            verdict=Verdict(False, 0.0),
+            answer_key=reference,
+            verdict=Verdict(False, 0.0, reference),
             verdict_time=2.5,
-            left_out=["answer_key", "explanation"],
         ),
         # escaped, as a log escapes text that is not valid UTF-8
         AnswerResult(answer_key="bad \\ud800 key"),
     ]
+    assert record.final_verdict == Verdict(False, None, marked)
 
 
 # ---------------------------------------------------------------------------
@@ -712,15 +718,12 @@ async def test_the_record_keeps_each_members_output_however_it_ended() -> None:
 @pytest.mark.parametrize(
     "text,logged",
     [
-        # read back as a reference to an attachment, so left out; the explanation only
-        # quotes it
-        pytest.param("attachment://0123", None, id="reference"),
         # not valid UTF-8, which the log escapes, as it does in a sample's own output
         pytest.param("bad \ud800 text", "bad \\ud800 text", id="surrogate"),
     ],
 )
 def test_model_text_is_recorded_as_a_log_gives_it_back(
-    tmp_path: Path, text: str, logged: str | None
+    tmp_path: Path, text: str, logged: str
 ) -> None:
     task = Task(
         dataset=[Sample(input="task")],
@@ -740,45 +743,74 @@ def test_model_text_is_recorded_as_a_log_gives_it_back(
     plain, odd = record.members
     assert plain.left_out == []
     assert plain.output is not None and plain.answer_key == "42"
-    if logged is None:
-        assert odd.left_out == ["output", "answer_key"]
-        assert odd.output is None and odd.answer_key is None
-    else:
-        assert odd.left_out == []
-        assert odd.output is not None and odd.output.completion == logged
-        assert odd.answer_key == logged
+    assert odd.left_out == []
+    assert odd.output is not None and odd.output.completion == logged
+    assert odd.answer_key == logged
     assert odd.verdict is not None
     assert (odd.verdict.passed, odd.verdict.value) == (False, 0.0)
-    assert odd.verdict.explanation == f"EXPLANATION-{logged or text}"
+    assert odd.verdict.explanation == f"EXPLANATION-{logged}"
 
 
 async def _echo(answer: str, metadata: dict[str, Any]) -> Verdict:
     return Verdict(passed=False, value=0.0, explanation=answer)
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("prefix", ["attachment://", "tc://"])
-async def test_model_text_naming_an_attachment_of_the_sample_is_left_out(
-    prefix: str,
+@pytest.mark.parametrize("prefix", ["attachment://", "tc://", _LITERAL])
+# the long text is more than 100 characters, which the log keeps as an attachment
+@pytest.mark.parametrize("more", ["", " and more" * 20], ids=["short", "long"])
+def test_model_text_that_reads_as_a_reference_reads_back_as_written(
+    tmp_path: Path, prefix: str, more: str
 ) -> None:
-    # long enough that the log keeps it as an attachment, which the reference names
+    # long enough that the log keeps it as an attachment, which the short text names
     role = "a role " * 50
-    reference = f"{prefix}{mm3_hash(role)}"
-    stop = await run_swarm(
-        swarm(
+    text = f"{prefix}{mm3_hash(role)}{more}"
+    live: list[tuple[bool, Read]] = []
+    task = Task(
+        dataset=[Sample(input="task")],
+        solver=swarm(
             [
                 member(answers("42"), name="plain"),
-                member(answers(reference), name="odd", role=role),
+                member(answers(text), name="odd", role=role),
             ],
             channels=[],
             result=answer_result(answer_key=lambda text: text, verifier=_echo),
-        )
+        ),
+        scorer=probe(live),
     )
-    _, odd = stop.record.members
-    assert odd.role == role
-    assert odd.left_out == ["output", "answer_key", "explanation"]
-    assert (odd.output, odd.answer_key) == (None, None)
-    assert odd.verdict is not None and odd.verdict.explanation is None
+    [log] = eval(task, model="mockllm/model", log_dir=str(tmp_path), display="none")
+    assert log.status == "success", log.error
+    resolved = read_eval_log(log.location, resolve_attachments=True)
+    unresolved = read_eval_log(log.location)
+    assert resolved.samples is not None and unresolved.samples is not None
+    rescored: list[tuple[bool, Read]] = []
+    score(unresolved, probe(rescored), display="none")
+    reads = [
+        live[0][1],
+        swarm_result(resolved.samples[0]),
+        swarm_result(unresolved.samples[0]),
+        rescored[0][1],
+    ]
+    for read in reads:
+        assert isinstance(read, SwarmResultRecord), read
+        _, odd = read.members
+        assert (odd.role, odd.left_out) == (role, [])
+        assert odd.output is not None
+        assert odd.output.completion == odd.output.message.text == text
+        assert odd.answer_key == text
+        assert odd.verdict is not None and odd.verdict.explanation == text
+    # the log holds the text marked
+    [event] = [
+        e
+        for e in resolved.samples[0].events
+        if isinstance(e, SwarmEvent) and e.kind == RECORD_TYPE
+    ]
+    members = cast(list[dict[str, Any]], event.data["members"])
+    assert members[1]["answer_key"] == f"{_LITERAL}{text}"
+    # a reference the sample was read without is still refused
+    without = read_eval_log(log.location, exclude_fields={"attachments"})
+    assert without.samples is not None
+    with pytest.raises(ValueError, match="holds an unresolved attachment reference"):
+        swarm_result(without.samples[0])
 
 
 @agent
@@ -1722,12 +1754,12 @@ class _Explained(Verdict):
         pytest.param(
             Verdict(True, 1.0, "fine"), Verdict(True, 1.0, "fine"), [], id="plain"
         ),
-        # text that reads as an attachment reference: the explanation alone is left out
+        # text that reads as an attachment reference, kept as written
         pytest.param(
             Verdict(True, 1.0, "attachment://0123"),
-            Verdict(True, 1.0),
-            ["explanation"],
-            id="plain-explanation-left-out",
+            Verdict(True, 1.0, "attachment://0123"),
+            [],
+            id="plain-explanation-reference",
         ),
         # a subclass's own constructor never runs on the record's copy
         pytest.param(_Passed(), Verdict(True), [], id="constructor-without-fields"),
@@ -1736,8 +1768,8 @@ class _Explained(Verdict):
         ),
         pytest.param(
             _Explained(value=1.0, explanation="attachment://0123"),
-            Verdict(True, 1.0),
-            ["explanation"],
+            Verdict(True, 1.0, "attachment://0123"),
+            [],
             id="constructor-recomputes-passed",
         ),
     ],
