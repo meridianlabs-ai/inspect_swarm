@@ -60,18 +60,28 @@ def _result(kind: str) -> ResultSpec:
 
 @agent
 def from_input(name: str) -> Agent:
-    """Answer what the sample's input gives this member: `answers: {"a": "1", ...}`. An answer `bare:<text>` is an output with only a completion, and no message."""
+    """Answer what the sample's input gives this member: `answers: {"a": "1", ...}`. An answer `bare:<text>` is an output with only a completion, and no message; `deep:<text>` is an output whose metadata is nested too deep for the record, which leaves it out."""
 
     async def execute(state: AgentState) -> AgentState:
         text = next(m.text for m in state.messages if "answers: " in m.text)
         answer: str = json.loads(text.split("answers: ", 1)[1])[name]
         if answer.startswith("bare:"):
             state.output = ModelOutput(model="mockllm", completion=answer[5:])
+        elif answer.startswith("deep:"):
+            state.output = ModelOutput.from_content("mockllm", answer[5:])
+            state.output.metadata = {"value": _nested(130)}
         else:
             state.output = ModelOutput.from_content("mockllm", answer)
         return state
 
     return execute
+
+
+def _nested(depth: int) -> list[Any]:
+    value: list[Any] = []
+    for _ in range(depth):
+        value = [value]
+    return value
 
 
 def _input(answers: dict[str, str]) -> str:
@@ -192,7 +202,7 @@ GRADES: dict[str, tuple[dict[str, str], dict[str, tuple[str, float, str | None]]
         },
     ),
     "left_out": (
-        {"a": "0.5", "b": "1", "c": "", "d": "attachment://x"},
+        {"a": "0.5", "b": "1", "c": "", "d": "deep:x"},
         {
             "a": ("graded", 0.5, None),
             "b": ("graded", 1.0, None),
@@ -252,11 +262,9 @@ def test_each_member_is_graded_and_aggregated_over_the_members_with_a_value(
             outcome, value, reason = outcomes[m["name"]]
             assert (m["outcome"], m["reason"]) == (outcome, reason), (id, m)
             assert _same(m["value"], value), (id, m)
-            # an answer key that reads as an attachment is left out with its output
-            left_out = reason == "output_left_out"
-            assert m["answer_key"] == (
-                None if left_out else _key(answers[id][m["name"]])
-            ), (id, m)
+            # the answer key is kept when the output is left out
+            given = answers[id][m["name"]].removeprefix("deep:")
+            assert m["answer_key"] == _key(given), (id, m)
             assert m["verdict"] is None and m["state"] == "ended"
             if outcome == "graded":
                 answer = answers[id][m["name"]]
@@ -266,7 +274,7 @@ def test_each_member_is_graded_and_aggregated_over_the_members_with_a_value(
     for state in calls:
         assert state.completed
         completion = state.output.completion
-        assert completion.strip() and not completion.startswith("attachment://")
+        assert completion.strip() and state.output.metadata is None
         assert [m.role for m in state.messages] == ["user", "assistant"]
         assert state.messages[0].text.startswith("answers: ")
         assert state.messages[1].text == completion
@@ -484,7 +492,7 @@ def test_each_member_is_graded_with_its_artifact_in_place_after_the_team(
     sample = _artifact_eval(
         tmp_path,
         _artifact_sample(
-            {"a": "", "b": "done", "c": "attachment://x", "d": "done"},
+            {"a": "", "b": "done", "c": "deep:x", "d": "done"},
             {"a": "1", "b": "0", "c": "0.5", "d": "1"},
         ),
         _all_but_d(),

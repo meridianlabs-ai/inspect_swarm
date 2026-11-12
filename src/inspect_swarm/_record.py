@@ -143,7 +143,7 @@ class MemberResult(BaseModel):
     """Swarm time when the verdict was taken; `None` without one."""
 
     left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): text that begins with `attachment://` or `tc://`, which a log reads as a reference to an attachment, and an output nested too deep for a JSON log, with a cycle, that reuses the same lists or dicts so often that writing it would expand it past 10,000 copies, or that a log cannot write or read back, such as a dict key with more digits than Python prints. Empty when nothing was left out. An output that holds any other Python object, which only task code puts there, ends its member `errored` and fails the sample; the record is still written, with that output left out."""
+    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): an output nested too deep for a JSON log, with a cycle, that reuses the same lists or dicts so often that writing it would expand it past 10,000 copies, or that a log cannot write or read back, such as a dict key with more digits than Python prints. Empty when nothing was left out. An output that holds any other Python object, which only task code puts there, ends its member `errored` and fails the sample; the record is still written, with that output left out."""
 
     # Validating a `ModelOutput` fills an empty completion from its message, both when
     # the record is made and when it is read; the record keeps the completion the
@@ -252,10 +252,10 @@ def write_record(record: SwarmResultRecord) -> None:
     id = uuid4().hex
     members = [_logged_member(record, m) for m in record.members]
     record = _logged_final(record.model_copy(update={"members": members}))
-    data: dict[str, JsonValue] = {"id": id, **record.model_dump(mode="json")}
+    data: dict[str, JsonValue] = {"id": id, **_marked(record.model_dump(mode="json"))}
     logged = _as_logged(data)
-    # the members' model text is held as a log gives it back; the rest is the task
-    # author's, refused if a log would change it
+    # the model text is held as a log gives it back, marked where a log would read it
+    # as a reference; the rest is the task author's, refused if a log would change it
     if any(
         _unresolved(written) or _authored(written) != _authored(data)
         for written in (logged, _as_logged(data, log_images=False))
@@ -309,19 +309,14 @@ def _logged_final(record: SwarmResultRecord) -> SwarmResultRecord:
 
 
 # The final verdict as the record gives it back from a log, or None when the log
-# cannot write or read it, or its explanation reads as an attachment reference. It is
-# written alone in a copy of the record, at its place in the record.
+# cannot write or read it. It is written alone in a copy of the record, at its place in
+# the record.
 def _logged_verdict(record: SwarmResultRecord, verdict: Verdict) -> Verdict | None:
     try:
         alone = record.model_copy(update={"members": [], "final_verdict": verdict})
-        data = alone.model_dump(mode="json")
-        if _unresolved(data["final_verdict"]):
-            return None
-        logged = _as_logged(data)
-        if _unresolved(logged["final_verdict"]):
-            return None
+        logged = _as_logged(_marked(alone.model_dump(mode="json")))
         return SwarmResultRecord.model_validate(
-            logged, context=get_deserializing_context()
+            _unmarked(logged), context=get_deserializing_context()
         ).final_verdict
     except ValueError:
         return None
@@ -330,9 +325,9 @@ def _logged_verdict(record: SwarmResultRecord, verdict: Verdict) -> Verdict | No
 # A member with its output, answer key and verdict explanation, and each of its
 # answers' key and explanation, as a log gives them back. A value the record cannot
 # hold is left out of its member or answer and named in that one's left_out, so that one member's model output never costs the sample its record: one a
-# log cannot write or read, one with text that reads as an attachment reference, and
-# an output whose serialization is not bounded (`_bounded()`). An object the task's
-# code put in an output fails the sample first (`_refuse_author_objects()`).
+# log cannot write or read, and an output whose serialization is not bounded
+# (`_bounded()`). An object the task's code put in an output fails the sample first
+# (`_refuse_author_objects()`).
 def _logged_member(record: SwarmResultRecord, m: MemberResult) -> MemberResult:
     if m.output is not None:
         _refuse_author_objects(m.output, m.name)
@@ -407,29 +402,92 @@ def _model_values(
 
 
 # `m` as the record gives it back from a log, or None when the log cannot write or read
-# it, or it holds text that reads as an attachment reference, before the log resolves
-# it (as the text of another attachment, when one matches) or after. `m` is written in
-# a copy of the record, which serializes as a sample does, at its place in the record.
+# it. `m` is written in a copy of the record, which serializes as a sample does, at its
+# place in the record, with its model text marked as `write_record()` marks it.
 def _logged_value(record: SwarmResultRecord, m: MemberResult) -> MemberResult | None:
     try:
         if m.output is not None and not _bounded(m.output):
             return None
         data = record.model_copy(update={"members": [m]}).model_dump(mode="json")
-        if _unresolved(_model_text(data)):
-            return None
-        logged = _as_logged(data)
-        if _unresolved(_model_text(logged)):
-            return None
+        logged = _unmarked(_as_logged(_marked(data)))
         [member] = cast(list[dict[str, JsonValue]], logged["members"])
         return MemberResult.model_validate(member, context=get_deserializing_context())
     except ValueError:
         return None
 
 
-# The model text of the one member in a record's data.
-def _model_text(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
-    [member] = cast(list[dict[str, JsonValue]], data["members"])
-    return {k: v for k, v in member.items() if k in _MODEL_TEXT}
+# Marks literal model text. A log reads a string that begins with `attachment://` or
+# `tc://` as a reference to an attachment, so the record keeps such a string of a
+# member's model text with `_LITERAL` before it, and so a string that begins with
+# `_LITERAL` itself, which keeps the marking reversible. The reader removes the marker
+# after it has refused any reference left unresolved.
+_LITERAL = "inspect_swarm:literal:"
+
+
+def _mark(text: str) -> str:
+    return (
+        _LITERAL + text if text.startswith((*_REFERENCE_PREFIXES, _LITERAL)) else text
+    )
+
+
+def _unmark(text: str) -> str:
+    return text.removeprefix(_LITERAL)
+
+
+def _marked(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return _model_text_converted(data, _mark)
+
+
+def _unmarked(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return _model_text_converted(data, _unmark)
+
+
+# The record's data with `convert` applied to each string of its model text: each
+# member's output (its strings, not its dict keys, which a log never reads as
+# references), answer key and verdict explanation, each of its answers' key and
+# explanation, and the final verdict's explanation. Data of another shape is left as it
+# is, for the record's validation to refuse.
+def _model_text_converted(
+    data: dict[str, JsonValue], convert: Callable[[str], str]
+) -> dict[str, JsonValue]:
+    def strings(value: JsonValue) -> JsonValue:
+        if isinstance(value, str):
+            return convert(value)
+        if isinstance(value, list):
+            return [strings(v) for v in value]
+        if isinstance(value, dict):
+            return {k: strings(v) for k, v in value.items()}
+        return value
+
+    def explained(verdict: JsonValue) -> JsonValue:
+        if isinstance(verdict, dict) and "explanation" in verdict:
+            return {**verdict, "explanation": strings(verdict["explanation"])}
+        return verdict
+
+    # a member or an answer
+    def holder(value: JsonValue) -> JsonValue:
+        if not isinstance(value, dict):
+            return value
+        converted = dict(value)
+        for name, convert_value in (
+            ("output", strings),
+            ("answer_key", strings),
+            ("verdict", explained),
+        ):
+            if name in converted:
+                converted[name] = convert_value(converted[name])
+        answers = converted.get("answer_results")
+        if isinstance(answers, list):
+            converted["answer_results"] = [holder(a) for a in answers]
+        return converted
+
+    converted = dict(data)
+    members = data.get("members")
+    if isinstance(members, list):
+        converted["members"] = [holder(m) for m in members]
+    if "final_verdict" in data:
+        converted["final_verdict"] = explained(data["final_verdict"])
+    return converted
 
 
 # The record's data as a log gives it back: in a sample's event, written as Inspect
@@ -723,7 +781,7 @@ def swarm_result(source: TaskState | EvalSample) -> SwarmResultRecord | None:
 
     Raises:
         RuntimeError: A swarm in the sample is still running, so the record of the swarm being scored does not exist yet; a scorer that the solve can call returns `None` while `state.completed` is `False`.
-        ValueError: The store names a record the transcript or sample does not hold (as for a sample read without its events), the record holds a string that reads as an attachment reference (one the sample was read without, or text beginning with `attachment://` or `tc://`), it is one this inspect_swarm cannot read, such as a version other than 1, the sample was written by an inspect_swarm that kept the record in the store, or the sample holds a swarm's events but its store names no record (as for a sample recovered from a crashed eval, whose store was not kept).
+        ValueError: The store names a record the transcript or sample does not hold (as for a sample read without its events), the record holds an unresolved attachment reference (read the sample or log with its attachments), it is one this inspect_swarm cannot read, such as a version other than 1, the sample was written by an inspect_swarm that kept the record in the store, or the sample holds a swarm's events but its store names no record (as for a sample recovered from a crashed eval, whose store was not kept).
     """
     if isinstance(source, EvalSample):
         return _sample_result(source)
@@ -801,8 +859,10 @@ def _read(
     data = {k: v for k, v in resolved.items() if k not in ("type", "id")}
     if _unresolved(data):
         raise ValueError(
-            f"{where}: the swarm's result record holds a string that reads as an attachment reference (attachment:// or tc://). Either the sample was read without its attachments, so read it, or the log being re-scored, with them (read_eval_log() without exclude_fields={{'attachments'}}), or the record's own text begins with such a prefix, which Inspect's attachment resolution cannot tell from a reference."
+            f"{where}: the swarm's result record holds an unresolved attachment reference (attachment:// or tc://). Read the sample, or the log being re-scored, with its attachments (read_eval_log() without exclude_fields={{'attachments'}})."
         )
+    # only after the check, so that a bare prefix is always a reference left unresolved
+    data = _unmarked(data)
     try:
         # as a log is read, so that a message keeps a missing id rather than gaining one
         return SwarmResultRecord.model_validate(
