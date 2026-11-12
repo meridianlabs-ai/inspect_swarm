@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.4.1](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.4.0...0.4.1) (2026-11-12)
+
+
+### Features
+
+* attempt_rows and select_at_k, comparing a swarm's answer with independent attempts ([#188](https://github.com/meridianlabs-ai/inspect_swarm/issues/188)) ([6701784](https://github.com/meridianlabs-ai/inspect_swarm/commit/6701784f19b47d91d3105db2198ddbd015347c3b))
+* key and verify each answer of a persistent member ([#194](https://github.com/meridianlabs-ai/inspect_swarm/issues/194)) ([338b861](https://github.com/meridianlabs-ai/inspect_swarm/commit/338b861d46e62bbf11567dfb0fb61647907754c5))
+* member_scores and baseline(), per-member scores for answer tasks ([#180](https://github.com/meridianlabs-ai/inspect_swarm/issues/180)) ([1b306c1](https://github.com/meridianlabs-ai/inspect_swarm/commit/1b306c15a285a3608685a1bfcedbf7aa0c8d012a))
+* member_scores grades each member's artifact, with member_artifacts ([#183](https://github.com/meridianlabs-ai/inspect_swarm/issues/183)) ([9f6f21a](https://github.com/meridianlabs-ai/inspect_swarm/commit/9f6f21a2b724548dbdb9e0a9553fdae587db5e16))
+* message and stop swarm members from inspect ctl ([#163](https://github.com/meridianlabs-ai/inspect_swarm/issues/163)) ([ca84b6f](https://github.com/meridianlabs-ai/inspect_swarm/commit/ca84b6fefa452478ff4802ed80601549ae8911c6))
+* pause and resume swarm members from inspect ctl ([#186](https://github.com/meridianlabs-ai/inspect_swarm/issues/186)) ([72c7c94](https://github.com/meridianlabs-ai/inspect_swarm/commit/72c7c94155dce7fd848a941f1936ed5975760101))
+* show a swarm as one agent in the log viewer ([#174](https://github.com/meridianlabs-ai/inspect_swarm/issues/174)) ([a5b4830](https://github.com/meridianlabs-ai/inspect_swarm/commit/a5b48308b777943ffe39212b86b59a48dde4d34d))
+* stop members' leftover processes and count file owners under users isolation ([#178](https://github.com/meridianlabs-ai/inspect_swarm/issues/178)) ([9024c0f](https://github.com/meridianlabs-ai/inspect_swarm/commit/9024c0f257a5703735612a3e7344f3f95966d807))
+* the final-answer chain, with verify and vote over the submissions ([#181](https://github.com/meridianlabs-ai/inspect_swarm/issues/181)) ([27b6b55](https://github.com/meridianlabs-ai/inspect_swarm/commit/27b6b55ac77c7b3e40199cfec8c8c9b4ef37880a))
+* the synthesize final-answer mode ([#189](https://github.com/meridianlabs-ai/inspect_swarm/issues/189)) ([c533df5](https://github.com/meridianlabs-ai/inspect_swarm/commit/c533df50b66361598f65bfbe7a7df183aacc74a6))
+* the topics channel ([#170](https://github.com/meridianlabs-ai/inspect_swarm/issues/170)) ([6cd39dc](https://github.com/meridianlabs-ai/inspect_swarm/commit/6cd39dca772c2ea247acd224e631ae0356b5eec4))
+
+
+### Bug Fixes
+
+* fail the sample on a member output the result record cannot hold ([#207](https://github.com/meridianlabs-ai/inspect_swarm/issues/207)) ([a8ad94b](https://github.com/meridianlabs-ai/inspect_swarm/commit/a8ad94bc5c6695ad9578a131e81a6dafdef49eb5))
+* keep member text that begins with attachment:// or tc:// on the result record ([#204](https://github.com/meridianlabs-ai/inspect_swarm/issues/204)) ([452c52a](https://github.com/meridianlabs-ai/inspect_swarm/commit/452c52a5c237dc3e286a9ecfba15a149a85602da))
+* stop bridged members as native ones, now that inspect_ai raises their limits ([#146](https://github.com/meridianlabs-ai/inspect_swarm/issues/146)) ([49a8c59](https://github.com/meridianlabs-ai/inspect_swarm/commit/49a8c5901d3cf1f51a3779e10b47003a16798062))
+
 ## [0.4.0](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.3.0...0.4.0) (2026-11-09)
 
 
