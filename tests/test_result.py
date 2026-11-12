@@ -871,6 +871,13 @@ def _parsed_tool_call(arguments: str) -> ModelOutput:
 _HUGE_KEY = "? 0x" + "f" * 4000 + "\n: value"
 
 
+# YAML whose aliases double at each of 14 levels, which Inspect's parser keeps as
+# shared lists: 2 ** 14 lists when written.
+_ALIASED = "a0: &a0 []\n" + "".join(
+    f"a{i}: &a{i} [*a{i - 1}, *a{i - 1}]\n" for i in range(1, 15)
+)
+
+
 # Subclasses of the data classes, as task code might define, whose methods must never
 # run: each raises.
 # Classes as task code might define, each with a `__class__` property and methods that
@@ -1000,14 +1007,6 @@ def _nested(depth: int) -> list[Any]:
     return value
 
 
-# Shared at every level, so that serializing it would expand it to 2 ** depth lists.
-def _aliased(depth: int) -> list[Any]:
-    value: list[Any] = []
-    for _ in range(depth):
-        value = [value, value]
-    return value
-
-
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "odd,problem",
@@ -1021,12 +1020,6 @@ def _aliased(depth: int) -> list[Any]:
             lambda: _with_metadata({"value": _nested(194)}),
             r"it is nested more than 120 levels deep at output\.metadata\['value'\]\[0\]",
             id="too-deep",
-        ),
-        # within the depth limit, refused before it is serialized
-        pytest.param(
-            lambda: _with_metadata({"value": _aliased(60)}),
-            "it reuses the same lists or dicts so often that writing it would add more than 10,000 copies of them",
-            id="aliased",
         ),
         # a key the log cannot write
         pytest.param(
@@ -1053,6 +1046,54 @@ async def test_an_output_the_record_cannot_hold_fails_the_sample(
 # A persistent member that ended submitted has its last answer as its output, which
 # the error names. A model call logs its output, and Inspect's own log cannot hold one
 # with a cycle, so the record is written directly here.
+@agent
+def holds_until_limit(
+    build: Callable[[], ModelOutput], model: Model | None = None
+) -> Agent:
+    """Hold the output `build` gives, then wait, or call `model` until a limit ends it."""
+
+    async def execute(state: AgentState) -> AgentState:
+        state.output = build()
+        while model is not None:
+            await model.generate(state.messages)
+        await anyio.sleep_forever()
+        return state
+
+    return execute
+
+
+# A sample limit ending the run, by cancelling it (time) or by an error (tokens), would
+# be scored as a limit reached; the record's failure is raised instead.
+@pytest.mark.anyio
+@pytest.mark.parametrize("limit", ["time", "token"])
+async def test_an_output_the_record_cannot_hold_fails_the_sample_a_limit_ends(
+    limit: Literal["time", "token"],
+) -> None:
+    odd = holds_until_limit(
+        lambda: _with_metadata(_cycle()),
+        scripted_model() if limit == "token" else None,
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"The swarm's result record cannot hold the output of member 'odd': it holds a cycle at output\.metadata\['self'\]\.",
+    ) as raised:
+        async with sample(
+            time=0.1 if limit == "time" else None,
+            tokens=TOKENS_PER_CALL if limit == "token" else None,
+        ):
+            await run_agent(
+                swarm(
+                    member(odd, name="odd"), channels=[], budget=Budget(derive=False)
+                ),
+                "task",
+            )
+    assert f"When the swarm ended, the sample's {limit} limit was ending it." in (
+        raised.value.__notes__
+    )
+    assert RESULT_ID_KEY not in store()
+    assert None not in (store().get(LEDGER_KEY), store().get(METRICS_KEY))
+
+
 @pytest.mark.anyio
 async def test_a_persistent_answer_the_record_cannot_hold_is_named() -> None:
     persistent = MemberResult(
@@ -1436,7 +1477,7 @@ async def test_a_subclass_of_an_inspect_model_fails_the_sample_before_it_is_read
         return _TaskOutput(
             model=base.model,
             choices=base.choices,
-            metadata={"value": _aliased(60), "rows": rows},
+            metadata={"value": _cycle(), "rows": rows},
         )
 
     async with sample():
@@ -1518,6 +1559,13 @@ def _odd_metadata(value: Any) -> Callable[[], ModelOutput]:
         ),
         pytest.param(
             _odd_metadata((1, 2)), _odd_metadata([1, 2]), id="tuple-in-metadata"
+        ),
+        # YAML aliases share lists, which the log writes once for each place, as
+        # Inspect's own sample writing does (decision: Ransom, 2026-11-12)
+        pytest.param(
+            lambda: _parsed_tool_call(_ALIASED),
+            lambda: _parsed_tool_call(_ALIASED),
+            id="yaml-aliases",
         ),
     ],
 )

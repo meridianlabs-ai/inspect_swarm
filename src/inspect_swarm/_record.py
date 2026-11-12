@@ -503,15 +503,15 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
 
 # Why serializing an output is not bounded, with where in the output, or None when it
 # is, measured without serializing it: nested no deeper than `_MAX_OUTPUT_DEPTH`, with
-# no cycle, and with containers reached by more than one path (as YAML aliases in tool
-# arguments give) adding at most `_MAX_SHARED_EXPANSION` containers, since serializing
-# writes a container once for each path. Each container is measured once, by identity,
-# so a shared one is never expanded; Inspect's `exceeds_max_depth()` measures depth the
-# same way but does not bound the expansion. It runs after `_refuse_author_objects()`,
-# so it meets only Inspect's models where Inspect puts them, and data.
+# no cycle. Each container is measured once, by identity, as Inspect's
+# `exceeds_max_depth()` measures depth. Like Inspect's sample serialization, it does not
+# bound how often containers reached by more than one path (as YAML aliases in tool
+# arguments give) are written (decision: Ransom, 2026-11-12). It runs after
+# `_refuse_author_objects()`, so it meets only Inspect's models where Inspect puts them,
+# and data.
 def _unbounded(output: ModelOutput) -> str | None:
-    # by container id: its height in levels and the containers serializing it writes
-    measured: dict[int, tuple[int, int]] = {}
+    # by container id: its height in levels
+    measured: dict[int, int] = {}
     in_progress: set[int] = set()
     # the steps to the value being measured: an attribute or index, or else a dict key
     trail: list[tuple[str | None, object]] = []
@@ -520,40 +520,35 @@ def _unbounded(output: ModelOutput) -> str | None:
         steps = [_key_step(key) if step is None else step for step, key in trail]
         return f"output{_path(steps)}"
 
-    # the problem when `value`, at `depth`, is not bounded
-    def measure(value: object, depth: int) -> tuple[int, int] | str:
+    # the problem when `value`, at `depth`, is not bounded, else its height
+    def measure(value: object, depth: int) -> int | str:
         children = _children(value)
         if children is None:
-            return (0, 0)
+            return 0
         if id(value) in in_progress:
             return f"holds a cycle at {at()}"
         if depth > _MAX_OUTPUT_DEPTH:
             return f"is nested more than {_MAX_OUTPUT_DEPTH} levels deep at {at()}"
-        known = measured.get(id(value))
-        if known is None:
+        height = measured.get(id(value))
+        if height is None:
             in_progress.add(id(value))
-            height, written = 0, 1
+            below = 0
             for step, key, child in children:
                 trail.append((step, key))
-                child_measure = measure(child, depth + 1)
+                child_height = measure(child, depth + 1)
                 trail.pop()
-                if isinstance(child_measure, str):
-                    return child_measure
-                height = max(height, child_measure[0])
-                written += child_measure[1]
+                if isinstance(child_height, str):
+                    return child_height
+                below = max(below, child_height)
             in_progress.remove(id(value))
-            known = measured[id(value)] = (height + 1, written)
-        if depth + known[0] - 1 > _MAX_OUTPUT_DEPTH:
+            height = measured[id(value)] = below + 1
+        if depth + height - 1 > _MAX_OUTPUT_DEPTH:
             # a container measured at another place, nested too deep at this one
             return f"is nested more than {_MAX_OUTPUT_DEPTH} levels deep below {at()}"
-        return known
+        return height
 
-    root = measure(output, 1)
-    if isinstance(root, str):
-        return root
-    if root[1] - len(measured) > _MAX_SHARED_EXPANSION:
-        return f"reuses the same lists or dicts so often that writing it would add more than {_MAX_SHARED_EXPANSION:,} copies of them"
-    return None
+    problem = measure(output, 1)
+    return problem if isinstance(problem, str) else None
 
 
 # A path's steps, a deeply nested path shortened in the middle.
@@ -683,10 +678,6 @@ def _children(value: object) -> Iterable[tuple[str | None, object, object]] | No
 # the output's containers, well below the depth at which the record inside its sample
 # no longer reads from a JSON log.
 _MAX_OUTPUT_DEPTH = MAX_TOOL_CALL_ARGUMENTS_DEPTH + 20
-
-# Far more containers than an output repeats, and far fewer than an aliased graph
-# expands to.
-_MAX_SHARED_EXPANSION = 10_000
 
 
 # Removes the store's record id, so that a swarm that leaves no record never leaves an
