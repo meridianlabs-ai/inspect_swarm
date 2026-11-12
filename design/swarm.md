@@ -522,7 +522,7 @@ The swarm writes its evidence as two inspect_ai event types (decision: Ransom, 2
 **Accounting.** Two separate things:
 
 - **A stopping rule.** The swarm opens one cap node (cost or tokens) around its members, and each member runs with its own limits below it. The spike above shows these nodes see every member's usage with no inspect_ai change. [swarm-limits.md](swarm-limits.md) designs the nodes, the budget parameter and how the swarm stops.
-- **A ledger.** Realized usage and cost, taken after the drain so it includes descendants, calls that completed after the cap was hit, and the final-answer step. The ledger, not the cap, is what analysis compares across arms. It is not taken from the cap nodes, because token and cost nodes can disagree (see [Limits and cost](#limits-and-cost)); its per-member figures come from token meter nodes, whose `ModelUsage` carries each call's cost before any check can raise ([swarm-limits.md](swarm-limits.md#what-the-nodes-record)).
+- **A ledger.** Realized usage and cost, taken after the drain so it includes descendants, calls that completed after the cap was hit, and the final-answer step. The ledger, not the cap, is what analysis compares across arms. It is not taken from the cap nodes, because token and cost nodes can disagree (see [Limits and cost](#limits-and-cost)); its per-member tokens come from token-tree meter nodes, and its cost comes from cost-tree meter nodes, including approval and review calls made while token metering is suspended ([swarm-limits.md](swarm-limits.md#what-the-nodes-record)).
 
 The ledger states its coverage and how each kind of call is charged, because no single Inspect record covers everything.
 
