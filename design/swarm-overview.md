@@ -30,7 +30,7 @@ swarm(
 )
 ```
 
-After M2, a strict, verifier-only answer is a controller parameter and needs the task's verifier: `controller=leaderless(stop_on_submission=False, final="verify")` with `result=answer_result(verifier=...)`.
+After M2, a strict, verifier-only answer is a controller parameter and needs the task's verifier: `controller=leaderless(stop="end", final="verify")` with `result=answer_result(verifier=...)`.
 
 The observer has no argument: what it records is a fixed, versioned contract that scorers and analysis read, the same in a swarm and in its baselines. Monitors are configured through inspect_sentinel, scores through the task's own scorers, and labels through Scout ([API](swarm-api.md#observer)). The API's own arguments are logged faithfully, so names, task parameters and Python sweeps all work; members configured with hooks and the task's result contract are rebuilt through registered builders or the task ([API](swarm-api.md#logging-and-replay)). A swarm is the task's solver, so its arguments are part of Inspect's task identity, and two *arms* (two tasks in an eval set, each a `Task` with its arguments, solver, model and limits) that differ in any of them are distinct ([API](swarm-api.md#task-identity-what-makes-two-arms-distinct)).
 
