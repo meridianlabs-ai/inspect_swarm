@@ -19,7 +19,7 @@ from inspect_ai.util._sandbox.context import (
 
 from ._budget import (
     Budget,
-    CostPair,
+    SwarmCostNode,
     SwarmTokenNode,
     check_cost_data,
     derive_caps,
@@ -150,7 +150,7 @@ def swarm(
             )
         cap_nodes: list[Limit] = []
         if caps.cost is not None:
-            cap_nodes.extend(CostPair(caps.cost, owner=None, role="cap").nodes)
+            cap_nodes.append(SwarmCostNode(caps.cost, owner=None, role="cap"))
         if caps.tokens is not None:
             cap_nodes.append(
                 SwarmTokenNode(caps.tokens, caps.token_type, owner=None, role="cap")

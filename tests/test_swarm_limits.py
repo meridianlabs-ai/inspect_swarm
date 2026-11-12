@@ -64,7 +64,7 @@ from inspect_swarm import (
     swarm_controller,
     swarm_result,
 )
-from inspect_swarm._budget import CostPair, SwarmNode
+from inspect_swarm._budget import SwarmCostNode, SwarmNode
 from inspect_swarm._controller._control import SwarmRun
 from inspect_swarm._evidence import LEDGER_KEY
 from inspect_swarm._ledger import SwarmLedger
@@ -372,23 +372,23 @@ async def test_the_runtime_lever_and_member_levers_are_siblings(staged: bool) ->
         return "all_done"
 
     record = member(generator, args={"model": model}, count=2)
-    cap = CostPair(100.0, owner=None, role="cap")
+    cap = SwarmCostNode(100.0, owner=None, role="cap")
     async with sample():
         swarm_run = SwarmRun(
             [(record, "a"), (record, "b")],
             state=AgentState(messages=[]),
             input=[ChatMessageUser(content="task")],
             preambles={"a": "", "b": ""},
-            caps=cap.nodes,
+            caps=[cap],
             time=None,
             grace=1.0,
             budget=Budget(),
         )
         await swarm_run.run(run)
     # each member's call is charged to its own lever and the cap, never the runtime's
-    assert [m.lever.cost for m in swarm_run._members] == [10.0, 10.0]
-    assert swarm_run._runtime_lever.cost == 10.0
-    assert cap.cost == 30.0
+    assert [m.lever.cost_node.usage for m in swarm_run._members] == [10.0, 10.0]
+    assert swarm_run._runtime_lever.cost_node.usage == 10.0
+    assert cap.usage == 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -1730,7 +1730,7 @@ CALL_COST = 2.0
 @pytest.mark.parametrize(
     "budget,limits,sample_cost,soft_stop,raised,status,ended_by",
     [
-        # under derive=False the sample's cost limit raises ahead of each swarm node
+        # the sample's cost limit raises ahead of each swarm node, root first
         pytest.param(
             Budget(derive=False),
             [cost_limit(1.0)],
@@ -1773,8 +1773,7 @@ CALL_COST = 2.0
             "sample_limit:cost",
             id="lever",
         ),
-        # controls: a call below the sample's limit, and derived caps (a $1.425 cap
-        # raises and the sample's limit is not checked, for either kind of member)
+        # a control: a call below the sample's limit
         pytest.param(
             Budget(derive=False),
             [cost_limit(1.0)],
@@ -1785,19 +1784,20 @@ CALL_COST = 2.0
             None,
             id="below-sample",
         ),
+        # derived caps too: a $1.425 cap does not raise ahead of the sample's limit
         pytest.param(
             Budget(),
             [cost_limit(1.0)],
             1.5,
             False,
-            False,
-            "swarm_cap",
-            None,
+            True,
+            "errored",
+            "sample_limit:cost",
             id="derived",
         ),
     ],
 )
-async def test_without_derived_caps_a_sample_cost_limit_raises_ahead_of_a_swarm_node(
+async def test_a_sample_cost_limit_raises_ahead_of_a_swarm_node(
     bridged: bool,
     budget: Budget,
     limits: list[Limit],
@@ -1850,6 +1850,42 @@ async def test_without_derived_caps_a_sample_cost_limit_raises_ahead_of_a_swarm_
     assert ledger.ended_by == ended_by
     line = next(m for m in ledger.members if m.name == "agent")
     assert (line.bridged, line.status) == (bridged, status)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("caller", ["member", "controller"])
+async def test_a_suspended_call_raises_the_sample_cost_limit_ahead_of_the_swarm_cap(
+    caller: str,
+) -> None:
+    # one $2 approval call, made with token metering suspended, crosses the derived
+    # $1.425 cap and the $1.50 sample cost limit: the sample's limit raises
+    model = scripted_model(cost=CALL_COST)
+
+    async def run(control: SwarmControl) -> StopReason:
+        if caller == "controller":
+            with suspend_token_limit():
+                await model.generate("approve?")
+        else:
+            control.start("approver")
+            async for _ in control.events():
+                pass
+        return "all_done"
+
+    errors: list[LimitExceededError] = []
+    async with sample(cost=1.5):
+        try:
+            await swarm(
+                approver(model),
+                controller=_controller(run, f"limits_test_suspended_{caller}"),
+                channels=[],
+            )(AgentState(messages=[ChatMessageUser(content="task")]))
+        except LimitExceededError as error:
+            errors.append(error)
+        ledger = _ledger()
+    assert [e.type for e in errors] == ["cost"]
+    assert ledger.ended_by == "sample_limit:cost"
+    assert ledger.stop_reason != "swarm_cap"
+    assert ledger.swarm.suspended_cost == pytest.approx(CALL_COST)
 
 
 @pytest.mark.anyio
