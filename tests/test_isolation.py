@@ -1128,7 +1128,7 @@ async def test_foreign_execs_count_a_members_commands_as_another_user() -> None:
     stub = IsolationStub()
     team = swarm(
         member(custom_tool, name="w", count=2),
-        controller=leaderless(stop_on_submission=False),
+        controller=leaderless(stop="end"),
         channels=[],
         isolation="users",
     )
@@ -1394,9 +1394,9 @@ async def test_no_callback_can_be_registered_while_a_member_is_reaped() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stop_on_submission", [True, False])
+@pytest.mark.parametrize("stop", ["answer", "end"])
 async def test_a_member_stopped_while_it_is_reaped_is_not_counted_cancelled(
-    stop_on_submission: bool,
+    stop: Literal["answer", "end"],
 ) -> None:
     # both submit; the first's end stops the swarm while the second is still reaped,
     # which is cleanup, not cancelled work
@@ -1404,7 +1404,7 @@ async def test_a_member_stopped_while_it_is_reaped_is_not_counted_cancelled(
     stub.reap_delay = {"61002": 0.3}
     team = swarm(
         member(ends, args={"how": "returns"}, name="w", count=2),
-        controller=leaderless(stop_on_submission=stop_on_submission),
+        controller=leaderless(stop=stop),
         channels=[],
         budget=Budget(grace=0),
         isolation="users",

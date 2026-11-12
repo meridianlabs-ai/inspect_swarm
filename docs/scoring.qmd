@@ -14,7 +14,7 @@ A swarm is scored by the task's own scorers. The swarm is the task's solver, so 
 The controller's `final` chain chooses the swarm's answer from the members' submissions. It is one mode, or a list of modes tried in order until one gives an answer:
 
 - `first`: the member that submitted earliest, by the swarm's clock, with ties broken by roster order.
-- `last`: the latest submission, again with ties broken by roster order. `leaderless(stop_on_submission=False, final="last")` gives it, for a team whose members build on each other's work ([Controllers](controllers.qmd#leaderless)).
+- `last`: the latest submission, again with ties broken by roster order. `leaderless(final="last")` gives it, for a team whose members build on each other's work ([Controllers](controllers.qmd#leaderless)).
 - `verify`: the submission that passed the verifier with the highest `value`, then the earliest. A verdict without a value, or with a NaN value, ranks below any number. It needs a verifier in the [result contract](#the-result-contract), and gives nothing when no submission passed.
 - `vote`: the most common answer key, one vote per member; a submission whose key is `None` does not vote. The answer is the earliest submission with that key. A tie goes to the key submitted first. It needs an `answer_key` in the result contract, and gives nothing when no submission has a key.
 - `synthesize`: one model call, when the swarm ends, that combines the submissions into one answer. `synthesize(model=..., prompt=...)` sets the model and the instruction; the plain string `"synthesize"` uses the model role `synthesizer` if the eval defines it, else the eval's model. The model gets the sample's input, then a message that quotes each submission's completion in a `<member_submission>` block naming its member, and asks for one final answer in the format the task asks for. Members' tool calls and messages are not included. The blocks are labels, not a boundary: a member can write text that looks like one. It needs a result contract of kind `answer`, and is never part of the default chain. It gives nothing when there are no submissions, or when the call fails with an error or a refusal, or returns an empty completion or a `content_filter` stop reason; the chain then goes on to its next mode. A limit, an operator's termination or a cancellation during the call ends the swarm with the answer so far. The answer so far, before the swarm ends, is the chain's choice without `synthesize`.
@@ -100,7 +100,7 @@ solver = swarm(
 - A submission can be left without a verdict when the swarm stops: once the stop has begun the verifier's model calls are refused, and a verifier still running at the hard stop is cancelled. A verdict it returns after it is cancelled is ignored, and the verifier is not called for submissions still waiting. The swarm's final step then verifies each submission left without a verdict, before it chooses the answer, except a persistent member's answers, which stay unverified. Their `MemberEnded` events have no verdict. The final step's model calls count against the sample's limits, not the swarm's cap.
 - For an `artifact` task, the verifier checks the environment. Members still working after a passing check can change it, so the final step calls the verifier once more, after the members have stopped, with the final answer's completion, or `""` without one. The record keeps that verdict as `final_verdict`.
 - An exception from `answer_key` or the verifier fails the sample (on a persistent member's answer, the key's error is the cause of an error that names the member and the answer), and so does a result of the wrong type: a key that is not a string or `None`, or a `Verdict` whose `passed` is not a bool, `value` not a float, an int a float holds exactly, or `None`, or `explanation` not a string or `None`. The record keeps the member's end and output, and any key or verdict recorded before the error. Like other task code, `answer_key` and the verifier are trusted to honour cancellation, return their real types and build a `Verdict` the ordinary way: these checks catch mistakes, not code written to get past them.
-- With the default `final` chain, the contract's verifier and answer key choose the answer ([The answer](#the-answer)).
+- With the default `final` chain, the contract's verifier and answer key choose the answer ([The answer](#the-answer)), and so when the default `leaderless` stops ([Controllers](controllers.qmd#leaderless)). Here the chain is `["verify", "vote", "first"]`, so the swarm stops at the first submission that passes the check. If none passes, every member runs to its end, and the swarm votes over all their answers.
 
 The contract holds the task's functions, so the log records it only as `"ResultSpec"`. Retrying the task rebuilds it. A swarm replayed from its logged arguments (`--solver inspect_swarm/swarm`) cannot rebuild it and raises `TypeError`; to make such a swarm replayable, return it from a registered `@agent` builder.
 
@@ -237,7 +237,7 @@ def swe_swarm() -> Task:
         dataset=INSTANCES,
         solver=swarm(
             members=member(react, args={"tools": [bash()]}, count=4),
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             result=swe_result(),
         ),
         scorer=[swe_tests(), swe_members()],
@@ -249,7 +249,7 @@ def swe_swarm() -> Task:
 
 ## Scoring what members leave
 
-A scorer that reads the sandbox, rather than the answer, scores what every member left there. With the default `leaderless`, the swarm stops the other members at the first submission, so what they were doing is left half done. When the scorer reads a shared artifact, let every member run to its end with `leaderless(stop_on_submission=False)` ([Controllers](controllers.qmd#leaderless)). The swarm returns after every member and its background work have ended, so the scorer sees the sandbox as the members left it.
+A scorer that reads the sandbox, rather than the answer, scores what every member left there. With the default `leaderless`, the swarm can stop the other members early: at the first submission without a verifier or answer key, or at the first passing one with a verifier. What they were doing is then left half done. When the scorer reads a shared artifact, let every member run to its end with `leaderless(stop="end")` ([Controllers](controllers.qmd#leaderless)). The swarm returns after every member and its background work have ended, so the scorer sees the sandbox as the members left it.
 
 [`examples/shared_sandbox.py`](https://github.com/meridianlabs-ai/inspect_swarm/blob/main/examples/shared_sandbox.py) scores a script that the members build together in a shared container.
 

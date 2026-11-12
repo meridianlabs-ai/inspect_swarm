@@ -23,7 +23,7 @@ def shared_sandbox(k: int = 3) -> Task:
         dataset=[Sample(input=PROMPT, target="9", files={"/shared/notes.md": ""})],
         solver=swarm(
             members=member(react, args={"tools": [bash(timeout=60)]}, count=k),
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
         ),
         scorer=script_works(),
         sandbox=("docker", "compose.yaml"),

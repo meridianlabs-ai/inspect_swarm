@@ -120,7 +120,7 @@ async def test_a_bridged_cli_is_one_loop_of_its_member() -> None:
                     member(cli(script), name="cli", bridged=True),
                 ],
                 channels=[messages(rate=None), shared_memory(rate=None)],
-                controller=leaderless(stop_on_submission=False),
+                controller=leaderless(stop="end"),
             )
         )
 
@@ -198,7 +198,7 @@ async def test_a_bridged_member_never_counts_as_waiting() -> None:
                     member(cli(script), name="cli", bridged=True),
                 ],
                 channels=[messages(max_wait=1)],
-                controller=leaderless(stop_on_submission=False),
+                controller=leaderless(stop="end"),
             )
         )
 
@@ -234,7 +234,7 @@ async def test_a_bridged_wait_is_capped_by_the_tools_max_wait() -> None:
                     member(cli(script), name="cli", bridged=True),
                 ],
                 channels=[messages(max_wait=2)],
-                controller=leaderless(stop_on_submission=False),
+                controller=leaderless(stop="end"),
             )
         )
 
@@ -350,7 +350,7 @@ async def test_a_messages_only_bridged_wait_ignores_the_board() -> None:
                     member(cli(script), name="cli", bridged=True),
                 ],
                 channels=[messages(rate=None), shared_memory(rate=None)],
-                controller=leaderless(stop_on_submission=False),
+                controller=leaderless(stop="end"),
             )
         )
 

@@ -1,6 +1,6 @@
 """A shared sandbox: `bash()` members build one script together in a container they all use.
 
-The default `filesystem` channel tells each member, in its preamble, to share files in `/shared`, to keep notes in `/shared/notes.md`, and to keep its own work in `/scratch/<member>`. The scorer runs the script the members left in `/shared`, so the swarm lets every member run to its end with `leaderless(stop_on_submission=False)`: a member still working when another submits can still change what is scored.
+The default `filesystem` channel tells each member, in its preamble, to share files in `/shared`, to keep notes in `/shared/notes.md`, and to keep its own work in `/scratch/<member>`. The scorer runs the script the members left in `/shared`, so the swarm lets every member run to its end with `leaderless(stop="end")`: a member still working when another submits can still change what is scored.
 
 Needs Docker.
 """
@@ -57,7 +57,7 @@ def shared_sandbox(k: int = 3) -> Task:
         dataset=[Sample(input=PROMPT, target="9", files={"/shared/notes.md": ""})],
         solver=swarm(
             members=member(react, args={"tools": [bash(timeout=60)]}, count=k),
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
         ),
         scorer=script_works(),
         sandbox=("docker", "compose.yaml"),

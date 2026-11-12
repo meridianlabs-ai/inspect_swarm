@@ -54,6 +54,7 @@ from .._final import (
     Pick,
     Synthesis,
     answer,
+    chain_names,
     chosen_output,
     finalise,
     settle,
@@ -270,6 +271,14 @@ class SwarmControl(Protocol):
     @property
     def members(self) -> Sequence[MemberHandle]:
         """The members, in roster order."""
+        ...
+
+    @property
+    def final_chain(self) -> Sequence[str]:
+        """The final-answer chain the swarm applies, by mode name, such as `["verify", "vote", "first"]`.
+
+        It is the controller's `final` or, when that is `None`, the default for the swarm's result contract. The result record's `final.chain` gives the same names.
+        """
         ...
 
     def member(self, name: str) -> MemberHandle:
@@ -699,6 +708,10 @@ class SwarmRun:
     @property
     def members(self) -> Sequence[MemberHandle]:
         return list(self._members)
+
+    @property
+    def final_chain(self) -> Sequence[str]:
+        return tuple(chain_names(self._chain))
 
     def member(self, name: str) -> MemberHandle:
         return self._lookup(name)

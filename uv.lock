@@ -1089,6 +1089,13 @@ dev = [
     { name = "ruff" },
     { name = "trio" },
 ]
+doc = [
+    { name = "griffe" },
+    { name = "markdown" },
+    { name = "panflute" },
+    { name = "pyyaml" },
+    { name = "rich" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1098,20 +1105,16 @@ dist = [
     { name = "build" },
     { name = "twine" },
 ]
-doc = [
-    { name = "griffe" },
-    { name = "markdown" },
-    { name = "panflute" },
-    { name = "pyyaml" },
-    { name = "rich" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.14.2" },
     { name = "anyio", marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "griffe", marker = "extra == 'doc'", specifier = ">=2" },
     { name = "inspect-ai", git = "https://github.com/UKGovernmentBEIS/inspect_ai?branch=main" },
+    { name = "markdown", marker = "extra == 'doc'" },
     { name = "pandas", marker = "extra == 'dev'", specifier = ">=2.1.0" },
+    { name = "panflute", marker = "extra == 'doc'" },
     { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=10.0.1" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyright", marker = "extra == 'dev'" },
@@ -1119,24 +1122,19 @@ requires-dist = [
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.4.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'" },
     { name = "pyyaml", marker = "extra == 'dev'" },
+    { name = "pyyaml", marker = "extra == 'doc'" },
+    { name = "rich", marker = "extra == 'doc'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "shortuuid" },
     { name = "trio", marker = "extra == 'dev'" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "doc"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "inspect-swarm", extras = ["dev"] }]
 dist = [
     { name = "build" },
     { name = "twine" },
-]
-doc = [
-    { name = "griffe", specifier = ">=2" },
-    { name = "markdown" },
-    { name = "panflute" },
-    { name = "pyyaml" },
-    { name = "rich" },
 ]
 
 [[package]]

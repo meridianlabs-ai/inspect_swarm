@@ -156,7 +156,7 @@ async def test_deepagent_members_general_subagents_have_their_own_installed_skil
                 },
                 count=2,
             ),
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
         ),
         tmp_path,

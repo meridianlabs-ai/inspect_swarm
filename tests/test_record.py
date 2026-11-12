@@ -74,7 +74,7 @@ def _pair(prefix: str = "", script: Script | None = None) -> Agent:
             member(generator(scripted_model()), name=f"{prefix}a"),
             member(generator(scripted_model(script)), name=f"{prefix}b"),
         ],
-        controller=leaderless(stop_on_submission=False),
+        controller=leaderless(stop="end"),
         channels=[],
     )
 
@@ -88,7 +88,7 @@ def _submitter() -> Agent:
 def _react_pair(prefix: str) -> Agent:
     return swarm(
         [member(_submitter(), name=f"{prefix}{n}") for n in ("a", "b")],
-        controller=leaderless(stop_on_submission=False),
+        controller=leaderless(stop="end"),
         channels=[],
     )
 
@@ -934,7 +934,7 @@ def test_a_solver_reads_the_record_once_the_swarm_has_returned(
                 name="busy",
             ),
         ],
-        controller=leaderless(stop_on_submission=False),
+        controller=leaderless(stop="end"),
         channels=[],
     )
     _eval(

@@ -165,7 +165,7 @@ def proof_swarm(
             ],
             controller=until_proved()
             if stop == "first_proof"
-            else leaderless(stop_on_submission=False),
+            else leaderless(stop="end"),
             channels=[shared_memory()],
         ),
         scorer=any_member_proved(),

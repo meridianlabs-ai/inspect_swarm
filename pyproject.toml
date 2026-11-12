@@ -61,10 +61,6 @@ dev = [
     "pyyaml",
 ]
 
-[dependency-groups]
-# Keeps a plain `uv sync` or `uv run` (Makefile) and the nightly canary's
-# `--group dev` install pulling the dev tools.
-dev = ["inspect_swarm[dev]"]
 # The docs' Python tools are in `doc`, which `dev` leaves out: CI installs `dev`
 # and never builds the docs. Quarto itself is a system install (`make docs`
 # checks its version), so the lock does not carry the Jupyter stack the
@@ -76,6 +72,11 @@ doc = [
     "rich",
     "pyyaml",
 ]
+
+[dependency-groups]
+# Keeps a plain `uv sync` or `uv run` (Makefile) and the nightly canary's
+# `--group dev` install pulling the dev tools.
+dev = ["inspect_swarm[dev]"]
 dist = ["twine", "build"]
 
 [tool.hatch.build]

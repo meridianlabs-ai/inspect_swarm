@@ -254,7 +254,7 @@ async def test_injected_tools_without_a_name_stay_in_the_members_own_sandbox(
                     sandbox="{member}",
                     visible_sandboxes=["comparator"],
                 ),
-                controller=leaderless(stop_on_submission=False),
+                controller=leaderless(stop="end"),
                 channels=[],
             )
         )
