@@ -63,7 +63,6 @@ description: Swarms, members, controllers, channels, results and the budget view
 ### MemberResult
 ### AnswerResult
 ### MemberReap
-### LeftOut
 ### FinalRecord
 ### answer_result
 ### artifact_result

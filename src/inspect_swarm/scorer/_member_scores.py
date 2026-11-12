@@ -65,11 +65,11 @@ def member_scores(
     For an answer task, `scorer` must be a function of the answer: the output, the sample's input, metadata and target. It may use the sandbox to evaluate the answer, but never as a source of the answer, or it would credit the team's work to a member. It grades each member on a copy of the state, with the member's output as the output and the sample's input followed by the member's message as the messages. An output with only a completion and no message adds no message, as when the swarm returns it as its answer. Members are graded in roster order, each inside a span named after it:
 
     - A member that never started has no value (`not_started`), and is not graded.
-    - A member whose output the record left out, or whose grade is `None`, NaN (`Score.unscored()`, or a value `value_to_float` converts to NaN) or not a single value (a dict, list or tuple), is unavailable: no value, with a reason (the grade's own `reason` for NaN, else `unscored`).
+    - A member whose grade is `None`, NaN (`Score.unscored()`, or a value `value_to_float` converts to NaN) or not a single value (a dict, list or tuple), is unavailable: no value, with a reason (the grade's own `reason` for NaN, else `unscored`).
     - A member with no output, or one whose completion is only whitespace, gets `empty_value` without being graded.
     - Every other member gets its grade, converted with `value_to_float`, and the grade's own `reason`, such as `invalid_response_format`.
 
-    For an artifact task whose contract has `member_artifacts`, `scorer` grades the environment, usually as the task's own scorer does. Each member that started is graded inside `member_artifacts.materialize(name)`, which puts that member's artifact where the scorer looks and restores the team's on exit. Every such member is graded, whatever its completion: a member can leave a passing artifact and submit no text. A member whose output the record left out is graded with an empty output. An error from `materialize` or the scorer fails the sample.
+    For an artifact task whose contract has `member_artifacts`, `scorer` grades the environment, usually as the task's own scorer does. Each member that started is graded inside `member_artifacts.materialize(name)`, which puts that member's artifact where the scorer looks and restores the team's on exit. Every such member is graded, whatever its completion: a member can leave a passing artifact and submit no text. A member with no output is graded with an empty one. An error from `materialize` or the scorer fails the sample.
 
     A sample with no swarm, a plain agent, is scored as one member named `solver`, whose output is the sample's. For an artifact task it is graded on the environment as it left it, without `materialize`. A task whose result is an artifact with no `member_artifacts`, a swarm without the contract, or one with another kind, gives no member values; then both keys are NaN, which Inspect counts as unscored, with the reason `artifact_without_member_artifacts`, `kind_not_declared` or `kind_mismatch`. So does a sample with no member value, with the reason `no_member_valued`.
 
@@ -187,17 +187,14 @@ async def _grade_answer(
     to_float: ValueToFloat,
     empty_value: float,
 ) -> _Grade:
-    # before the empty check, since a left-out output is None in the record
-    if "output" in m.left_out:
-        return _Grade("unavailable", math.nan, "output_left_out")
     if m.output is None or not m.output.completion.strip():
         return _Grade("empty", empty_value, "empty_output")
     return await _grade(m.name, m.output, state, target, scorer, to_float, None)
 
 
 # Every member is graded on its artifact, whatever its completion, since a member can
-# leave a passing artifact and submit no text; an output the record left out is graded
-# as an empty one.
+# leave a passing artifact and submit no text; a member with no output is graded with
+# an empty one.
 async def _grade_artifact(
     m: MemberResult,
     state: TaskState,

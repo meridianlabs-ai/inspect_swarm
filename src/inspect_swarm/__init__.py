@@ -45,7 +45,6 @@ from ._member import Member, member
 from ._record import (
     AnswerResult,
     FinalRecord,
-    LeftOut,
     MemberReap,
     MemberResult,
     SwarmResultRecord,
@@ -88,7 +87,6 @@ __all__ = [
     "FinalName",
     "FinalRecord",
     "FinalSpec",
-    "LeftOut",
     "Member",
     "MemberArtifacts",
     "MemberEnded",

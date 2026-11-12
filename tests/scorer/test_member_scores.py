@@ -60,28 +60,18 @@ def _result(kind: str) -> ResultSpec:
 
 @agent
 def from_input(name: str) -> Agent:
-    """Answer what the sample's input gives this member: `answers: {"a": "1", ...}`. An answer `bare:<text>` is an output with only a completion, and no message; `deep:<text>` is an output whose metadata is nested too deep for the record, which leaves it out."""
+    """Answer what the sample's input gives this member: `answers: {"a": "1", ...}`. An answer `bare:<text>` is an output with only a completion, and no message."""
 
     async def execute(state: AgentState) -> AgentState:
         text = next(m.text for m in state.messages if "answers: " in m.text)
         answer: str = json.loads(text.split("answers: ", 1)[1])[name]
         if answer.startswith("bare:"):
             state.output = ModelOutput(model="mockllm", completion=answer[5:])
-        elif answer.startswith("deep:"):
-            state.output = ModelOutput.from_content("mockllm", answer[5:])
-            state.output.metadata = {"value": _nested(130)}
         else:
             state.output = ModelOutput.from_content("mockllm", answer)
         return state
 
     return execute
-
-
-def _nested(depth: int) -> list[Any]:
-    value: list[Any] = []
-    for _ in range(depth):
-        value = [value]
-    return value
 
 
 def _input(answers: dict[str, str]) -> str:
@@ -201,15 +191,6 @@ GRADES: dict[str, tuple[dict[str, str], dict[str, tuple[str, float, str | None]]
             "d": ("unavailable", NAN, "grader_failed"),
         },
     ),
-    "left_out": (
-        {"a": "0.5", "b": "1", "c": "", "d": "deep:x"},
-        {
-            "a": ("graded", 0.5, None),
-            "b": ("graded", 1.0, None),
-            "c": ("empty", 0.25, "empty_output"),
-            "d": ("unavailable", NAN, "output_left_out"),
-        },
-    ),
 }
 
 # every placement of one valued, one unavailable and one empty member, beside a fourth
@@ -239,7 +220,6 @@ def test_each_member_is_graded_and_aggregated_over_the_members_with_a_value(
         "graded": (1.0, 1.75 / 4, True, 4, None),
         "unavailable": (NAN, NAN, False, 0, "no_member_valued"),
         "reasons": (1.0, 1.25 / 3, False, 3, None),
-        "left_out": (1.0, 1.75 / 3, False, 3, None),
     } | {id: (1.0, 1.25 / 2, False, 2, None) for id in PERMUTED}
     for id, (best, mean, complete, valued, reason) in expected.items():
         result = _score(samples[id])
@@ -262,15 +242,13 @@ def test_each_member_is_graded_and_aggregated_over_the_members_with_a_value(
             outcome, value, reason = outcomes[m["name"]]
             assert (m["outcome"], m["reason"]) == (outcome, reason), (id, m)
             assert _same(m["value"], value), (id, m)
-            # the answer key is kept when the output is left out
-            given = answers[id][m["name"]].removeprefix("deep:")
-            assert m["answer_key"] == _key(given), (id, m)
+            assert m["answer_key"] == _key(answers[id][m["name"]]), (id, m)
             assert m["verdict"] is None and m["state"] == "ended"
             if outcome == "graded":
                 answer = answers[id][m["name"]]
                 assert (m["answer"], m["explanation"]) == (answer, f"graded {answer}")
     # each grade sees the sample's input and the member's answer, after the solve; no
-    # empty or left-out output reaches the scorer
+    # empty output reaches the scorer
     for state in calls:
         assert state.completed
         completion = state.output.completion
@@ -279,9 +257,7 @@ def test_each_member_is_graded_and_aggregated_over_the_members_with_a_value(
         assert state.messages[0].text.startswith("answers: ")
         assert state.messages[1].text == completion
     graded_names = {
-        id: {name for name, answer in given.items() if answer.strip()} - {"d"}
-        if id == "left_out"
-        else {name for name, answer in given.items() if answer.strip()}
+        id: {name for name, answer in given.items() if answer.strip()}
         for id, given in answers.items()
     }
     assert len(calls) == sum(len(names) for names in graded_names.values())
@@ -488,11 +464,11 @@ def test_each_member_is_graded_with_its_artifact_in_place_after_the_team(
     tmp_path: Path,
 ) -> None:
     log: list[tuple[Any, ...]] = []
-    # a submits no text, and the record leaves c's output out; d never starts
+    # a submits no text; d never starts
     sample = _artifact_eval(
         tmp_path,
         _artifact_sample(
-            {"a": "", "b": "done", "c": "deep:x", "d": "done"},
+            {"a": "", "b": "done", "c": "done", "d": "done"},
             {"a": "1", "b": "0", "c": "0.5", "d": "1"},
         ),
         _all_but_d(),
@@ -510,12 +486,12 @@ def test_each_member_is_graded_with_its_artifact_in_place_after_the_team(
         ("score", "0", "done"),
         ("exit", "b"),
         ("enter", "c"),
-        ("score", "0.5", ""),
+        ("score", "0.5", "done"),
         ("exit", "c"),
     ]
     messages = [[m.role for m in entry[3]] for entry in log[1:] if entry[0] == "score"]
-    # a's empty completion still has its message; c's left-out output has none
-    assert messages == [["user", "assistant"], ["user", "assistant"], ["user"]]
+    # a's empty completion still has its message
+    assert messages == [["user", "assistant"]] * 3
     result = _score(sample, "branch_members")
     assert result.value == {"best_member": 1.0, "mean_member": 0.5}
     metadata = result.metadata
@@ -1017,13 +993,9 @@ def test_an_output_with_only_a_completion_is_graded(
 def _persistent(
     name: str, status: str, completion: str, *, kept: bool = True
 ) -> dict[str, Any]:
-    # answered 42, then 7, each keyed and verified; the last key left out unless kept
-    last = (
-        AnswerResult(answer_key="7", verdict=Verdict(False, 0.0), verdict_time=2.5)
-        if kept
-        else AnswerResult(
-            verdict=Verdict(False, 0.0), verdict_time=2.5, left_out=["answer_key"]
-        )
+    # answered 42, then 7, each verified; the last keyed only when kept
+    last = AnswerResult(
+        answer_key="7" if kept else None, verdict=Verdict(False, 0.0), verdict_time=2.5
     )
     return MemberResult(
         name=name,
@@ -1073,7 +1045,7 @@ def test_a_persistent_members_key_and_verdict_are_its_last_answers_when_it_submi
     record["members"] = [
         _persistent("submitted", "submitted", "7"),
         _persistent("stopped", "stopped", "8"),
-        _persistent("left_out", "submitted", "7", kept=False),
+        _persistent("unkeyed", "submitted", "7", kept=False),
         old,
     ]
     calls: list[TaskState] = []
@@ -1099,7 +1071,7 @@ def test_a_persistent_members_key_and_verdict_are_its_last_answers_when_it_submi
         ),
         ("stopped", "graded", 8.0, None, None),
         (
-            "left_out",
+            "unkeyed",
             "graded",
             7.0,
             None,
