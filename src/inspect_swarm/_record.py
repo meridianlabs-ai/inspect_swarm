@@ -33,9 +33,6 @@ from ._result import ResultKind, Verdict
 MemberState = Literal["pending", "running", "idle", "ending", "ended"]
 """A member's lifecycle: not started, running, idle, ending, or ended. Only persistent members are ever `idle` (answered and waiting for `SwarmControl.wake()`) or `ending` (their ending has begun, and the member has not yet ended)."""
 
-LeftOut = Literal["output", "answer_key", "explanation"]
-"""A member's value that the record leaves out, because the record cannot hold it: its output, its answer key, or its verdict's explanation."""
-
 RECORD_TYPE = "result_record"
 RESULT_ID_KEY = "inspect_swarm:result_id"
 START_TYPE = "swarm_start"
@@ -80,9 +77,6 @@ class AnswerResult(BaseModel):
 
     verdict_time: float | None = None
     """Swarm time when the verdict was taken; `None` without one."""
-
-    left_out: list[LeftOut] = []
-    """The answer's values left out of the record, which are `None` here: `answer_key`, or `explanation` for the verdict's explanation, for the reasons a member's `left_out` gives. Empty when nothing was left out."""
 
 
 class MemberResult(BaseModel):
@@ -131,7 +125,7 @@ class MemberResult(BaseModel):
     """A persistent member's answers' keys and verdicts, in the order of `answer_times`. Empty for other members, and in records written before it existed."""
 
     output: ModelOutput | None = None
-    """The member's output when it ended, however it ended, as Inspect's log keeps a sample's output; `None` until then."""
+    """The member's output when it ended, however it ended, as Inspect's log keeps a sample's output; `None` until then. It is also `None` for an output that held an object only task code makes, which ends its member `errored` and fails the sample. An output the record cannot hold, such as one with a cycle or nested more than 120 levels deep, fails the sample with a `ValueError`, and no record is written."""
 
     answer_key: str | None = None
     """The answer key of the member's submission, from the result contract's `answer_key`; `None` without a submission, a key function or a comparable answer. A persistent member's answers have theirs in `answer_results`."""
@@ -141,9 +135,6 @@ class MemberResult(BaseModel):
 
     verdict_time: float | None = None
     """Swarm time when the verdict was taken; `None` without one."""
-
-    left_out: list[LeftOut] = []
-    """The member's values left out of the record, which are `None` here (for `explanation`, the verdict's explanation): an output nested too deep for a JSON log, with a cycle, that reuses the same lists or dicts so often that writing it would expand it past 10,000 copies, or that a log cannot write or read back, such as a dict key with more digits than Python prints. Empty when nothing was left out. An output that holds any other Python object, which only task code puts there, ends its member `errored` and fails the sample; the record is still written, with that output left out."""
 
     # Validating a `ModelOutput` fills an empty completion from its message, both when
     # the record is made and when it is read; the record keeps the completion the
@@ -235,9 +226,6 @@ class SwarmResultRecord(BaseModel):
     final_verdict: Verdict | None = None
     """For an `artifact` task with a verifier: the verifier's verdict on the environment after the members have stopped, called with the final answer's completion, or `""` without one. `None` otherwise."""
 
-    left_out: list[LeftOut] = []
-    """The record's own values left out, as for a member's `left_out`: `explanation`, the final verdict's explanation. Empty when nothing was left out."""
-
     # serialized as Inspect serializes a sample (`EvalSample`), which keeps NaN and
     # infinities, the members' outputs included
     model_config = ConfigDict(ser_json_inf_nan="constants")
@@ -251,7 +239,9 @@ def write_record(record: SwarmResultRecord) -> None:
     forget_record()
     id = uuid4().hex
     members = [_logged_member(record, m) for m in record.members]
-    record = _logged_final(record.model_copy(update={"members": members}))
+    record = record.model_copy(
+        update={"members": members, "final_verdict": _plain(record.final_verdict)}
+    )
     data: dict[str, JsonValue] = {"id": id, **_marked(record.model_dump(mode="json"))}
     logged = _as_logged(data)
     # the model text is held as a log gives it back, marked where a log would read it
@@ -287,133 +277,72 @@ def _authored(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
     }
 
 
-# The record, its members already as a log gives them back, with its own model text as
-# a log gives it back: the final verdict, whose explanation is left out, and named in
-# the record's left_out, when the record could not hold it.
-def _logged_final(record: SwarmResultRecord) -> SwarmResultRecord:
-    update: dict[str, Any] = {}
-    verdict = record.final_verdict
-    if verdict is not None:
-        # the verdict's declared fields alone, as for a member's verdict
-        logged = Verdict(verdict.passed, verdict.value)
-        if verdict.explanation is not None:
-            explained = _logged_verdict(
-                record, Verdict(verdict.passed, verdict.value, verdict.explanation)
-            )
-            if explained is None:
-                update["left_out"] = [*record.left_out, "explanation"]
-            else:
-                logged = explained
-        update["final_verdict"] = logged
-    return record.model_copy(update=update)
+# A verdict of its declared fields alone, built as a plain `Verdict`, so that a
+# subclass's own constructor never runs on the record's copy.
+def _plain(verdict: Verdict | None) -> Verdict | None:
+    return (
+        None
+        if verdict is None
+        else Verdict(verdict.passed, verdict.value, verdict.explanation)
+    )
 
 
-# The final verdict as the record gives it back from a log, or None when the log
-# cannot write or read it. It is written alone in a copy of the record, at its place in
-# the record.
-def _logged_verdict(record: SwarmResultRecord, verdict: Verdict) -> Verdict | None:
-    try:
-        alone = record.model_copy(update={"members": [], "final_verdict": verdict})
-        logged = _as_logged(_marked(alone.model_dump(mode="json")))
-        return SwarmResultRecord.model_validate(
-            _unmarked(logged), context=get_deserializing_context()
-        ).final_verdict
-    except ValueError:
-        return None
-
-
-# A member with its output, answer key and verdict explanation, and each of its
-# answers' key and explanation, as a log gives them back. A value the record cannot
-# hold is left out of its member or answer and named in that one's left_out, so that one member's model output never costs the sample its record: one a
-# log cannot write or read, and an output whose serialization is not bounded
-# (`_bounded()`). An object the task's code put in an output fails the sample first
-# (`_refuse_author_objects()`).
+# A member as the record holds it: its verdicts plain, and its output as a log gives it
+# back. An output the record cannot hold fails the sample (decision: Ransom,
+# 2026-11-12): one that holds an object only task code makes, with a `TypeError`
+# (`_refuse_author_objects()`), and one whose serialization is not bounded
+# (`_unbounded()`) or that a log cannot write or read back, with a `ValueError`.
 def _logged_member(record: SwarmResultRecord, m: MemberResult) -> MemberResult:
-    if m.output is not None:
-        _refuse_author_objects(m.output, m.name)
-    # each answer with its key and explanation removed, as the member's own are below
-    stripped = [
-        a.model_copy(update={"answer_key": None, "verdict": _without_explanation(a)})
-        for a in m.answer_results
-    ]
-    # the member with each value alone, so that each is kept or left out by itself
-    alone = m.model_copy(
+    logged = m.model_copy(
         update={
-            "output": None,
-            "answer_key": None,
-            "verdict": _without_explanation(m),
-            "answer_results": stripped,
+            "verdict": _plain(m.verdict),
+            "answer_results": [
+                a.model_copy(update={"verdict": _plain(a.verdict)})
+                for a in m.answer_results
+            ],
         }
     )
-    values: list[tuple[LeftOut, dict[str, Any]]] = []
-    if m.output is not None:
-        values.append(("output", {"output": m.output}))
-    values += _model_values(m)
-    logged = alone
-    left_out = list(m.left_out)
-    for name, value in values:
-        kept = _logged_value(record, alone.model_copy(update=value))
-        if kept is None:
-            left_out.append(name)
-        else:
-            field = "verdict" if name == "explanation" else name
-            logged = logged.model_copy(update={field: getattr(kept, field)})
-    # each answer's key and explanation, each alone in the member, at its place
-    answers = list(stripped)
-    for i, answer in enumerate(m.answer_results):
-        answer_left_out = list(answer.left_out)
-        for name, value in _model_values(answer):
-            alone_answers = list(stripped)
-            alone_answers[i] = stripped[i].model_copy(update=value)
-            kept = _logged_value(
-                record, alone.model_copy(update={"answer_results": alone_answers})
-            )
-            if kept is None:
-                answer_left_out.append(name)
-            else:
-                field = "verdict" if name == "explanation" else name
-                answers[i] = answers[i].model_copy(
-                    update={field: getattr(kept.answer_results[i], field)}
-                )
-        answers[i] = answers[i].model_copy(update={"left_out": answer_left_out})
-    return logged.model_copy(update={"left_out": left_out, "answer_results": answers})
-
-
-# The verdict's declared fields alone, without its explanation, built as a plain
-# `Verdict`, so that a subclass's own constructor never runs on the copy.
-def _without_explanation(holder: MemberResult | AnswerResult) -> Verdict | None:
-    verdict = holder.verdict
-    return None if verdict is None else Verdict(verdict.passed, verdict.value)
-
-
-# A member's or an answer's model text, each value as an update that holds it alone:
-# its answer key, and its verdict with its explanation.
-def _model_values(
-    holder: MemberResult | AnswerResult,
-) -> list[tuple[LeftOut, dict[str, Any]]]:
-    values: list[tuple[LeftOut, dict[str, Any]]] = []
-    if holder.answer_key is not None:
-        values.append(("answer_key", {"answer_key": holder.answer_key}))
-    verdict = holder.verdict
-    if verdict is not None and verdict.explanation is not None:
-        explained = Verdict(verdict.passed, verdict.value, verdict.explanation)
-        values.append(("explanation", {"verdict": explained}))
-    return values
-
-
-# `m` as the record gives it back from a log, or None when the log cannot write or read
-# it. `m` is written in a copy of the record, which serializes as a sample does, at its
-# place in the record, with its model text marked as `write_record()` marks it.
-def _logged_value(record: SwarmResultRecord, m: MemberResult) -> MemberResult | None:
+    if m.output is None:
+        return logged
+    _refuse_author_objects(m.output, m.name)
+    problem = _unbounded(m.output)
+    if problem is not None:
+        raise ValueError(
+            f"The swarm's result record cannot hold {_output_of(m)}: it {problem}."
+        )
     try:
-        if m.output is not None and not _bounded(m.output):
-            return None
-        data = record.model_copy(update={"members": [m]}).model_dump(mode="json")
-        logged = _unmarked(_as_logged(_marked(data)))
-        [member] = cast(list[dict[str, JsonValue]], logged["members"])
-        return MemberResult.model_validate(member, context=get_deserializing_context())
-    except ValueError:
-        return None
+        output = _logged_output(record, m)
+    except ValueError as ex:
+        raise ValueError(
+            f"The swarm's result record cannot hold {_output_of(m)}: a log cannot write it or read it back: {ex}"
+        ) from ex
+    return logged.model_copy(update={"output": output})
+
+
+# A member's output, for an error: for a persistent member that ended with an answer,
+# its output is that answer.
+def _output_of(m: MemberResult) -> str:
+    where = f"the output of member {m.name!r}"
+    if m.persistent and m.submitted and m.answer_times:
+        where += f", its answer {len(m.answer_times) - 1} (from 0)"
+    return where
+
+
+# The member's output as the record gives it back from a log. It is written alone in a
+# copy of the member, in a copy of the record, which serializes as a sample does, at its
+# place in the record, and marked as `write_record()` marks it.
+def _logged_output(record: SwarmResultRecord, m: MemberResult) -> ModelOutput | None:
+    alone = m.model_copy(
+        update={"answer_key": None, "verdict": None, "answer_results": []}
+    )
+    data = record.model_copy(
+        update={"members": [alone], "final_verdict": None}
+    ).model_dump(mode="json")
+    logged = _unmarked(_as_logged(_marked(data)))
+    [member] = cast(list[dict[str, JsonValue]], logged["members"])
+    return MemberResult.model_validate(
+        member, context=get_deserializing_context()
+    ).output
 
 
 # Marks literal model text. A log reads a string that begins with `attachment://` or
@@ -534,11 +463,8 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
             at, step, key = trail[at]
             steps.append(_key_step(key) if step is None else step)
         steps.reverse()
-        # a deeply nested path is shortened in the middle
-        if len(steps) > 20:
-            steps = [*steps[:10], f"...({len(steps) - 15} steps)...", *steps[-5:]]
         return TypeError(
-            f"The swarm's result record cannot be written: the output of member {member!r} holds a value of type {_class_name(type(value))} at output{''.join(steps)}. A member's output must be built from Inspect's own classes, and its metadata and tool arguments must hold data a model can return: dicts, lists, strings, numbers, booleans and None, or the dates, times, bytes and sets YAML gives."
+            f"The swarm's result record cannot be written: the output of member {member!r} holds a value of type {_class_name(type(value))} at output{_path(steps)}. A member's output must be built from Inspect's own classes, and its metadata and tool arguments must hold data a model can return: dicts, lists, strings, numbers, booleans and None, or the dates, times, bytes and sets YAML gives."
         )
 
     def push(
@@ -575,42 +501,61 @@ def _refuse_author_objects(output: ModelOutput, member: str) -> None:
                 push(child, data, at, f"[{i}]")
 
 
-# Whether serializing an output is bounded, measured without serializing it: nested no
-# deeper than `_MAX_OUTPUT_DEPTH`, with no cycle, and with containers reached by more
-# than one path (as YAML aliases in tool arguments give) adding at most
-# `_MAX_SHARED_EXPANSION` containers, since serializing writes a container once for
-# each path. Each container is measured once, by identity, so a shared one is never
-# expanded; Inspect's `exceeds_max_depth()` measures depth the same way but does not
-# bound the expansion. It runs after `_refuse_author_objects()`, so it meets only
-# Inspect's models where Inspect puts them, and data.
-def _bounded(output: ModelOutput) -> bool:
-    # by container id: its height in levels and the containers serializing it writes
-    measured: dict[int, tuple[int, int]] = {}
+# Why serializing an output is not bounded, with where in the output, or None when it
+# is, measured without serializing it: nested no deeper than `_MAX_OUTPUT_DEPTH`, with
+# no cycle. Each container is measured once, by identity, as Inspect's
+# `exceeds_max_depth()` measures depth. Like Inspect's sample serialization, it does not
+# bound how often containers reached by more than one path (as YAML aliases in tool
+# arguments give) are written (decision: Ransom, 2026-11-12). It runs after
+# `_refuse_author_objects()`, so it meets only Inspect's models where Inspect puts them,
+# and data.
+def _unbounded(output: ModelOutput) -> str | None:
+    # by container id: its height in levels
+    measured: dict[int, int] = {}
     in_progress: set[int] = set()
+    # the steps to the value being measured: an attribute or index, or else a dict key
+    trail: list[tuple[str | None, object]] = []
 
-    # None when `value`, at `depth`, is not bounded
-    def measure(value: object, depth: int) -> tuple[int, int] | None:
+    def at() -> str:
+        steps = [_key_step(key) if step is None else step for step, key in trail]
+        return f"output{_path(steps)}"
+
+    # the problem when `value`, at `depth`, is not bounded, else its height
+    def measure(value: object, depth: int) -> int | str:
         children = _children(value)
         if children is None:
-            return (0, 0)
-        if depth > _MAX_OUTPUT_DEPTH or id(value) in in_progress:
-            return None
-        known = measured.get(id(value))
-        if known is None:
+            return 0
+        if id(value) in in_progress:
+            return f"holds a cycle at {at()}"
+        if depth > _MAX_OUTPUT_DEPTH:
+            return f"is nested more than {_MAX_OUTPUT_DEPTH} levels deep at {at()}"
+        height = measured.get(id(value))
+        if height is None:
             in_progress.add(id(value))
-            height, written = 0, 1
-            for child in children:
-                child_measure = measure(child, depth + 1)
-                if child_measure is None:
-                    return None
-                height = max(height, child_measure[0])
-                written += child_measure[1]
+            below = 0
+            for step, key, child in children:
+                trail.append((step, key))
+                child_height = measure(child, depth + 1)
+                trail.pop()
+                if isinstance(child_height, str):
+                    return child_height
+                below = max(below, child_height)
             in_progress.remove(id(value))
-            known = measured[id(value)] = (height + 1, written)
-        return None if depth + known[0] - 1 > _MAX_OUTPUT_DEPTH else known
+            height = measured[id(value)] = below + 1
+        if depth + height - 1 > _MAX_OUTPUT_DEPTH:
+            # a container measured at another place, nested too deep at this one
+            return f"is nested more than {_MAX_OUTPUT_DEPTH} levels deep below {at()}"
+        return height
 
-    root = measure(output, 1)
-    return root is not None and root[1] - len(measured) <= _MAX_SHARED_EXPANSION
+    problem = measure(output, 1)
+    return problem if isinstance(problem, str) else None
+
+
+# A path's steps, a deeply nested path shortened in the middle.
+def _path(steps: list[str]) -> str:
+    if len(steps) > 20:
+        steps = [*steps[:10], f"...({len(steps) - 15} steps)...", *steps[-5:]]
+    return "".join(steps)
 
 
 # A dict key's step in a path: a key too large to print, such as an integer YAML gives
@@ -714,14 +659,18 @@ def _free_form(hint: object) -> bool:
     )
 
 
-# The values in `value` that serializing it writes, when it is a container.
-def _children(value: object) -> Iterable[object] | None:
+# The values in `value` that serializing it writes, when it is a container, each with its
+# step from `value`: an attribute or index, or else the dict key it is reached by.
+def _children(value: object) -> Iterable[tuple[str | None, object, object]] | None:
     if isinstance(value, dict):
-        return cast(dict[object, object], value).values()
+        items = cast(dict[object, object], value).items()
+        return ((None, key, child) for key, child in items)
     if isinstance(value, list | tuple | set):
-        return cast(Iterable[object], value)
+        values = cast(Iterable[object], value)
+        return ((f"[{i}]", None, child) for i, child in enumerate(values))
     if _inspect_model(value):
-        return [*vars(value).values(), *_extra(value).values()]
+        fields = [*vars(value).items(), *_extra(value).items()]
+        return ((f".{name}", None, child) for name, child in fields)
     return None
 
 
@@ -729,10 +678,6 @@ def _children(value: object) -> Iterable[object] | None:
 # the output's containers, well below the depth at which the record inside its sample
 # no longer reads from a JSON log.
 _MAX_OUTPUT_DEPTH = MAX_TOOL_CALL_ARGUMENTS_DEPTH + 20
-
-# Far more containers than an output repeats, and far fewer than an aliased graph
-# expands to.
-_MAX_SHARED_EXPANSION = 10_000
 
 
 # Removes the store's record id, so that a swarm that leaves no record never leaves an

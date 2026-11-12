@@ -549,7 +549,6 @@ async def test_the_record_is_written_once_when_the_swarm_ends() -> None:
         "answer_key",
         "verdict",
         "verdict_time",
-        "left_out",
         "persistent",
         "answer_times",
         "answer_results",
@@ -1709,10 +1708,10 @@ async def test_the_vote_counts_keys_that_read_as_references() -> None:
         "a",
         False,
     )
-    assert [(m.answer_key, m.left_out) for m in record.members] == [
-        ("attachment://x", []),
-        ("attachment://x", []),
-        ("y", []),
+    assert [m.answer_key for m in record.members] == [
+        "attachment://x",
+        "attachment://x",
+        "y",
     ]
 
 
@@ -1816,7 +1815,6 @@ async def test_the_final_verdict_without_an_answer_keeps_a_reference_explanation
     assert environment.calls == [""]
     # kept as written, though a log would read it as a reference to an attachment
     assert stop.record.final_verdict == Verdict(False, None, "attachment://elsewhere")
-    assert stop.record.left_out == []
 
 
 class _Holds:
