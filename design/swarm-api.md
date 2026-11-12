@@ -29,7 +29,7 @@ def swarm(
 
 # Controllers: how the swarm runs. A @swarm_controller factory returns a Controller.
 @swarm_controller
-def leaderless(stop: Literal["submission", "verified", "end"] | None = None, *, final: FinalSpec | None = None) -> Controller: ...   # None: the stop the final chain needs
+def leaderless(*, stop: Literal["answer", "end"] = "answer", final: FinalSpec | None = None) -> Controller: ...   # "answer": stop when the chain's leading mode has its answer
 
 class Controller:
     def __init__(
@@ -45,7 +45,7 @@ class SwarmControl(Protocol):                    # what `run` works through
     def members(self) -> Sequence[MemberHandle]: ...   # name, role, state, status, submitted, verdict (after M2)
     def member(self, name: str) -> MemberHandle: ...
     def start(self, member: str | MemberHandle, input: str | list[ChatMessage] | None = None, *, preamble: str | Literal[False] | None = None) -> None: ...
-    def events(self) -> AsyncGenerator[ControlEvent, None]: ...  # MemberEnded in M1
+    def events(self) -> AsyncGenerator[ControlEvent, None]: ...  # MemberEnded, MemberIdle, MemberNews
     def choose_answer(self, member: str | MemberHandle, reason: str | None = None) -> None: ...  # M2: the controller's choice of the answer
     @property
     def final_chain(self) -> Sequence[str]: ...   # the chain the swarm applies, by mode name (swarm-leaderless-stop.md)
@@ -402,14 +402,14 @@ class MemberEnded:
     submitted: bool
     verdict: VerdictSummary | None   # after M2
 
-ControlEvent = MemberEnded       # later work adds kinds (idle and woken members, quiescence)
+ControlEvent = MemberEnded | MemberIdle | MemberNews   # MemberIdle and MemberNews: persistent members; later work may add kinds
 ```
 
 - **`start()`** schedules the member in the runtime's member task group, in its own span with its limits, which the member wrapper enters before it builds the member's conversation, so a member message limit applies from the first message, and calls the agent on a state the runtime keeps, so its output survives an escaping error ([swarm-limits.md](swarm-limits.md#stopping), "Member wrapper and statuses"), and returns at once. Its input is the given input, else the member record's `input` (the ORBIT deep dive's field), else the swarm's input, followed by the member's preamble: its name unless `choose_name=True` ([swarm-chosen-names.md](swarm-chosen-names.md)), its role and the roster size, and each channel's instructions ([Channels](#channels)). A controller can replace the preamble with text of its own, or leave it out with `preamble=False` ([swarm-orbit.md S3](swarm-orbit.md#s3-a-controllers-preamble)). The preamble's wording is M1's prompt work. In M1 a member runs once: `start()` on a member whose state is not `pending` raises `RuntimeError`. `start()` also raises `RuntimeError` once the swarm is stopping ([Stopping](#controllers), below). A controller can meet that refusal only by resuming before the stop's cancellation reaches it (an event already queued); if the refusal then leaves `run`, the runtime treats it as the stop, not as the controller's error, and the controller ends as the cancellation would have ended it. The rest of `run`'s errors are classified as **Errors and outer stops** below says. Persistent members, later, add a wake operation.
 - **`events()`** yields events in order from swarm start, so none is lost between `start()` and iteration. A member counts as running until the runtime has taken its submission's verdict and queued its `MemberEnded`, so an asynchronous verifier still running when the last agent returns cannot be missed. Its handle already shows it ended, with `verdict` `None` until the verdict is taken ([swarm-scoring.md Verdicts](swarm-scoring.md#verdicts)). The iterator ends when no member is running and nothing is queued; a member started later is reported by a new `events()` call. One iterator at a time: an iterator holds the events from its first step until it ends or is closed, and a second iterator's first step raises `RuntimeError` while one is open. `events()` therefore returns an `AsyncGenerator[ControlEvent, None]`, not an `AsyncIterator`, so a controller that stops iterating early releases it with `aclose()` or by iterating inside `contextlib.aclosing()`; one abandoned without either stays open until Python finalises it, and until then another iterator's first step raises. A controller tests an event's kind before reading its fields (`isinstance(event, MemberEnded)`), as every example below does: `ControlEvent` becomes a union when later work adds idle and woken members (which a controller must not mistake for an ending) and quiescence (which has no `member`).
 - **`choose_answer()`** (M2) makes a member's submission the swarm's answer in place of the controller's `final` rule: the provisional answer from the call on, and the final answer after the stop. The record and the `final` event give the mode `controller`, the member and the reason. The member must have ended with a submission (`RuntimeError` otherwise, `KeyError` for an unknown name), and a controller chooses once. After M2 the choice goes before the chain ([swarm-scoring.md](swarm-scoring.md#the-controllers-choice)).
 - **Statuses.** `state` is the coarse lifecycle a controller schedules on. `status` and `MemberEnded.status` are the limits deep dive's closed set, unchanged: `submitted`, `unsubmitted`, `stopped` (soft stop), `share`, `member_limit:<type>`, `swarm_cap`, `cancelled`, `errored` ([swarm-limits.md](swarm-limits.md#stopping), "Member wrapper and statuses"). `submitted` is the scoring deep dive's notion of a submission, which a member stopped mid-work does not have.
-- **Members with background work** (from M2-5) end after their drain ([swarm-background-members.md Statuses, ended, and the record](swarm-background-members.md#statuses-ended-and-the-record)). Such a member stays `running` until its background children have finished or been cancelled, so the drain adds to the time between its agent's return and its `MemberEnded`: up to the effective grace plus the cancelled children's cleanup, which has no deadline. After M2, the verdict on its submission is still taken before that `MemberEnded` is queued, as `events()` above requires, so a configured verifier's queueing and running add to it as they do for any member. Its status is still the one its agent ended with, unless a foreign error from a child during the drain makes it `errored`. The controllers below (`leaderless(stop="verified")`, `coordinator` and `escalate`) act on that `MemberEnded` unchanged, that much later.
+- **Members with background work** (from M2-5) end after their drain ([swarm-background-members.md Statuses, ended, and the record](swarm-background-members.md#statuses-ended-and-the-record)). Such a member stays `running` until its background children have finished or been cancelled, so the drain adds to the time between its agent's return and its `MemberEnded`: up to the effective grace plus the cancelled children's cleanup, which has no deadline. After M2, the verdict on its submission is still taken before that `MemberEnded` is queued, as `events()` above requires, so a configured verifier's queueing and running add to it as they do for any member. Its status is still the one its agent ended with, unless a foreign error from a child during the drain makes it `errored`. The controllers below (`leaderless`'s stop at a passing verdict, `coordinator` and `escalate`) act on that `MemberEnded` unchanged, that much later.
 - **No member text.** Handles and events carry states, statuses, names chosen by the eval author and a verdict's pass flag and value, never a member's output, a message body or a verifier's explanation (scoring's `Verdict.explanation` is free text that may quote the answer or a judge model's words; it stays in the observer's result record). A controller therefore cannot pass one member's words into another's input, which would put model output in the user role (swarm.md, [Delivery](swarm.md#delivery-peer-messages-are-model-output)). Members read each other through channels' tools. ORBIT's scheduled mode adds conversation snapshots and trusted interventions to these handles for trusted policies; that is its deep dive's extension, argued there.
 - **Stopping.** Returning from `run` is a request to stop, not a cancellation. The runtime passes the returned reason to the limits deep dive's single stop procedure, `stop(reason)`: a soft stop through each running member's stop lever, a grace period of `Budget.grace` for in-flight calls to finish and be recorded, and a hard stop (cancellation) only for members still running after the grace ([swarm-limits.md](swarm-limits.md#stopping)). The swarm's own cap and time cap go through the same procedure (`swarm_cap`, `swarm_time`). The runtime orders every stop so that no member can start once it has begun:
   1. **Close scheduling, synchronously.** The first thing `stop(reason)` does, before any await, is mark the swarm as stopping. From then on `start()` raises `RuntimeError`; a controller that resumes and meets that refusal ends with the stop, not with an error (`start()` above). This matters because the soft stop closes only the levers of members already running, and the swarm time cap is a timer, not an Inspect time node the members inherit ([swarm-limits.md](swarm-limits.md#stopping), "Triggers"). A member started during grace would have an open lever and could dispatch new calls until the hard stop cancelled them, turning spend into unknown expenditure.
@@ -460,7 +460,7 @@ The observer is what the swarm records and where monitors attach: evidence event
 | What | Set by | Where it lives | Changes how the swarm runs? |
 |---|---|---|---|
 | Evidence events, the ledger and its coverage rules, metrics, the per-member result record | Fixed | inspect_swarm (versioned) | No |
-| What the result record can hold (after M2): verdicts and a comparable answer form exist only when the task's result contract supplies a verifier and an answer key | The task's result contract, `swarm(result=)` | The swarm's arguments, in the task | Yes, where the controller uses them: its `final` chain (`verify`, `vote`) and `leaderless(stop="verified")` |
+| What the result record can hold (after M2): verdicts and a comparable answer form exist only when the task's result contract supplies a verifier and an answer key | The task's result contract, `swarm(result=)` | The swarm's arguments, in the task | Yes, where the controller uses them: its `final` chain (`verify`, `vote`) and `leaderless`'s stop at the first passing submission under a chain led by `verify` |
 | The bus hook: continue, modify, reject or terminate each sanctioned record (after M2; in M2 sentinel monitors the channel tools) | `swarm(policy=...)` or a sentinel adapter (the communication deep dive's open question 1) | The swarm's arguments, in the task | Yes |
 | Live monitors and protocols (tool calls, including sends and reads) | inspect_sentinel's `@monitor` and `@protocol`, through `Task(sentinel=...)` or `eval(sentinel=...)` / `eval_set(sentinel=...)` (inspect_ai `feature/sentinel`, `src/inspect_ai/_eval/task/task.py:107`) | The task, or eval options | Yes: a protocol can reject, modify or terminate |
 | Scores: the task's headline score and per-member scores | The task's `@scorer`s ([Scores](#scores-the-task-scores-the-observer-records)) | The task | Not through the swarm, which never calls a scorer. But a member may: a retrying agent's in-loop scoring uses the task's scorers ([Scores](#scores-the-task-scores-the-observer-records)) |
@@ -624,43 +624,14 @@ swarm(
 )
 ```
 
-The built-in it uses. It starts every member and returns `submitted` at the first submission, `verified` at the first passing one, or `all_done` when every member has ended (`quiescence` when members are left idle); which stop applies follows the final chain unless the task names one. The sketch below shows its shape; the controller as built, including how it treats a persistent member's `MemberIdle`, is [`leaderless.py`](../src/inspect_swarm/_controller/leaderless.py):
+The built-in it uses, whose signature is:
 
 ```python
-import contextlib
-
 @swarm_controller
-def leaderless(
-    stop: Literal["submission", "verified", "end"] | None = None,
-    *,
-    final: FinalSpec | None = None,
-) -> Controller:
-    """Start every member with the swarm's input; stop when the answer chain has its answer, or when all have ended."""
-    if stop not in (None, "submission", "verified", "end"):
-        raise ValueError(f"leaderless: stop must be 'submission', 'verified', 'end' or None, got {stop!r}")
-    if final is not None and has_reporter(final):   # any `reporter` mode in the chain
-        raise ValueError("leaderless: a leaderless swarm has no reporter")
-
-    async def run(swarm: SwarmControl) -> StopReason:
-        # None: the stop for the chain the swarm applies, which final=None resolves only in swarm()
-        applied = _stop(swarm.final_chain, stop)
-        for m in swarm.members:
-            swarm.start(m)
-        async with contextlib.aclosing(swarm.events()) as events:   # released on the early return
-            async for event in events:
-                # a persistent member's answer is a submission, and carries its verdict on MemberIdle
-                if not isinstance(event, MemberEnded | MemberIdle):
-                    continue
-                if applied == "verified" and event.verdict is not None and event.verdict.passed:
-                    return "verified"
-                if applied == "submission" and (isinstance(event, MemberIdle) or event.submitted):
-                    return "submitted"
-        return "quiescence" if any(m.state == "idle" for m in swarm.members) else "all_done"
-
-    return Controller(run, final=final)
+def leaderless(*, stop: Literal["answer", "end"] = "answer", final: FinalSpec | None = None) -> Controller: ...
 ```
 
-A stop at the first submission (decision: Ransom, 2026-10-21) is meaningful only with the `first` chain: the first submission is then the answer, so nothing the other members do after it can change it. With `verify`, `vote`, `last` or `synthesize` a later member can still change the answer. So the stop at the first submission is the default only when the chain is `first`, with the chain learnt at run time (decision: Ransom, 2026-11-10); a chain that starts with `verify` stops at the first passing submission by default, and any other chain runs every member to its end (decision: Ransom, 2026-11-11). `final=None` is resolved against the task's result only in `swarm()`, so `run` reads the resolved chain from `SwarmControl.final_chain`; `stop` names the stop directly, one value per stop, in place of two flags (decision: Ransom, 2026-11-11), and `_stop()` and its table are [swarm-leaderless-stop.md](swarm-leaderless-stop.md#leaderless). Any explicit `stop` is accepted with any chain: `stop="submission"` with `final="vote"` votes over the submissions made before the stop. `stop="end"` keeps every member running to its end, for tasks whose scorer reads a shared artifact after the drain, arms that measure each member's result (team@k), and agents for which any normal return counts as a submission.
+It starts every member with the swarm's input. With `stop="answer"` it stops as soon as the answer can no longer change, decided by the leading mode of the chain the swarm applies, which `run` reads from `SwarmControl.final_chain` because `final=None` is resolved against the task's result only in `swarm()`: `submitted` at the first submission for a chain led by `first`, `verified` at the first passing submission for a chain led by `verify`, and otherwise `all_done` when every member has ended, or `quiescence` when members are left idle. A persistent member's `MemberIdle` counts as a submission and carries its answer's verdict. `stop="end"` runs every member to its end, for tasks whose scorer reads a shared artifact after the drain, arms that measure each member's result (team@k), graded verifiers, and agents for which any normal return counts as a submission. The stop at the first submission (decision: Ransom, 2026-10-21) is the default only for a chain led by `first`, with the chain learnt at run time (decision: Ransom, 2026-11-10); a chain led by `verify` stops at the first passing submission and any other chain runs every member to its end (decision: Ransom, 2026-11-11); `stop` is keyword-only and takes these two values in place of `stop_on_submission` and `stop_on_verified` (decision: Ransom, 2026-11-12). The rule and why are [swarm-leaderless-stop.md](swarm-leaderless-stop.md#leaderless); the controller as built is [`leaderless.py`](../src/inspect_swarm/_controller/leaderless.py).
 
 **A coordinator swarm (later: coordinator topologies, on the later messages channel).** A lead and three workers. All start together; workers wait for the lead's instructions with `swarm_wait` ([swarm-wait.md](swarm-wait.md)), and the lead's submission is the answer. Members with tool sources are registered builders, passed uncalled, so the log can name them and each member gets its own tool source ([Members](#tool-state-and-member-builders)).
 
@@ -840,8 +811,8 @@ All in inspect_swarm, with mockllm, on asyncio and trio, no network or Docker:
   - (after M2) a final chain mixing strings and pydantic `FinalMode` values (including a `synthesize` with a model) validates back from its logged JSON;
   - `-T channels=filesystem` (a string) and `-T channels=filesystem,messages` (a list) both resolve.
 - `tests/test_controller.py`:
-  - `leaderless` starts every member and returns `submitted` at the first submission, soft-stopping the members still running, while a member that ends without a submission does not stop it; with `stop="end"` every member runs to its end and it returns `all_done`; after M2, with `stop="verified"` it returns `verified` at the first passed verdict;
-  - (after M2) a delayed verifier: the last member's agent returns before its verdict is taken, and `events()` still yields that member's `MemberEnded` with the verdict before it ends, so `stop="verified"` and `escalate` see it;
+  - `leaderless` starts every member and returns `submitted` at the first submission, soft-stopping the members still running, while a member that ends without a submission does not stop it; with `stop="end"` every member runs to its end and it returns `all_done`; after M2, under a chain led by `verify` it returns `verified` at the first passed verdict;
+  - (after M2) a delayed verifier: the last member's agent returns before its verdict is taken, and `events()` still yields that member's `MemberEnded` with the verdict before it ends, so `leaderless`'s stop at a passing verdict and `escalate` see it;
   - a custom controller (`escalate`) starts members later and with custom input; `start()` twice raises; `events()` ends when nothing runs; a second iterator raises while one is open, including one that competes in the interval after a waiting iterator is woken (the woken one keeps its event); an open iterator holds its events until it is closed;
   - returning while members run goes through the soft stop: in-flight mockllm calls complete and are recorded, members get status `stopped`, and only a member still running after `Budget.grace` is cancelled; the swarm cap and time cap take the same path with reasons `swarm_cap` and `swarm_time`, and `run` is cancelled;
   - stop ordering, with barriers: a controller that runs a scout first (`escalate` after M2; in M1 one that starts the workers when the scout ends) runs its scout while the time cap (and, separately, the swarm cap) fires; the scout ends unverified during grace. No pending worker starts (a `start()` attempted after the stop began raises `RuntimeError`), no member model call is dispatched after the stop began, cancelling `run` does not cancel the scout's member task, and the never-started workers are recorded as not started;
