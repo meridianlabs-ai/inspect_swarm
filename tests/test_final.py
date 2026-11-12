@@ -1664,8 +1664,8 @@ async def test_the_provisional_answer_follows_the_vote_after_each_key() -> None:
 
 
 @pytest.mark.anyio
-async def test_the_vote_counts_keys_the_record_leaves_out() -> None:
-    # two members answer with a key the record cannot hold
+async def test_the_vote_counts_keys_that_read_as_references() -> None:
+    # two members answer with a key a log would read as a reference to an attachment
     stop = await run_swarm(
         swarm(
             _team(
@@ -1686,8 +1686,8 @@ async def test_the_vote_counts_keys_the_record_leaves_out() -> None:
         False,
     )
     assert [(m.answer_key, m.left_out) for m in record.members] == [
-        (None, ["output", "answer_key"]),
-        (None, ["output", "answer_key"]),
+        ("attachment://x", []),
+        ("attachment://x", []),
         ("y", []),
     ]
 
@@ -1777,7 +1777,7 @@ async def test_the_final_verdict_checks_the_environment_after_the_stop() -> None
 
 
 @pytest.mark.anyio
-async def test_the_final_verdict_without_an_answer_and_with_a_lost_explanation() -> (
+async def test_the_final_verdict_without_an_answer_keeps_a_reference_explanation() -> (
     None
 ):
     environment = _Environment(explanation="attachment://elsewhere")
@@ -1790,8 +1790,9 @@ async def test_the_final_verdict_without_an_answer_and_with_a_lost_explanation()
         )
     )
     assert environment.calls == [""]
-    assert stop.record.final_verdict == Verdict(False)
-    assert stop.record.left_out == ["explanation"]
+    # kept as written, though a log would read it as a reference to an attachment
+    assert stop.record.final_verdict == Verdict(False, None, "attachment://elsewhere")
+    assert stop.record.left_out == []
 
 
 class _Holds:
