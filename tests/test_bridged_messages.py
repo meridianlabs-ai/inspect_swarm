@@ -111,7 +111,7 @@ def test_a_cli_member_messages_a_native_member(cli: str) -> None:
         solver=swarm(
             [member(collector(cli), name="w-1"), member(_cli(cli), name=cli)],
             channels=[messages()],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
         ),
         sandbox="docker",
     )

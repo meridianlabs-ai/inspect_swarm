@@ -917,7 +917,7 @@ async def test_a_member_stopped_while_its_background_work_drains(submits: bool) 
     ran = await _run(
         swarm(
             [member(returns_with_background(), name="a")],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
             budget=Budget(grace=5),
         ),
@@ -1755,7 +1755,7 @@ async def test_stopping_the_swarm_is_its_own_stop_in_its_own_context() -> None:
                     name="b",
                 ),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
         ),
         drive,
@@ -2990,7 +2990,7 @@ async def test_operator_actions_over_the_control_channel() -> None:
                 member(_react(Script([_submit("42")])), name="a"),
                 member(_react(script, slow()), name="b"),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
             budget=Budget(grace=0.2),
         ),

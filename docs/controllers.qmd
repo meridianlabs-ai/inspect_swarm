@@ -9,9 +9,15 @@ llms-description: "The `leaderless` controller, when the swarm stops, which subm
 
 ## leaderless
 
-The only built-in controller is `leaderless`, the default. It starts every member with the sample's input and stops the swarm when the first member submits. The other members finish the calls they have in flight and stop. Those still running after the grace period are cancelled. If no member submits, the swarm ends when all have ended.
+The only built-in controller is `leaderless`, the default. It starts every member with the sample's input and stops the swarm as soon as its answer can no longer change. The chain that chooses the answer decides when that is ([Scoring](scoring.qmd#the-answer)), by its first mode:
 
-Pass `leaderless(stop_on_submission=False)` to let every member run to its end:
+- `first`: the swarm stops at the first submission. This is the chain without a result contract, or with one that has neither a verifier nor an answer key.
+- `verify`: the swarm stops at the first submission that passes the verifier. If none passes, every member runs to its end, and the rest of the chain chooses from all their submissions. This is the default chain when the result contract has a verifier.
+- `vote`, `last` or `synthesize`: every member runs to its end. `vote` is the default chain when the result contract has an answer key and no verifier.
+
+When the swarm stops, the other members finish the calls they have in flight and stop. Those still running after the grace period are cancelled. If no stop fires, the swarm ends when all members have ended.
+
+Pass `leaderless(stop="end")` to let every member run to its end whatever the chain:
 
 ```python
 from inspect_ai.agent import react
@@ -20,35 +26,26 @@ from inspect_swarm import leaderless, member, swarm
 
 solver = swarm(
     members=member(react, count=4),
-    controller=leaderless(stop_on_submission=False),
+    controller=leaderless(stop="end"),
 )
 ```
 
 Use it when:
 
 - The scorer reads what members leave in the sandbox, where members still working change what is scored ([Scoring](scoring.qmd#scoring-what-members-leave)).
-- You measure each member's result, as for team@k.
+- You measure each member's result, as for team@k or `member_scores()`.
+- Your verifier grades passes with `Verdict.value`, so a later pass could rank higher than the first.
 - Your agent returns normally when it gives up, which would count as a submission and stop the swarm.
 
-Without a result contract, the answer is still the first submission; otherwise the result contract determines the default chain. When the members work as a team and the latest submission should be the answer, add `final="last"`:
+`final` sets the chain, and so the stop. When the members work as a team and the latest submission should be the answer, pass `final="last"`, and every member runs to its end:
 
 ```python
 from inspect_swarm import leaderless
 
-controller = leaderless(stop_on_submission=False, final="last")
+controller = leaderless(final="last")
 ```
 
-Any `final` other than `first` needs `stop_on_submission=False`, and `leaderless` refuses it otherwise: a chain that compares submissions needs members that run on after the first one. Without `final`, the chain is the default for the task's result contract ([Scoring](scoring.qmd#the-answer)). With the default `stop_on_submission=True`, that chain chooses from the submissions made before the members stopped, usually just the first.
-
-With a verifier in the result contract, `stop_on_verified=True` stops the swarm at the first submission that passes. It also needs `stop_on_submission=False`:
-
-```python
-from inspect_swarm import leaderless
-
-controller = leaderless(stop_on_submission=False, stop_on_verified=True)
-```
-
-`leaderless` returns the stop reason `verified` when a passed submission stopped the swarm, `submitted` when a submission stopped it and `all_done` when every member ended. The ledger records it as `stop_reason` ([Analysis](analysis.qmd#the-ledger)).
+`leaderless` returns the stop reason `verified` when a passed submission stopped the swarm, `submitted` when a submission stopped it, `quiescence` when no stop fired and some [persistent members](#persistent-members) are left idle, and `all_done` when every member ended. The ledger records it as `stop_reason` ([Analysis](analysis.qmd#the-ledger)).
 
 ## Writing a controller
 
@@ -99,7 +96,7 @@ def escalate(first: str = "fast") -> Controller:
 - The swarm's preamble tells each member that the members work at the same time. A controller that runs them otherwise can pass its own text as `preamble`, which replaces the whole preamble, channel instructions included, and is used as given. `preamble=False` leaves it out; the input must then hold a user message.
 - `swarm.events()` yields each event once, in order from the swarm's start. `MemberEnded` gives the member's name, status, whether it submitted, and the verdict on its submission (`passed` and `value`) when the swarm's result contract has a verifier ([Scoring](scoring.qmd#the-result-contract)). With a verifier, a submission's event waits for its verdict. `MemberIdle` and `MemberNews` come only from [persistent members](#persistent-members). Test an event's type before reading its fields. The iterator ends when no member is running or ending, none is waiting for its verdict and no event is waiting, so a member started or woken later needs a new `events()` call. Use one iterator at a time, and close it, as `aclosing()` does here.
 - `check`, if given, is called with the roster when `swarm()` is called. Raise `ValueError` for a roster the controller cannot run.
-- `final`, if given, is the chain that chooses the answer: a mode such as `first` or `last`, or a list of modes. `None`, as here, is the default chain for the task's result contract ([Scoring](scoring.qmd#the-answer)).
+- `final`, if given, is the chain that chooses the answer: a mode such as `first` or `last`, or a list of modes. `None`, as here, is the default chain for the task's result contract ([Scoring](scoring.qmd#the-answer)). `swarm.final_chain` gives the chain the swarm applies, by mode name, such as `("verify", "vote", "first")`, so `run` can read the default the contract chose.
 - The stop reasons `all_done`, `submitted`, `verified` and `quiescence` are recorded as they are. Any other is recorded as `controller:<reason>`.
 
 A `Controller` holds configuration only: one object serves every sample, so keep per-sample state in `run`'s local variables. The factory's arguments are logged with the controller, so it can be rebuilt from the log. Pass the controller to the swarm, `swarm(..., controller=escalate("fast"))`, or by its registered name with its default arguments, `controller="escalate"`.
@@ -238,7 +235,7 @@ swarm(
 - `handle.end()` or the swarm's stop on an idle member sets it `ending` at once, and it ends `submitted`, with its last answer as its output. The iterator waits for its `MemberEnded`.
 - With a verifier in the result contract, a member stays `running` and held after an answer until the answer's verdict is taken. It then goes idle, and `MemberIdle.verdict` carries the verdict (`passed` and `value`). `wake()` refuses the member until then. An end or a stop while the verdict is pending ends the member `submitted`, and its `MemberEnded` waits for the verdict. The handle's `verdict`, and `MemberEnded`'s however the member ends, is the verdict on its latest answer. Without a verifier, `MemberIdle.verdict` is `None`.
 - The swarm is *quiescent* when every member is pending, idle or ended and no event is waiting: `events()` ends. Nothing moves until the controller starts, wakes or ends a member. A controller that wakes no one returns `quiescence`.
-- `leaderless` treats `MemberIdle` as a submission, so by default the first answer stops the swarm. With `stop_on_submission=False` it returns `quiescence` once no member is working and some are idle, and with `stop_on_verified=True` it returns `verified` at a `MemberIdle` whose verdict passed. It never wakes a member.
+- `leaderless` treats `MemberIdle` as a submission. Under a chain led by `first`, the first answer stops the swarm. Under a chain led by `verify`, it returns `verified` at a `MemberIdle` whose verdict passed. Otherwise, or with `stop="end"`, it returns `quiescence` once no member is working and some are idle. It never wakes a member, so each persistent member answers once.
 
 ### News for idle members
 

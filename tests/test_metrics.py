@@ -164,7 +164,7 @@ async def test_tokens_and_cost_are_the_ledgers() -> None:
                 member(generator(model, calls=2), name="a"),
                 member(generator(model), name="b"),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
         )
     )
@@ -265,7 +265,7 @@ async def test_members_that_acted_without_resolving_swarm_tools_are_unwired(
                 member(generator(scripted_model()), name="cli", bridged=True),
             ],
             channels=channels,
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
         )
     )
     assert _metrics(outcome.transcript).tools_unwired == unwired
@@ -388,7 +388,7 @@ async def test_steps_to_answer_and_longest_member_steps(
                 member(_stepper(*a, submits), name="a"),
                 member(_stepper(*b, submits), name="b"),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
         )
     )
@@ -570,7 +570,7 @@ def test_the_swarm_has_one_timeline_rooted_at_its_span(
                         member(generator(model, calls=a_calls), name="a"),
                         member(generator(model), name="b"),
                     ],
-                    controller=leaderless(stop_on_submission=False),
+                    controller=leaderless(stop="end"),
                     channels=[],
                 )
             ),
@@ -1154,7 +1154,7 @@ async def test_waits_wait_time_and_idle_time() -> None:
                 member(held(finish), name="r"),
             ],
             channels=[shared_memory()],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
         )
     )
     p, q, r = _metrics(outcome.transcript).members
@@ -1852,7 +1852,7 @@ def _impostor_swarm() -> Agent:
         ],
         channels=["metrics_test_impostor"],
         # iw, which waits for ip's end, answers
-        controller=leaderless(stop_on_submission=False, final="last"),
+        controller=leaderless(stop="end", final="last"),
     )
 
 

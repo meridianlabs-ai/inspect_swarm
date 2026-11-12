@@ -65,14 +65,14 @@ From the command line:
 inspect eval my_tasks.py --solver inspect_swarm/swarm -S 'members={factory: react, count: 4}'
 ```
 
-Each sample runs four `react()` members, `react-1` to `react-4`, at the same time. Each starts with the sample's input and a short preamble: its name, the number of members, and how to share files. By default the swarm stops at the first submission and uses it as its answer. It stops the remaining members. To let every member run to its end, use `leaderless(stop_on_submission=False)`. The task's scorer scores it as it would score a single agent.
+Each sample runs four `react()` members, `react-1` to `react-4`, at the same time. Each starts with the sample's input and a short preamble: its name, the number of members, and how to share files. By default the swarm stops at the first submission and uses it as its answer. It stops the remaining members. A verifier or an answer key in the swarm's result contract changes the default answer and so the stop: the swarm then stops at the first submission that passes the verifier, or lets every member run to its end. To let every member run to its end in any case, use `leaderless(stop="end")`. The task's scorer scores it as it would score a single agent.
 
 `--solver` and `eval(solver=...)` replace the task's whole solver, including any system message or tools it set up, so give the members their tools and prompt. Members use the eval's model unless they are given one. The task's `setup` solver still runs first.
 
 ## What a swarm has
 
 - Members: agents registered with `@agent`, given as `member()` records with a name, role, count, limits and sandbox. A member builder, an `@agent` function that builds the member's agent, is where it gets the swarm's tools. See [Members](https://meridianlabs-ai.github.io/inspect_swarm/members.html).
-- A controller: which members start and when the swarm stops. The default, `leaderless`, starts every member and stops at the first submission. See [Controllers](https://meridianlabs-ai.github.io/inspect_swarm/controllers.html), which also covers writing one.
+- A controller: which members start and when the swarm stops. The default, `leaderless`, starts every member and stops as soon as the answer can no longer change: at the first submission, unless the result contract has a verifier or an answer key. See [Controllers](https://meridianlabs-ai.github.io/inspect_swarm/controllers.html), which also covers writing one.
 - Channels: how members share information. `filesystem`, the default, describes a shared directory in the sample's sandbox. `shared_memory` is a board of files with `swarm_wait`. `messages` lets members send each other messages. `topics` gives them named rooms with declared readers and writers. See [Channels](https://meridianlabs-ai.github.io/inspect_swarm/channels.html).
 - A budget: caps on cost, tokens and time, taken from the sample's limits by default, shared or split between members. See [Budgets](https://meridianlabs-ai.github.io/inspect_swarm/budget.html).
 - Sandboxes: members share the sample's sandbox, or each works in its own. See [Sandboxes](https://meridianlabs-ai.github.io/inspect_swarm/sandboxes.html).
@@ -108,7 +108,7 @@ The swarm logs every write, view and wait. See [Shared Memory](https://meridianl
 
 ## Results
 
-By default the swarm's answer is the first submission. `leaderless(stop_on_submission=False, final="last")` makes it the latest, and a controller of your own can choose it. The swarm's output is the chosen member's `ModelOutput`, unchanged. When the swarm ends, it writes its result record to the transcript: each member's state and status, and which member's output is the answer. Read it with `swarm_result()`. The swarm keeps two more records in the sample store:
+By default the swarm's answer is the first submission; a verifier or an answer key in the result contract changes that default. `leaderless(final="last")` makes it the latest, and a controller of your own can choose it. The swarm's output is the chosen member's `ModelOutput`, unchanged. When the swarm ends, it writes its result record to the transcript: each member's state and status, and which member's output is the answer. Read it with `swarm_result()`. The swarm keeps two more records in the sample store:
 
 - `inspect_swarm:ledger`: the swarm's caps and each member's usage and cost.
 - `inspect_swarm:metrics`: tokens, cost and time, and counts of how each member acted, communicated and waited.

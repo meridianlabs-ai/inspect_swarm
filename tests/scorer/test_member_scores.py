@@ -134,7 +134,7 @@ def artifact_members(calls: list[TaskState]) -> Scorer:
 def _swarm(names: tuple[str, ...] = NAMES, **kwargs: Any) -> Agent:
     return swarm(
         [member(from_input(name), name=name) for name in names],
-        controller=kwargs.pop("controller", leaderless(stop_on_submission=False)),
+        controller=kwargs.pop("controller", leaderless(stop="end")),
         channels=[],
         **kwargs,
     )

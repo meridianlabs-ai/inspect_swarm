@@ -3,7 +3,7 @@ import json
 import math
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import anyio
@@ -353,9 +353,7 @@ def _limited_task(*, early_submission: bool) -> Task:
         )
     return Task(
         dataset=[Sample(input="task")],
-        solver=swarm(
-            members, controller=leaderless(stop_on_submission=False), channels=[]
-        ),
+        solver=swarm(members, controller=leaderless(stop="end"), channels=[]),
         message_limit=6,
     )
 
@@ -797,7 +795,7 @@ async def test_a_team_swarm_answers_with_its_last_submission() -> None:
                     name="refuser",
                 ),
             ],
-            controller=leaderless(stop_on_submission=False, final="last"),
+            controller=leaderless(stop="end", final="last"),
             channels=[],
         )
     )
@@ -845,7 +843,7 @@ def test_an_outer_limit_leaves_the_latest_submission_under_last(
                     after(["b"], generator(scripted_model(), calls=None)), name="busy"
                 ),
             ],
-            controller=leaderless(stop_on_submission=False, final="last"),
+            controller=leaderless(stop="end", final="last"),
             channels=[],
         ),
         message_limit=6,
@@ -866,9 +864,8 @@ def test_an_outer_limit_leaves_the_latest_submission_under_last(
 @pytest.mark.parametrize(
     "build",
     [
-        pytest.param(lambda: leaderless(final="last"), id="last-stopping-at-first"),
         pytest.param(
-            lambda: leaderless(stop_on_submission=False, final="best"),  # pyright: ignore[reportArgumentType]
+            lambda: leaderless(stop="end", final="best"),  # pyright: ignore[reportArgumentType]
             id="unknown-mode",
         ),
     ],
@@ -877,6 +874,45 @@ def test_a_final_rule_the_swarm_cannot_apply_is_refused(
     build: Callable[[], Controller],
 ) -> None:
     with pytest.raises(ValueError, match="final"):
+        build()
+
+
+@pytest.mark.parametrize(
+    "final", ["last", "vote", ["verify", "first"]], ids=["last", "vote", "chain"]
+)
+def test_leaderless_accepts_any_chain_with_the_default_stop(
+    final: FinalSpec,
+) -> None:
+    assert leaderless(final=final).final == final
+
+
+@pytest.mark.parametrize(
+    "build,error,match",
+    [
+        pytest.param(
+            lambda: leaderless(stop="first"),  # pyright: ignore[reportArgumentType]
+            ValueError,
+            'stop= must be "answer" or "end"',
+            id="unknown-stop",
+        ),
+        pytest.param(
+            lambda: cast(Any, leaderless)(stop_on_submission=False),
+            TypeError,
+            "stop_on_submission",
+            id="old-keyword",
+        ),
+        pytest.param(
+            lambda: cast(Any, leaderless)("end"),
+            TypeError,
+            "positional",
+            id="positional",
+        ),
+    ],
+)
+def test_leaderless_refuses_a_stop_it_does_not_have(
+    build: Callable[[], Controller], error: type[Exception], match: str
+) -> None:
+    with pytest.raises(error, match=match):
         build()
 
 
@@ -1440,7 +1476,7 @@ def test_a_mixed_chain_validates_back_from_its_log() -> None:
         pytest.param(
             lambda: swarm(
                 react(),
-                controller=leaderless(stop_on_submission=False, final="verify"),
+                controller=leaderless(stop="end", final="verify"),
                 result=answer_result(answer_key=_key),
             ),
             "verify, which needs a verifier",
@@ -1449,9 +1485,7 @@ def test_a_mixed_chain_validates_back_from_its_log() -> None:
         pytest.param(
             lambda: swarm(
                 react(),
-                controller=leaderless(
-                    stop_on_submission=False, final=["vote", "first"]
-                ),
+                controller=leaderless(stop="end", final=["vote", "first"]),
                 result=answer_result(verifier=_verifier()),
             ),
             "vote, which needs an answer_key",
@@ -1460,7 +1494,7 @@ def test_a_mixed_chain_validates_back_from_its_log() -> None:
         pytest.param(
             lambda: swarm(
                 react(),
-                controller=leaderless(stop_on_submission=False, final="vote"),
+                controller=leaderless(stop="end", final="vote"),
             ),
             "vote, which needs an answer_key",
             id="vote-without-a-contract",
@@ -1468,7 +1502,7 @@ def test_a_mixed_chain_validates_back_from_its_log() -> None:
         pytest.param(
             lambda: swarm(
                 react(),
-                controller=leaderless(stop_on_submission=False, final="synthesize"),
+                controller=leaderless(stop="end", final="synthesize"),
             ),
             "synthesize, which needs a result contract of kind answer",
             id="synthesize-without-a-contract",
@@ -1476,7 +1510,7 @@ def test_a_mixed_chain_validates_back_from_its_log() -> None:
         pytest.param(
             lambda: swarm(
                 react(),
-                controller=leaderless(stop_on_submission=False, final="synthesize"),
+                controller=leaderless(stop="end", final="synthesize"),
                 result=artifact_result(),
             ),
             "synthesize, which needs a result contract of kind answer",
@@ -1486,7 +1520,7 @@ def test_a_mixed_chain_validates_back_from_its_log() -> None:
             lambda: swarm(
                 react(),
                 controller=leaderless(
-                    stop_on_submission=False,
+                    stop="end",
                     final=["synthesize", synthesize(prompt="x"), "first"],
                 ),
                 result=answer_result(),
@@ -1500,19 +1534,9 @@ def test_a_mixed_chain_validates_back_from_its_log() -> None:
             id="reporter-in-a-controller-that-accepts-it",
         ),
         pytest.param(
-            lambda: leaderless(stop_on_submission=False, final=Reporter(member="x")),
+            lambda: leaderless(stop="end", final=Reporter(member="x")),
             "a leaderless swarm has no reporter",
             id="reporter-in-leaderless",
-        ),
-        pytest.param(
-            lambda: leaderless(final=["verify", "first"]),
-            "needs stop_on_submission=False",
-            id="chain-stopping-at-first",
-        ),
-        pytest.param(
-            lambda: leaderless(stop_on_verified=True),
-            "stop_on_verified=True\\) needs stop_on_submission=False",
-            id="stop-on-verified-stopping-at-first",
         ),
     ],
 )
@@ -1537,7 +1561,7 @@ def _team(*members: tuple[str, str, list[str]]) -> list[Any]:
 @pytest.mark.anyio
 async def test_the_default_chain_verifies_then_votes_then_takes_the_first() -> None:
     contract = answer_result(answer_key=_key, verifier=_verifier())
-    team = leaderless(stop_on_submission=False)
+    team = leaderless(stop="end")
     # b's answer passes, after a's that does not
     verified = await run_swarm(
         swarm(
@@ -1586,7 +1610,7 @@ async def test_a_strict_verify_leaves_no_answer_when_nothing_passes() -> None:
     stop = await run_swarm(
         swarm(
             _team(("a", "7", []), ("b", "8", ["a"])),
-            controller=leaderless(stop_on_submission=False, final="verify"),
+            controller=leaderless(stop="end", final="verify"),
             channels=[],
             result=answer_result(verifier=_verifier()),
         )
@@ -1673,7 +1697,7 @@ async def test_the_vote_counts_keys_that_read_as_references() -> None:
                 ("b", "attachment://x", ["a"]),
                 ("c", "y", ["b"]),
             ),
-            controller=leaderless(stop_on_submission=False, final="vote"),
+            controller=leaderless(stop="end", final="vote"),
             channels=[],
             result=answer_result(answer_key=_key),
         )
@@ -1700,7 +1724,7 @@ def test_a_vote_keeps_no_image_data_in_a_log_without_images(tmp_path: Path) -> N
         dataset=[Sample(input="task")],
         solver=swarm(
             _team(("a", images[0], []), ("b", images[1], ["a"]), ("c", "y", ["b"])),
-            controller=leaderless(stop_on_submission=False, final="vote"),
+            controller=leaderless(stop="end", final="vote"),
             channels=[],
             result=answer_result(answer_key=_key),
         ),
@@ -1760,7 +1784,7 @@ async def test_the_final_verdict_checks_the_environment_after_the_stop() -> None
                 *_team(("a", "done", [])),
                 member(after(["a"], breaks(environment)), name="b"),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
             result=artifact_result(verifier=environment),
         )
@@ -1784,7 +1808,7 @@ async def test_the_final_verdict_without_an_answer_keeps_a_reference_explanation
     stop = await run_swarm(
         swarm(
             [member(breaks(environment), name="b")],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
             result=artifact_result(verifier=environment),
         )
@@ -1827,7 +1851,7 @@ def _final_step_swarm(kind: str, verifier: Any) -> Agent:
         budget = Budget(time=0.2, grace=0.05)
     return swarm(
         _team(("a", "done", [])),
-        controller=leaderless(stop_on_submission=False),
+        controller=leaderless(stop="end"),
         channels=[],
         budget=budget,
         result=result,
@@ -1926,33 +1950,100 @@ async def test_a_verifier_failing_in_the_final_step_fails_the_sample(
         _assert_final_step_ended(kind, cancelled=False)
 
 
-@pytest.mark.anyio
-async def test_leaderless_stops_at_the_first_verified_submission() -> None:
-    stop = await run_swarm(
-        swarm(
-            [
-                *_team(("a", "7", []), ("b", "42", ["a"])),
-                member(sleeper(), name="slow"),
-            ],
-            controller=leaderless(stop_on_submission=False, stop_on_verified=True),
-            channels=[],
-            budget=Budget(grace=0.05),
-            result=answer_result(verifier=_verifier()),
-        )
-    )
-    assert stop.reason == "verified"
-    assert statuses(stop) == {"a": "submitted", "b": "submitted", "slow": "cancelled"}
-    assert (stop.record.final.mode, stop.record.final.member) == ("verify", "b")
+_Team = tuple[tuple[str, str, list[str]], ...]
+_FAILS_THEN_PASSES: _Team = (("a", "7", []), ("b", "42", ["a"]))
+_FAILS_THEN_TWO_AGREE: _Team = (("a", "7", []), ("b", "42", ["a"]), ("c", "42", ["b"]))
+_NONE_PASSES: _Team = (("a", "7", []), ("b", "8", ["a"]), ("c", "8", ["b"]))
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "text,reason,slow",
-    [("42", "verified", "cancelled"), ("7", "quiescence", "submitted")],
-    ids=["passed", "failed"],
+    "stop,final,result,team,slow,reason,mode,chosen",
+    [
+        # a stop fires: a late member that never ends is cancelled by it
+        pytest.param(
+            "answer", None, None, _FAILS_THEN_PASSES, True, "submitted", "first", "a",
+            id="first-no-contract",
+        ),
+        pytest.param(
+            "answer", ["first", "last"], None, _FAILS_THEN_PASSES, True,
+            "submitted", "first", "a",
+            id="first-led-chain",
+        ),
+        pytest.param(
+            "answer", None, answer_result(answer_key=_key, verifier=_verifier()),
+            _FAILS_THEN_PASSES, True, "verified", "verify", "b",
+            id="verify-led-passes",
+        ),
+        # no stop fires: every member runs to its end
+        pytest.param(
+            "answer", None, answer_result(answer_key=_key), _FAILS_THEN_TWO_AGREE,
+            False, "all_done", "vote", "b",
+            id="vote-led-default",
+        ),
+        pytest.param(
+            "answer", None, answer_result(answer_key=_key, verifier=_verifier()),
+            _NONE_PASSES, False, "all_done", "vote", "b",
+            id="verify-led-none-passes",
+        ),
+        pytest.param(
+            "answer", "vote", answer_result(answer_key=_key), _FAILS_THEN_TWO_AGREE,
+            False, "all_done", "vote", "b",
+            id="vote-explicit",
+        ),
+        pytest.param(
+            "end", None, answer_result(verifier=_verifier()), _FAILS_THEN_PASSES,
+            False, "all_done", "verify", "b",
+            id="end-verify-led",
+        ),
+        pytest.param(
+            "end", None, None, _FAILS_THEN_PASSES, False, "all_done", "first", "a",
+            id="end-no-contract",
+        ),
+    ],
+)  # fmt: skip
+async def test_leaderless_stops_when_the_chains_leading_mode_has_its_answer(
+    stop: Literal["answer", "end"],
+    final: FinalSpec | None,
+    result: ResultSpec | None,
+    team: _Team,
+    slow: bool,
+    reason: str,
+    mode: str,
+    chosen: str,
+) -> None:
+    members = _team(*team)
+    if slow:
+        members.append(member(sleeper(), name="slow"))
+    outcome = await run_swarm(
+        swarm(
+            members,
+            controller=leaderless(stop=stop, final=final),
+            channels=[],
+            budget=Budget(grace=0.05),
+            result=result,
+        )
+    )
+    assert outcome.reason == reason
+    expected = {name: "submitted" for name, _, _ in team}
+    if slow:
+        expected["slow"] = "cancelled"
+    assert statuses(outcome) == expected
+    assert (outcome.record.final.mode, outcome.record.final.member) == (mode, chosen)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "result,text,reason,slow",
+    [
+        (answer_result(verifier=_verifier()), "42", "verified", "cancelled"),
+        (answer_result(verifier=_verifier()), "7", "quiescence", "submitted"),
+        (answer_result(answer_key=_key), "42", "quiescence", "submitted"),
+    ],
+    ids=["passed", "failed", "vote"],
 )
-async def test_leaderless_stops_at_a_persistent_members_verified_answer(
-    text: str, reason: str, slow: str
+async def test_a_persistent_members_answer_stops_leaderless_as_its_chain_says(
+    result: ResultSpec, text: str, reason: str, slow: str
 ) -> None:
     sample = await _eval(
         swarm(
@@ -1966,10 +2057,10 @@ async def test_leaderless_stops_at_a_persistent_members_verified_answer(
                     generator(scripted_model(Script(delay=0.5)), calls=1), name="slow"
                 ),
             ],
-            controller=leaderless(stop_on_submission=False, stop_on_verified=True),
+            controller=leaderless(),
             channels=[],
             budget=Budget(grace=0.05),
-            result=answer_result(verifier=_verifier()),
+            result=result,
         )
     )
     assert sample.error is None, sample.error.traceback
@@ -1977,30 +2068,9 @@ async def test_leaderless_stops_at_a_persistent_members_verified_answer(
     [final_event] = _swarm_events(ran, "final")
     assert final_event.data["stop_reason"] == reason
     assert _statuses(ran) == {"p": "submitted", "slow": slow}
-    # a failing answer does not stop the swarm, and the first answer is still chosen
+    # a failing answer, or one under vote, does not stop the swarm, and the persistent
+    # member answers once
     assert (ran.record.final.member, ran.record.final.answer) == ("p", 0)
-
-
-@pytest.mark.anyio
-async def test_leaderless_stopping_at_the_first_submission_applies_the_default_chain() -> (
-    None
-):
-    stop = await run_swarm(
-        swarm(
-            [*_team(("a", "7", [])), member(sleeper(), name="slow")],
-            channels=[],
-            budget=Budget(grace=0.05),
-            result=answer_result(answer_key=_key, verifier=_verifier()),
-        )
-    )
-    assert stop.reason == "submitted"
-    assert statuses(stop) == {"a": "submitted", "slow": "cancelled"}
-    final_record = stop.record.final
-    assert (final_record.chain, final_record.mode, final_record.member) == (
-        ["verify", "vote", "first"],
-        "vote",
-        "a",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -2033,7 +2103,7 @@ def _synthesizing(
     return swarm(
         members,
         controller=leaderless(
-            stop_on_submission=False, final=[synthesize(model=model), *(after_it or [])]
+            stop="end", final=[synthesize(model=model), *(after_it or [])]
         ),
         channels=[],
         result=answer_result(),
@@ -2067,7 +2137,7 @@ async def test_synthesize_answers_from_the_fenced_submissions(
                 ),
             ],
             controller=leaderless(
-                stop_on_submission=False, final=synthesize(model=model, prompt=prompt)
+                stop="end", final=synthesize(model=model, prompt=prompt)
             ),
             channels=[],
             result=answer_result(),
@@ -2117,7 +2187,7 @@ def test_synthesize_calls_the_synthesizer_role_else_the_eval_model(
         dataset=[Sample(input="task")],
         solver=swarm(
             _answers(("a", "7")),
-            controller=leaderless(stop_on_submission=False, final="synthesize"),
+            controller=leaderless(stop="end", final="synthesize"),
             channels=[],
             result=answer_result(),
         ),
@@ -2237,7 +2307,7 @@ async def test_synthesize_is_not_called_unless_the_chain_reaches_it(
             if submits
             else [member(generator(scripted_model(Script([_refused([])]))), name="a")],
             controller=leaderless(
-                stop_on_submission=False, final=["verify", synthesize(model=model)]
+                stop="end", final=["verify", synthesize(model=model)]
             ),
             channels=[],
             result=answer_result(verifier=_verifier()),
@@ -2410,9 +2480,7 @@ def _synthesize_arm(prompt: str) -> str:
         dataset=[Sample(input="x")],
         solver=swarm(
             react(),
-            controller=leaderless(
-                stop_on_submission=False, final=synthesize(prompt=prompt)
-            ),
+            controller=leaderless(stop="end", final=synthesize(prompt=prompt)),
             channels=[],
             result=answer_result(),
         ),

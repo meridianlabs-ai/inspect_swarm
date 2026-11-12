@@ -126,7 +126,7 @@ async def test_member_limits_are_recreated_for_each_member_and_run(
             count=3,
             limits=[limit()],
         ),
-        controller=leaderless(stop_on_submission=False),
+        controller=leaderless(stop="end"),
         channels=[],
     )
     # the same swarm runs twice, as for a second sample: no limit object is reused
@@ -469,7 +469,7 @@ async def test_the_swarms_own_errors_become_statuses(
                 # a sibling with nothing to do but return
                 member(generator(scripted_model(), calls=0), name="sibling"),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
             budget=budget,
         )
@@ -700,7 +700,7 @@ async def test_a_member_that_stops_itself_ends_member_limit_custom(
                 # still running when the member stops itself
                 member(generator(scripted_model(Script(delay=0.05))), name="sibling"),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
         )
     )
@@ -1251,7 +1251,7 @@ async def test_a_cap_reached_in_a_members_last_tool_call_stops_the_swarm(
                 ),
                 member(_waiting_sibling(), name="sibling"),
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
             budget=budget,
         )
@@ -1452,7 +1452,7 @@ async def test_members_stop_on_their_own_shares(
                 )
                 for name, script in zip(names, scripts, strict=True)
             ],
-            controller=leaderless(stop_on_submission=False),
+            controller=leaderless(stop="end"),
             channels=[],
             budget=budget,
         ),
