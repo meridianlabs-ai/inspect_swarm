@@ -13,7 +13,7 @@ import pathlib
 import re
 import tomllib
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -39,6 +39,12 @@ LOCKED_JOBS = {
     },
 }
 BUILD_REQUIREMENTS = "scripts/build-dist/requirements.txt"
+SHARED_BUILD = SHARED_ACTIONS + ".github/workflows/build-python-dist.yml@"
+PUBLISH_STEPS = ("actions/download-artifact@", "pypa/gh-action-pypi-publish@")
+DOWNLOAD_INPUTS = {
+    "artifact-ids": "${{ needs.build.outputs.artifact-id }}",
+    "path": "dist/",
+}
 EXEMPT_COOLDOWN = "6 hours"
 # CI moves it to inspect_ai main, so Dependabot leaves it alone.
 MAIN_TRACKED = "inspect-ai"
@@ -109,6 +115,19 @@ def run_lines(job: dict[str, Any]) -> list[str]:
         for step in job.get("steps", [])
         for line in step.get("run", "").replace("\\\n", " ").splitlines()
         if line.strip()
+    ]
+
+
+def jobs() -> list[tuple[str, dict[str, Any], Any]]:
+    return [
+        (
+            f"{path.name}:{name}",
+            job,
+            job.get("permissions", workflow.get("permissions")),
+        )
+        for path in workflows()
+        for workflow in [yaml.safe_load(path.read_text())]
+        for name, job in workflow["jobs"].items()
     ]
 
 
@@ -377,20 +396,64 @@ def test_uv_never_relocks() -> None:
 
 
 # The build toolchain comes from the hashed file, as wheels, and the build
-# resolves nothing more.
+# resolves nothing more. The release build runs the same way in the shared
+# workflow.
 def test_builds_use_the_hashed_toolchain_without_isolation() -> None:
     hashed = [
         step["with"]
         for _, step in all_steps()
         if step.get("with", {}).get("versions") == "hashed-requirements"
     ]
-    assert len(hashed) == 2
+    assert len(hashed) == 1
     for inputs in hashed:
         assert inputs["requirements-file"] == BUILD_REQUIREMENTS
         assert inputs["package-format"] == "wheels-only"
     builds = [line for _, line in workflow_run_lines() if " -m build" in line]
-    assert len(builds) == 2
+    assert len(builds) == 1
     assert [line for line in builds if "--no-isolation" not in line.split()] == []
+    shared = [
+        where
+        for where, job, _ in jobs()
+        if job.get("uses", "").startswith(SHARED_BUILD)
+    ]
+    assert shared == ["publish.yaml:build"]
+
+
+# The build runs in the shared workflow, in a job with no publishing
+# credential. A job with `id-token: write` only downloads that build and
+# publishes it. A job that calls a shared workflow, such as a docs deploy, has
+# no steps here.
+def test_publish_jobs_only_upload_the_shared_build() -> None:
+    publishers = [
+        (where, job)
+        for where, job, permissions in jobs()
+        if isinstance(permissions, dict)
+        and cast(dict[str, str], permissions).get("id-token") == "write"
+        and "uses" not in job
+    ]
+    assert publishers, "no job holds id-token: write"
+    wrong = [
+        where
+        for where, job in publishers
+        if len(job["steps"]) != len(PUBLISH_STEPS)
+        or not all(
+            step.get("uses", "").startswith(prefix)
+            for step, prefix in zip(job["steps"], PUBLISH_STEPS, strict=True)
+        )
+    ]
+    assert wrong == [], f"only download the dist and publish it in {wrong}"
+    unlinked = [
+        where
+        for where, job in publishers
+        for needs in [job.get("needs", [])]
+        if "build" not in ([needs] if isinstance(needs, str) else needs)
+        or job["steps"][0].get("with") != DOWNLOAD_INPUTS
+    ]
+    assert unlinked == [], f"download only the shared build artifact in {unlinked}"
+    build = yaml.safe_load((WORKFLOWS / "publish.yaml").read_text())["jobs"]["build"]
+    assert build["uses"].startswith(SHARED_BUILD), build["uses"]
+    ref = build["uses"].split("@")[1].split()[0]
+    assert re.fullmatch(r"[0-9a-f]{40}", ref), "pin a 40-character SHA"
 
 
 def test_no_workflow_opts_out_of_the_cooldown() -> None:
