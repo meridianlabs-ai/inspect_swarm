@@ -1046,54 +1046,6 @@ async def test_an_output_the_record_cannot_hold_fails_the_sample(
 # A persistent member that ended submitted has its last answer as its output, which
 # the error names. A model call logs its output, and Inspect's own log cannot hold one
 # with a cycle, so the record is written directly here.
-@agent
-def holds_until_limit(
-    build: Callable[[], ModelOutput], model: Model | None = None
-) -> Agent:
-    """Hold the output `build` gives, then wait, or call `model` until a limit ends it."""
-
-    async def execute(state: AgentState) -> AgentState:
-        state.output = build()
-        while model is not None:
-            await model.generate(state.messages)
-        await anyio.sleep_forever()
-        return state
-
-    return execute
-
-
-# A sample limit ending the run, by cancelling it (time) or by an error (tokens), would
-# be scored as a limit reached; the record's failure is raised instead.
-@pytest.mark.anyio
-@pytest.mark.parametrize("limit", ["time", "token"])
-async def test_an_output_the_record_cannot_hold_fails_the_sample_a_limit_ends(
-    limit: Literal["time", "token"],
-) -> None:
-    odd = holds_until_limit(
-        lambda: _with_metadata(_cycle()),
-        scripted_model() if limit == "token" else None,
-    )
-    with pytest.raises(
-        ValueError,
-        match=r"The swarm's result record cannot hold the output of member 'odd': it holds a cycle at output\.metadata\['self'\]\.",
-    ) as raised:
-        async with sample(
-            time=0.1 if limit == "time" else None,
-            tokens=TOKENS_PER_CALL if limit == "token" else None,
-        ):
-            await run_agent(
-                swarm(
-                    member(odd, name="odd"), channels=[], budget=Budget(derive=False)
-                ),
-                "task",
-            )
-    assert f"When the swarm ended, the sample's {limit} limit was ending it." in (
-        raised.value.__notes__
-    )
-    assert RESULT_ID_KEY not in store()
-    assert None not in (store().get(LEDGER_KEY), store().get(METRICS_KEY))
-
-
 @pytest.mark.anyio
 async def test_a_persistent_answer_the_record_cannot_hold_is_named() -> None:
     persistent = MemberResult(

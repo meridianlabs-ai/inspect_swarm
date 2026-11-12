@@ -998,8 +998,6 @@ class SwarmRun:
                         )
                     except Exception as ex:
                         failures.append(ex)
-                    # the record's own failure, which a sample limit must not hide
-                    record_failure = failures[0] if failures else None
                     failures += self._account(
                         interval,
                         timeline,
@@ -1013,26 +1011,14 @@ class SwarmRun:
                         and isinstance(escaping, anyio.get_cancelled_exc_class()),
                         failed=not ended or bool(failures),
                     )
-                    # the error or cancellation that ended the swarm
-                    # `is not None`, as an exception's truthiness is its own to define
-                    ending = escaping if escaping is not None else error
-                    # the sample limit that was ending the run, when the record could
-                    # not be written: the record's failure is raised instead, so that
-                    # the sample fails rather than Inspect scoring it as a limit reached
-                    limit = (
-                        _exhaustion(ending)
-                        if record_failure is not None and ending is not None
-                        else None
-                    )
-                    if limit is not None and not limit.startswith("sample_limit:"):
-                        limit = None
-                    # else the error or cancellation that ended the swarm stays the one
+                    # the error or cancellation that ended the swarm stays the one
                     # raised, else the first failure here; the others become its notes
+                    # `is not None`, as an exception's truthiness is its own to define
                     first = (
-                        record_failure
-                        if limit is not None
-                        else ending
-                        if ending is not None
+                        escaping
+                        if escaping is not None
+                        else error
+                        if error is not None
                         else failures[0]
                         if failures
                         else None
@@ -1042,10 +1028,6 @@ class SwarmRun:
                             first.add_note(
                                 f"When the swarm ended: {type(failure).__name__}: {failure}"
                             )
-                    if limit is not None and record_failure is not None:
-                        record_failure.add_note(
-                            f"When the swarm ended, the sample's {limit.removeprefix('sample_limit:')} limit was ending it."
-                        )
                     if failures and first is failures[0]:
                         raise failures[0]
             finally:
