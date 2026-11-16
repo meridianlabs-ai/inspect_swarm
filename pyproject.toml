@@ -61,11 +61,10 @@ dev = [
     "pyyaml",
 ]
 
-# The docs' Python tools are in `doc`, which `dev` leaves out: CI installs `dev`
-# and never builds the docs. Quarto itself is a system install (`make docs`
-# checks its version), so the lock does not carry the Jupyter stack the
-# quarto-cli package pulls in (decision: Ransom, 2026-10-22).
+# The docs build, Quarto included, is in `doc`, which `dev` leaves out: the
+# tests never build the docs. 1.9.36 was `make docs`' floor for a system Quarto.
 doc = [
+    "quarto-cli>=1.9.36",
     "panflute",
     "markdown",
     "griffe>=2",

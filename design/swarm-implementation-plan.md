@@ -552,4 +552,4 @@ None.
 
 Noticed while planning and left out, for Ransom to file if wanted:
 
-- **A docs-publishing workflow.** No workflow builds or publishes the Quarto site; it is published to GitHub Pages by hand, as [CONTRIBUTING.md Documentation](../CONTRIBUTING.md#documentation) says.
+- **A docs-publishing workflow.** Since added: `publish.yaml` deploys the site to GitHub Pages with each release ([CONTRIBUTING.md Documentation](../CONTRIBUTING.md#documentation)).

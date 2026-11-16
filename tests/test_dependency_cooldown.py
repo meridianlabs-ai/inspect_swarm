@@ -456,6 +456,30 @@ def test_publish_jobs_only_upload_the_shared_build() -> None:
     assert re.fullmatch(r"[0-9a-f]{40}", ref), "pin a 40-character SHA"
 
 
+# The docs deploy waits for the PyPI publish. Its id-token is for the shared
+# workflow's Pages deploy, and it is the only job besides publish that holds one.
+def test_docs_job_runs_only_the_shared_docs_workflow() -> None:
+    holders = [
+        where
+        for where, _, permissions in jobs()
+        if isinstance(permissions, dict)
+        and cast(dict[str, str], permissions).get("id-token") == "write"
+    ]
+    assert holders == ["publish.yaml:publish", "publish.yaml:docs"]
+    docs = yaml.safe_load((WORKFLOWS / "publish.yaml").read_text())["jobs"]["docs"]
+    assert docs["permissions"] == {
+        "contents": "read",
+        "pages": "write",
+        "id-token": "write",
+    }
+    assert docs["needs"] == "publish"
+    assert docs["if"] == "${{ github.event_name == 'release' }}"
+    workflow, ref = docs["uses"].split("@")
+    assert workflow == "meridianlabs-ai/actions/.github/workflows/publish-docs.yml"
+    assert re.fullmatch(r"[0-9a-f]{40}", ref.split()[0]), "pin a 40-character SHA"
+    assert docs["with"]["extras"] == "doc"
+
+
 def test_no_workflow_opts_out_of_the_cooldown() -> None:
     floating = [
         (where, line)
