@@ -28,7 +28,7 @@ from inspect_ai.util._sandbox._framework_operation import (
 from inspect_ai.util._span import AGENT_SPAN_TYPE
 from pydantic import BaseModel, ConfigDict
 
-from ._budget import Budget, CostPair, cost_node, token_node
+from ._budget import Budget, Lever, MeterNodes, cost_node, token_node
 from ._critical_path import PathLog
 from ._fence import utf8_bytes
 
@@ -208,7 +208,7 @@ class MemberAccount:
     name: str
     status: str | None
     bridged: bool
-    lever: CostPair
+    lever: Lever
     # None for a member never started
     span_id: str | None
     cancelled: bool
@@ -449,9 +449,9 @@ class LedgerInterval:
         caps: Sequence[Limit],
         time_cap: float | None,
         members: Sequence[MemberAccount],
-        runtime: CostPair,
-        final: CostPair,
-        swarm: CostPair,
+        runtime: Lever,
+        final: MeterNodes,
+        swarm: MeterNodes,
         stop_reason: str | None,
         ended_by: str | None,
         interrupted: bool,
@@ -639,11 +639,11 @@ def sample_resumed() -> bool:
     return resume is not None and resume.attempt != "initial"
 
 
-def _meter(pair: CostPair) -> Meter:
+def _meter(meter: MeterNodes) -> Meter:
     return Meter(
-        usage=pair.token_node.model_usage.model_copy(),
-        cost=pair.cost,
-        suspended_cost=pair.suspended_cost,
+        usage=meter.token_node.model_usage.model_copy(),
+        cost=meter.cost_node.usage,
+        suspended_cost=meter.cost_node.suspended_cost,
     )
 
 

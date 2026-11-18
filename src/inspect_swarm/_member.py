@@ -57,9 +57,9 @@ from pydantic import (
 
 from ._background import MemberBackground, self_stop
 from ._budget import (
-    CostPair,
     Lever,
     MemberContext,
+    SwarmCostNode,
     SwarmMessageNode,
     SwarmNode,
     SwarmTimeNode,
@@ -422,7 +422,7 @@ def member_nodes(
                 SwarmTokenNode(limit.limit, limit.type, owner=name, role="limit")
             )
         elif isinstance(limit, _CostLimit):
-            nodes.extend(CostPair(limit.limit, owner=name, role="limit").nodes)
+            nodes.append(SwarmCostNode(limit.limit, owner=name, role="limit"))
         elif isinstance(limit, _TurnLimit):
             nodes.append(SwarmTurnNode(limit.limit, owner=name))
         elif isinstance(limit, _MessageLimit):
