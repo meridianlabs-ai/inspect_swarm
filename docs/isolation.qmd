@@ -113,7 +113,7 @@ Users isolation adds two `SwarmEvent`s to the swarm's span, each with `member` `
 - `capped`: `true` when the root had more than 10,000 entries, the most the census counts.
 - `paths_omitted`: paths left out once the census had written 1 MiB of them. The counts include them.
 
-A member's files under `/tmp`, `/var/tmp` or `/dev/shm` are files it put where every member can read them, outside the shares you gave. The census does not see reads, changes to existing files, files deleted before it ran, or traffic over sockets, so it is not a measure of how much members communicated.
+Files under `/tmp`, `/var/tmp`, `/dev/shm` or `/run/lock` are outside the shares you gave. Their permissions can still keep other members from reading them. The census does not see reads, changes to existing files, files deleted before it ran, or traffic over sockets, so it is not a measure of how much members communicated.
 
 Read the events from a sample in the log:
 
