@@ -26,7 +26,7 @@ Users isolation is a default boundary and a record of who made what, not contain
 ## What each member gets
 
 - A Linux user `swarm-<member>`, such as `swarm-w-1`, that is not root. Every member is also in the group `inspect-swarm`.
-- A private home, `/scratch/<member>` by default (`users(home=...)`). It is the member's `$HOME` and where its tools start. Only the member can read it, unless `peers="read"` lets every member read every other member's home. The swarm creates it empty: it does not copy the image's `/etc/skel`. It holds a `tmp` directory, and a `.profile` and `.bashrc` that set `$TMPDIR` to it.
+- A private home, `/scratch/<member>` by default (`users(home=...)`). It is the member's `$HOME` and where its tools start. Only the member can read it, unless `peers="read"` opens every member's home to the other members for reading ([Permissions](#permissions)). The swarm creates it empty: it does not copy the image's `/etc/skel`. It holds a `tmp` directory, and a `.profile` and `.bashrc` that set `$TMPDIR` to it.
 - The shared directories, `/shared` read-write by default ([Sharing](#sharing)).
 - A paragraph at the end of its preamble that tells it its user and directories:
 
@@ -59,11 +59,15 @@ isolation = users(
 
 A share can also be given as a mapping, as in `{"path": "/data", "access": "ro"}`.
 
-- In a `rw` share, every member can read, create, change, rename and delete every file. Files already there, such as the sample's `files`, are kept. Setup gives them to the `inspect-swarm` group and sets a default ACL, so that new files stay group-writable whatever a member's umask.
+- In a `rw` share, members can read, create, change, rename and delete each other's files. Files already there, such as the sample's `files`, are kept. Setup makes them readable and writable by every member, and sets a default ACL so that new files are too, whatever a member's umask. See [Permissions](#permissions) for what a member can still make private.
 - A `ro` share is used as it is: setup does not change it. Every member must already be able to read every entry in it and search every directory, and none may be able to write it. Set its modes in the image.
 - When the image has `git`, setup marks each `rw` share, and each repository near its top, as a safe directory, and makes those repositories group-shared. A repository a member creates later belongs to that member, so other members' `git` refuses it until they run `git config --global --add safe.directory <path>`, as their preamble says.
 
 The default `filesystem` channel tells members to share files in `/shared`, append to `/shared/notes.md` and keep their own work in `/scratch/<member>`, which match the defaults of `users()`. If you change one, change the other. The swarm refuses a `filesystem` channel whose `scratch` is not the members' `home`, whose `shared` directory is not a `rw` share, or whose notes file is in none.
+
+### Permissions
+
+Setup sets the permissions once, when the swarm starts. It does not enforce them afterwards. The default ACL in a `rw` share overrides a restrictive umask, but not a mode given when a file is created, or a later `chmod`. A member can still make a file or directory in a share, or in its home under `peers="read"`, that the other members cannot read. For example, `mktemp -d` creates a directory only its owner can use. In a share, run `chmod g+rwx <directory>` on it if the other members need it.
 
 ### What is not isolated
 
@@ -147,4 +151,4 @@ census = next(
 
 ### Comparing arms
 
-Members under users isolation are not root, and members in the shared default usually are. Comparing `isolation=None` with `users()` therefore changes privilege as well as isolation. To measure isolation alone, run the other arms at the same privilege: a swarm of one member under `users()` for the single-agent arm, and `users(peers="read")` with the working area as a `rw` share for an arm where members see everything.
+Members under users isolation are not root, and members in the shared default usually are. Comparing `isolation=None` with `users()` therefore changes privilege as well as isolation. To measure isolation alone, run the other arms at the same privilege: a swarm of one member under `users()` for the single-agent arm, and `users(peers="read")` with the working area as a `rw` share for an arm where members can read each other's work. Members can still make their own files private ([Permissions](#permissions)).
