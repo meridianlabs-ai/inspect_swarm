@@ -25,6 +25,8 @@ or, in a uv project:
 uv add inspect_swarm
 ```
 
+It needs Python 3.11 or later. It installs inspect_ai 0.3.291 or later from PyPI and needs nothing else.
+
 To install the latest development version from GitHub:
 
 ```bash
@@ -37,13 +39,11 @@ or, in a uv project:
 uv add "inspect_swarm @ git+https://github.com/meridianlabs-ai/inspect_swarm"
 ```
 
-For now it needs inspect_ai's `main` branch, which has features no inspect_ai release has yet. Installing Inspect Swarm installs a released inspect_ai, so install inspect_ai from GitHub `main` too (in a uv project, `uv add "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai"`):
+The development version is built and tested against inspect_ai's `main` branch, and may use features no inspect_ai release has yet. It still installs inspect_ai from PyPI. If it fails with the released inspect_ai, install inspect_ai from GitHub `main` too (in a uv project, `uv add "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai"`):
 
 ```bash
 pip install git+https://github.com/UKGovernmentBEIS/inspect_ai
 ```
-
-It needs Python 3.11 or later.
 
 ## Run a swarm on an existing task
 
@@ -117,7 +117,7 @@ The log viewer shows the swarm as one agent, named `swarm`, with a lane for each
 - [Members](members.qmd): member records, names, limits, member builders, and how a member ends.
 - [Controllers](controllers.qmd): when the swarm stops, and writing a controller of your own.
 - [Channels](channels.qmd) and [Shared Memory](shared-memory.qmd): how members share information, and waiting for each other.
-- [Budgets](budget.qmd) and [Sandboxes](sandboxes.qmd): the swarm's caps and splits, and shared or per-member sandboxes.
+- [Budgets](budget.qmd), [Sandboxes](sandboxes.qmd) and [Isolation](isolation.qmd): the swarm's caps and splits, shared or per-member sandboxes, and members as separate Linux users in one sandbox.
 - [Scoring](scoring.qmd), [Analysis](analysis.qmd) and [Restrictions](restrictions.qmd): the answer and the result record, metrics, the ledger, and what the swarm does not support or record.
 - [Operators](operators.qmd): messaging and stopping members of a running swarm with `inspect ctl`.
 

@@ -33,6 +33,8 @@ def shared_sandbox(k: int = 3) -> Task:
 
 Members' processes run side by side in one container, and nothing stops one member from killing another's process or filling the disk. Keep the task's checks and secrets out of a shared sandbox the members could read.
 
+To keep members apart in the shared sandbox, run each as its own Linux user, with a private home and the shared directories you list: `swarm(isolation=users())`. See [Isolation](isolation.qmd).
+
 ## Per member
 
 With `sandbox`, a member works in a sandbox environment of its own, which becomes its default, so `sandbox()` in its tools returns it. `{member}` stands for the member's name, so `sandbox="{member}"` gives each copy of a counted member its own:
