@@ -1,0 +1,150 @@
+---
+title: Isolation
+llms-description: "Users isolation with `swarm(isolation=users())`: each member runs as its own Linux user in one shared sandbox, with a private home and shared directories; what it stops, what it records, and what the image needs; read it to keep members apart without a sandbox each."
+---
+
+## Overview
+
+Members who share the sample's sandbox all run as its default user, usually root, so any member can read, change or delete another's files and stop its processes ([Sandboxes](sandboxes.qmd)). Users isolation keeps them apart inside that one sandbox. Each member runs as its own Linux user, with a private home directory, and shares only the directories you list.
+
+```python
+from inspect_ai.agent import react
+from inspect_ai.tool import bash
+
+from inspect_swarm import member, swarm, users
+
+solver = swarm(
+    members=member(react, args={"tools": [bash()]}, name="w", count=3),
+    isolation=users(),
+)
+```
+
+`isolation="users"` is the same as `users()`. When the swarm starts, before any member does, it creates the users, their homes and the shared directories in the sandbox, then runs commands as the members to check that the boundaries hold. If any check fails, the swarm refuses to start.
+
+Users isolation is a default boundary and a record of who made what, not containment. Members share one kernel and one sandbox root, and they can still reach each other in the ways listed under [What is not isolated](#what-is-not-isolated). When members must be truly apart, give each its own sandbox ([Sandboxes](sandboxes.qmd#per-member)).
+
+## What each member gets
+
+- A Linux user `swarm-<member>`, such as `swarm-w-1`, that is not root. Every member is also in the group `inspect-swarm`.
+- A private home, `/scratch/<member>` by default (`users(home=...)`). It is the member's `$HOME` and where its tools start. Only the member can read it, unless `peers="read"` lets every member read every other member's home. The swarm creates it empty: it does not copy the image's `/etc/skel`. It holds a `tmp` directory, and a `.profile` and `.bashrc` that set `$TMPDIR` to it.
+- The shared directories, `/shared` read-write by default ([Sharing](#sharing)).
+- A paragraph at the end of its preamble that tells it its user and directories:
+
+  > You run as the Linux user swarm-w-1, without root. Your private directory is /scratch/w-1 (your \$HOME); other members cannot read it. Shared with all members: /shared (read and write). Use \$TMPDIR for temporary files. Git refuses a repository another user created until you run `git config --global --add safe.directory <path>`. Processes you leave running are stopped when you finish.
+
+The member's tools run as its user:
+
+- The built-in tools that run commands in the sandbox, `bash()`, `python()`, `bash_session()`, `text_editor()`, `grep()`, `list_files()` and `read_file()`, run as the member and start in its home.
+- A custom tool's `sandbox().exec()`, `read_file()` and `write_file()` calls that name no user run as the member too. Raw `exec()` calls keep the sandbox's working directory unless they pass `cwd`, so use absolute paths in raw file calls.
+- A call that names another user, such as `exec(..., user="root")`, runs as that user. That is a grant made in code, and the record counts it ([The record](#the-record)).
+- `computer()`, `web_browser()` and `skill()` raise inside a member, and so do built-in tools built with another `user`, such as `bash(user="root")`, and a `bash_session()` shared between members through an explicit `instance`.
+
+Members are not root. They cannot install system packages, write system directories or `pip install` without `--user`. Tasks that need root while the members work are unsuitable.
+
+## Sharing
+
+`users(shared=...)` lists the directories every member shares, each read-write (`"rw"`) or read-only (`"ro"`). The default is one read-write share, `/shared`. Directories that do not exist are created.
+
+```python
+from inspect_swarm import Share, users
+
+isolation = users(
+    shared=[
+        Share(path="/shared", access="rw"),
+        Share(path="/data", access="ro"),
+    ],
+    peers="read",
+)
+```
+
+A share can also be given as a mapping, as in `{"path": "/data", "access": "ro"}`.
+
+- In a `rw` share, every member can read, create, change, rename and delete every file. Files already there, such as the sample's `files`, are kept. Setup gives them to the `inspect-swarm` group and sets a default ACL, so that new files stay group-writable whatever a member's umask.
+- A `ro` share is used as it is: setup does not change it. Every member must already be able to read every entry in it and search every directory, and none may be able to write it. Set its modes in the image.
+- When the image has `git`, setup marks each `rw` share, and each repository near its top, as a safe directory, and makes those repositories group-shared. A repository a member creates later belongs to that member, so other members' `git` refuses it until they run `git config --global --add safe.directory <path>`, as their preamble says.
+
+The default `filesystem` channel tells members to share files in `/shared`, append to `/shared/notes.md` and keep their own work in `/scratch/<member>`, which match the defaults of `users()`. If you change one, change the other. The swarm refuses a `filesystem` channel whose `scratch` is not the members' `home`, whose `shared` directory is not a `rw` share, or whose notes file is in none.
+
+### What is not isolated
+
+A member can still:
+
+- See the other members' processes and their command lines.
+- Share files through `/tmp`, `/var/tmp`, `/dev/shm` and `/run/lock`, which every user can write. The census records who left files there ([Evidence](#evidence)).
+- Connect to the other members' sockets on localhost.
+- Use the CPU, memory and process table that every member shares. A member that uses up memory can get a peer's process killed. Size the sandbox for every member at once ([Sandboxes](sandboxes.qmd#sizing)).
+
+Anything that gets a member root gets it everything.
+
+## Leftover processes
+
+When a member ends, however it ends, the swarm kills every process in the sandbox that still runs as the member's user. It repeats the scan up to five times, since a process can start another between scans. This runs before the member's end is recorded, so the member ends after its processes are gone. While it runs, operators cannot message or stop the member ([Operators](operators.qmd)).
+
+What the swarm found is the member's `reap` in the result record. Stopping the processes never fails the member or the sample. When it cannot finish, the record says so instead.
+
+## The record
+
+The result record ([Scoring](scoring.qmd#the-result-record)) gets these fields under users isolation. Without isolation they are `null`.
+
+- Each member's `user`, `uid` and `home`.
+- Each member's `reap`: its `status`, `killed` and `killed_names` (the processes the member left running after its tool calls returned, up to 50 names), and `survivors` and `survivor_names`. `status` is `ok` when no process of the member's user is left, `survivors` when some were still running after five rounds, `timeout` when the swarm stopped waiting for the sandbox, and `error` when the sandbox could not run the command, with its `message`.
+- Each member's `foreign_execs`: how many sandbox commands it ran as another user, such as a custom tool's `exec(..., user="root")`. Inspect's own sandbox operations are not counted. It counts named-user commands in every sandbox of the sample, and does not see calls a tool makes on the provider object (`sandbox().as_type(...)`) or file reads and writes.
+- The record's `isolation_incomplete`: `true` when some member that started may have left processes running, because its `reap` did not end `ok` or did not run. The task's scorer still runs. Analyses of what members left in the sandbox should exclude or report these samples.
+
+The swarm's metrics have the same check as `reap_complete` ([Analysis](analysis.qmd#metrics)).
+
+## Evidence
+
+Users isolation adds two `SwarmEvent`s to the swarm's span, each with `member` `null`.
+
+`isolation`, when the swarm starts, records the setup:
+
+- `sandbox`: the sandbox the members share.
+- `members`: each member's `name`, `user`, `uid` and `home`.
+- `census_roots`: the directories the census will scan, each with its `path` and `kind`: `share` for a `rw` share, `transient` for `/tmp`, `/var/tmp`, `/dev/shm` and `/run/lock`, and `world_writable` for the other directories on the root filesystem that every user can write.
+- `census_roots_capped`: `true` when there were more than 200 such world-writable directories, and the census scans only the first 200.
+
+`census`, once every member has ended and when the swarm ends without an error, records who owns the files under each census root. A file's owner is the member that created it, even from a background process between tool calls. Its `status` is `ok`, or `timeout` or `error` with a `message` when the census failed; the swarm ends as usual either way. With `ok`, `roots` has one entry for each census root:
+
+- `path` and `kind`, as above.
+- `status`: `ok`, `absent` for a root that is not a directory, or `unreadable` with find's first `error`, besides what it counted.
+- `members`: for each member that owns entries there, its `entries`, the `bytes` of its regular files, and up to 50 `paths`, each with its `type` (such as `file`, `directory` or `symlink`) and `path`. A path longer than 1,024 bytes is cut to that and marked `truncated`.
+- `others`: the `entries` and `bytes` owned by anyone else.
+- `capped`: `true` when the root had more than 10,000 entries, the most the census counts.
+- `paths_omitted`: paths left out once the census had written 1 MiB of them. The counts include them.
+
+A member's files under `/tmp`, `/var/tmp` or `/dev/shm` are files it put where every member can read them, outside the shares you gave. The census does not see reads, changes to existing files, files deleted before it ran, or traffic over sockets, so it is not a measure of how much members communicated.
+
+Read the events from a sample in the log:
+
+```python
+from inspect_ai.event import SwarmEvent
+
+census = next(
+    e.data for e in sample.events if isinstance(e, SwarmEvent) and e.kind == "census"
+)
+```
+
+## Requirements and limits
+
+- The sandbox must let commands run as root and as other users: Docker, or Kubernetes with a root container. The `local` sandbox is refused.
+- The image needs `useradd` and `groupadd` (package `passwd`), `awk` and GNU `find`. With any share it also needs `setfacl` and `getfacl` (package `acl`), which the default Inspect image and `python:3.12-bookworm` lack. For a Debian image:
+
+  ```dockerfile
+  FROM python:3.12-slim-bookworm
+  RUN apt-get update \
+      && apt-get install -y --no-install-recommends acl \
+      && rm -rf /var/lib/apt/lists/*
+  ```
+
+- Homes and shares must sit under directories that are owned by root and not writable by group or others. A share must not be `/tmp`, `/var/tmp`, `/dev/shm` or `/run/lock`, inside one or above one, and shares must not overlap each other or the homes' parent directory. The homes must not exist yet, so leave them out of the image and the sample's `files`.
+- Setup refuses an ACL in a share or on the homes' parent, and a mount inside a share or under the homes' parent. In a `rw` share it refuses hard-linked files, devices, sockets, FIFOs and set-user-id or set-group-id files.
+- Member names must be valid Linux user-name suffixes: lowercase letters, digits and `-`, starting with a letter, at most 26 characters. Members cannot choose their own names ([Members](members.qmd#members-that-choose-their-names)) or have their own sandboxes.
+- One swarm with users isolation per sandbox in a sample. Another is refused, whether it runs after the first, beside it, in a subtask or in a fork. `users(sandbox=...)` picks which of the sample's sandboxes the members share.
+- Bridged members (inspect_swe agents) do not work under users isolation yet: they need inspect_ai and inspect_swe versions with bridge support for it.
+- The image and sandbox configuration are trusted, like task code that runs before the swarm. Setup refuses an existing `inspect-swarm` group or `swarm-<member>` user or group, and checks that `sudo -n true` fails for each member, but it does not audit the image for every setting that could give a member authority. See `users()` for the conditions setup does not check.
+- Setup runs before the controller and counts towards the sample's time. A time cap derived from the sample's time limit is derived again after setup ([Budgets](budget.qmd)).
+
+### Comparing arms
+
+Members under users isolation are not root, and members in the shared default usually are. Comparing `isolation=None` with `users()` therefore changes privilege as well as isolation. To measure isolation alone, run the other arms at the same privilege: a swarm of one member under `users()` for the single-agent arm, and `users(peers="read")` with the working area as a `rw` share for an arm where members see everything.
