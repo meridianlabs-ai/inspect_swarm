@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.4.1...0.4.2) (2026-11-18)
+
+
+### Features
+
+* Adding World Reports ([#214](https://github.com/meridianlabs-ai/inspect_swarm/issues/214)) ([7c1f2f7](https://github.com/meridianlabs-ai/inspect_swarm/commit/7c1f2f7cb9acf19f3ca2ec09a43e7a4dda4ea33c))
+
 ## [0.4.1](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.4.0...0.4.1) (2026-11-16)
 
 
