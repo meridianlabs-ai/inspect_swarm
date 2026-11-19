@@ -26,8 +26,7 @@ This needs uv 0.13.4 or later. It installs the package in editable mode along wi
 
 For this repository:
 
-- inspect_swarm needs unreleased inspect_ai changes. `[tool.uv.sources]` in `pyproject.toml` points `inspect-ai` at inspect_ai `main`.
-- The 6-hour packages, and the in-house packages from PyPI with no cooldown, are in `[tool.uv.exclude-newer-package]` in `pyproject.toml`.
+- The in-house packages with no cooldown are in `[tool.uv.exclude-newer-package]` in `pyproject.toml`.
 
 ## Checks and tests
 

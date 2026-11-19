@@ -1,14 +1,10 @@
-# pyproject.toml holds back releases younger than seven days, or six hours for
-# a list of model provider SDKs and Inspect packages. Dependabot applies the
-# seven days to its uv.lock bumps and leaves that list to uv. Development tracks
-# inspect_ai main through [tool.uv.sources], and every CI job installs from
-# uv.lock, except that inspect-ai moves to main's latest commit first (or, on
-# the release PR, to the newest release). The build toolchain comes from a
-# hashed requirements file. Testing against the newest releases happens in
-# meridianlabs-ai/canaries, outside this repository.
+# pyproject.toml holds back releases younger than seven days, six hours for a
+# list of model provider SDKs, and no time for the in-house packages, which come
+# from PyPI only. Dependabot applies the seven days to its uv.lock bumps and
+# leaves that list to uv. Every CI job installs exactly uv.lock. The build
+# toolchain comes from a hashed requirements file. Testing against the newest
+# releases happens in meridianlabs-ai/canaries, outside this repository.
 
-import importlib.util
-import os
 import pathlib
 import re
 import tomllib
@@ -21,11 +17,8 @@ import yaml
 REPO = pathlib.Path(__file__).parents[1]
 GITHUB = REPO / ".github"
 WORKFLOWS = GITHUB / "workflows"
-UV_SYNC = GITHUB / "actions" / "uv-sync" / "action.yml"
-UV_SYNC_ACTION = "./.github/actions/uv-sync"
 SHARED_ACTIONS = "meridianlabs-ai/actions/"
-RELEASE_BRANCH = "release-please--branches--main"
-INSPECT_AI_GIT = "https://github.com/UKGovernmentBEIS/inspect_ai"
+INSTALL_ACTION = SHARED_ACTIONS + "install-python-dependencies@"
 MATRIX_PYTHON = "${{ matrix.python-version }}"
 LOCKED_JOBS = {
     "py-ruff": {"python-version": "3.11", "project-install": "skip", "extras": "dev"},
@@ -49,15 +42,6 @@ EXEMPT_COOLDOWN = "6 hours"
 # `false`: Meridian Labs publishes the in-house packages, so they have no cooldown.
 IN_HOUSE_COOLDOWN = False
 IN_HOUSE = re.compile(r"inspect-.*|petri.*")
-# CI moves it to inspect_ai main, so Dependabot leaves it alone.
-MAIN_TRACKED = "inspect-ai"
-
-spec = importlib.util.spec_from_file_location(
-    "inspect_ai_floor", GITHUB / "scripts" / "inspect_ai_floor.py"
-)
-assert spec and spec.loader
-inspect_ai_floor = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(inspect_ai_floor)
 
 
 def pyproject() -> dict[str, Any]:
@@ -73,16 +57,17 @@ def normalize(package: str) -> str:
     return re.sub(r"[-_.]+", "-", package).lower()
 
 
+def requirement_name(requirement: str) -> str:
+    return normalize(re.split(r"[^A-Za-z0-9._-]", requirement, maxsplit=1)[0])
+
+
 def direct_dependencies() -> set[str]:
     project = pyproject()["project"]
     requirements = [
         *project["dependencies"],
         *(r for extra in project["optional-dependencies"].values() for r in extra),
     ]
-    return {
-        normalize(re.split(r"[^A-Za-z0-9._-]", requirement, maxsplit=1)[0])
-        for requirement in requirements
-    }
+    return {requirement_name(requirement) for requirement in requirements}
 
 
 def cooldown_days(exclude_newer: str) -> int:
@@ -169,10 +154,15 @@ def workflow_run_lines() -> list[tuple[str, str]]:
 def verify_exclude_newer_package(
     config: dict[str, Any], direct: set[str], now: datetime
 ) -> None:
-    # Each entry is `false` for an in-house package, "6 hours" or a dated entry
-    # younger than the cooldown.
+    # Each in-house package has no cooldown. Each other entry is "6 hours" or a
+    # dated entry younger than the cooldown.
     max_age = timedelta(days=cooldown_days(config["exclude-newer"]))
-    for package, cooldown in config["exclude-newer-package"].items():
+    entries = config["exclude-newer-package"]
+    for package in sorted(p for p in direct if IN_HOUSE.fullmatch(p)):
+        assert entries.get(package) is IN_HOUSE_COOLDOWN, (
+            f"in-house {package} needs {package} = false"
+        )
+    for package, cooldown in entries.items():
         assert normalize(package) in direct, f"{package} is not a direct dependency"
         if cooldown is IN_HOUSE_COOLDOWN:
             assert IN_HOUSE.fullmatch(normalize(package)), (
@@ -190,13 +180,13 @@ def verify_dependabot_cooldown(
 ) -> None:
     cooldown = dependabot["cooldown"]
     assert cooldown["default-days"] == cooldown_days(config["exclude-newer"])
-    assert dependabot["ignore"] == [{"dependency-name": MAIN_TRACKED}]
+    assert "ignore" not in dependabot
     # Dependabot's cooldown counts whole days, so it leaves the "6 hours" and
     # `false` entries to uv. Dated entries are locked by hand.
     exempt = sorted(
         package
         for package, cooldown in config["exclude-newer-package"].items()
-        if cooldown in (EXEMPT_COOLDOWN, IN_HOUSE_COOLDOWN) and package != MAIN_TRACKED
+        if cooldown in (EXEMPT_COOLDOWN, IN_HOUSE_COOLDOWN)
     )
     assert sorted(cooldown.get("exclude", [])) == exempt
     # The exempt packages have their own group, listed before the catch-all.
@@ -233,6 +223,7 @@ def test_fresh_dated_entry_passes() -> None:
         ("pydantic", timedelta(days=-7), "dated entry"),
         ("pydantic", timedelta(days=1), "dated entry"),
         ("pydantic", IN_HOUSE_COOLDOWN, "not an in-house package"),
+        ("inspect-ai", EXEMPT_COOLDOWN, "needs inspect-ai = false"),
     ],
 )
 def test_bad_exclude_newer_package_entry_is_caught(
@@ -254,24 +245,28 @@ def test_other_cooldown_value_is_caught() -> None:
         verify_exclude_newer_package(config, direct_dependencies(), datetime.now(UTC))
 
 
-def test_inspect_ai_is_a_floor_tracked_from_main_through_sources() -> None:
-    # PyPI rejects direct references, and only uv reads [tool.uv.sources].
-    inspect_ai = [
-        d
-        for d in pyproject()["project"]["dependencies"]
-        if normalize(re.split(r"[^A-Za-z0-9._-]", d, maxsplit=1)[0]) == MAIN_TRACKED
-    ]
-    assert len(inspect_ai) == 1 and re.fullmatch(r"inspect-ai>=[\d.]+", inspect_ai[0])
-    assert uv_config()["sources"] == {
-        MAIN_TRACKED: {"git": INSPECT_AI_GIT, "branch": "main"}
-    }
-    # The committed lock comes from the source, not a PEP 508 git reference.
-    (locked,) = [
-        p
+def test_in_house_packages_come_from_pypi() -> None:
+    # No git or path source may merge for an in-house package: each is a PyPI
+    # floor, locked from the registry.
+    dependencies = pyproject()["project"]["dependencies"]
+    in_house = sorted(
+        d for d in dependencies if IN_HOUSE.fullmatch(requirement_name(d))
+    )
+    assert (
+        in_house
+        and [d for d in in_house if not re.fullmatch(r"[\w-]+>=[\d.]+", d)] == []
+    )
+    sources = uv_config().get("sources", {})
+    assert [p for p in sources if IN_HOUSE.fullmatch(normalize(p))] == []
+    locked = {
+        p["name"]: p["source"]
         for p in tomllib.loads((REPO / "uv.lock").read_text())["package"]
-        if p["name"] == MAIN_TRACKED
-    ]
-    assert locked["source"]["git"].startswith(f"{INSPECT_AI_GIT}?branch=main#")
+    }
+    assert [
+        (name, locked[name])
+        for name in map(requirement_name, in_house)
+        if "registry" not in locked[name]
+    ] == []
 
 
 def test_uv_comes_from_the_shared_setup_uv() -> None:
@@ -285,7 +280,7 @@ def test_uv_comes_from_the_shared_setup_uv() -> None:
         if ref.startswith(
             (
                 SHARED_ACTIONS + "setup-uv@",
-                SHARED_ACTIONS + "install-python-dependencies@",
+                INSTALL_ACTION,
             )
         )
     }
@@ -301,91 +296,11 @@ def test_locked_jobs_install_from_the_lockfile(
     installs = [
         step.get("with", {})
         for step in job["steps"]
-        if step.get("uses") == UV_SYNC_ACTION
+        if step.get("uses", "").startswith(INSTALL_ACTION)
+        and step["with"]["versions"] == "locked"
     ]
-    assert installs == [inputs]
+    assert installs == [{"versions": "locked", **inputs}]
     assert not [line for line in run_lines(job) if line.startswith("uv sync")]
-
-
-def test_only_uv_sync_installs_from_the_lockfile() -> None:
-    # Outside uv-sync, a locked install would skip moving inspect-ai to main.
-    locked = [
-        where
-        for where, step in all_steps()
-        if step.get("uses", "").startswith(SHARED_ACTIONS)
-        and step.get("with", {}).get("versions") == "locked"
-    ]
-    assert locked == ["uv-sync"]
-
-
-def test_uv_sync_action_moves_only_inspect_ai() -> None:
-    # Moving inspect-ai re-locks, which would also absorb a pyproject.toml
-    # change nobody locked, so the committed lock is checked first. The
-    # release PR resolves without sources, and later steps see the committed
-    # uv.lock.
-    action = yaml.safe_load(UV_SYNC.read_text())
-    setup, move, install, restore = action["runs"]["steps"]
-    assert setup["uses"].startswith(SHARED_ACTIONS + "setup-uv@")
-    # A job that installed through the shared action first already ran setup-uv.
-    assert setup["if"] == "env.MERIDIAN_SETUP_UV == ''"
-    assert setup["with"] == {"python-version": "${{ inputs.python-version }}"}
-    assert move["env"]["HEAD_REF"] == "${{ github.head_ref }}"
-    assert run_lines({"steps": [move]}) == [
-        "uv lock --check",
-        f'if [ "$HEAD_REF" = "{RELEASE_BRANCH}" ]; then',
-        "export UV_NO_SOURCES=1",
-        'echo "UV_NO_SOURCES=1" >> "$GITHUB_ENV"',
-        "fi",
-        "uv lock --upgrade-package inspect-ai",
-    ]
-    assert install["uses"].startswith(SHARED_ACTIONS + "install-python-dependencies@")
-    assert install["with"] == {
-        "versions": "locked",
-        "python-version": "${{ inputs.python-version }}",
-        "extras": "${{ inputs.extras }}",
-        "project-install": "${{ inputs.project-install }}",
-        "default-dependency-groups": "${{ inputs.default-dependency-groups }}",
-        "also-install-without-deps": "${{ inputs.also-install-without-deps }}",
-    }
-    assert run_lines({"steps": [restore]}) == ["git checkout -- uv.lock"]
-
-
-def test_release_branch_name_matches_everywhere() -> None:
-    # A misspelt name silently runs the release PR as a dev PR.
-    names = {
-        where: set(re.findall(r"release-please--branches--[\w-]+", text))
-        for where, text in [
-            *[(path.name, path.read_text()) for path in workflows()],
-            ("uv-sync", UV_SYNC.read_text()),
-        ]
-    }
-    assert set().union(*names.values()) == {RELEASE_BRANCH}
-    assert names["uv-sync"] and names["release-pin-deps.yml"]
-
-
-def test_push_floor_pushes_only_the_release_branch_the_floor_job_read() -> None:
-    # The floor job runs `uv lock`, which can run dependency code and change
-    # the commit it reports. So the job holding the App token checks out the
-    # release branch by name and stops unless it is that commit.
-    workflow = yaml.safe_load((WORKFLOWS / "release-pin-deps.yml").read_text())
-    floor_steps = workflow["jobs"]["floor"]["steps"]
-    (floor,) = [step for step in floor_steps if step.get("id") == "floor"]
-    floor_lines = run_lines({"steps": [floor]})
-    sha = floor_lines.index('echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"')
-    assert sha < next(
-        i for i, line in enumerate(floor_lines) if "inspect_ai_floor.py" in line
-    )
-    steps = workflow["jobs"]["push-floor"]["steps"]
-    (checkout,) = [
-        s for s in steps if s.get("uses", "").startswith("actions/checkout@")
-    ]
-    assert checkout["with"]["ref"] == "${{ env.RELEASE_BRANCH }}"
-    assert workflow["env"]["RELEASE_BRANCH"] == RELEASE_BRANCH
-    check = steps[steps.index(checkout) + 1]
-    assert check["env"] == {"FLOOR_SHA": "${{ needs.floor.outputs.sha }}"}
-    assert run_lines({"steps": [check]})[0] == (
-        'if [ "$(git rev-parse HEAD)" != "$FLOOR_SHA" ]; then'
-    )
 
 
 # A bare `uv run` or `uv sync` re-resolves an out-of-date uv.lock and installs
@@ -496,48 +411,3 @@ def test_no_workflow_opts_out_of_the_cooldown() -> None:
         if re.search(r"--exclude-newer(=|\s+)false", line)
     ]
     assert floating == []
-
-
-GIT_LOCK = f"""
-[[package]]
-name = "inspect-ai"
-version = "0.3.288.dev42"
-source = {{ git = "{INSPECT_AI_GIT}?branch=main#abc" }}
-"""
-RELEASED_LOCK = """
-[[package]]
-name = "inspect-ai"
-version = "0.3.287"
-source = { registry = "https://pypi.org/simple" }
-"""
-
-
-def test_floor_script_requires_a_released_inspect_ai() -> None:
-    with pytest.raises(ValueError, match="not locked from PyPI"):
-        inspect_ai_floor.locked_inspect_ai(GIT_LOCK)
-    assert inspect_ai_floor.locked_inspect_ai(RELEASED_LOCK) == "0.3.287"
-
-
-@pytest.mark.skipif(os.name != "posix", reason="the fake uv is a shell script")
-def test_floor_script_locks_without_sources_and_restores_the_lock(
-    tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    # A fake uv that relocks inspect-ai from PyPI only when sources are off.
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (tmp_path / "released.lock").write_text(RELEASED_LOCK)
-    uv = bin_dir / "uv"
-    uv.write_text(
-        "#!/bin/sh\n"
-        '[ "$*" = "lock --no-sources --upgrade-package inspect-ai" ] || exit 1\n'
-        "cp released.lock uv.lock\n"
-    )
-    uv.chmod(0o755)
-    (tmp_path / "uv.lock").write_text(GIT_LOCK)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    inspect_ai_floor.main()
-    assert capsys.readouterr().out == "0.3.287\n"
-    assert (tmp_path / "uv.lock").read_text() == GIT_LOCK
