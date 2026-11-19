@@ -2,6 +2,7 @@ import contextlib
 import gc
 import logging
 import math
+import weakref
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -1776,6 +1777,46 @@ def test_ledger_reads_the_price_of_a_limit_reaching_call_from_a_bounded_transcri
     assert ledger.calls == Calls(calls=101)
     assert ledger.swarm.cost == pytest.approx(202.0)
     assert ledger.total_complete
+
+
+@agent
+def _releasing(model: Model, calls: int, released: list[bool]) -> Agent:
+    # generates once and holds only a weak reference to that call's event, then
+    # generates past the bounded transcript's resident window and reports whether the
+    # event was released while the swarm still runs
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(state.messages)
+        [*_, first] = [
+            e for e in transcript().history.resident_events if isinstance(e, ModelEvent)
+        ]
+        event = weakref.ref(first)
+        del first
+        for _ in range(calls):
+            state.output = await model.generate(state.messages)
+        gc.collect()
+        released.append(event() is None)
+        return state
+
+    return execute
+
+
+def test_the_ledger_does_not_keep_evicted_generations_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("INSPECT_TRANSCRIPT_BOUNDED", "1")
+    released: list[bool] = []
+    model = scripted_model(cost=1.0)
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="task")],
+            solver=_swarm_solver(swarm(_releasing(model, 150, released), channels=[])),
+        ),
+        model=model,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success"
+    assert released == [True]
 
 
 @pytest.mark.anyio

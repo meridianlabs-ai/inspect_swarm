@@ -413,8 +413,15 @@ class LedgerInterval:
     def __init__(self, *, roster: Collection[str]) -> None:
         self._resumed = sample_resumed()
         self._events = EventLog(None if self._resumed else PathLog(roster))
+        # the generations started in the swarm's context, members' and the runtime's
+        # included, with the models that made them; each transcript event moves those
+        # collected so far into the classes, so the list does not keep their events
+        # alive for the whole swarm
+        self._classes: set[str] = set()
+        self._collecting = ExitStack()
+        self._generations = self._collecting.enter_context(collect_model_events())
         self._unsubscribe = transcript()._subscribe(  # pyright: ignore[reportPrivateUsage]
-            self._events
+            self._observe
         )
         self._span_id = current_span_id()
         self._start_usage = _usage_snapshot()
@@ -428,14 +435,20 @@ class LedgerInterval:
             "working": limits.working.limit,
             "time": limits.time.limit,
         }
-        # the generations started in the swarm's context, members' and the runtime's
-        # included, with the models that made them
-        self._collecting = ExitStack()
-        self._generations = self._collecting.enter_context(collect_model_events())
 
     @property
     def events(self) -> EventLog:
         return self._events
+
+    def _observe(self, event: Event) -> None:
+        self._events(event)
+        self._take_generations()
+
+    # moves the generations collected so far into the native compaction classes
+    def _take_generations(self) -> None:
+        if self._generations:
+            self._classes |= native_compaction_classes(self._generations)
+            self._generations.clear()
 
     # the model calls in flight now, by event id
     def pending_calls(self) -> list[str]:
@@ -486,7 +499,8 @@ class LedgerInterval:
             logger.error(
                 f"The swarm's ledger does not reconcile with the sample's usage: the swarm meter recorded more than the sample did over the swarm's lifetime. Unattributed: {unattributed.model_dump(exclude_none=True)}."
             )
-        classes = sorted(native_compaction_classes(self._generations))
+        self._take_generations()
+        classes = sorted(self._classes)
         member_ledgers = [
             MemberLedger(
                 name=m.name,
