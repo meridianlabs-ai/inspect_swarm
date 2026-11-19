@@ -116,6 +116,7 @@ solver = swarm(
 )
 ```
 
+- The image needs `curl` for the bridged tools ([Requirements and limits](#requirements-and-limits)).
 - The CLI and every process it starts run as the member's user. The CLI starts in the member's home and keeps its settings there.
 - The CLI's model proxy, which the bridge runs in the sandbox, serves only the member's user. A request to its port from another member, or from root, gets HTTP 403. If another member is already listening on the port the proxy needs, the bridge fails before the CLI starts, and the sample fails with the proxy's error.
 - When the member ends, its CLI and the processes the CLI left are stopped ([Leftover processes](#leftover-processes)).
@@ -174,12 +175,12 @@ census = next(
 ## Requirements and limits
 
 - The sandbox must let commands run as root and as other users: Docker, or Kubernetes with a root container. The `local` sandbox is refused.
-- The image needs `useradd` and `groupadd` (package `passwd`), `awk` and GNU `find`. With any share it also needs `setfacl` and `getfacl` (package `acl`), which the default Inspect image and `python:3.12-bookworm` lack. For a Debian image:
+- The image needs `useradd` and `groupadd` (package `passwd`), `awk` and GNU `find`. With any share it also needs `setfacl` and `getfacl` (package `acl`), which the default Inspect image and `python:3.12-bookworm` lack. Bridged members with bridged tools, such as `swarm_bridged_tools()`, also need `curl`: inspect_swe runs it to check that those tools are ready before it starts the CLI. For a Debian image:
 
   ```dockerfile
   FROM python:3.12-slim-bookworm
   RUN apt-get update \
-      && apt-get install -y --no-install-recommends acl \
+      && apt-get install -y --no-install-recommends acl curl \
       && rm -rf /var/lib/apt/lists/*
   ```
 
