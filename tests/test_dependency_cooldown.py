@@ -17,9 +17,8 @@ import yaml
 REPO = pathlib.Path(__file__).parents[1]
 GITHUB = REPO / ".github"
 WORKFLOWS = GITHUB / "workflows"
-UV_SYNC = GITHUB / "actions" / "uv-sync" / "action.yml"
-UV_SYNC_ACTION = "./.github/actions/uv-sync"
 SHARED_ACTIONS = "meridianlabs-ai/actions/"
+INSTALL_ACTION = SHARED_ACTIONS + "install-python-dependencies@"
 MATRIX_PYTHON = "${{ matrix.python-version }}"
 LOCKED_JOBS = {
     "py-ruff": {"python-version": "3.11", "project-install": "skip", "extras": "dev"},
@@ -281,7 +280,7 @@ def test_uv_comes_from_the_shared_setup_uv() -> None:
         if ref.startswith(
             (
                 SHARED_ACTIONS + "setup-uv@",
-                SHARED_ACTIONS + "install-python-dependencies@",
+                INSTALL_ACTION,
             )
         )
     }
@@ -297,35 +296,11 @@ def test_locked_jobs_install_from_the_lockfile(
     installs = [
         step.get("with", {})
         for step in job["steps"]
-        if step.get("uses") == UV_SYNC_ACTION
+        if step.get("uses", "").startswith(INSTALL_ACTION)
+        and step["with"]["versions"] == "locked"
     ]
-    assert installs == [inputs]
+    assert installs == [{"versions": "locked", **inputs}]
     assert not [line for line in run_lines(job) if line.startswith("uv sync")]
-
-
-def test_only_uv_sync_installs_from_the_lockfile() -> None:
-    locked = [
-        where
-        for where, step in all_steps()
-        if step.get("uses", "").startswith(SHARED_ACTIONS)
-        and step.get("with", {}).get("versions") == "locked"
-    ]
-    assert locked == ["uv-sync"]
-
-
-def test_uv_sync_action_installs_the_committed_lock() -> None:
-    # Nothing changes uv.lock before the locked install.
-    action = yaml.safe_load(UV_SYNC.read_text())
-    (install,) = action["runs"]["steps"]
-    assert install["uses"].startswith(SHARED_ACTIONS + "install-python-dependencies@")
-    assert install["with"] == {
-        "versions": "locked",
-        "python-version": "${{ inputs.python-version }}",
-        "extras": "${{ inputs.extras }}",
-        "project-install": "${{ inputs.project-install }}",
-        "default-dependency-groups": "${{ inputs.default-dependency-groups }}",
-        "also-install-without-deps": "${{ inputs.also-install-without-deps }}",
-    }
 
 
 # A bare `uv run` or `uv sync` re-resolves an out-of-date uv.lock and installs

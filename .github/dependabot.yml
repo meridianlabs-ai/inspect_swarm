@@ -6,10 +6,7 @@ updates:
   # cooldown. The cooldown gives a compromised release time to be caught
   # before it is proposed; security updates skip it.
   - package-ecosystem: "github-actions"
-    # / covers the workflows; the local composite actions pin actions too.
-    directories:
-      - "/"
-      - "/.github/actions/*"
+    directory: "/"
     schedule:
       interval: "weekly"
     cooldown:
