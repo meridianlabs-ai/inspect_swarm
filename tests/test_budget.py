@@ -84,8 +84,11 @@ from inspect_swarm import (
     Controller,
     StopReason,
     SwarmControl,
+    answer_result,
+    leaderless,
     member,
     swarm,
+    synthesize,
 )
 from inspect_swarm._budget import (
     Budget,
@@ -1860,6 +1863,30 @@ async def test_ledger_attributes_native_compaction_to_the_member() -> None:
     assert m.meter.cost == pytest.approx(2.0)
     assert ledger.unattributed.total_tokens == 0
     # a model the swarm used that can compact natively leaves the total a lower bound
+    assert any(c.endswith("NativeCompaction") for c in ledger.native_compaction_classes)
+    assert not ledger.total_complete
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("where", ["controller", "final"])
+async def test_ledger_lists_a_native_compaction_model_the_runtime_or_final_step_used(
+    where: str,
+) -> None:
+    # the members use a model without native compaction; the native-capable model
+    # generates only in the controller or only in the final step's synthesize
+    native = _native_compaction_model(cost=1.0)
+    members = member(generator(scripted_model(cost=1.0), answer="7"), name="a")
+    if where == "controller":
+        agent_swarm = swarm(members, controller=_starting_all(native), channels=[])
+    else:
+        agent_swarm = swarm(
+            members,
+            controller=leaderless(stop="end", final=synthesize(model=native)),
+            channels=[],
+            result=answer_result(),
+        )
+    ledger = await _ledger(agent_swarm)
+    assert ledger.calls == Calls(calls=2)
     assert any(c.endswith("NativeCompaction") for c in ledger.native_compaction_classes)
     assert not ledger.total_complete
 
