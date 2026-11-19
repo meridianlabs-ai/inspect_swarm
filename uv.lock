@@ -21,7 +21,7 @@ exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for 
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-inspect-ai = { timestamp = "0001-01-01T00:00:00Z", span = "PT6H" }
+inspect-ai = false
 
 [[package]]
 name = "agent-client-protocol"
@@ -1218,8 +1218,8 @@ wheels = [
 
 [[package]]
 name = "inspect-ai"
-version = "0.3.290.dev11+g10dc86e48"
-source = { git = "https://github.com/UKGovernmentBEIS/inspect_ai?branch=main#10dc86e4847f4413637bd3eb554a9430a54e69f4" }
+version = "0.3.291"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "aiobotocore" },
@@ -1262,6 +1262,10 @@ dependencies = [
     { name = "zipfile-zstd", marker = "python_full_version < '3.14'" },
     { name = "zipp" },
     { name = "zstandard" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ab/38/11145421c7c312c7bc33e6aab635bdb63e315049f19c98d482d900fb39ce/inspect_ai-0.3.291.tar.gz", hash = "sha256:2ea302b1c35349e3efb95d1ee94937639c1760a62fcf471b86ad4646e6d52718", size = 7892590, upload-time = "2026-11-17T22:08:25.433Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/0d/3e0ab49df0f679603d86cc0ab6f86c57c100ae9bb0b83a9e3bcb5335123f/inspect_ai-0.3.291-py3-none-any.whl", hash = "sha256:ef9e1df52757857103d10cb2fad92f369439cc254902422a49b207781c0114b0", size = 35832591, upload-time = "2026-11-17T22:08:21.847Z" },
 ]
 
 [[package]]
@@ -1310,7 +1314,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.14.2" },
     { name = "anyio", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "griffe", marker = "extra == 'doc'", specifier = ">=2" },
-    { name = "inspect-ai", git = "https://github.com/UKGovernmentBEIS/inspect_ai?branch=main" },
+    { name = "inspect-ai", specifier = ">=0.3.291" },
     { name = "markdown", marker = "extra == 'doc'" },
     { name = "pandas", marker = "extra == 'dev'", specifier = ">=2.1.0" },
     { name = "panflute", marker = "extra == 'doc'" },
