@@ -2,6 +2,7 @@ import json
 import logging
 import time
 from collections.abc import Collection, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -19,7 +20,11 @@ from inspect_ai.event import (
 from inspect_ai.log._samples import sample_active
 from inspect_ai.log._transcript import transcript
 from inspect_ai.model import ModelAPI, ModelUsage
-from inspect_ai.model._model import sample_model_usage
+from inspect_ai.model._model import (
+    CollectedGeneration,
+    collect_model_events,
+    sample_model_usage,
+)
 from inspect_ai.scorer import Value
 from inspect_ai.util import Limit, current_span_id, sample_limits
 from inspect_ai.util._sandbox._framework_operation import (
@@ -175,7 +180,7 @@ class SwarmLedger(BaseModel):
     """Models in `sample_delta` with tokens but no cost."""
 
     native_compaction_classes: list[str]
-    """Loaded `ModelAPI` classes that override `compact()`, when the swarm started or ended. Native compaction emits no event, so the ledger cannot count its calls."""
+    """The `ModelAPI` classes that override `compact()`, among those of the models the swarm's generations used. Native compaction emits no event, so the ledger cannot count its calls."""
 
     overshoot: dict[str, float]
     """How far usage at the end went past each cap, keyed by `cost`, `tokens` and `time`. Only kinds over their cap appear."""
@@ -196,7 +201,7 @@ class SwarmLedger(BaseModel):
     """The sample resumed from a checkpoint, so the swarm restarted its caps from zero. Swarms now refuse checkpointing, so only logs from earlier versions can have it true."""
 
     total_complete: bool
-    """No call is known to be missing from the swarm's usage and cost: no member, member background task or final step was cancelled, the swarm was not interrupted, every call completed with priced usage, every model in `sample_delta` is priced, and no loaded model class compacts natively."""
+    """No call is known to be missing from the swarm's usage and cost: no member, member background task or final step was cancelled, the swarm was not interrupted, every call completed with priced usage, every model in `sample_delta` is priced, and no model the swarm generated with can compact natively."""
 
     attribution_complete: bool
     """`total_complete`, and the swarm meter recorded all the sample used over the swarm's lifetime: `unattributed` is zero, to within rounding."""
@@ -408,13 +413,19 @@ class LedgerInterval:
     def __init__(self, *, roster: Collection[str]) -> None:
         self._resumed = sample_resumed()
         self._events = EventLog(None if self._resumed else PathLog(roster))
+        # the generations started in the swarm's context, members' and the runtime's
+        # included, with the models that made them; each transcript event moves those
+        # collected so far into the classes, so the list does not keep their events
+        # alive for the whole swarm
+        self._classes: set[str] = set()
+        self._collecting = ExitStack()
+        self._generations = self._collecting.enter_context(collect_model_events())
         self._unsubscribe = transcript()._subscribe(  # pyright: ignore[reportPrivateUsage]
-            self._events
+            self._observe
         )
         self._span_id = current_span_id()
         self._start_usage = _usage_snapshot()
         self._start_time = time.monotonic()
-        self._classes = native_compaction_classes()
         limits = sample_limits()
         self._sample_limits: dict[str, float | None] = {
             "token": limits.token.limit,
@@ -429,6 +440,16 @@ class LedgerInterval:
     def events(self) -> EventLog:
         return self._events
 
+    def _observe(self, event: Event) -> None:
+        self._events(event)
+        self._take_generations()
+
+    # moves the generations collected so far into the native compaction classes
+    def _take_generations(self) -> None:
+        if self._generations:
+            self._classes |= native_compaction_classes(self._generations)
+            self._generations.clear()
+
     # the model calls in flight now, by event id
     def pending_calls(self) -> list[str]:
         return [uuid for uuid, call in self._events.calls.items() if call.pending]
@@ -437,6 +458,7 @@ class LedgerInterval:
     # however the swarm ends
     def close(self) -> None:
         self._unsubscribe()
+        self._collecting.close()
 
     # where the spans of the interval lie, given the spans of the members that entered one
     def places(self, member_spans: Mapping[str, str]) -> "SpanPlaces":
@@ -477,7 +499,8 @@ class LedgerInterval:
             logger.error(
                 f"The swarm's ledger does not reconcile with the sample's usage: the swarm meter recorded more than the sample did over the swarm's lifetime. Unattributed: {unattributed.model_dump(exclude_none=True)}."
             )
-        classes = sorted(self._classes | native_compaction_classes())
+        self._take_generations()
+        classes = sorted(self._classes)
         member_ledgers = [
             MemberLedger(
                 name=m.name,
@@ -613,20 +636,15 @@ def count_call(calls: Calls, call: CallRecord) -> None:
             calls.unpriced += 1
 
 
-# Every loaded ModelAPI class that overrides compact(), built-in or custom. Native
-# compaction emits no event, so only the capability can be checked.
-def native_compaction_classes() -> set[str]:
+# The ModelAPI classes that override compact(), among those of the models that made
+# the generations. Native compaction emits no event, so only the capability can be
+# checked; a model that compacted without generating is not seen.
+def native_compaction_classes(generations: Sequence[CollectedGeneration]) -> set[str]:
     found: set[str] = set()
-    seen: set[type[ModelAPI]] = set()
-    pending = list(ModelAPI.__subclasses__())
-    while pending:
-        cls = pending.pop()
-        if cls in seen:
-            continue
-        seen.add(cls)
+    for generation in generations:
+        cls = type(generation.model.api)
         if cls.compact is not ModelAPI.compact:
             found.add(f"{cls.__module__}.{cls.__qualname__}")
-        pending.extend(cls.__subclasses__())
     return found
 
 

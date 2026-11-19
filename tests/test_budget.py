@@ -2,6 +2,7 @@ import contextlib
 import gc
 import logging
 import math
+import weakref
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -83,8 +84,11 @@ from inspect_swarm import (
     Controller,
     StopReason,
     SwarmControl,
+    answer_result,
+    leaderless,
     member,
     swarm,
+    synthesize,
 )
 from inspect_swarm._budget import (
     Budget,
@@ -1778,6 +1782,46 @@ def test_ledger_reads_the_price_of_a_limit_reaching_call_from_a_bounded_transcri
     assert ledger.total_complete
 
 
+@agent
+def _releasing(model: Model, calls: int, released: list[bool]) -> Agent:
+    # generates once and holds only a weak reference to that call's event, then
+    # generates past the bounded transcript's resident window and reports whether the
+    # event was released while the swarm still runs
+    async def execute(state: AgentState) -> AgentState:
+        state.output = await model.generate(state.messages)
+        [*_, first] = [
+            e for e in transcript().history.resident_events if isinstance(e, ModelEvent)
+        ]
+        event = weakref.ref(first)
+        del first
+        for _ in range(calls):
+            state.output = await model.generate(state.messages)
+        gc.collect()
+        released.append(event() is None)
+        return state
+
+    return execute
+
+
+def test_the_ledger_does_not_keep_evicted_generations_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("INSPECT_TRANSCRIPT_BOUNDED", "1")
+    released: list[bool] = []
+    model = scripted_model(cost=1.0)
+    [log] = eval(
+        Task(
+            dataset=[Sample(input="task")],
+            solver=_swarm_solver(swarm(_releasing(model, 150, released), channels=[])),
+        ),
+        model=model,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+    assert log.status == "success"
+    assert released == [True]
+
+
 @pytest.mark.anyio
 async def test_ledger_charges_an_approval_call_to_its_member_and_leaves_its_tokens_unattributed() -> (
     None
@@ -1818,20 +1862,46 @@ async def test_ledger_attributes_native_compaction_to_the_member() -> None:
     assert m.meter.usage.total_tokens == 2 * TOKENS_PER_CALL
     assert m.meter.cost == pytest.approx(2.0)
     assert ledger.unattributed.total_tokens == 0
-    # a loaded class with native compaction leaves the total a lower bound
+    # a model the swarm used that can compact natively leaves the total a lower bound
     assert any(c.endswith("NativeCompaction") for c in ledger.native_compaction_classes)
     assert not ledger.total_complete
 
 
 @pytest.mark.anyio
-async def test_ledger_a_loaded_native_compaction_class_clears_total_complete() -> None:
-    gc.collect()
-    loaded = _native_compaction_model(cost=1.0)
-    ledger = await _ledger(swarm(generator(scripted_model(cost=1.0)), channels=[]))
-    assert ledger.calls == Calls(calls=1)
-    assert ledger.native_compaction_classes != []
+@pytest.mark.parametrize("where", ["controller", "final"])
+async def test_ledger_lists_a_native_compaction_model_the_runtime_or_final_step_used(
+    where: str,
+) -> None:
+    # the members use a model without native compaction; the native-capable model
+    # generates only in the controller or only in the final step's synthesize
+    native = _native_compaction_model(cost=1.0)
+    members = member(generator(scripted_model(cost=1.0), answer="7"), name="a")
+    if where == "controller":
+        agent_swarm = swarm(members, controller=_starting_all(native), channels=[])
+    else:
+        agent_swarm = swarm(
+            members,
+            controller=leaderless(stop="end", final=synthesize(model=native)),
+            channels=[],
+            result=answer_result(),
+        )
+    ledger = await _ledger(agent_swarm)
+    assert ledger.calls == Calls(calls=2)
+    assert any(c.endswith("NativeCompaction") for c in ledger.native_compaction_classes)
     assert not ledger.total_complete
-    del loaded
+
+
+@pytest.mark.anyio
+async def test_ledger_an_unused_native_compaction_class_leaves_total_complete() -> None:
+    # loaded, as importing a provider SDK loads its class, and used by the sample
+    # before the swarm, but not by the swarm
+    loaded = _native_compaction_model(cost=1.0)
+    ledger = await _ledger(
+        swarm(generator(scripted_model(cost=1.0)), channels=[]), before=[loaded]
+    )
+    assert ledger.calls == Calls(calls=1)
+    assert ledger.native_compaction_classes == []
+    assert ledger.total_complete
 
 
 @pytest.mark.anyio
