@@ -39,11 +39,7 @@ or, in a uv project:
 uv add "inspect_swarm @ git+https://github.com/meridianlabs-ai/inspect_swarm"
 ```
 
-The development version is built and tested against inspect_ai's `main` branch, and may use features no inspect_ai release has yet. It still installs inspect_ai from PyPI. If it fails with the released inspect_ai, install inspect_ai from GitHub `main` too (in a uv project, `uv add "inspect-ai @ git+https://github.com/UKGovernmentBEIS/inspect_ai"`):
-
-```bash
-pip install git+https://github.com/UKGovernmentBEIS/inspect_ai
-```
+The development version uses inspect_ai releases from PyPI.
 
 ## Run a swarm on an existing task
 
