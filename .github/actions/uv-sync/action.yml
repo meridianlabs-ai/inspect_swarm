@@ -1,10 +1,7 @@
 name: Install Python dependencies from uv.lock
 description: >-
-  Installs uv and Python, fails on a uv.lock that is out of date with
-  pyproject.toml, moves inspect-ai to inspect_ai main's latest commit, and
-  installs. Every other package stays at its locked version. On the Release
-  Please release PR, inspect-ai is the newest release that clears its cooldown
-  instead, so the release is tested against the inspect_ai it will require.
+  Installs uv, Python and exactly the versions in uv.lock. Fails on a uv.lock
+  that is out of date with pyproject.toml.
 
 inputs:
   python-version:
@@ -30,26 +27,6 @@ inputs:
 runs:
   using: composite
   steps:
-    # meridianlabs-ai/actions holds the uv pin. Both actions use the same commit.
-    # setup-uv runs once per job, so skip it after an earlier
-    # install-python-dependencies call, which checks that the two match.
-    - uses: meridianlabs-ai/actions/setup-uv@5e38536660a7c7a03feef16a2e88b41fa54f52c5 # main
-      if: env.MERIDIAN_SETUP_UV == ''
-      with:
-        python-version: ${{ inputs.python-version }}
-
-    - name: Move inspect-ai to inspect_ai main
-      shell: bash
-      env:
-        HEAD_REF: ${{ github.head_ref }}
-      run: |
-        uv lock --check
-        if [ "$HEAD_REF" = "release-please--branches--main" ]; then
-          export UV_NO_SOURCES=1
-          echo "UV_NO_SOURCES=1" >> "$GITHUB_ENV"
-        fi
-        uv lock --upgrade-package inspect-ai
-
     - uses: meridianlabs-ai/actions/install-python-dependencies@5e38536660a7c7a03feef16a2e88b41fa54f52c5 # main
       with:
         versions: locked
@@ -59,7 +36,3 @@ runs:
         default-dependency-groups: ${{ inputs.default-dependency-groups }}
         also-install-without-deps: ${{ inputs.also-install-without-deps }}
 
-    # Later steps check for uncommitted changes and build from the checkout.
-    - name: Restore uv.lock
-      shell: bash
-      run: git checkout -- uv.lock
