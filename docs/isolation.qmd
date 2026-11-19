@@ -118,6 +118,7 @@ solver = swarm(
 
 - The image needs `curl` for the bridged tools ([Requirements and limits](#requirements-and-limits)).
 - The CLI and every process it starts run as the member's user. The CLI starts in the member's home and keeps its settings there.
+- inspect_swe installs the CLI from the host's cache or a download, not from the image. Both agents refuse `version="sandbox"` under users isolation, and the default `version="auto"` installs the stable release.
 - The CLI's model proxy, which the bridge runs in the sandbox, serves only the member's user. A request to its port from another member, or from root, gets HTTP 403. If another member is already listening on the port the proxy needs, the bridge fails before the CLI starts, and the sample fails with the proxy's error.
 - When the member ends, its CLI and the processes the CLI left are stopped ([Leftover processes](#leftover-processes)).
 - `centaur` mode raises inside a member, and so do inspect_swe's other agents and its ACP adapters.
