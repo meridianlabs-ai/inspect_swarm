@@ -1818,20 +1818,22 @@ async def test_ledger_attributes_native_compaction_to_the_member() -> None:
     assert m.meter.usage.total_tokens == 2 * TOKENS_PER_CALL
     assert m.meter.cost == pytest.approx(2.0)
     assert ledger.unattributed.total_tokens == 0
-    # a loaded class with native compaction leaves the total a lower bound
+    # a model the swarm used that can compact natively leaves the total a lower bound
     assert any(c.endswith("NativeCompaction") for c in ledger.native_compaction_classes)
     assert not ledger.total_complete
 
 
 @pytest.mark.anyio
-async def test_ledger_a_loaded_native_compaction_class_clears_total_complete() -> None:
-    gc.collect()
+async def test_ledger_an_unused_native_compaction_class_leaves_total_complete() -> None:
+    # loaded, as importing a provider SDK loads its class, and used by the sample
+    # before the swarm, but not by the swarm
     loaded = _native_compaction_model(cost=1.0)
-    ledger = await _ledger(swarm(generator(scripted_model(cost=1.0)), channels=[]))
+    ledger = await _ledger(
+        swarm(generator(scripted_model(cost=1.0)), channels=[]), before=[loaded]
+    )
     assert ledger.calls == Calls(calls=1)
-    assert ledger.native_compaction_classes != []
-    assert not ledger.total_complete
-    del loaded
+    assert ledger.native_compaction_classes == []
+    assert ledger.total_complete
 
 
 @pytest.mark.anyio
