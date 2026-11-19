@@ -46,6 +46,9 @@ DOWNLOAD_INPUTS = {
     "path": "dist/",
 }
 EXEMPT_COOLDOWN = "6 hours"
+# `false`: Meridian Labs publishes the in-house packages, so they have no cooldown.
+IN_HOUSE_COOLDOWN = False
+IN_HOUSE = re.compile(r"inspect-.*|petri.*")
 # CI moves it to inspect_ai main, so Dependabot leaves it alone.
 MAIN_TRACKED = "inspect-ai"
 
@@ -166,11 +169,16 @@ def workflow_run_lines() -> list[tuple[str, str]]:
 def verify_exclude_newer_package(
     config: dict[str, Any], direct: set[str], now: datetime
 ) -> None:
-    # Each entry is "6 hours" or a dated entry younger than the cooldown.
+    # Each entry is `false` for an in-house package, "6 hours" or a dated entry
+    # younger than the cooldown.
     max_age = timedelta(days=cooldown_days(config["exclude-newer"]))
     for package, cooldown in config["exclude-newer-package"].items():
         assert normalize(package) in direct, f"{package} is not a direct dependency"
-        if cooldown != EXEMPT_COOLDOWN:
+        if cooldown is IN_HOUSE_COOLDOWN:
+            assert IN_HOUSE.fullmatch(normalize(package)), (
+                f"{package} = false, but it is not an in-house package"
+            )
+        elif cooldown != EXEMPT_COOLDOWN:
             age = now - datetime.fromisoformat(cooldown)
             assert timedelta(0) <= age < max_age, (
                 f'dated entry {package} = "{cooldown}" is in the future or stale'
@@ -183,12 +191,12 @@ def verify_dependabot_cooldown(
     cooldown = dependabot["cooldown"]
     assert cooldown["default-days"] == cooldown_days(config["exclude-newer"])
     assert dependabot["ignore"] == [{"dependency-name": MAIN_TRACKED}]
-    # Dependabot's cooldown counts whole days, so it leaves the "6 hours"
-    # entries to uv. Dated entries are locked by hand.
+    # Dependabot's cooldown counts whole days, so it leaves the "6 hours" and
+    # `false` entries to uv. Dated entries are locked by hand.
     exempt = sorted(
         package
         for package, cooldown in config["exclude-newer-package"].items()
-        if cooldown == EXEMPT_COOLDOWN and package != MAIN_TRACKED
+        if cooldown in (EXEMPT_COOLDOWN, IN_HOUSE_COOLDOWN) and package != MAIN_TRACKED
     )
     assert sorted(cooldown.get("exclude", [])) == exempt
     # The exempt packages have their own group, listed before the catch-all.
@@ -224,10 +232,11 @@ def test_fresh_dated_entry_passes() -> None:
         ("certifi", EXEMPT_COOLDOWN, "not a direct dependency"),
         ("pydantic", timedelta(days=-7), "dated entry"),
         ("pydantic", timedelta(days=1), "dated entry"),
+        ("pydantic", IN_HOUSE_COOLDOWN, "not an in-house package"),
     ],
 )
 def test_bad_exclude_newer_package_entry_is_caught(
-    package: str, cooldown: str | timedelta, error: str
+    package: str, cooldown: str | bool | timedelta, error: str
 ) -> None:
     config = uv_config()
     now = datetime.now(UTC)

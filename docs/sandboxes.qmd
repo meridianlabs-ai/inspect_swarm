@@ -10,6 +10,12 @@ A swarm has one of two sandbox topologies:
 - Shared, the default: every member works in the sample's sandbox, at the same time. Members can share files, and can change files under each other.
 - Per member: each member works in a sandbox environment of its own, and members cannot reach each other's. What they share goes through a channel, such as the [shared-memory board](shared-memory.qmd), or a volume every member's sandbox mounts.
 
+The shared sandbox can also run each member as its own Linux user, with [users isolation](isolation.qmd). Choose by how far apart members must be:
+
+- Shared: members work on one tree of files and may change each other's work. Cheapest to run.
+- Shared with users isolation: members work in one sandbox, but each has a private home that the others cannot change, and the record says which member made which file. Members are not root, so the image must hold everything they need. It is a default boundary, not containment: members still see each other's processes and can connect to each other's sockets ([What is not isolated](isolation.qmd#what-is-not-isolated)).
+- Per member: members must not reach each other at all, or need root. Costs a sandbox per member ([Sizing](#sizing)).
+
 ## Shared
 
 With no `sandbox=` on any member, members share the sample's sandbox. The default `filesystem` channel gives them a convention for it: `/shared` for shared files, `/shared/notes.md` for notes, and `/scratch/<member>` for each member's own work ([Channels](channels.qmd#the-filesystem-channel)). The channel does not create these directories, so create them in the sandbox image or with the sample's `files`. When members choose their own names ([Members](members.qmd#members-that-choose-their-names)), create `/shared` and `/scratch` but not the members' directories in it: a directory named after a member would tell members the swarm's names.

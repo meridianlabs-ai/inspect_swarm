@@ -80,6 +80,48 @@ A member can still:
 
 Anything that gets a member root gets it everything.
 
+## Bridged members
+
+A bridged member's CLI runs as the member too. inspect_swe 0.3.2 or later is needed, with `claude_code()` or `codex_cli()` run headless, as members run them:
+
+```python
+from inspect_ai.agent import Agent, agent, react
+from inspect_ai.tool import bash
+from inspect_swe import claude_code
+
+from inspect_swarm import (
+    member,
+    messages,
+    swarm,
+    swarm_bridged_tools,
+    swarm_tools,
+    users,
+)
+
+
+@agent
+def worker() -> Agent:
+    return react(tools=[bash(), swarm_tools()])
+
+
+@agent
+def cc_worker() -> Agent:
+    return claude_code(bridged_tools=[swarm_bridged_tools(["messages"])])
+
+
+solver = swarm(
+    members=[member(worker, count=2), member(cc_worker, name="cc", bridged=True)],
+    channels=[messages()],
+    isolation=users(),
+)
+```
+
+- The CLI and every process it starts run as the member's user. The CLI starts in the member's home and keeps its settings there.
+- The CLI's model proxy, which the bridge runs in the sandbox, serves only the member's user. A request to its port from another member, or from root, gets HTTP 403. If another member is already listening on the port the proxy needs, the bridge fails before the CLI starts, and the sample fails with the proxy's error.
+- When the member ends, its CLI and the processes the CLI left are stopped ([Leftover processes](#leftover-processes)).
+- `centaur` mode raises inside a member, and so do inspect_swe's other agents and its ACP adapters.
+- Use one bridged agent type per swarm. inspect_swe gives each agent type its own port numbers, so the first Claude Code member and the first Codex member in one sandbox both need port 3001.
+
 ## Leftover processes
 
 When a member ends, however it ends, the swarm kills every process in the sandbox that still runs as the member's user. It repeats the scan up to five times, since a process can start another between scans. This runs before the member's end is recorded, so the member ends after its processes are gone. While it runs, operators cannot message or stop the member ([Operators](operators.qmd)).
@@ -145,7 +187,7 @@ census = next(
 - Setup refuses an ACL in a share or on the homes' parent, and a mount inside a share or under the homes' parent. In a `rw` share it refuses hard-linked files, devices, sockets, FIFOs and set-user-id or set-group-id files.
 - Member names must be valid Linux user-name suffixes: lowercase letters, digits and `-`, starting with a letter, at most 26 characters. Members cannot choose their own names ([Members](members.qmd#members-that-choose-their-names)) or have their own sandboxes.
 - One swarm with users isolation per sandbox in a sample. Another is refused, whether it runs after the first, beside it, in a subtask or in a fork. `users(sandbox=...)` picks which of the sample's sandboxes the members share.
-- Bridged members (inspect_swe agents) do not work under users isolation yet: they need inspect_ai and inspect_swe versions with bridge support for it.
+- Bridged members need inspect_swe 0.3.2 or later, the first release that supports users isolation. Only `claude_code()` and `codex_cli()` are supported ([Bridged members](#bridged-members)).
 - The image and sandbox configuration are trusted, like task code that runs before the swarm. Setup refuses an existing `inspect-swarm` group or `swarm-<member>` user or group, and checks that `sudo -n true` fails for each member, but it does not audit the image for every setting that could give a member authority. See `users()` for the conditions setup does not check.
 - Setup runs before the controller and counts towards the sample's time. A time cap derived from the sample's time limit is derived again after setup ([Budgets](budget.qmd)).
 

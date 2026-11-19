@@ -44,6 +44,12 @@ build-backend = "hatchling.build"
 
 [project.optional-dependencies]
 dev = [
+    # Claude Code and Codex members in tests/test_isolation_bridged.py; 0.3.2
+    # is the first release whose agents run inside a sandbox identity scope
+    "inspect-swe>=0.3.2",
+    # the agent bridge translates Claude Code's and Codex's requests with them
+    "anthropic",
+    "openai",
     "ruff",
     "pytest",
     "pyright",
@@ -102,9 +108,11 @@ required-version = ">=0.13.4"
 exclude-newer = "7 days"
 
 # 6 hours only for direct dependencies that are a model provider SDK or an
-# Inspect package; see CONTRIBUTING.md.
+# Inspect package tracked from git; no cooldown (`false`) for the in-house
+# packages installed from PyPI. See CONTRIBUTING.md.
 [tool.uv.exclude-newer-package]
 inspect-ai = "6 hours"
+inspect-swe = false
 
 # Development and CI track inspect_ai's main. uv.lock records a commit, and CI
 # moves it to main's latest (.github/actions/uv-sync). The published package

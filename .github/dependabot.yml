@@ -24,13 +24,12 @@ updates:
     commit-message:
       prefix: "ci"
   # Bumps uv.lock. The cooldown matches `exclude-newer` in pyproject.toml. Its
-  # only "6 hours" entry in `exclude-newer-package` is inspect-ai, which is
-  # ignored: it comes from inspect_ai main, which CI moves to the latest commit
-  # on every run. So no package needs `cooldown.exclude` or a 6-hour group.
-  # When a direct dependency gets a "6 hours" entry, add it to
-  # `cooldown.exclude` and to a `six-hour-cooldown` group listed before
-  # `python-packages`, as inspect_scout does: Dependabot's cooldown counts
-  # whole days, and puts a package in the first group that matches.
+  # exclude list matches the "6 hours" and `false` entries in
+  # `exclude-newer-package` there, except inspect-ai, which is ignored: it
+  # comes from inspect_ai main, which CI moves to the latest commit on every
+  # run. Dependabot's cooldown counts whole days, so those packages' short or
+  # no cooldown is left to uv. They get their own group, listed first because
+  # Dependabot puts a package in the first group that matches.
   - package-ecosystem: "uv"
     versioning-strategy: lockfile-only
     directory: "/"
@@ -38,9 +37,14 @@ updates:
       interval: "daily"
     cooldown:
       default-days: 7
+      exclude:
+        - "inspect-swe"
     ignore:
       - dependency-name: "inspect-ai"
     groups:
+      six-hour-cooldown:
+        patterns:
+          - "inspect-swe"
       python-packages:
         patterns:
           - "*"
