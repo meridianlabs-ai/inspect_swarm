@@ -35,10 +35,12 @@ updates:
       default-days: 7
       exclude:
         - "inspect-ai"
+        - "inspect-swe"
     groups:
       six-hour-cooldown:
         patterns:
           - "inspect-ai"
+          - "inspect-swe"
       python-packages:
         patterns:
           - "*"

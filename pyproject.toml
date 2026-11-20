@@ -39,6 +39,12 @@ build-backend = "hatchling.build"
 
 [project.optional-dependencies]
 dev = [
+    # Claude Code and Codex members in tests/test_isolation_bridged.py; 0.3.2
+    # is the first release whose agents run inside a sandbox identity scope
+    "inspect-swe>=0.3.2",
+    # the agent bridge translates Claude Code's and Codex's requests with them
+    "anthropic",
+    "openai",
     "ruff",
     "pytest",
     "pyright",
@@ -99,6 +105,7 @@ exclude-newer = "7 days"
 # No cooldown for Inspect packages; see CONTRIBUTING.md.
 [tool.uv.exclude-newer-package]
 inspect-ai = false
+inspect-swe = false
 
 [tool.ruff]
 extend-exclude = ["docs", "design"]
