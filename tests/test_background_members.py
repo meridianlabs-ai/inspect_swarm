@@ -883,7 +883,10 @@ async def test_a_deepagent_members_background_children_are_drained_before_it_end
     # no native-capable class from another test may still be loaded
     gc.collect()
     # the parent dispatches three children, cancels the third with agent_cancel, and
-    # submits while the other two are in their tool calls
+    # submits while the other two are in their tool calls. Latches replace wall-clock
+    # sleeps: a child meant to finish is released by the parent's submit turn and writes
+    # its file before ending, while one meant to cancel holds until the drain (or the
+    # agent_cancel) cancels it. No timer can let a child finish just before a cancel.
     plan = _Deep(
         parent=[
             _dispatch("fast"),
@@ -894,10 +897,43 @@ async def test_a_deepagent_members_background_children_are_drained_before_it_end
         wait_before={3: ["dropped"], 4: ["fast", "slow"]},
     )
     log: list[str] = []
-    hold = _hold(plan, log, {"fast": 0.1, "slow": 1.0, "dropped": 3600})
+    release: dict[str, anyio.Event] = {
+        name: anyio.Event() for name in ("fast", "slow", "dropped")
+    }
+
+    async def until(name: str) -> None:
+        if name in finished:
+            await release[name].wait()
+            # `until` owns the file write and the log entry that `_hold` would make
+            await sandbox().write_file(f"{name}.txt", name)
+        else:
+            # held in flight so the drain or the agent_cancel cancels it
+            await anyio.sleep_forever()
+
+    hold = _hold(plan, log, until=until)
+
+    async def parent_model(
+        input: list[ChatMessage],
+        tools: list[ToolInfo],
+        tool_choice: ToolChoice,
+        config: GenerateConfig,
+    ) -> ModelOutput:
+        result = await plan(input, tools, tool_choice, config)
+        if (
+            result.message.tool_calls
+            and result.message.tool_calls[0].function == "submit"
+        ):
+            for name in finished:
+                release[name].set()
+        return result
+
     sample = await _eval(
         swarm(
-            _deep_member(scripted_model(plan, cost=1.0), [hold], name="deep"),  # pyright: ignore[reportArgumentType]
+            _deep_member(
+                scripted_model(parent_model, cost=1.0),  # pyright: ignore[reportArgumentType]
+                [hold],
+                name="deep",
+            ),
             channels=[],
             budget=Budget(grace=grace),
         ),
