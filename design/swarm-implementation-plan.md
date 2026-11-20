@@ -349,7 +349,7 @@ Three inspect_ai fixes, inspect_ai#5884 (a `ToolEvent`'s span is its tool span),
 
 None in M2, and none in M1.
 
-- **inspect_swe.** Bridged members are accepted from M1 unchanged; swarm-limits.md detects them by their inspect_swe registry names. The two pieces of work that need inspect_swe changes, users isolation ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#implementation-plan) step 3) and bridged swarms, are future work.
+- **inspect_swe.** Bridged members are accepted from M1 unchanged; swarm-limits.md detects them by their inspect_swe registry names. Under users isolation, inspect_swe's agents resolve the member's user through the scope ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#bridged-members)); bridged swarms need inspect_swe changes and are future work.
 - **inspect_sentinel.** A native member's call to a channel tool is an ordinary tool call, which sentinel's tool stages see with no change, and sentinel is M2's only monitor ([swarm-communication.md Monitoring](swarm-communication.md#monitoring-sentinel-first-the-bus-hook-for-the-rest)). The dispatcher skips bridged agents' tool stages ([Current state](#current-state)), which matters only once bridged members use bus tools; the bus hook for them is future work ([Decisions](#decisions), item 5).
 
 ### inspect_swarm
@@ -467,8 +467,7 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 - The solve/scoring cost boundary.
 - Per-member working time, matching Inspect's working-time accounting ([Decisions](#decisions), item 12), when an experiment needs it.
 - The dependency-linked critical path (the longest chain of member steps linked by reads of another member's writes), from each write's commit (`delivered`) to the reads that showed it (`read`, whose tool span identifies the reader's step), with the evidence D-1 names ([swarm-memory-channel.md Evidence](swarm-memory-channel.md#evidence)); latency curves are interpreted only from then (decision: Ransom, 2026-10-14). Designed in [swarm-critical-path.md](swarm-critical-path.md).
-- Users isolation in one sandbox ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md)), with its inspect_ai, inspect_swe and inspect_swarm pull requests.
-- Further isolation rungs: hidden processes, bubblewrap, per-member cgroups, per-member network rules, Landlock.
+- Further isolation rungs beyond users isolation: hidden processes, bubblewrap, per-member cgroups, per-member network rules, Landlock ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#later-rungs-surveyed-not-designed)).
 - Bridged swarms: Codex multi-agent v2 and Claude Code agent teams in inspect_swe, with their traffic mapped to swarm evidence.
 - Safety hooks: roles as data, per-member prompt, model and tool overrides, joint-monitor helpers on inspect_sentinel, a scheduled execution mode.
 - The bus hook for bridged bus tools and internal records, as a sentinel adapter or on inspect_ai's `SentinelAction` names (swarm-communication.md's open question 1).
@@ -484,7 +483,7 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 
 **Per-member sandboxes in M1.** They serve the external port, not first internal use, which runs on the shared default. Putting them in M2 keeps M1 small, and M2-1 is independent of the rest of M2.
 
-**Users isolation in M2 instead of per-member sandboxes.** [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md) gives members of one sandbox their own Linux users. Epoch's swarm runs members in separate, network-isolated containers, which users isolation does not reproduce (shared kernel, `/tmp`, process table and network), and it costs two inspect_ai pull requests and one in inspect_swe ([its plan](swarm-sandbox-isolation.md#implementation-plan), steps 1 to 3). Per-member sandboxes are one inspect_swarm pull request on private inspect_ai names the designs already allow. Users isolation stays future work, as its design says ("No milestone").
+**Users isolation in M2 instead of per-member sandboxes.** [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md) gives members of one sandbox their own Linux users. Epoch's swarm runs members in separate, network-isolated containers, which users isolation does not reproduce (shared kernel, `/tmp`, process table and network), and it needs changes in inspect_ai and inspect_swe as well as here ([Where it lives](swarm-sandbox-isolation.md#where-it-lives)). Per-member sandboxes are one inspect_swarm pull request on private inspect_ai names the designs already allow.
 
 **Direct messages in M2 as well as the shared-memory channel.** It costs the `messages` channel and its bridged tools (about two more pull requests, swarm-communication.md steps 3 and 6), which no known external user needs. Ransom chose to leave them out ([Decisions](#decisions), item 2).
 
