@@ -4,15 +4,18 @@ Usage: python3 /opt/checks.py <check> <args>
 
 - `binds <port>`: bind at the port as asyncio does (SO_REUSEADDR), with and without SO_REUSEPORT, at ::1, 127.0.0.1, :: and 0.0.0.0, printing each address, the option and the result.
 - `listener <port>`: the pid of the process listening at the port, from the socket tables and each process's descriptors.
+- `connected <host> <local port> <port> <user>`: wait up to 30 seconds for the user's established connection from the local port to the port, printing `connected` or `missing`.
 - `retire <host> <local port> <port>`: connect from a fixed local port, send a model request with the marker native-retired, and reset the connection.
 - `listen <host> <port> <log>`: listen at the port, writing `listening` and then `accepted` for each connection to the log.
 """
 
 import errno
 import os
+import pwd
 import socket
 import struct
 import sys
+import time
 
 
 def binds(port: int) -> None:
@@ -53,6 +56,25 @@ def listener(port: int) -> None:
     print(*sorted(pids))
 
 
+def connected(host: str, local_port: int, port: int, user: str) -> None:
+    table = "/proc/net/tcp6" if ":" in host else "/proc/net/tcp"
+    uid = str(pwd.getpwnam(user).pw_uid)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        for row in open(table).read().splitlines()[1:]:
+            fields = row.split()
+            if (
+                fields[1].endswith(f":{local_port:04X}")
+                and fields[2].endswith(f":{port:04X}")
+                and fields[3] == "01"
+                and fields[7] == uid
+            ):
+                print("connected")
+                return
+        time.sleep(0.1)
+    print("missing")
+
+
 def retire(host: str, local_port: int, port: int) -> None:
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     s = socket.socket(family, socket.SOCK_STREAM)
@@ -85,6 +107,8 @@ if __name__ == "__main__":
         binds(int(args[0]))
     elif check == "listener":
         listener(int(args[0]))
+    elif check == "connected":
+        connected(args[0], int(args[1]), int(args[2]), args[3])
     elif check == "retire":
         retire(args[0], int(args[1]), int(args[2]))
     elif check == "listen":

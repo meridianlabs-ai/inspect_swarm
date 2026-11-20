@@ -187,7 +187,9 @@ async def _race(case: Case, host: str, local_port: int) -> dict[str, str]:
         async with anyio.create_task_group() as tg:
             tg.start_soon(member_curl)
             # the member's connection waits in the stopped proxy's accept queue
-            await anyio.sleep(2)
+            out["connected"] = await _root(
+                _check("connected", host, local_port, _PORT, f"swarm-{case.cli}")
+            )
             await _root(f"kill -CONT {pid}")
     finally:
         await _root(f"kill -CONT {pid}")
@@ -365,6 +367,7 @@ def test_bridged_member_runs_as_its_user_behind_its_proxy(
     for host in ("127.0.0.1", "::1"):
         race = case.results[f"race {host}"]
         assert race["retire"].strip() == "reset", race
+        assert race["connected"].strip() == "connected", race
         assert _status(race["member"])[1] == "200", race
     assert sorted(case.markers) == ["member-curl", "member-curl"]
     # the CLI's processes were gone when it ended
