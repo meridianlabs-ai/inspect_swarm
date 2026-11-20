@@ -8,4 +8,4 @@ jobs:
   lint:
     permissions:
       pull-requests: read
-    uses: meridianlabs-ai/actions/.github/workflows/pr-title-lint.yml@e8167a6521fd94bf7950529e0fe9b63bf8d8e414 # main
+    uses: meridianlabs-ai/actions/.github/workflows/pr-title-lint.yml@411ec72d030510ad5f1cdde5b5ae56506d781c5b # main
