@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.4.2...0.4.3) (2026-11-20)
+
+
+### Bug Fixes
+
+* judge native compaction by the models the swarm used ([#224](https://github.com/meridianlabs-ai/inspect_swarm/issues/224)) ([5d8fa3b](https://github.com/meridianlabs-ai/inspect_swarm/commit/5d8fa3bdb182c17484496d8a8ebf2199ad6c52de))
+
 ## [0.4.2](https://github.com/meridianlabs-ai/inspect_swarm/compare/0.4.1...0.4.2) (2026-11-18)
 
 
