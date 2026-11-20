@@ -10,7 +10,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: meridianlabs-ai/actions/.github/workflows/release-please-python.yml@e8167a6521fd94bf7950529e0fe9b63bf8d8e414 # main
+    uses: meridianlabs-ai/actions/.github/workflows/release-please-python.yml@411ec72d030510ad5f1cdde5b5ae56506d781c5b # main
     with:
       # Publish runs in publish.yaml on the `release` event, behind its own
       # environment gate, and posts the approval ping from there so the ping

@@ -21,7 +21,7 @@ jobs:
     if: ${{ github.event_name == 'release' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: meridianlabs-ai/actions/slack-approval-ping@e8167a6521fd94bf7950529e0fe9b63bf8d8e414 # main
+      - uses: meridianlabs-ai/actions/slack-approval-ping@411ec72d030510ad5f1cdde5b5ae56506d781c5b # main
         with:
           webhook: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
           approvers: "jjallaire dragonstyle ransomr"
@@ -37,7 +37,7 @@ jobs:
   build:
     permissions:
       contents: read
-    uses: meridianlabs-ai/actions/.github/workflows/build-python-dist.yml@e8167a6521fd94bf7950529e0fe9b63bf8d8e414 # main
+    uses: meridianlabs-ai/actions/.github/workflows/build-python-dist.yml@411ec72d030510ad5f1cdde5b5ae56506d781c5b # main
     with:
       python-version: "3.11"
 
@@ -69,7 +69,7 @@ jobs:
       contents: read
       pages: write
       id-token: write
-    uses: meridianlabs-ai/actions/.github/workflows/publish-docs.yml@e8167a6521fd94bf7950529e0fe9b63bf8d8e414 # main
+    uses: meridianlabs-ai/actions/.github/workflows/publish-docs.yml@411ec72d030510ad5f1cdde5b5ae56506d781c5b # main
     with:
       python-version: "3.11"
       extras: doc
@@ -82,7 +82,7 @@ jobs:
     if: ${{ github.event_name == 'release' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: meridianlabs-ai/actions/slack-release-announce@e8167a6521fd94bf7950529e0fe9b63bf8d8e414 # main
+      - uses: meridianlabs-ai/actions/slack-release-announce@411ec72d030510ad5f1cdde5b5ae56506d781c5b # main
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
           title: ":rocket: inspect-swarm ${{ github.event.release.tag_name }} released"
