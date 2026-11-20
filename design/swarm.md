@@ -456,9 +456,8 @@ Which sandbox each member runs in is a decision, not an accident of the scaffold
 
 **Other topologies are opt-in.**
 - **A sandbox per member**, through Inspect's multiple named sandbox environments per sample (`sandbox(name)`, `src/inspect_ai/util/_sandbox/context.py:48`). M2 adds it as an opt-in member field, `member(sandbox=..., visible_sandboxes=...)`, and the default stays shared ([swarm-lean-open-problems.md](swarm-lean-open-problems.md#1-m2-per-member-sandboxes-as-an-opt-in-member-field)).
-- **Partial isolation**, later work if users need it:
-  - private sandboxes plus one shared volume or service;
-  - or one shared sandbox with a Linux user and write scope per member, as SCHEME does ("All agents in a given sample share a single Docker sandbox", with per-agent file scopes).
+- **A Linux user per member in one shared sandbox**, with private homes and named shares, as SCHEME does ("All agents in a given sample share a single Docker sandbox", with per-agent file scopes): `swarm(isolation=users())`, described in [swarm-sandbox-isolation.md](swarm-sandbox-isolation.md).
+- **Partial isolation**, later work if users need it: private sandboxes plus one shared volume or service.
 
 Cases that might need them, none committed:
 - isolation comparable to the k-epochs arm, so that a "no communication" swarm matches independent attempts in its environment as well as its prompts;
@@ -923,7 +922,6 @@ The milestones are defined by their audiences (decision: Ransom, 2026-10-13). [s
 - **Push delivery** needs the messages channel and an answer to whether ordinary messages are pushed at all; urgent messages and nested notices also need the inspect_ai `Steer` PR ([swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional)).
 - **Scoring beyond `first`, `last` and a controller's choice** starts with the result contract; the final-answer chain, `synthesize`, per-member scores, `baseline()` and the analysis helper build on it, and `synthesize` reuses the bus's fencing ([swarm-scoring.md](swarm-scoring.md#the-result-contract)). Per-member sandboxes in the scoring contract also need a design for routing the task's scorer to the selected member's sandbox.
 - **The dependency-linked critical path** needs the bus's attributed writes and reads.
-- **Users isolation in one sandbox** needs its inspect_ai and inspect_swe PRs ([swarm-sandbox-isolation.md](swarm-sandbox-isolation.md#where-it-lives)).
 - **A scheduled execution mode** (ORBIT's rounds and plans) needs M1's controller handles and a turn hook on members, which M2 does not have; scheduled runs with channels also need M2's bus ([swarm-orbit.md](swarm-orbit.md#p4-scheduled-mode-the-turn-seam-and-activation)).
 - **Red-team features** (optional, unscheduled, may never be built) need the bus.
 
