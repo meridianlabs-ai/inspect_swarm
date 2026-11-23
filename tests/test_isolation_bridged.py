@@ -201,7 +201,7 @@ async def _check_running_proxy(case: Case) -> None:
     # the owners of the processes running the CLI's binary, by their first argument:
     # without CAP_SYS_PTRACE root cannot read another user's /proc/<pid>/exe
     results["cli_users"] = await _root(
-        "for p in /proc/[0-9]*; do tr '\\0' '\\n' < $p/cmdline 2>/dev/null | head -n 1 | grep -q -e /claude- -e /codex && stat -c %U $p; done | sort -u"
+        "for p in /proc/[0-9]*; do tr '\\0' '\\n' < $p/cmdline | head -n 1 | grep -q -e /claude- -e /codex && stat -c %U $p; done 2>/dev/null | sort -u"
     )
     results["cli_home"] = await _root(
         f"find /scratch/{case.cli} -mindepth 1 -maxdepth 1 -printf '%u %f\\n'"
