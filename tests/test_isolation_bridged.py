@@ -324,6 +324,18 @@ def _eval(tmp_path: Path, cases: dict[str, Case]) -> dict[str, EvalSample]:
     return {str(s.id): s for s in log.samples}
 
 
+# inspect_swe asks api.github.com for Codex's release, with a token only if
+# GITHUB_TOKEN or GH_TOKEN is set; the canary sets neither, and unauthenticated calls
+# are limited to 60 per hour per IP, which a shared runner can use up
+_GITHUB_RATE_LIMIT = "'403 rate limit exceeded' for url 'https://api.github.com/"
+
+
+def _assert_no_error(sample: EvalSample) -> None:
+    if sample.error and _GITHUB_RATE_LIMIT in sample.error.message:
+        pytest.skip(f"GitHub API rate limit: {sample.error.message}")
+    assert sample.error is None, sample.error.message if sample.error else ""
+
+
 def _status(output: str) -> tuple[str, str]:
     # curl's body, then its HTTP status on the last line
     body, _, status = output.rpartition("\n")
@@ -338,8 +350,7 @@ def test_bridged_member_runs_as_its_user_behind_its_proxy(
     name = f"proxy-{cli_name}"
     samples = _eval(tmp_path, {name: Case(cli=cli_name, checks="all")})
     case = _CASES[name]
-    error = samples[name].error
-    assert error is None, error.message if error else ""
+    _assert_no_error(samples[name])
     user = f"swarm-{cli_name}"
     # the CLI started, passed its MCP readiness check and called a bridged tool
     assert case.tool_result is not None and "nat" in case.tool_result, case.tools
@@ -386,8 +397,7 @@ def test_bridged_member_runs_without_an_ipv6_loopback(
     name = f"ipv4-{cli_name}"
     samples = _eval(tmp_path, {name: Case(cli=cli_name, checks="ipv4", ipv6=False)})
     case = _CASES[name]
-    error = samples[name].error
-    assert error is None, error.message if error else ""
+    _assert_no_error(samples[name])
     assert case.results["if_inet6"].strip() == ""
     assert case.tool_result is not None and "nat" in case.tool_result, case.tools
     for who in ("peer", "root"):
