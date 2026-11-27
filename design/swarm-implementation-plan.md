@@ -479,6 +479,40 @@ Unordered; each line is an item that may be done in any order or in part (decisi
 - A swarm view in the log viewer.
 - World reports: `WorldReport` on `events()`, `world_report()` from host code and the `world_service()` solver for reports from a sandbox ([swarm-world-reports.md](swarm-world-reports.md)).
 
+### Proposed automatic-delivery pull requests
+
+[Automatic message delivery](swarm-message-delivery.md) offers an answer to communication's ordinary-push question. These entries extend future work, not M1 and M2 or the recorded decisions below; acceptance of the design precedes implementation.
+
+**D-4. Automatic message delivery.**
+- Files: `design/swarm-message-delivery.md`; API, communication, turn-seam, event-types, critical-path, overview, swarm and implementation-plan designs.
+- Tests: design links, source references and real-CLI mock-model probes listed in the [delivery tests](swarm-message-delivery.md#testing).
+- Depends on: the existing communication and turn-seam designs; maintainer agreement before implementation.
+- Implements: native synchronous insertion, retained bridge input, per-member selection and evidence, with departures from communication's sketch stated for review.
+
+#### inspect_ai
+
+**AI-8. Selected request headers.**
+- Files: `src/inspect_ai/agent/_bridge/context.py`, `bridge.py`, `sandbox/bridge.py` and `sandbox/service.py` within that bridge directory.
+- Tests: `tests/agent/test_bridge_agent_context.py`, `test_bridge_headers.py`; credential refusal, opt-in capture, retry identity, in-process controls and controls without a model.
+- Depends on: D-4's agreed interface; release precedes SWE-1 and swarm's optional dependency floor requiring it.
+- Implements: opt-in `expose_client_headers` and a default-empty `BridgeRequest.headers` mapping, independent of provider forwarding. Credential names are rejected and request identity is preserved across retries; no swarm policy ([companion scope](swarm-message-delivery.md#positive-root-identity)).
+
+#### inspect_swe
+
+**SWE-1. Scoped bridge input.**
+- Files: `src/inspect_swe/_util/agentcontext.py`; `_claude_code/claude_code.py`, `env.py`, `systemprompt.py`, `_events/live_consumer.py` and `_codex_cli/codex_cli.py`, `_events/consumer.py` under `src/inspect_swe/`.
+- Tests: agent-context tests; Claude environment, prompt-pinning, subagent-attribution and span tests; and Codex subagent-span tests in the [source and test map](swarm-message-delivery.md#implementation-plan); live failure, wrapper, non-entry, proxy, auto-review, root, child and compaction cases.
+- Depends on: released AI-8 and D-4; closure of the design's runtime support questions and release precede the swarm bridge extra depending on it.
+- Implements: versioned scope, strict request classification, normalized-input composition and captured-bridge failure propagation for Claude Code and Codex. Unscoped public attribution and author filters retain their behavior; inboxes and retention stay in swarm ([protocol](swarm-message-delivery.md#a-scoped-input-hook)). No inspect_sentinel change.
+
+#### inspect_swarm
+
+**Delivery implementation.**
+- Files: `pyproject.toml`, `uv.lock`; `_swarm.py`, `_budget.py`, `_member.py`, new `_delivery.py`, `_channel/messages.py`, `_seam.py`, `_bus/_bus.py`, `_evidence.py`, `_ledger.py`, `_metrics.py` under `src/inspect_swarm/`; messages and analysis docs and the affected designs.
+- Tests: API logging, messages and channel, new delivery, turn seam, background and persistent members, bridged messages and isolation, communication evidence, metrics and critical-path tests in the [source and test map](swarm-message-delivery.md#implementation-plan); both async backends and real-CLI mock-model integration.
+- Depends on: D-4; enabled bridge delivery requires released AI-8 and SWE-1. Native and manual behavior retains its existing dependencies.
+- Implements: logged `inject` settings, shared packing and read accounting, native and bridge adapters, commitment evidence and injection metrics, following the [delivery plan](swarm-message-delivery.md#implementation-plan).
+
 ## Alternatives considered
 
 **Per-member sandboxes in M1.** They serve the external port, not first internal use, which runs on the shared default. Putting them in M2 keeps M1 small, and M2-1 is independent of the rest of M2.

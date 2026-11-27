@@ -2,6 +2,8 @@
 
 ## Overview
 
+[Automatic message delivery](swarm-message-delivery.md#native-members) proposes a synchronous delivery stage after this seam's callbacks. It refines the possible push callback mentioned below so that insertion and inbox consumption commit together, including when background work prevents holding.
+
 The turn seam lets code outside a member stop it between the turns of its own agent loop and continue it later. A *turn boundary* comes before the loop's first generation and before each one after it, with no model or tool call of the loop in flight. Any code holding a member's handle registers a *boundary callback* with `on_boundary(callback, origin=...)`; at every boundary the member's callbacks run in the order they were registered, each receiving a `Boundary` (the member, the boundary's index and activation, what the conversation ends with, and copies of the conversation and the last output). A callback may wait as long as it likes, then continue the member unchanged, continue it with a replaced conversation, or end it. `end(origin=...)` ends a member from outside the chain, whichever callback is waiting.
 
 While its callbacks run the member is *held*, and the swarm knows it: its member time limit does not run, `swarm_wait` does not count it as active, background work cannot start for it (except that starting it withdraws an operator's pause, below), and a swarm stop or `end()` ends it at once. A callback's own work counts towards the member's limits and the sample's working time; a callback marks its idle waits with `suspend_working_limit()`.

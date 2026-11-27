@@ -243,8 +243,8 @@ class Member(BaseModel):
     role: str | None = None               # data; given to the controller and in the member's preamble
     count: int = 1                        # members from this record: name-1 ... name-k when count > 1 (factory form only)
     limits: list[Limit] = []              # the member's own limits (limits deep dive); serialised by kind and value
-    # fields the sibling deep dives add: after M2, remind (communication), bridged (limits),
-    # input (ORBIT)
+    # fields the sibling deep dives add: after M2, remind (communication),
+    # inject (message delivery), bridged (limits), input (ORBIT)
 
 def build_member(record: Member) -> Agent:  # private: the agent, or record.factory(**record.args); only the runtime calls it
     ...
@@ -577,7 +577,9 @@ The rule a task author follows is the one `eval_set()`'s error message gives: di
 | Scoring | `reporter` mode, reserved | valid only on controllers with a reporter; `coordinator(lead=...)` defaults to it |
 | Scoring | `baseline(member, result)` | after M2, `swarm(members=member, controller=leaderless(final="first"), channels=[], result=result)`, where `member` is a built agent or a `Member` record, as `members=` takes |
 | Communication | `channels=["filesystem", messages(...)]` | the same call; `messages` is a `@swarm_channel` factory, `"messages"` resolves to it |
-| Communication | after M2, `member(remind=)` and `member(inject=)`, depending on [swarm-communication.md open question 2](swarm-communication.md#open-questions) | `member()` fields |
+| Communication | proposed `messages(inject=False)` and `member(inject=None)` ([automatic delivery](swarm-message-delivery.md)) | logged messages-channel default and member override; native and retained bridge delivery. Serialization omits the Member's `inject` field when `None`, retaining explicit `False` and `True`; omitted or JSON-null fields reconstruct as `None`. Default Member payloads remain unchanged, including existing nullable core fields. |
+| Communication | registered CLI wrappers with `member(..., bridged=True, inject=True)` | routing uses the existing effective bridged identity, with unchanged logging of factories and their arguments or prebuilt agents; delivery dispatches from the executing supported scaffold before launch ([examples and entry contract](swarm-message-delivery.md#registered-wrappers)). Factories remain deferred, dependencies are checked at construction, and an enabled bridged invocation that never enters the integration fails on exit. No additional public selector is needed; SWE retains its existing constructor validation. |
+| Communication | deferred `member(remind=)` and channel reminders | separate proposal in [swarm-communication.md](swarm-communication.md#push-delivery-after-m2-optional) |
 | Communication | `swarm(policy=)` | Not in M2, where sentinel is the only monitor. If the bus hook is later a setting rather than the sentinel adapter, `swarm(policy=)` is the setting of the observer's interception point; a callable, so it is logged by name and varied across arms through a task argument or a registered swarm builder ([Task identity](#task-identity-what-makes-two-arms-distinct)) |
 | Communication | the `Channel` protocol | M2's operations on `Channel`, with per-sample state on a per-run `ChannelState` |
 | Communication | `swarm_tools()`, `swarm_bridged_tools()` | member-side helpers, not `swarm()` arguments; a member using them is a registered member builder, which builds them per member and which the log can name |
