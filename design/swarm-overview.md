@@ -2,6 +2,8 @@
 
 This is the short form of [swarm.md](swarm.md), the detailed design. It assumes the reader knows inspect_ai, and skips the motivation and research survey. Each section links to the detailed argument.
 
+[Automatic message delivery](swarm-message-delivery.md) proposes an opt-in exception to the no-added-messages decision below, for the messages channel's native and bridged recipients. The existing decisions remain recorded pending acceptance.
+
 ## What it is
 
 `inspect_swarm` lets an Inspect eval run a **swarm**: several agents working on one sample at the same time and coordinating. It makes "how many agents, how they are arranged, how they communicate, and how the budget is split" ordinary task parameters that an eval set can sweep. It also records what is needed to compare a swarm fairly with more epochs or a bigger single-agent budget, and to monitor what the agents say to each other.

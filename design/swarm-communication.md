@@ -2,6 +2,8 @@
 
 ## Overview
 
+**Proposed extension:** [Automatic message delivery](swarm-message-delivery.md) offers an answer to [open question 2](#open-questions): optional native and retained bridge delivery. Acceptance would supersede the no-added-messages decision only for this opt-in messages-channel arm. The historical decisions and push sketch below remain recorded unchanged; the new proposal lists its departures under [Changes to other designs](swarm-message-delivery.md#changes-to-other-designs).
+
 Members of a swarm talk through one bus. With the messages channel a member sends with `send_message` and the recipient reads with `read_messages`, so a peer's words reach a model only as tool output, fenced and stamped with the sender the bus bound. The swarm adds nothing to a member's conversation by itself: a member learns of unread messages from tools, the status line that ends the results of the swarm's own tools in its own loop and `swarm_wait`, whose result counts unread messages and names their senders, never what they say. Every send passes the same steps (a monitoring hook, storm controls, evidence, delivery), and the evidence records when each message was sent and read. A member busy in a long tool call hears nothing until the call ends.
 
 **Milestones** (decision: Ransom, 2026-10-14; [swarm-implementation-plan.md](swarm-implementation-plan.md#decisions), item 2). M2 builds the bus, member binding, the wiring checks, communication metrics and docs ([Implementation plan](#implementation-plan), steps 1, 2, 4, 5 and 7), with a shared-memory channel, designed separately ([swarm-memory-channel.md](swarm-memory-channel.md)), as its first channel with records in place of `messages`, and the bus's wait, `swarm_wait`, also designed separately ([swarm-wait.md](swarm-wait.md); M2-13). The `messages` channel (step 3) and bridged members' bus tools (step 6) came after M2; with step 6, a bridged member reaches the bus channels through `swarm_bridged_tools()` ([Bridged members](#bridged-members)).
@@ -586,6 +588,8 @@ Depends on [open question 2](#open-questions). With `remind=N`:
 
 #### Content injection
 
+The [automatic-delivery proposal](swarm-message-delivery.md#presentation) adopts this sketch's count header and versioned metadata, while specifying tools-free remainder wording, synchronous commitment, retained bridge input and injection metrics. It is the proposed replacement for this subsection's ordinary-injection mechanism; reminders and steering remain separate.
+
 Depends on [open question 2](#open-questions). `inject=True` is ORBIT's `auto`: at the turn boundary the member gets the unread messages themselves, not a count. This puts peer text in the user role, which is allowed only as an explicit, opt-in experimental arm (decision: Ransom, 2026-10-09).
 
 **Representation.** One `ChatMessageUser` is appended, with no `source`:
@@ -882,6 +886,8 @@ The structured channels other than the shared memory, persistent-member wake and
 Push for bridged members is inspect_swe work and is not in this plan.
 
 ## Open questions
+
+Question 2 has a [proposed answer](swarm-message-delivery.md), awaiting maintainer acceptance; its original wording below is preserved.
 
 1. **The bus hook, when bridged bus tools or internal records arrive.** Should step 1 run the sample's sentinel protocols on a `BeforeToolCall` built from each record, or, if sentinel still cannot run on a synthesized step, call a `swarm(policy=...)` callable whose decisions use inspect_ai's `SentinelAction` names? Recommendation: the sentinel adapter, so there is one monitor type. swarm-api.md's task-identity table bears on it: `policy` is logged by name only, and sentinel configuration is not hashed into the task identifier at all on `feature/sentinel`, so either way a monitoring ablation selects its monitor through a task argument.
 2. **Ordinary push for the messages channel.** The swarm adds nothing to a member's conversation (decision: Ransom, 2026-10-27; [How members learn of changes](#how-members-learn-of-changes)), which supersedes the decision of 2026-10-13 that ordinary notices, reminders and injections stay on an `on_continue` hook after M2. Does the messages channel push ordinary messages at all? The options:
